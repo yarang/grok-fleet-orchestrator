@@ -24,3 +24,7 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 chrono = { workspace = true }
+fleet-transport = { workspace = true }
+fleet-core = { workspace = true }
+fleet-store = { workspace = true }
+async-trait = { workspace = true }

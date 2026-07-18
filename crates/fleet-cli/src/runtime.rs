@@ -22,12 +22,15 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
 use fleet_core::{CircuitBreakerConfig, WorkerFilter, WorkerStatus};
 use fleet_mcp::run_mcp_server;
-use fleet_scheduler::{Dispatcher, FleetState};
+use fleet_scheduler::{
+    Dispatcher, FleetState, HealthChecker, HealthConfig,
+};
 use fleet_store::{PgStore, Store};
 use fleet_transport::MockTransport;
 
@@ -73,7 +76,13 @@ fn sanitize_url(url: &str) -> String {
 }
 
 /// `serve` 명령 실행.
-pub async fn run_serve(transport_kind: &str, db_max_conn: u32) -> Result<()> {
+pub async fn run_serve(
+    transport_kind: &str,
+    db_max_conn: u32,
+    no_health_check: bool,
+    health_interval_secs: u64,
+    health_missed: u32,
+) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
 
     // Phase 1: MockTransport만 지원. Phase 3에서 HubTransport feature 추가.
@@ -87,10 +96,9 @@ pub async fn run_serve(transport_kind: &str, db_max_conn: u32) -> Result<()> {
     let (transport, event_rx) = MockTransport::new();
     let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
 
-    // TODO(Phase 3): config 파일에서 workers 로드 → transport.register + store.upsert_worker
-    // Phase 1 테스트에서는 외부 스크립트 또는 MCP 없이 workers를 미리 등록해야 함.
-    // 여기서는 사용자가 seed 쿼리를 직접 실행하거나 /workers HTTP API(Phase 3)를
-    // 사용한다고 가정. CLI에서 --register-worker 옵션은 Phase 2에 추가 예정.
+    // TODO(Phase 3): config 파일에서 workers 로드 → transport.register + store.upsert_worker.
+    // Phase 2 테스트 시나리오에서는 workers를 미리 DB에 INSERT 해 두거나
+    // fleet-cli에서 별도 등록 명령을 통해 준비합니다.
 
     let state = Arc::new(FleetState::new(
         store,
@@ -107,10 +115,33 @@ pub async fn run_serve(transport_kind: &str, db_max_conn: u32) -> Result<()> {
         dispatcher_loop.run_event_loop().await;
     });
 
+    // 헬스체크 루프 (옵션). missed heartbeat → offline 처리.
+    let _health_handle = if !no_health_check {
+        let cfg = HealthConfig {
+            check_interval: Duration::from_secs(health_interval_secs),
+            missed_heartbeat_threshold: health_missed,
+        };
+        tracing::info!(
+            interval_secs = health_interval_secs,
+            missed_threshold = health_missed,
+            "health checker enabled"
+        );
+        let checker = HealthChecker::new(state.clone(), cfg);
+        Some(checker.spawn())
+    } else {
+        tracing::info!("health checker disabled by --no-health-check");
+        None
+    };
+
     tracing::info!("starting MCP stdio server");
     run_mcp_server(state, dispatcher)
         .await
         .context("MCP server error")?;
+
+    // MCP 서버 종료 시 백그라운드 헬스체크도 정리.
+    if let Some(h) = _health_handle {
+        h.abort().await;
+    }
     Ok(())
 }
 

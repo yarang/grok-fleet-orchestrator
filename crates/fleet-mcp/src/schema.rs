@@ -30,6 +30,10 @@ pub const TOOL_DISPATCH_TASK: &str = "fleet_dispatch_task";
 pub const TOOL_GET_TASK_STATUS: &str = "fleet_get_task_status";
 /// 워커 목록 조회 도구.
 pub const TOOL_LIST_WORKERS: &str = "fleet_list_workers";
+/// 작업 취소 도구 (Phase 2).
+pub const TOOL_CANCEL_TASK: &str = "fleet_cancel_task";
+/// 작업 종료까지 대기 도구 (Phase 2).
+pub const TOOL_WAIT_FOR_TASK: &str = "fleet_wait_for_task";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  JSON-RPC 2.0 봉투
@@ -272,6 +276,46 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "description": "Maximum workers to return (default 100)."
                     }
                 }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_CANCEL_TASK,
+            description: "Cancel a pending or in-flight task. The worker receives a cancellation signal; the task transitions to the 'cancelled' phase. Tasks already in a terminal state (completed/failed/cancelled) cannot be cancelled. Cancellation is best-effort on the worker side but the task status is updated regardless.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "UUID of the task to cancel."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional human-readable reason recorded in the event log.",
+                        "default": "cancelled by user"
+                    }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_WAIT_FOR_TASK,
+            description: "Block until the task reaches a terminal state (completed/failed/cancelled) or the timeout expires. Returns the final task snapshot. Use sparingly — long-running tasks block the MCP client. Prefer polling with fleet_get_task_status unless synchronous semantics are required.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "UUID of the task to wait for."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 3600,
+                        "default": 300,
+                        "description": "Maximum seconds to wait (default 300). Returns isError=true on timeout."
+                    }
+                },
+                "required": ["task_id"]
             }),
         },
     ]

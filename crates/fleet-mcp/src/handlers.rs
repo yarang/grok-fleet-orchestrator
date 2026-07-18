@@ -20,7 +20,8 @@ use fleet_scheduler::{Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
-    self, JsonRpcError, TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_WORKERS,
+    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS,
+    TOOL_LIST_WORKERS, TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -50,6 +51,8 @@ pub async fn dispatch_tool(
         TOOL_DISPATCH_TASK => handle_dispatch_task(ctx, arguments).await,
         TOOL_GET_TASK_STATUS => handle_get_task_status(ctx, arguments).await,
         TOOL_LIST_WORKERS => handle_list_workers(ctx, arguments).await,
+        TOOL_CANCEL_TASK => handle_cancel_task(ctx, arguments).await,
+        TOOL_WAIT_FOR_TASK => handle_wait_for_task(ctx, arguments).await,
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -152,6 +155,74 @@ async fn handle_get_task_status(
     };
 
     Ok(schema::tool_json(&task_summary(&task)))
+}
+
+// ── fleet_cancel_task ───────────────────────────────────────────────────
+
+async fn handle_cancel_task(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args.as_object().ok_or_else(|| {
+        JsonRpcError::invalid_params("arguments must be a JSON object")
+    })?;
+
+    let id_str = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: task_id"))?;
+
+    let task_id: TaskId = id_str
+        .parse()
+        .map_err(|e| JsonRpcError::invalid_params(format!("invalid task_id: {e}")))?;
+
+    let reason = args
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cancelled by user")
+        .to_string();
+
+    match ctx.dispatcher.cancel(task_id, reason).await {
+        Ok(()) => Ok(schema::tool_json(&json!({
+            "task_id": task_id.to_string(),
+            "status": "cancelled",
+            "hint": "Cancellation has been recorded; the worker has been notified (best-effort)."
+        }))),
+        Err(e) => Ok(schema::tool_error(format!("cancel failed: {e}"))),
+    }
+}
+
+// ── fleet_wait_for_task ─────────────────────────────────────────────────
+
+async fn handle_wait_for_task(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args.as_object().ok_or_else(|| {
+        JsonRpcError::invalid_params("arguments must be a JSON object")
+    })?;
+
+    let id_str = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: task_id"))?;
+
+    let task_id: TaskId = id_str
+        .parse()
+        .map_err(|e| JsonRpcError::invalid_params(format!("invalid task_id: {e}")))?;
+
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(300);
+    // 스키마가 최대 3600을 선언하지만 서버 측에서도 clamp.
+    let timeout_secs = timeout_secs.clamp(1, 3600);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+
+    match ctx.dispatcher.wait_for_task(task_id, timeout).await {
+        Ok(task) => Ok(schema::tool_json(&task_summary(&task))),
+        Err(e) => Ok(schema::tool_error(format!("wait failed: {e}"))),
+    }
 }
 
 /// 클라이언트에게 반환할 작업 요약. 전체 `Task`에서 핵심 필드만 발췌.

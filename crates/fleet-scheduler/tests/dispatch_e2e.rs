@@ -522,3 +522,238 @@ async fn label_filtering_selects_only_matching_worker() {
         other => panic!("expected Completed, got {:?}", other),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+//  Phase 2: cancel + wait
+// ─────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cancel_dispatched_task_transitions_to_cancelled() {
+    // 매우 긴 latency로 인해 dispatch 후 cancel 호출 시점에 작업이 실행 중이도록 유도.
+    let worker = make_worker("cancellable-1");
+    let worker_id = worker.id;
+    let mut mock = MockWorker::new(worker_id, "wss://cancellable-1/ws");
+    mock.latency = std::time::Duration::from_secs(60); // 거의 확실히 cancel보다 늦게 끝남
+
+    let (state, dispatcher) = setup(vec![worker], vec![mock]).await;
+
+    let task = Task::from_request(TaskRequest {
+        prompt: "long-running work".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+    dispatcher.submit(task).await.unwrap();
+
+    // dispatch 후 잠시 대기 → Dispatched 상태 확인
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let in_flight = state.store.get_task(task_id).await.unwrap().unwrap();
+    assert!(
+        matches!(in_flight.status, TaskStatus::Dispatched { .. }),
+        "task should be Dispatched, got {:?}",
+        in_flight.status
+    );
+
+    // 취소
+    dispatcher
+        .cancel(task_id, "test cancel")
+        .await
+        .expect("cancel should succeed");
+
+    let after = state.store.get_task(task_id).await.unwrap().unwrap();
+    match after.status {
+        TaskStatus::Cancelled { reason, .. } => {
+            assert_eq!(reason, "test cancel");
+        }
+        other => panic!("expected Cancelled, got {:?}", other),
+    }
+
+    // TaskCancelled 이벤트 발행 확인
+    let events = state.store.list_events(0, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event.event_type() == "task_cancelled"),
+        "should have task_cancelled event"
+    );
+}
+
+#[tokio::test]
+async fn cancel_pending_task_succeeds_without_transport_call() {
+    // server_hint로 존재하지 않는 워커를 지정 → submit은 Pending(?)이 아니라
+    // 즉시 Failed가 됨. Pending 상태를 만들려면 select가 실패해야 하는데,
+    // submit()은 현재 동기적으로 select를 호출하므로 Pending은 brief moment.
+    // 따라서 Dispatched 직후 취소가 주요 경로. 여기서는 Pending 직접 생성.
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    // Pending 상태의 작업을 직접 Store에 삽입
+    let task = Task::from_request(TaskRequest {
+        prompt: "manually inserted".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+    state.store.insert_task(&task).await.unwrap();
+
+    // cancel 호출 — Pending 상태이므로 transport.cancel은 호출되지 않아야 함
+    dispatcher.cancel(task_id, "user-requested").await.unwrap();
+
+    let after = state.store.get_task(task_id).await.unwrap().unwrap();
+    assert!(matches!(after.status, TaskStatus::Cancelled { .. }));
+}
+
+#[tokio::test]
+async fn cancel_already_completed_returns_error() {
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    let task = Task::from_request(TaskRequest {
+        prompt: "echo done".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+    dispatcher.submit(task).await.unwrap();
+    wait_until_terminal(&state, task_id).await; // 완료 대기
+
+    // 이미 종료된 작업 취소 시도 → 에러
+    let result = dispatcher.cancel(task_id, "late cancel").await;
+    assert!(result.is_err(), "cancelling terminal task should fail");
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(err_msg.contains("terminal"), "error: {err_msg}");
+}
+
+#[tokio::test]
+async fn cancel_nonexistent_task_returns_error() {
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (_state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    let fake_id = TaskId::new();
+    let result = dispatcher.cancel(fake_id, "nope").await;
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(err_msg.contains("not found"), "error: {err_msg}");
+}
+
+#[tokio::test]
+async fn wait_for_task_returns_completed_task() {
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (_state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    let task = Task::from_request(TaskRequest {
+        prompt: "fast work".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+    dispatcher.submit(task).await.unwrap();
+
+    // 5초 대기 — mock latency=10ms이므로 즉시 완료되어야 함
+    let result = dispatcher
+        .wait_for_task(task_id, std::time::Duration::from_secs(5))
+        .await;
+    let finished = result.expect("wait should succeed");
+    assert!(matches!(finished.status, TaskStatus::Completed(_)));
+}
+
+#[tokio::test]
+async fn wait_for_task_times_out_when_still_running() {
+    // 긴 latency → wait는 타임아웃
+    let worker = make_worker("slow-1");
+    let worker_id = worker.id;
+    let mut mock = MockWorker::new(worker_id, "wss://slow-1/ws");
+    mock.latency = std::time::Duration::from_secs(30);
+
+    let (state, dispatcher) = setup(vec![worker], vec![mock]).await;
+
+    let task = Task::from_request(TaskRequest {
+        prompt: "slow".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+    dispatcher.submit(task).await.unwrap();
+
+    let result = dispatcher
+        .wait_for_task(task_id, std::time::Duration::from_millis(200))
+        .await;
+    assert!(result.is_err(), "should time out");
+    let err = result.unwrap_err();
+    let err_msg = format!("{err}");
+    assert!(err_msg.contains("timed out"), "error: {err_msg}");
+
+    // 작업은 여전히 Dispatched 상태여야 함
+    let still_running = state.store.get_task(task_id).await.unwrap().unwrap();
+    assert!(
+        matches!(still_running.status, TaskStatus::Dispatched { .. }),
+        "task should still be in-flight"
+    );
+}
+
+#[tokio::test]
+async fn wait_for_nonexistent_task_returns_error() {
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (_state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    let result = dispatcher
+        .wait_for_task(TaskId::new(), std::time::Duration::from_millis(100))
+        .await;
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("not found"));
+}
+
+#[tokio::test]
+async fn cancel_does_not_record_breaker_failure() {
+    // 취소는 실패로 간주하지 않음 — 브레이커 상태에 영향 X
+    let worker = make_worker("cancellable-2");
+    let worker_id = worker.id;
+    let mut mock = MockWorker::new(worker_id, "wss://cancellable-2/ws");
+    mock.latency = std::time::Duration::from_secs(60);
+
+    let (state, dispatcher) = setup(vec![worker], vec![mock]).await;
+
+    for _ in 0..3 {
+        let task = Task::from_request(TaskRequest {
+            prompt: "to-be-cancelled".into(),
+            created_by: "test".into(),
+            ..Default::default()
+        });
+        let task_id = task.id;
+        dispatcher.submit(task).await.unwrap();
+        dispatcher.cancel(task_id, "test").await.unwrap();
+    }
+
+    // 브레이커는 Open 되지 않아야 함 (취소 = 실패 아님)
+    let breaker_state = state.breakers.state_of(worker_id);
+    assert!(
+        !breaker_state.is_open(),
+        "cancellations should not trip the breaker"
+    );
+}

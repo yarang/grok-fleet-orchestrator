@@ -266,6 +266,121 @@ impl Dispatcher {
             .append_event(&FleetEvent::task_failed(task_id, failure))
             .await;
     }
+
+    /// 작업을 취소.
+    ///
+    /// 허용 상태: `Pending` 또는 `Dispatched`. 이미 종료 상태(Completed/Failed/Cancelled)면
+    /// 에러를 반환합니다. `Dispatched`인 경우 transport.cancel()로 워커 측에 취소를 전파하고,
+    /// 그 후 Store 상태를 `Cancelled`로 전이합니다.
+    ///
+    /// **CircuitBreaker 고려**: 취소는 사용자 의도이므로 실패로 간주하지 않습니다.
+    /// 따라서 브레이커에는 어떤 outcome도 기록하지 않습니다.
+    pub async fn cancel(
+        &self,
+        task_id: TaskId,
+        reason: impl Into<String>,
+    ) -> Result<(), CancelError> {
+        let reason = reason.into();
+
+        let task = self
+            .state
+            .store
+            .get_task(task_id)
+            .await
+            .map_err(|e| CancelError::Store(e.to_string()))?
+            .ok_or(CancelError::NotFound(task_id))?;
+
+        // 이미 종료 상태인지 검사
+        if task.is_terminal() {
+            return Err(CancelError::AlreadyTerminal {
+                task_id,
+                phase: phase_label(&task.status),
+            });
+        }
+
+        // Dispatched 상태면 워커에게 취소 통지
+        let worker_id = match &task.status {
+            TaskStatus::Dispatched { worker_id, .. } => Some(*worker_id),
+            _ => None,
+        };
+        if let Some(wid) = worker_id {
+            // transport.cancel은 best-effort — 워커가 이미 끝났을 수 있음.
+            // 에러가 나도 상태 전이는 진행.
+            if let Err(e) = self.state.transport.cancel(task_id).await {
+                warn!(%task_id, %wid, error = %e, "transport.cancel failed, proceeding with status update");
+            }
+        }
+
+        let cancelled = TaskStatus::Cancelled {
+            reason,
+            cancelled_at: Utc::now(),
+        };
+
+        self.state
+            .store
+            .update_task_status(task_id, &cancelled)
+            .await
+            .map_err(|e| CancelError::Store(e.to_string()))?;
+
+        let _ = self
+            .state
+            .store
+            .append_event(&FleetEvent::task_cancelled(
+                task_id,
+                // FleetEvent의 reason 필드에 들어감; cancelled 상태의 reason과 일치
+                match &cancelled {
+                    TaskStatus::Cancelled { reason, .. } => reason.clone(),
+                    _ => unreachable!(),
+                },
+            ))
+            .await;
+
+        dec_running();
+        info!(%task_id, "task cancelled");
+        Ok(())
+    }
+
+    /// 작업이 종료 상태(Completed/Failed/Cancelled)에 도달할 때까지 대기.
+    ///
+    /// `timeout`이 지나면 `Err(WaitTimeout)` 반환. 종료 시 해당 `Task` 반환.
+    /// 폴링 주기는 50ms (MCP 클라이언트의 동기적 호출 패턴에 적합).
+    pub async fn wait_for_task(
+        &self,
+        task_id: TaskId,
+        timeout: std::time::Duration,
+    ) -> Result<Task, WaitError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let task = self
+                .state
+                .store
+                .get_task(task_id)
+                .await
+                .map_err(|e| WaitError::Store(e.to_string()))?
+                .ok_or(WaitError::NotFound(task_id))?;
+
+            if task.is_terminal() {
+                return Ok(task);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(WaitError::Timeout { task_id, timeout });
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// `TaskStatus`의 위상 라벨 (에러 메시지용).
+fn phase_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Dispatched { .. } => "dispatched",
+        TaskStatus::Completed(_) => "completed",
+        TaskStatus::Failed(_) => "failed",
+        TaskStatus::Cancelled { .. } => "cancelled",
+    }
 }
 
 /// 디스패치 에러.
@@ -288,4 +403,36 @@ impl From<TransportError> for DispatchError {
     fn from(e: TransportError) -> Self {
         DispatchError::Transport(e.to_string())
     }
+}
+
+/// 작업 취소 에러.
+#[derive(Debug, thiserror::Error)]
+pub enum CancelError {
+    #[error("store error: {0}")]
+    Store(String),
+
+    #[error("task not found: {0}")]
+    NotFound(TaskId),
+
+    #[error("task {task_id} already in terminal state '{phase}' — cannot cancel")]
+    AlreadyTerminal {
+        task_id: TaskId,
+        phase: &'static str,
+    },
+}
+
+/// 작업 대기 에러.
+#[derive(Debug, thiserror::Error)]
+pub enum WaitError {
+    #[error("store error: {0}")]
+    Store(String),
+
+    #[error("task not found: {0}")]
+    NotFound(TaskId),
+
+    #[error("timed out waiting for task {task_id} after {timeout:?}")]
+    Timeout {
+        task_id: TaskId,
+        timeout: std::time::Duration,
+    },
 }

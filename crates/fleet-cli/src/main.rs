@@ -47,6 +47,18 @@ enum Command {
         /// Postgres 최대 연결 수.
         #[arg(long, env = "FLEET_DB_MAX_CONN", default_value_t = 10)]
         db_max_conn: u32,
+
+        /// 헬스체크 비활성화 (기본값: 활성).
+        #[arg(long, default_value_t = false)]
+        no_health_check: bool,
+
+        /// 헬스체크 폴링 주기 (초).
+        #[arg(long, env = "FLEET_HEALTH_INTERVAL", default_value_t = 15)]
+        health_interval_secs: u64,
+
+        /// 하트비트 누락 허용 횟수. 이 횟수 × 주기를 초과하면 offline 처리.
+        #[arg(long, env = "FLEET_HEALTH_MISSED", default_value_t = 3)]
+        health_missed: u32,
     },
 
     /// 데이터베이스 마이그레이션만 실행하고 종료.
@@ -75,7 +87,19 @@ async fn main() -> Result<()> {
         Command::Serve {
             transport,
             db_max_conn,
-        } => runtime::run_serve(&transport, db_max_conn).await,
+            no_health_check,
+            health_interval_secs,
+            health_missed,
+        } => {
+            runtime::run_serve(
+                &transport,
+                db_max_conn,
+                no_health_check,
+                health_interval_secs,
+                health_missed,
+            )
+            .await
+        }
         Command::Migrate => runtime::run_migrate().await,
         Command::WorkerList { status } => runtime::run_worker_list(status).await,
     }

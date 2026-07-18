@@ -14,10 +14,12 @@
 
 pub mod breaker;
 pub mod dispatcher;
+pub mod health;
 pub mod selector;
 pub mod state;
 
 pub use breaker::{BreakerRegistry, BreakerState};
-pub use dispatcher::Dispatcher;
+pub use dispatcher::{CancelError, DispatchError, Dispatcher, WaitError};
+pub use health::{HealthChecker, HealthCheckerHandle, HealthConfig};
 pub use selector::{SelectionError, WorkerSelector};
 pub use state::FleetState;

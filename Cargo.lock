@@ -456,6 +456,7 @@ dependencies = [
  "fleet-core",
  "fleet-scheduler",
  "fleet-store",
+ "fleet-transport",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
