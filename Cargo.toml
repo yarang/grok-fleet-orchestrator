@@ -8,6 +8,7 @@ members = [
     "crates/fleet-api",
     "crates/fleet-mcp",
     "crates/fleet-provisioner",
+    "crates/fleet-dashboard",
     "crates/fleet-cli",
 ]
 
@@ -73,6 +74,7 @@ fleet-scheduler = { path = "crates/fleet-scheduler", version = "0.1.0" }
 fleet-api = { path = "crates/fleet-api", version = "0.1.0" }
 fleet-mcp = { path = "crates/fleet-mcp", version = "0.1.0" }
 fleet-provisioner = { path = "crates/fleet-provisioner", version = "0.1.0" }
+fleet-dashboard = { path = "crates/fleet-dashboard", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3

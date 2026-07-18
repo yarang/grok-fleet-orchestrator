@@ -91,6 +91,7 @@ pub async fn run_serve(
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
+    dashboard_bind: Option<&str>,
 ) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
 
@@ -178,6 +179,27 @@ pub async fn run_serve(
         None
     };
 
+    // 웹 대시보드 서버 (옵션). --dashboard-bind가 지정된 경우에만 실행.
+    let _dashboard_handle = if let Some(bind_str) = dashboard_bind {
+        let bind: SocketAddr = bind_str
+            .parse()
+            .with_context(|| format!("invalid --dashboard-bind address: {bind_str}"))?;
+        let dashboard_state = Arc::new(fleet_dashboard::DashboardState::new(
+            store.clone(),
+            store.pool().clone(),
+        ));
+        tracing::info!(bind = %bind, "dashboard server starting");
+        let dash_join = tokio::spawn(async move {
+            if let Err(e) = fleet_dashboard::run_dashboard_server(dashboard_state, bind).await {
+                tracing::error!(error = %e, "dashboard server terminated with error");
+            }
+        });
+        Some(dash_join)
+    } else {
+        tracing::info!("dashboard disabled (pass --dashboard-bind ADDR:PORT to enable)");
+        None
+    };
+
     tracing::info!("starting MCP stdio server");
     run_mcp_server(state, dispatcher)
         .await
@@ -188,6 +210,9 @@ pub async fn run_serve(
         h.abort().await;
     }
     if let Some(h) = _http_handle {
+        h.abort();
+    }
+    if let Some(h) = _dashboard_handle {
         h.abort();
     }
     Ok(())

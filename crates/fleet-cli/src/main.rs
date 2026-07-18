@@ -75,6 +75,13 @@ enum Command {
         /// CF-Access-Jwt-Assertion 헤더 검증 활성화.
         #[arg(long, env = "FLEET_CF_AUDIENCE")]
         cf_audience: Option<String>,
+
+        /// 웹 대시보드 바인드 주소 (예: `127.0.0.1:8082`).
+        /// 생략하면 대시보드 서버를 실행하지 않습니다.
+        /// 지정하면 `/api/overview`, `/api/workers`, `/api/tasks`,
+        /// `/api/events/stream` (SSE) 엔드포인트가 제공됩니다.
+        #[arg(long, env = "FLEET_DASHBOARD_BIND")]
+        dashboard_bind: Option<String>,
     },
 
     /// 데이터베이스 마이그레이션만 실행하고 종료.
@@ -170,6 +177,7 @@ async fn main() -> Result<()> {
             http_bind,
             api_tokens,
             cf_audience,
+            dashboard_bind,
         } => {
             runtime::run_serve(
                 &transport,
@@ -180,6 +188,7 @@ async fn main() -> Result<()> {
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
+                dashboard_bind.as_deref(),
             )
             .await
         }

@@ -1,0 +1,34 @@
+[package]
+name = "fleet-dashboard"
+description = "Web dashboard with embedded static assets (htmx + pure HTML)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fleet-core = { workspace = true }
+fleet-store = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
+async-stream = { workspace = true }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false, features = ["trace", "cors"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+[lib]
+name = "fleet_dashboard"
+path = "src/lib.rs"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

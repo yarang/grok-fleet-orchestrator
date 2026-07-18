@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fleet Orchestrator</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+  <header>
+    <h1>Fleet Orchestrator</h1>
+    <div id="status-pill">connecting…</div>
+  </header>
+
+  <main>
+    <section id="overview">
+      <h2>Overview</h2>
+      <div id="overview-grid" class="grid">
+        <div class="card">
+          <div class="metric" id="metric-workers">—</div>
+          <div class="label">Workers online</div>
+        </div>
+        <div class="card">
+          <div class="metric" id="metric-tasks-active">—</div>
+          <div class="label">Active tasks</div>
+        </div>
+        <div class="card">
+          <div class="metric" id="metric-tasks-today">—</div>
+          <div class="label">Total tasks</div>
+        </div>
+        <div class="card">
+          <div class="metric" id="metric-failures">—</div>
+          <div class="label">Failed</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="workers">
+      <h2>Workers</h2>
+      <div id="worker-list" class="table">
+        <div class="row header">
+          <div>Name</div><div>Status</div><div>Active</div><div>Circuit</div><div>Last seen</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tasks">
+      <h2>Recent tasks</h2>
+      <div id="task-list" class="table">
+        <div class="row header">
+          <div>ID</div><div>Phase</div><div>Prompt</div><div>Worker</div><div>Created</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="events">
+      <h2>Live events <small id="event-counter"></small></h2>
+      <div id="event-log"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
