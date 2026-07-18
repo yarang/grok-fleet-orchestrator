@@ -37,13 +37,10 @@ const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// ## 재연결
 ///
 /// 연결이 끊기면 자동으로 재연결을 시도합니다 (sqlx PgListener 내장 동작).
-pub async fn listen_events<'a, S>(
-    store: &'a S,
+pub async fn listen_events<'a>(
+    store: &'a dyn Store,
     pool: &sqlx::PgPool,
-) -> Result<impl Stream<Item = Vec<fleet_core::EventEntry>> + 'a, crate::StoreError>
-where
-    S: Store + 'a,
-{
+) -> Result<impl Stream<Item = Vec<fleet_core::EventEntry>> + 'a, crate::StoreError> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.listen(EVENT_CHANNEL).await?;
 

@@ -181,6 +181,13 @@ impl CircuitBreaker {
         inner.samples.clear();
         inner.opened_at = None;
     }
+
+    /// 강제 Open (다중 admin 동기화용). 다른 admin이 Open시킨 상태를 반영.
+    pub fn force_open(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state = BreakerState::Open;
+        inner.opened_at = Some(Instant::now());
+    }
 }
 
 /// 회로가 열려 있을 때 반환되는 에러.
@@ -223,6 +230,15 @@ impl BreakerRegistry {
             .get(&worker_id)
             .map(|cb| cb.state())
             .unwrap_or(BreakerState::Closed)
+    }
+
+    /// 특정 워커의 브레이커를 리셋 (워커 등록 해제 시).
+    /// 존재하지 않아도 에러 아님.
+    pub fn reset(&self, worker_id: WorkerId) {
+        let breakers = self.breakers.lock().unwrap();
+        if let Some(cb) = breakers.get(&worker_id) {
+            cb.reset();
+        }
     }
 }
 

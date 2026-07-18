@@ -59,6 +59,17 @@ enum Command {
         /// 하트비트 누락 허용 횟수. 이 횟수 × 주기를 초과하면 offline 처리.
         #[arg(long, env = "FLEET_HEALTH_MISSED", default_value_t = 3)]
         health_missed: u32,
+
+        /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
+        /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
+        /// 지정하면 워커 등록/하트비트 엔드포인트가 병렬로 serve됩니다.
+        #[arg(long, env = "FLEET_HTTP_BIND")]
+        http_bind: Option<String>,
+
+        /// HTTP API 인증용 bearer 토큰 (쉼표 구분).
+        /// 생략하면 no-auth 모드 (개발용). Phase 4에서 OIDC로 대체.
+        #[arg(long, env = "FLEET_API_TOKENS")]
+        api_tokens: Option<String>,
     },
 
     /// 데이터베이스 마이그레이션만 실행하고 종료.
@@ -90,6 +101,8 @@ async fn main() -> Result<()> {
             no_health_check,
             health_interval_secs,
             health_missed,
+            http_bind,
+            api_tokens,
         } => {
             runtime::run_serve(
                 &transport,
@@ -97,6 +110,8 @@ async fn main() -> Result<()> {
                 no_health_check,
                 health_interval_secs,
                 health_missed,
+                http_bind.as_deref(),
+                api_tokens.as_deref(),
             )
             .await
         }

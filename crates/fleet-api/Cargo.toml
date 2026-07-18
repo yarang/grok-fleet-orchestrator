@@ -1,0 +1,28 @@
+[package]
+name = "fleet-api"
+description = "HTTP API server for worker registration, heartbeats, and admin operations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fleet-core = { workspace = true }
+fleet-store = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "query"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", default-features = false, features = ["trace", "cors"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+fleet-scheduler = { workspace = true }
+fleet-transport = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

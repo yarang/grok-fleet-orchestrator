@@ -20,8 +20,8 @@ use fleet_scheduler::{Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
-    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS,
-    TOOL_LIST_WORKERS, TOOL_WAIT_FOR_TASK,
+    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_DISPATCH_TASK,
+    TOOL_GET_TASK_STATUS, TOOL_LIST_WORKERS, TOOL_STREAM_TASK_OUTPUT, TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -53,6 +53,8 @@ pub async fn dispatch_tool(
         TOOL_LIST_WORKERS => handle_list_workers(ctx, arguments).await,
         TOOL_CANCEL_TASK => handle_cancel_task(ctx, arguments).await,
         TOOL_WAIT_FOR_TASK => handle_wait_for_task(ctx, arguments).await,
+        TOOL_STREAM_TASK_OUTPUT => handle_stream_task_output(ctx, arguments).await,
+        TOOL_COLLECT_RESULTS => handle_collect_results(ctx, arguments).await,
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -225,8 +227,229 @@ async fn handle_wait_for_task(
     }
 }
 
+// ── fleet_stream_task_output ────────────────────────────────────────────
+
+async fn handle_stream_task_output(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args.as_object().ok_or_else(|| {
+        JsonRpcError::invalid_params("arguments must be a JSON object")
+    })?;
+
+    let id_str = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: task_id"))?;
+
+    let task_id: TaskId = id_str
+        .parse()
+        .map_err(|e| JsonRpcError::invalid_params(format!("invalid task_id: {e}")))?;
+
+    let mut offset = args
+        .get("from_offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let poll_interval_secs = args
+        .get("poll_interval_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1)
+        .clamp(1, 30);
+    let max_polls = args
+        .get("max_polls")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60)
+        .clamp(1, 600);
+
+    // 존재 여부 확인 — 없으면 즉시 에러.
+    let initial = ctx
+        .state
+        .store
+        .get_task(task_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    let Some(initial_task) = initial else {
+        return Ok(schema::tool_error(format!("task not found: {task_id}")));
+    };
+
+    let mut buffer = String::new();
+    let mut chunks_seen = 0u64;
+    let mut polls_used = 0u64;
+    let mut stopped_reason = "max_polls_reached";
+
+    // 이미 종료 상태라면 한 번의 출력 읽기로 끝.
+    if initial_task.is_terminal() {
+        let output = ctx
+            .state
+            .store
+            .get_output(task_id, offset)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        for chunk in &output.chunks {
+            buffer.push_str(&chunk.chunk);
+            chunks_seen += 1;
+        }
+        offset = output.next_offset;
+        polls_used = 1;
+        stopped_reason = "terminal";
+    } else {
+        let sleep = std::time::Duration::from_secs(poll_interval_secs);
+        for poll_idx in 1..=max_polls {
+            let output = ctx
+                .state
+                .store
+                .get_output(task_id, offset)
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+            for chunk in &output.chunks {
+                buffer.push_str(&chunk.chunk);
+                chunks_seen += 1;
+            }
+            offset = output.next_offset;
+            polls_used = poll_idx;
+
+            // 상태 확인 — 매 폴링마다.
+            let task = ctx
+                .state
+                .store
+                .get_task(task_id)
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+            if task.as_ref().is_some_and(|t| t.is_terminal()) {
+                stopped_reason = "terminal";
+                break;
+            }
+
+            // 마지막 폴링이 아니면 대기.
+            if poll_idx < max_polls {
+                tokio::time::sleep(sleep).await;
+            }
+        }
+    }
+
+    // 최종 위상 조회.
+    let final_task = ctx
+        .state
+        .store
+        .get_task(task_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    let phase = final_task
+        .as_ref()
+        .map(|t| phase_str(&t.status))
+        .unwrap_or("unknown");
+
+    Ok(schema::tool_json(&json!({
+        "task_id": task_id.to_string(),
+        "phase": phase,
+        "output": buffer,
+        "chunks_seen": chunks_seen,
+        "next_offset": offset,
+        "polls_used": polls_used,
+        "stopped_reason": stopped_reason,
+    })))
+}
+
+// ── fleet_collect_results ───────────────────────────────────────────────
+
+async fn handle_collect_results(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args.as_object().ok_or_else(|| {
+        JsonRpcError::invalid_params("arguments must be a JSON object")
+    })?;
+
+    let ids_arr = args
+        .get("task_ids")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: task_ids (array)"))?;
+
+    if ids_arr.is_empty() {
+        return Err(JsonRpcError::invalid_params("task_ids must not be empty"));
+    }
+    if ids_arr.len() > 200 {
+        return Err(JsonRpcError::invalid_params(
+            "task_ids length exceeds maximum of 200",
+        ));
+    }
+
+    let include_output = args
+        .get("include_output")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // task_id 문자열 파싱 — 하나라도 잘못되면 전체 실패.
+    let mut task_ids: Vec<TaskId> = Vec::with_capacity(ids_arr.len());
+    for (i, v) in ids_arr.iter().enumerate() {
+        let s = v.as_str().ok_or_else(|| {
+            JsonRpcError::invalid_params(format!("task_ids[{i}] must be a string"))
+        })?;
+        let id: TaskId = s.parse().map_err(|e| {
+            JsonRpcError::invalid_params(format!("task_ids[{i}] invalid uuid: {e}"))
+        })?;
+        task_ids.push(id);
+    }
+
+    // 병렬 조회 — futures::future::join_all.
+    let store = ctx.state.store.clone();
+    let futures_iter = task_ids.iter().map(|&id| {
+        let store = store.clone();
+        async move {
+            let result = store.get_task(id).await;
+            (id, result)
+        }
+    });
+    let results = futures::future::join_all(futures_iter).await;
+
+    let mut entries = Vec::with_capacity(results.len());
+    let mut not_found = 0u32;
+    let mut terminal = 0u32;
+    for (id, result) in results {
+        match result {
+            Ok(Some(task)) => {
+                if task.is_terminal() {
+                    terminal += 1;
+                }
+                entries.push(task_summary_compact(&task, include_output));
+            }
+            Ok(None) => {
+                not_found += 1;
+                entries.push(json!({
+                    "task_id": id.to_string(),
+                    "phase": "not_found",
+                    "error": "task not found",
+                }));
+            }
+            Err(e) => {
+                entries.push(json!({
+                    "task_id": id.to_string(),
+                    "phase": "error",
+                    "error": format!("store error: {e}"),
+                }));
+            }
+        }
+    }
+
+    Ok(schema::tool_json(&json!({
+        "results": entries,
+        "count": entries.len(),
+        "summary": {
+            "terminal": terminal,
+            "not_found": not_found,
+            "total": entries.len(),
+        },
+    })))
+}
+
 /// 클라이언트에게 반환할 작업 요약. 전체 `Task`에서 핵심 필드만 발췌.
 fn task_summary(task: &Task) -> Value {
+    task_summary_with_options(task, true)
+}
+
+/// `include_output`으로 출력 포함 여부를 제어하는 작업 요약.
+/// `fleet_collect_results`에서 대량 조회 시 출력을 생략하기 위해 사용.
+fn task_summary_with_options(task: &Task, include_output: bool) -> Value {
     let phase = phase_str(&task.status);
     let mut summary = json!({
         "task_id": task.id.to_string(),
@@ -250,7 +473,11 @@ fn task_summary(task: &Task) -> Value {
         }
         fleet_core::TaskStatus::Completed(result) => {
             summary["worker_id"] = json!(result.worker_id.to_string());
-            summary["output"] = json!(result.output);
+            if include_output {
+                summary["output"] = json!(result.output);
+            } else {
+                summary["output_bytes"] = json!(result.output.len());
+            }
             summary["exit_code"] = json!(result.exit_code);
             summary["duration_secs"] = json!(result.duration_secs);
             summary["finished_at"] = json!(result.finished_at.to_rfc3339());
@@ -270,6 +497,11 @@ fn task_summary(task: &Task) -> Value {
     }
 
     summary
+}
+
+/// `fleet_collect_results`용 compact 요약. `task_summary_with_options`의 thin wrapper.
+fn task_summary_compact(task: &Task, include_output: bool) -> Value {
+    task_summary_with_options(task, include_output)
 }
 
 /// `TaskStatus`에서 위상(phase) 문자열 추출 (클라이언트 친화적).
@@ -387,5 +619,68 @@ mod tests {
         assert!(parse_worker_status("online").is_ok());
         assert!(parse_worker_status("circuit_open").is_ok());
         assert!(parse_worker_status("bogus").is_err());
+    }
+
+    #[test]
+    fn task_summary_with_output_includes_output_field() {
+        use fleet_core::{TaskResult, TaskStatus, WorkerId};
+        let result = TaskResult {
+            output: "build finished".into(),
+            exit_code: 0,
+            duration_secs: 12.5,
+            token_usage: None,
+            worker_id: WorkerId::new(),
+            finished_at: chrono::Utc::now(),
+        };
+        let task = Task {
+            id: TaskId::new(),
+            prompt: "cargo build".into(),
+            cwd: None,
+            model: None,
+            server_hint: None,
+            required_labels: vec![],
+            max_turns: None,
+            timeout_secs: None,
+            created_at: chrono::Utc::now(),
+            created_by: "test".into(),
+            priority: fleet_core::TaskPriority::Normal,
+            status: TaskStatus::Completed(result),
+        };
+        let summary = task_summary_with_options(&task, true);
+        assert_eq!(summary["phase"], "completed");
+        assert_eq!(summary["output"], "build finished");
+        assert!(summary.get("output_bytes").is_none());
+    }
+
+    #[test]
+    fn task_summary_without_output_shows_byte_count() {
+        use fleet_core::{TaskResult, TaskStatus, WorkerId};
+        let result = TaskResult {
+            output: "build finished".into(),
+            exit_code: 0,
+            duration_secs: 12.5,
+            token_usage: None,
+            worker_id: WorkerId::new(),
+            finished_at: chrono::Utc::now(),
+        };
+        let task = Task {
+            id: TaskId::new(),
+            prompt: "cargo build".into(),
+            cwd: None,
+            model: None,
+            server_hint: None,
+            required_labels: vec![],
+            max_turns: None,
+            timeout_secs: None,
+            created_at: chrono::Utc::now(),
+            created_by: "test".into(),
+            priority: fleet_core::TaskPriority::Normal,
+            status: TaskStatus::Completed(result),
+        };
+        let summary = task_summary_with_options(&task, false);
+        assert_eq!(summary["phase"], "completed");
+        assert!(summary.get("output").is_none());
+        // "build finished" = 14 bytes
+        assert_eq!(summary["output_bytes"], 14);
     }
 }

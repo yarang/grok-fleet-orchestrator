@@ -22,6 +22,7 @@ pub mod listener;
 pub mod postgres;
 
 pub use error::StoreError;
+pub use listener::listen_events;
 pub use postgres::PgStore;
 
 use async_trait::async_trait;

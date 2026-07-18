@@ -34,6 +34,10 @@ pub const TOOL_LIST_WORKERS: &str = "fleet_list_workers";
 pub const TOOL_CANCEL_TASK: &str = "fleet_cancel_task";
 /// 작업 종료까지 대기 도구 (Phase 2).
 pub const TOOL_WAIT_FOR_TASK: &str = "fleet_wait_for_task";
+/// 작업 출력 폴링 도구 (Phase 3).
+pub const TOOL_STREAM_TASK_OUTPUT: &str = "fleet_stream_task_output";
+/// 여러 작업 결과 취합 도구 (Phase 3).
+pub const TOOL_COLLECT_RESULTS: &str = "fleet_collect_results";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  JSON-RPC 2.0 봉투
@@ -316,6 +320,62 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["task_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_STREAM_TASK_OUTPUT,
+            description: "Poll a task's streamed output (stdout/stderr chunks) until it reaches a terminal state or the polling budget is exhausted. Concatenates all new chunks observed during the poll window and returns them along with the current task phase. Useful for tailing long-running builds/tests without repeatedly calling fleet_get_task_status.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "UUID of the task whose output should be streamed."
+                    },
+                    "from_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Start reading chunks whose seq is strictly greater than this offset (default 0, i.e. from the beginning)."
+                    },
+                    "poll_interval_secs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 30,
+                        "default": 1,
+                        "description": "Seconds between polls (default 1)."
+                    },
+                    "max_polls": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 600,
+                        "default": 60,
+                        "description": "Maximum number of polls before returning (default 60). Total wait is roughly poll_interval_secs × max_polls."
+                    }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_COLLECT_RESULTS,
+            description: "Collect the final status of multiple tasks in parallel by task_id. Returns one entry per task_id with phase, output (if completed), or error. Tasks still running at query time are reported with phase 'pending' or 'dispatched' and no output. Useful after dispatching a batch with fleet_dispatch_task.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": 200,
+                        "description": "List of task UUIDs to collect results for."
+                    },
+                    "include_output": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include the full output string for completed tasks (default true). Set to false to get a compact phase-only summary."
+                    }
+                },
+                "required": ["task_ids"]
             }),
         },
     ]

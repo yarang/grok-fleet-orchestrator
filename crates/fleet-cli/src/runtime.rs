@@ -21,16 +21,16 @@
 //!              run_mcp_server(state, dispatcher)  ← stdio
 //! ```
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
+use fleet_api::{run_http_server, AppState};
 use fleet_core::{CircuitBreakerConfig, WorkerFilter, WorkerStatus};
 use fleet_mcp::run_mcp_server;
-use fleet_scheduler::{
-    Dispatcher, FleetState, HealthChecker, HealthConfig,
-};
+use fleet_scheduler::{Dispatcher, FleetState, HealthChecker, HealthConfig};
 use fleet_store::{PgStore, Store};
 use fleet_transport::MockTransport;
 
@@ -76,12 +76,15 @@ fn sanitize_url(url: &str) -> String {
 }
 
 /// `serve` 명령 실행.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_serve(
     transport_kind: &str,
     db_max_conn: u32,
     no_health_check: bool,
     health_interval_secs: u64,
     health_missed: u32,
+    http_bind: Option<&str>,
+    api_tokens: Option<&str>,
 ) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
 
@@ -96,12 +99,8 @@ pub async fn run_serve(
     let (transport, event_rx) = MockTransport::new();
     let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
 
-    // TODO(Phase 3): config 파일에서 workers 로드 → transport.register + store.upsert_worker.
-    // Phase 2 테스트 시나리오에서는 workers를 미리 DB에 INSERT 해 두거나
-    // fleet-cli에서 별도 등록 명령을 통해 준비합니다.
-
     let state = Arc::new(FleetState::new(
-        store,
+        store.clone(),
         transport,
         CircuitBreakerConfig::default(),
     ));
@@ -133,14 +132,53 @@ pub async fn run_serve(
         None
     };
 
+    // HTTP API 서버 (옵션). --http-bind가 지정된 경우에만 실행.
+    let _http_handle = if let Some(bind_str) = http_bind {
+        let bind: SocketAddr = bind_str
+            .parse()
+            .with_context(|| format!("invalid --http-bind address: {bind_str}"))?;
+
+        let mut app_state = AppState::new(store.clone())
+            .with_heartbeat_interval(health_interval_secs as u32);
+        if let Some(tokens) = api_tokens {
+            let token_list: Vec<String> = tokens
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !token_list.is_empty() {
+                app_state = app_state.with_tokens(token_list);
+                tracing::info!(bind = %bind, "HTTP API server with bearer auth");
+            } else {
+                tracing::warn!(bind = %bind, "HTTP API server in NO-AUTH mode (empty token list)");
+            }
+        } else {
+            tracing::warn!(bind = %bind, "HTTP API server in NO-AUTH mode (dev only)");
+        }
+
+        let app_state = Arc::new(app_state);
+        let http_join = tokio::spawn(async move {
+            if let Err(e) = run_http_server(app_state, bind).await {
+                tracing::error!(error = %e, "HTTP API server terminated with error");
+            }
+        });
+        Some(http_join)
+    } else {
+        tracing::info!("HTTP API server disabled (pass --http-bind ADDR:PORT to enable)");
+        None
+    };
+
     tracing::info!("starting MCP stdio server");
     run_mcp_server(state, dispatcher)
         .await
         .context("MCP server error")?;
 
-    // MCP 서버 종료 시 백그라운드 헬스체크도 정리.
+    // MCP 서버 종료 시 백그라운드 태스크도 정리.
     if let Some(h) = _health_handle {
         h.abort().await;
+    }
+    if let Some(h) = _http_handle {
+        h.abort();
     }
     Ok(())
 }
