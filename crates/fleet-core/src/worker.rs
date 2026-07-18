@@ -112,7 +112,7 @@ pub enum CircuitState {
 }
 
 /// 워커 목록 조회용 필터. Store::list_workers에 전달.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<WorkerStatus>,
@@ -120,6 +120,16 @@ pub struct WorkerFilter {
     pub labels: HashMap<String, String>,
     #[serde(default = "default_worker_limit")]
     pub limit: usize,
+}
+
+impl Default for WorkerFilter {
+    fn default() -> Self {
+        Self {
+            status: None,
+            labels: HashMap::new(),
+            limit: default_worker_limit(),
+        }
+    }
 }
 
 fn default_worker_limit() -> usize {

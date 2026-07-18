@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/fleet-core",
+    "crates/fleet-store",
 ]
 
 [workspace.package]
@@ -32,10 +33,22 @@ tracing = "0.1"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 
-# 내부 크레이트 (추후 추가 시 여기서 버전 고정)
-# fleet-core = { path = "crates/fleet-core", version = "0.1.0" }
-# fleet-store = { path = "crates/fleet-store", version = "0.1.0" }
-# ...
+# 데이터베이스
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+    "migrate",
+    "macros",
+] }
+futures = "0.3"
+async-stream = "0.3"
+
+# 내부 크레이트
+fleet-core = { path = "crates/fleet-core", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3

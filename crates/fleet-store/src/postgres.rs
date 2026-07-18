@@ -1,0 +1,584 @@
+//! PostgreSQL `Store` 구현.
+//!
+//! ## DB ↔ 도메인 매핑
+//!
+//! | DB 칼럼 | 타입 | 도메인 타입 |
+//! |---------|------|------------|
+//! | `status` (tasks) | JSONB | `TaskStatus` (serde) |
+//! | `status_phase` | TEXT (generated) | — (필터링용) |
+//! | `priority` | TEXT | `TaskPriority` (snake_case) |
+//! | `required_labels` | JSONB | `Vec<String>` |
+//! | `labels` (workers) | JSONB | `HashMap<String,String>` |
+//! | `status` (workers) | TEXT | `WorkerStatus` (snake_case) |
+//! | `circuit_state` | TEXT | `CircuitState` (snake_case) |
+//! | `payload` (events) | JSONB | `FleetEvent` (serde) |
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use sqlx::Row;
+use uuid::Uuid;
+
+use fleet_core::{
+    CircuitState, EventEntry, FleetEvent, Labels, Task, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, Worker, WorkerFilter,
+    WorkerHeartbeat, WorkerId, WorkerStatus,
+};
+
+use crate::error::StoreError;
+use crate::Store;
+
+/// PostgreSQL 기반 `Store` 구현.
+pub struct PgStore {
+    pool: PgPool,
+}
+
+impl PgStore {
+    /// 연결 풀을 생성하고 반환.
+    pub async fn connect(database_url: &str, max_connections: u32) -> Result<Self, StoreError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect(database_url)
+            .await?;
+        Ok(Self { pool })
+    }
+
+    /// 기존 풀로부터 생성 (테스트/공유용).
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// 내부 풀 참조 (LISTEN/NOTIFY 등 저수준 접근용).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Store trait 구현
+// ═══════════════════════════════════════════════════════════════════════
+
+#[async_trait]
+impl Store for PgStore {
+    // ── Task ───────────────────────────────────────────────────────────
+
+    async fn insert_task(&self, task: &Task) -> Result<(), StoreError> {
+        let priority_str = priority_to_str(task.priority);
+        let status_json = serde_json::to_value(&task.status)?;
+        let labels_json = serde_json::to_value(&task.required_labels)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO tasks
+                (id, prompt, cwd, model, server_hint, required_labels,
+                 max_turns, timeout_secs, created_at, created_by, priority, status)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(task.id.as_uuid())
+        .bind(&task.prompt)
+        .bind(task.cwd.as_ref())
+        .bind(task.model.as_ref())
+        .bind(task.server_hint.as_ref())
+        .bind(labels_json)
+        .bind(task.max_turns.map(|v| v as i32))
+        .bind(task.timeout_secs.map(|v| v as i64))
+        .bind(task.created_at)
+        .bind(&task.created_by)
+        .bind(priority_str)
+        .bind(status_json)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
+        let row = sqlx::query(
+            r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                      max_turns, timeout_secs, created_at, created_by, priority, status
+               FROM tasks WHERE id = $1"#,
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_task).transpose()
+    }
+
+    async fn update_task_status(
+        &self,
+        id: TaskId,
+        status: &TaskStatus,
+    ) -> Result<(), StoreError> {
+        let status_json = serde_json::to_value(status)?;
+        let result = sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(status_json)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
+        // 단순 필터는 SQL로, 복잡한 것(worker_id)은 Rust로 후처리.
+        let limit = filter.limit.min(1000) as i64;
+
+        let rows = if let Some(ref created_by) = filter.created_by {
+            sqlx::query(
+                r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                          max_turns, timeout_secs, created_at, created_by, priority, status
+                   FROM tasks WHERE created_by = $1
+                   ORDER BY created_at DESC LIMIT $2"#,
+            )
+            .bind(created_by)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                          max_turns, timeout_secs, created_at, created_by, priority, status
+                   FROM tasks
+                   ORDER BY created_at DESC LIMIT $1"#,
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut tasks: Vec<Task> = rows.into_iter().map(row_to_task).collect::<Result<_, _>>()?;
+
+        // 상태 위상 필터 (SQL의 status_phase 대응, 단 Terminal/Active 합성도 처리)
+        if let Some(status_filter) = filter.status {
+            tasks.retain(|t| status_matches(&t.status, status_filter));
+        }
+
+        // 워커 ID 필터 (status JSONB 내부 필드 — 앱 레벨 처리)
+        if let Some(worker_id) = filter.worker_id {
+            tasks.retain(|t| task_worker_id(&t.status) == Some(worker_id));
+        }
+
+        Ok(tasks)
+    }
+
+    // ── Worker ─────────────────────────────────────────────────────────
+
+    async fn upsert_worker(&self, worker: &Worker) -> Result<(), StoreError> {
+        let labels_json = serde_json::to_value(&worker.labels)?;
+        let status_str = worker_status_to_str(worker.status);
+        let circuit_str = circuit_state_to_str(worker.circuit_state);
+
+        sqlx::query(
+            r#"
+            INSERT INTO workers
+                (id, name, endpoint, labels, status, circuit_state,
+                 last_seen, active_tasks, max_concurrent, worker_version, registered_at)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (id) DO UPDATE SET
+                name            = EXCLUDED.name,
+                endpoint        = EXCLUDED.endpoint,
+                labels          = EXCLUDED.labels,
+                status          = EXCLUDED.status,
+                circuit_state   = EXCLUDED.circuit_state,
+                last_seen       = EXCLUDED.last_seen,
+                active_tasks    = EXCLUDED.active_tasks,
+                max_concurrent  = EXCLUDED.max_concurrent,
+                worker_version  = EXCLUDED.worker_version
+            "#,
+        )
+        .bind(worker.id.as_uuid())
+        .bind(&worker.name)
+        .bind(&worker.endpoint)
+        .bind(labels_json)
+        .bind(status_str)
+        .bind(circuit_str)
+        .bind(worker.last_seen)
+        .bind(worker.active_tasks as i32)
+        .bind(worker.max_concurrent as i32)
+        .bind(worker.worker_version.as_ref())
+        .bind(worker.registered_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
+        let row = sqlx::query(
+            r#"SELECT id, name, endpoint, labels, status, circuit_state,
+                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+               FROM workers WHERE id = $1"#,
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_worker).transpose()
+    }
+
+    async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
+        let row = sqlx::query(
+            r#"SELECT id, name, endpoint, labels, status, circuit_state,
+                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+               FROM workers WHERE name = $1"#,
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_worker).transpose()
+    }
+
+    async fn list_workers(&self, filter: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
+        let limit = filter.limit.min(1000) as i64;
+
+        let rows = if let Some(status) = filter.status {
+            let status_str = worker_status_to_str(status);
+            sqlx::query(
+                r#"SELECT id, name, endpoint, labels, status, circuit_state,
+                          last_seen, active_tasks, max_concurrent, worker_version, registered_at
+                   FROM workers WHERE status = $1
+                   ORDER BY registered_at DESC LIMIT $2"#,
+            )
+            .bind(status_str)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"SELECT id, name, endpoint, labels, status, circuit_state,
+                          last_seen, active_tasks, max_concurrent, worker_version, registered_at
+                   FROM workers
+                   ORDER BY registered_at DESC LIMIT $1"#,
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut workers: Vec<Worker> =
+            rows.into_iter().map(row_to_worker).collect::<Result<_, _>>()?;
+
+        // 라벨 필터 (GIN 인덱스 활용 가능하지만, 단순 containment로 처리)
+        if !filter.labels.is_empty() {
+            workers.retain(|w| {
+                filter
+                    .labels
+                    .iter()
+                    .all(|(k, v)| w.labels.get(k).is_some_and(|val| val == v))
+            });
+        }
+
+        Ok(workers)
+    }
+
+    async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM workers WHERE id = $1")
+            .bind(id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    async fn update_worker_heartbeat(
+        &self,
+        id: WorkerId,
+        heartbeat: &WorkerHeartbeat,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            r#"UPDATE workers SET
+                 last_seen    = NOW(),
+                 active_tasks = $2
+               WHERE id = $1"#,
+        )
+        .bind(id.as_uuid())
+        .bind(heartbeat.active_tasks as i32)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
+    // ── Event log ──────────────────────────────────────────────────────
+
+    async fn append_event(&self, event: &FleetEvent) -> Result<u64, StoreError> {
+        let event_type = event.event_type();
+        let payload = serde_json::to_value(event)?;
+        let task_id = event.task_id().map(|t| t.as_uuid());
+        let worker_id = event.worker_id().map(|w| w.as_uuid());
+
+        let row = sqlx::query(
+            r#"INSERT INTO events (task_id, worker_id, event_type, payload)
+               VALUES ($1, $2, $3, $4)
+               RETURNING seq"#,
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(event_type)
+        .bind(payload)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let seq: i64 = row.try_get("seq")?;
+        Ok(seq as u64)
+    }
+
+    async fn list_events(
+        &self,
+        after_seq: u64,
+        limit: u32,
+    ) -> Result<Vec<EventEntry>, StoreError> {
+        let rows = sqlx::query(
+            r#"SELECT seq, payload FROM events
+               WHERE seq > $1 ORDER BY seq ASC LIMIT $2"#,
+        )
+        .bind(after_seq as i64)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let seq: i64 = row.try_get("seq")?;
+                let payload: serde_json::Value = row.try_get("payload")?;
+                let event: FleetEvent = serde_json::from_value(payload)?;
+                Ok(EventEntry {
+                    seq: seq as u64,
+                    event,
+                })
+            })
+            .collect()
+    }
+
+    // ── Output buffer ──────────────────────────────────────────────────
+
+    async fn append_output(&self, task_id: TaskId, chunk: &str) -> Result<u64, StoreError> {
+        let row = sqlx::query(
+            r#"INSERT INTO task_outputs (task_id, chunk)
+               VALUES ($1, $2) RETURNING seq"#,
+        )
+        .bind(task_id.as_uuid())
+        .bind(chunk)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let seq: i64 = row.try_get("seq")?;
+        Ok(seq as u64)
+    }
+
+    async fn get_output(&self, task_id: TaskId, after_seq: u64) -> Result<TaskOutput, StoreError> {
+        let rows = sqlx::query(
+            r#"SELECT seq, chunk, written_at FROM task_outputs
+               WHERE task_id = $1 AND seq > $2
+               ORDER BY seq ASC"#,
+        )
+        .bind(task_id.as_uuid())
+        .bind(after_seq as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let chunks: Vec<TaskOutputChunk> = rows
+            .into_iter()
+            .map(|row| {
+                let seq: i64 = row.try_get("seq")?;
+                let chunk: String = row.try_get("chunk")?;
+                let written_at = row.try_get("written_at")?;
+                Ok(TaskOutputChunk {
+                    task_id,
+                    seq: seq as u64,
+                    chunk,
+                    written_at,
+                })
+            })
+            .collect::<Result<_, StoreError>>()?;
+
+        let next_offset = chunks.last().map(|c| c.seq).unwrap_or(after_seq);
+
+        Ok(TaskOutput {
+            task_id,
+            chunks,
+            next_offset,
+        })
+    }
+
+    // ── Migration ──────────────────────────────────────────────────────
+
+    async fn migrate(&self) -> Result<(), StoreError> {
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .map_err(|e| StoreError::Migration(e.to_string()))?;
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  행 → 도메인 변환 헬퍼
+// ═══════════════════════════════════════════════════════════════════════
+
+fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let prompt: String = row.try_get("prompt")?;
+    let cwd: Option<String> = row.try_get("cwd")?;
+    let model: Option<String> = row.try_get("model")?;
+    let server_hint: Option<String> = row.try_get("server_hint")?;
+    let labels_json: serde_json::Value = row.try_get("required_labels")?;
+    let max_turns: Option<i32> = row.try_get("max_turns")?;
+    let timeout_secs: Option<i64> = row.try_get("timeout_secs")?;
+    let created_at = row.try_get("created_at")?;
+    let created_by: String = row.try_get("created_by")?;
+    let priority_str: String = row.try_get("priority")?;
+    let status_json: serde_json::Value = row.try_get("status")?;
+
+    let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
+    let status: TaskStatus = serde_json::from_value(status_json)?;
+    let priority = str_to_priority(&priority_str)?;
+
+    Ok(Task {
+        id: TaskId::from(id),
+        prompt,
+        cwd,
+        model,
+        server_hint,
+        required_labels,
+        max_turns: max_turns.map(|v| v as u32),
+        timeout_secs: timeout_secs.map(|v| v as u64),
+        created_at,
+        created_by,
+        priority,
+        status,
+    })
+}
+
+fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let name: String = row.try_get("name")?;
+    let endpoint: String = row.try_get("endpoint")?;
+    let labels_json: serde_json::Value = row.try_get("labels")?;
+    let status_str: String = row.try_get("status")?;
+    let circuit_str: String = row.try_get("circuit_state")?;
+    let last_seen = row.try_get("last_seen")?;
+    let active_tasks: i32 = row.try_get("active_tasks")?;
+    let max_concurrent: i32 = row.try_get("max_concurrent")?;
+    let worker_version: Option<String> = row.try_get("worker_version")?;
+    let registered_at = row.try_get("registered_at")?;
+
+    let labels: Labels = serde_json::from_value(labels_json).unwrap_or_else(|_| HashMap::new());
+
+    Ok(Worker {
+        id: WorkerId::from(id),
+        name,
+        endpoint,
+        labels,
+        status: str_to_worker_status(&status_str)?,
+        last_seen,
+        active_tasks: active_tasks as u32,
+        max_concurrent: max_concurrent as u32,
+        circuit_state: str_to_circuit_state(&circuit_str)?,
+        worker_version,
+        registered_at,
+    })
+}
+
+/// `TaskStatus`에서 worker_id 추출 (필터링용).
+fn task_worker_id(status: &TaskStatus) -> Option<WorkerId> {
+    match status {
+        TaskStatus::Dispatched { worker_id, .. } => Some(*worker_id),
+        TaskStatus::Completed(result) => Some(result.worker_id),
+        TaskStatus::Failed(failure) => failure.worker_id,
+        _ => None,
+    }
+}
+
+/// `TaskStatusFilter` 매칭.
+fn status_matches(status: &TaskStatus, filter: TaskStatusFilter) -> bool {
+    matches!(
+        (status, filter),
+        (TaskStatus::Pending, TaskStatusFilter::Pending)
+            | (TaskStatus::Pending, TaskStatusFilter::Active)
+            | (TaskStatus::Dispatched { .. }, TaskStatusFilter::Dispatched)
+            | (TaskStatus::Dispatched { .. }, TaskStatusFilter::Active)
+            | (TaskStatus::Completed(_), TaskStatusFilter::Completed)
+            | (TaskStatus::Completed(_), TaskStatusFilter::Terminal)
+            | (TaskStatus::Failed(_), TaskStatusFilter::Failed)
+            | (TaskStatus::Failed(_), TaskStatusFilter::Terminal)
+            | (TaskStatus::Cancelled { .. }, TaskStatusFilter::Cancelled)
+            | (TaskStatus::Cancelled { .. }, TaskStatusFilter::Terminal)
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Enum ↔ TEXT 변환
+// ═══════════════════════════════════════════════════════════════════════
+
+fn priority_to_str(p: TaskPriority) -> &'static str {
+    match p {
+        TaskPriority::Low => "low",
+        TaskPriority::Normal => "normal",
+        TaskPriority::High => "high",
+    }
+}
+
+fn str_to_priority(s: &str) -> Result<TaskPriority, StoreError> {
+    match s {
+        "low" => Ok(TaskPriority::Low),
+        "normal" => Ok(TaskPriority::Normal),
+        "high" => Ok(TaskPriority::High),
+        other => Err(StoreError::Decode(format!(
+            "unknown priority: {other}"
+        ))),
+    }
+}
+
+fn worker_status_to_str(s: WorkerStatus) -> &'static str {
+    match s {
+        WorkerStatus::Online => "online",
+        WorkerStatus::Degraded => "degraded",
+        WorkerStatus::Offline => "offline",
+        WorkerStatus::CircuitOpen => "circuit_open",
+    }
+}
+
+fn str_to_worker_status(s: &str) -> Result<WorkerStatus, StoreError> {
+    match s {
+        "online" => Ok(WorkerStatus::Online),
+        "degraded" => Ok(WorkerStatus::Degraded),
+        "offline" => Ok(WorkerStatus::Offline),
+        "circuit_open" => Ok(WorkerStatus::CircuitOpen),
+        other => Err(StoreError::Decode(format!(
+            "unknown worker status: {other}"
+        ))),
+    }
+}
+
+fn circuit_state_to_str(c: CircuitState) -> &'static str {
+    match c {
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "open",
+        CircuitState::HalfOpen => "half_open",
+    }
+}
+
+fn str_to_circuit_state(s: &str) -> Result<CircuitState, StoreError> {
+    match s {
+        "closed" => Ok(CircuitState::Closed),
+        "open" => Ok(CircuitState::Open),
+        "half_open" => Ok(CircuitState::HalfOpen),
+        other => Err(StoreError::Decode(format!(
+            "unknown circuit state: {other}"
+        ))),
+    }
+}

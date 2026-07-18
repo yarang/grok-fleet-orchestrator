@@ -184,7 +184,7 @@ pub enum FailureKind {
 }
 
 /// 작업 목록 조회용 필터. Store::list_tasks에 전달.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<TaskStatusFilter>,
@@ -194,6 +194,17 @@ pub struct TaskFilter {
     pub created_by: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+}
+
+impl Default for TaskFilter {
+    fn default() -> Self {
+        Self {
+            status: None,
+            worker_id: None,
+            created_by: None,
+            limit: default_limit(),
+        }
+    }
 }
 
 fn default_limit() -> usize {
