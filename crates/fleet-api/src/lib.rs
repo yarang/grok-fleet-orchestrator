@@ -24,9 +24,11 @@
 #![allow(missing_docs)]
 
 mod app;
+mod cloudflare;
 mod error;
 mod handlers;
 mod schema;
 
 pub use app::{build_app, run_http_server, AppState};
+pub use cloudflare::{cloudflare_access_middleware, VerifiedUser};
 pub use error::ApiError;

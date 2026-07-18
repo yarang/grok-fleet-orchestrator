@@ -33,6 +33,9 @@ pub struct AppState {
     /// 허용된 bearer token 목록 (Phase 3 임시; Phase 4에서 OIDC로 대체).
     /// `None`이면 bearer 헤더 없이도 통과 (allow_no_auth와 동일 효과).
     pub valid_tokens: Option<Arc<Vec<String>>>,
+    /// Cloudflare Access Application AUD (Phase 4).
+    /// 설정된 경우 CF-Access-Jwt-Assertion 헤더의 aud 클레임과 비교.
+    pub cf_audience: Option<String>,
 }
 
 impl AppState {
@@ -42,6 +45,7 @@ impl AppState {
             heartbeat_interval_secs: 15,
             allow_no_auth: true,
             valid_tokens: None,
+            cf_audience: None,
         }
     }
 
@@ -52,6 +56,14 @@ impl AppState {
 
     pub fn with_tokens(mut self, tokens: Vec<String>) -> Self {
         self.valid_tokens = Some(Arc::new(tokens));
+        self.allow_no_auth = false;
+        self
+    }
+
+    /// Cloudflare Access AUD 설정. 이후 모든 보호된 엔드포인트는
+    /// 유효한 CF-Access-Jwt-Assertion 헤더를 요구.
+    pub fn with_cf_audience(mut self, aud: impl Into<String>) -> Self {
+        self.cf_audience = Some(aud.into());
         self.allow_no_auth = false;
         self
     }
@@ -80,7 +92,19 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/health", get(handlers::health))
         .nest("/workers", api_routes);
 
-    // 인증 미들웨어
+    // Cloudflare Access 미들웨어 (가장 바깥).
+    // 설정된 경우 모든 요청이 CF-Access-Jwt-Assertion 검증을 받음.
+    let state_for_cf = state.clone();
+    let v1 = if state.cf_audience.is_some() {
+        v1.layer(middleware::from_fn(move |req, next| {
+            let state = state_for_cf.clone();
+            async move { crate::cloudflare::cloudflare_access_middleware(state, req, next).await }
+        }))
+    } else {
+        v1
+    };
+
+    // Bearer token 인증 미들웨어 (CF Access 뒤).
     let state_for_auth = state.clone();
     let v1 = v1.layer(middleware::from_fn(move |req, next| {
         let state = state_for_auth.clone();

@@ -70,6 +70,11 @@ enum Command {
         /// 생략하면 no-auth 모드 (개발용). Phase 4에서 OIDC로 대체.
         #[arg(long, env = "FLEET_API_TOKENS")]
         api_tokens: Option<String>,
+
+        /// Cloudflare Access Application AUD. 설정된 경우
+        /// CF-Access-Jwt-Assertion 헤더 검증 활성화.
+        #[arg(long, env = "FLEET_CF_AUDIENCE")]
+        cf_audience: Option<String>,
     },
 
     /// 데이터베이스 마이그레이션만 실행하고 종료.
@@ -80,6 +85,67 @@ enum Command {
         /// 상태 필터 (`online`, `offline`, `degraded`, `circuit_open`).
         #[arg(long)]
         status: Option<String>,
+    },
+
+    /// 원격 서버에 SSH로 접속해 워커 스택을 자동 프로비저닝.
+    ///
+    /// 단일 호스트 또는 inventory YAML 파일로 일괄 처리.
+    Provision {
+        /// 단일 호스트 (IP 또는 호스트명). --inventory와 배타.
+        #[arg(long, conflicts_with = "inventory")]
+        host: Option<String>,
+
+        /// SSH 사용자. --host 모드에서 사용.
+        #[arg(long, default_value = "ubuntu")]
+        user: String,
+
+        /// SSH 포트.
+        #[arg(long, default_value_t = 22)]
+        ssh_port: u16,
+
+        /// SSH 개인키 경로.
+        #[arg(long)]
+        ssh_key: Option<String>,
+
+        /// 워커 이름 (오케스트레이터에 등록될 식별자).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// 라벨 (key=value 반복). 예: --labels arch=arm64,gpu=false
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+
+        /// Cloudflare 토큰 (터널 생성용).
+        #[arg(long, env = "FLEET_CF_TOKEN")]
+        cf_token: Option<String>,
+
+        /// 오케스트레이터 URL.
+        #[arg(long, env = "FLEET_ORCHESTRATOR_URL")]
+        orchestrator_url: Option<String>,
+
+        /// 로컬 빌드한 fleet-worker 바이너리 경로.
+        #[arg(long)]
+        fleet_worker_bin: Option<String>,
+
+        /// 인벤토리 YAML 파일 경로. --host 대신 사용.
+        #[arg(long, conflicts_with = "host")]
+        inventory: Option<String>,
+
+        /// 병렬 처리 수 (인벤토리 모드).
+        #[arg(long, default_value_t = 1)]
+        parallel: usize,
+
+        /// 특정 태그만 실행 (예: tunnel, setup).
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// 인벤토리 내에서 특정 워커만 실행 (쉼표 구분 이름).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+
+        /// Dry-run — 실제 변경 없이 무엇을 할지 로깅.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -103,6 +169,7 @@ async fn main() -> Result<()> {
             health_missed,
             http_bind,
             api_tokens,
+            cf_audience,
         } => {
             runtime::run_serve(
                 &transport,
@@ -112,11 +179,46 @@ async fn main() -> Result<()> {
                 health_missed,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
+                cf_audience.as_deref(),
             )
             .await
         }
         Command::Migrate => runtime::run_migrate().await,
         Command::WorkerList { status } => runtime::run_worker_list(status).await,
+        Command::Provision {
+            host,
+            user,
+            ssh_port,
+            ssh_key,
+            name,
+            labels,
+            cf_token,
+            orchestrator_url,
+            fleet_worker_bin,
+            inventory,
+            parallel,
+            tags,
+            only,
+            dry_run,
+        } => {
+            runtime::run_provision(runtime::ProvisionArgs {
+                host,
+                user,
+                ssh_port,
+                ssh_key,
+                name,
+                labels,
+                cf_token,
+                orchestrator_url,
+                fleet_worker_bin,
+                inventory,
+                parallel,
+                tags,
+                only,
+                dry_run,
+            })
+            .await
+        }
     }
     .context("fleet command failed")?;
 

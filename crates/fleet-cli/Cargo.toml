@@ -18,6 +18,7 @@ fleet-transport = { workspace = true }
 fleet-scheduler = { workspace = true }
 fleet-mcp = { workspace = true }
 fleet-api = { workspace = true }
+fleet-provisioner = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

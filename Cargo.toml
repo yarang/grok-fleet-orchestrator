@@ -7,6 +7,7 @@ members = [
     "crates/fleet-scheduler",
     "crates/fleet-api",
     "crates/fleet-mcp",
+    "crates/fleet-provisioner",
     "crates/fleet-cli",
 ]
 
@@ -58,6 +59,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # MCP / JSON-RPC
 tokio-util = "0.7"
 
+# SSH 프로비저닝 (Phase 4)
+russh = "0.46"
+russh-keys = "0.46"
+base64 = "0.22"
+serde_yaml = "0.9"
+
 # 내부 크레이트
 fleet-core = { path = "crates/fleet-core", version = "0.1.0" }
 fleet-store = { path = "crates/fleet-store", version = "0.1.0" }
@@ -65,6 +72,7 @@ fleet-transport = { path = "crates/fleet-transport", version = "0.1.0" }
 fleet-scheduler = { path = "crates/fleet-scheduler", version = "0.1.0" }
 fleet-api = { path = "crates/fleet-api", version = "0.1.0" }
 fleet-mcp = { path = "crates/fleet-mcp", version = "0.1.0" }
+fleet-provisioner = { path = "crates/fleet-provisioner", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3
