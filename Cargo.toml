@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fleet-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yarang/grok-fleet-orchestrator"
+homepage = "https://github.com/yarang/grok-fleet-orchestrator"
+
+# 공통 의존성 버전은 여기서 중앙 집중 관리.
+# 각 크레이트는 `dep = { workspace = true }` 형식으로 참조.
+[workspace.dependencies]
+# 직렬화
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 시간 / ID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# 에러 / 로깅
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+
+# 비동기
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# 내부 크레이트 (추후 추가 시 여기서 버전 고정)
+# fleet-core = { path = "crates/fleet-core", version = "0.1.0" }
+# fleet-store = { path = "crates/fleet-store", version = "0.1.0" }
+# ...
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
