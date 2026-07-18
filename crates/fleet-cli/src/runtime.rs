@@ -29,7 +29,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 
 use fleet_api::{run_http_server, AppState};
-use fleet_core::{CircuitBreakerConfig, WorkerFilter, WorkerStatus};
+use fleet_core::{
+    CircuitBreakerConfig, TaskFilter, TaskId, TaskStatus, TaskStatusFilter, WorkerFilter,
+    WorkerStatus,
+};
+// CLI 하위 명령 enum (main.rs).
+use crate::{EventsAction, TasksAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookReport,
@@ -225,8 +230,105 @@ pub async fn run_migrate() -> Result<()> {
     Ok(())
 }
 
-/// `worker list` 명령.
-pub async fn run_worker_list(status_filter: Option<String>) -> Result<()> {
+/// `workers` 명령 그룹 디스패치.
+pub async fn run_workers(action: WorkersAction) -> Result<()> {
+    match action {
+        WorkersAction::List { status, json } => run_workers_list(status, json).await,
+        WorkersAction::Show { name } => run_workers_show(&name).await,
+    }
+}
+
+/// `tasks` 명령 그룹 디스패치.
+pub async fn run_tasks(action: TasksAction) -> Result<()> {
+    match action {
+        TasksAction::List { status, limit, json } => run_tasks_list(status, limit, json).await,
+        TasksAction::Show { id } => run_tasks_show(&id).await,
+        TasksAction::Cancel { id, reason } => run_tasks_cancel(&id, reason).await,
+    }
+}
+
+/// `events` 명령 그룹 디스패치. 감사 로그 조회.
+pub async fn run_events(action: EventsAction) -> Result<()> {
+    match action {
+        EventsAction::List {
+            after_seq,
+            limit,
+            json,
+        } => run_events_list(after_seq, limit, json).await,
+    }
+}
+
+/// `events list` 명령.
+async fn run_events_list(after_seq: u64, limit: u32, json: bool) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+    let events = store
+        .list_events(after_seq, limit)
+        .await
+        .context("failed to list events")?;
+
+    if json {
+        let value = serde_json::to_string_pretty(&events)?;
+        println!("{value}");
+        return Ok(());
+    }
+
+    if events.is_empty() {
+        println!("(no events in range)");
+        return Ok(());
+    }
+
+    println!(
+        "{:<8} {:<24} {:<22} DETAIL",
+        "SEQ", "TIMESTAMP", "TYPE"
+    );
+    println!("{}", "-".repeat(100));
+    for e in events {
+        let type_str = event_type_str(&e.event);
+        let detail = event_detail_str(&e.event);
+        let ts = chrono::Utc::now(); // 이벤트 자체 timestamp가 없으면 현재 시간.
+        println!(
+            "{:<8} {:<24} {:<22} {}",
+            e.seq,
+            ts.to_rfc3339(),
+            type_str,
+            detail,
+        );
+    }
+    Ok(())
+}
+
+fn event_type_str(e: &fleet_core::FleetEvent) -> &'static str {
+    use fleet_core::FleetEvent;
+    match e {
+        FleetEvent::TaskCreated { .. } => "task_created",
+        FleetEvent::TaskDispatched { .. } => "task_dispatched",
+        FleetEvent::TaskProgress { .. } => "task_progress",
+        FleetEvent::TaskCompleted { .. } => "task_completed",
+        FleetEvent::TaskFailed { .. } => "task_failed",
+        FleetEvent::TaskCancelled { .. } => "task_cancelled",
+        FleetEvent::WorkerJoined { .. } => "worker_joined",
+        FleetEvent::WorkerLeft { .. } => "worker_left",
+        FleetEvent::WorkerCircuitChanged { .. } => "worker_circuit_changed",
+        FleetEvent::WorkerHeartbeat { .. } => "worker_heartbeat",
+    }
+}
+
+fn event_detail_str(e: &fleet_core::FleetEvent) -> String {
+    let json = serde_json::to_value(e).unwrap_or_default();
+    let obj = json.as_object().cloned().unwrap_or_default();
+    // type 필드는 이미 TYPE 컬럼에 표시되므로 detail에서는 제외.
+    let mut parts = Vec::new();
+    for (k, v) in &obj {
+        if k == "type" {
+            continue;
+        }
+        parts.push(format!("{k}={v}"));
+    }
+    parts.join(" ")
+}
+
+/// `workers list` 명령.
+async fn run_workers_list(status_filter: Option<String>, json: bool) -> Result<()> {
     let store = connect_and_migrate(2).await?;
 
     let mut filter = WorkerFilter::default();
@@ -239,12 +341,17 @@ pub async fn run_worker_list(status_filter: Option<String>) -> Result<()> {
         .await
         .context("failed to list workers")?;
 
+    if json {
+        let value = serde_json::to_string_pretty(&workers)?;
+        println!("{value}");
+        return Ok(());
+    }
+
     if workers.is_empty() {
         println!("(no workers registered)");
         return Ok(());
     }
 
-    // 사람용 텍스트 포맷
     println!(
         "{:<36} {:<20} {:<14} {:<10} {:<10}",
         "ID", "NAME", "STATUS", "ACTIVE", "CIRCUIT"
@@ -261,6 +368,195 @@ pub async fn run_worker_list(status_filter: Option<String>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `workers show <name>` 명령.
+async fn run_workers_show(name: &str) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+    let w = store
+        .get_worker_by_name(name)
+        .await
+        .with_context(|| format!("failed to look up worker {name}"))?
+        .ok_or_else(|| anyhow!("no worker named '{name}'"))?;
+
+    println!("{:<20} {}", "ID:", w.id);
+    println!("{:<20} {}", "NAME:", w.name);
+    println!("{:<20} {}", "ENDPOINT:", w.endpoint);
+    println!("{:<20} {}", "STATUS:", format!("{:?}", w.status).to_lowercase());
+    println!(
+        "{:<20} {}/{}",
+        "ACTIVE:", w.active_tasks, w.max_concurrent
+    );
+    println!(
+        "{:<20} {}",
+        "CIRCUIT:",
+        format!("{:?}", w.circuit_state).to_lowercase()
+    );
+    println!(
+        "{:<20} {}",
+        "LAST_SEEN:",
+        w.last_seen
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "(never)".into())
+    );
+    println!(
+        "{:<20} {}",
+        "REGISTERED_AT:",
+        w.registered_at.to_rfc3339()
+    );
+    println!("{:<20} {:?}", "LABELS:", w.labels);
+    Ok(())
+}
+
+/// `tasks list` 명령.
+async fn run_tasks_list(
+    status_filter: Option<String>,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+    let mut filter = TaskFilter {
+        limit,
+        ..Default::default()
+    };
+    if let Some(s) = status_filter {
+        filter.status = Some(parse_task_status_filter(&s)?);
+    }
+
+    let tasks = store
+        .list_tasks(&filter)
+        .await
+        .context("failed to list tasks")?;
+
+    if json {
+        let value = serde_json::to_string_pretty(&tasks)?;
+        println!("{value}");
+        return Ok(());
+    }
+
+    if tasks.is_empty() {
+        println!("(no tasks match)");
+        return Ok(());
+    }
+
+    println!(
+        "{:<38} {:<12} {:<24} {:<20} {:<8}",
+        "ID", "PHASE", "CREATED_AT", "CREATED_BY", "PROMPT"
+    );
+    println!("{}", "-".repeat(110));
+    for t in tasks {
+        let phase = phase_str(&t.status);
+        let prompt = truncate(&t.prompt, 20);
+        println!(
+            "{:<38} {:<12} {:<24} {:<20} {:<8}",
+            t.id.to_string(),
+            phase,
+            t.created_at.to_rfc3339(),
+            truncate(&t.created_by, 20),
+            prompt,
+        );
+    }
+    Ok(())
+}
+
+/// `tasks show <id>` 명령.
+async fn run_tasks_show(id_str: &str) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+    let id: TaskId = id_str
+        .parse()
+        .with_context(|| format!("invalid task id '{id_str}' (expected UUID)"))?;
+    let t = store
+        .get_task(id)
+        .await
+        .with_context(|| format!("failed to look up task {id}"))?
+        .ok_or_else(|| anyhow!("no task with id {id}"))?;
+
+    let phase = phase_str(&t.status);
+    println!("{:<20} {}", "ID:", t.id);
+    println!("{:<20} {}", "PHASE:", phase);
+    println!("{:<20} {}", "PROMPT:", truncate(&t.prompt, 60));
+    println!("{:<20} {}", "CREATED_BY:", t.created_by);
+    println!("{:<20} {}", "CREATED_AT:", t.created_at.to_rfc3339());
+    if let Some(hint) = &t.server_hint {
+        println!("{:<20} {hint}", "SERVER_HINT:");
+    }
+    match &t.status {
+        TaskStatus::Dispatched { worker_id, started_at } => {
+            println!("{:<20} {worker_id}", "WORKER_ID:");
+            println!("{:<20} {}", "STARTED_AT:", started_at.to_rfc3339());
+        }
+        TaskStatus::Completed(r) => {
+            println!("{:<20} {}", "WORKER_ID:", r.worker_id);
+            println!("{:<20} {}", "EXIT_CODE:", r.exit_code);
+            println!("{:<20} {:.2}s", "DURATION:", r.duration_secs);
+        }
+        TaskStatus::Failed(f) => {
+            if let Some(w) = &f.worker_id {
+                println!("{:<20} {w}", "WORKER_ID:");
+            }
+            println!("{:<20} {}", "ERROR:", f.error);
+            println!("{:<20} {:?}", "KIND:", f.kind);
+        }
+        TaskStatus::Cancelled { reason, cancelled_at } => {
+            println!("{:<20} {reason}", "REASON:");
+            println!("{:<20} {}", "CANCELLED_AT:", cancelled_at.to_rfc3339());
+        }
+        TaskStatus::Pending => {}
+    }
+    Ok(())
+}
+
+/// `tasks cancel <id>` 명령.
+async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+    let id: TaskId = id_str
+        .parse()
+        .with_context(|| format!("invalid task id '{id_str}'"))?;
+    let reason = reason.unwrap_or_else(|| "manual cancel".into());
+    let cancelled_at = chrono::Utc::now();
+    let t = store.get_task(id).await?;
+    let task = t.ok_or_else(|| anyhow!("no task with id {id}"))?;
+    if task.is_terminal() {
+        return Err(anyhow!(
+            "task {id} is already in terminal state ({})",
+            phase_str(&task.status)
+        ));
+    }
+    let new_status = TaskStatus::Cancelled {
+        reason: reason.clone(),
+        cancelled_at,
+    };
+    store
+        .update_task_status(id, &new_status)
+        .await
+        .context("failed to update task status")?;
+    println!("task {id} cancelled (reason: {reason})");
+    Ok(())
+}
+
+fn parse_task_status_filter(s: &str) -> Result<TaskStatusFilter> {
+    match s.to_lowercase().as_str() {
+        "pending" => Ok(TaskStatusFilter::Pending),
+        "dispatched" => Ok(TaskStatusFilter::Dispatched),
+        "completed" => Ok(TaskStatusFilter::Completed),
+        "failed" => Ok(TaskStatusFilter::Failed),
+        "cancelled" => Ok(TaskStatusFilter::Cancelled),
+        "terminal" => Ok(TaskStatusFilter::Terminal),
+        "active" => Ok(TaskStatusFilter::Active),
+        other => Err(anyhow!(
+            "invalid status '{other}': expected pending, dispatched, completed, failed, cancelled, terminal, or active"
+        )),
+    }
+}
+
+fn phase_str(s: &TaskStatus) -> &'static str {
+    match s {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Dispatched { .. } => "dispatched",
+        TaskStatus::Completed(_) => "completed",
+        TaskStatus::Failed(_) => "failed",
+        TaskStatus::Cancelled { .. } => "cancelled",
+    }
 }
 
 fn parse_status(s: &str) -> Result<WorkerStatus> {

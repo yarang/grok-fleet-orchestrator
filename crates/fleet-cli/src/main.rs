@@ -4,9 +4,13 @@
 //!
 //! ## 명령
 //!
-//! - `fleet serve` — MCP stdio 서버 실행 (AI 코딩 클라이언트에 도구 노출)
+//! - `fleet serve` — MCP stdio + HTTP API + (옵션) 대시보드 실행
 //! - `fleet migrate` — 데이터베이스 마이그레이션만 실행
-//! - `fleet worker list` — 등록된 워커 조회 (사람용)
+//! - `fleet workers list` / `workers show <name>` — 워커 조회
+//! - `fleet tasks list` / `tasks show <id>` / `tasks cancel <id>` — 작업 관리
+//! - `fleet token new` — 부트스트랩 토큰 생성
+//! - `fleet doctor` — 인프라 진단 (DB 연결, 마이그레이션, 워커 상태)
+//! - `fleet provision` — SSH 자동 프로비저닝
 //!
 //! ## 환경변수
 //!
@@ -16,8 +20,10 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+mod doctor;
 mod logging;
 mod runtime;
+mod token;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -87,11 +93,45 @@ enum Command {
     /// 데이터베이스 마이그레이션만 실행하고 종료.
     Migrate,
 
-    /// 등록된 워커 목록을 사람이 읽기 쉬운 형태로 출력.
-    WorkerList {
-        /// 상태 필터 (`online`, `offline`, `degraded`, `circuit_open`).
-        #[arg(long)]
-        status: Option<String>,
+    /// 워커 관련 조회 명령 그룹.
+    Workers {
+        #[command(subcommand)]
+        action: WorkersAction,
+    },
+
+    /// 작업 관련 조회/제어 명령 그룹.
+    Tasks {
+        #[command(subcommand)]
+        action: TasksAction,
+    },
+
+    /// 부트스트랩 토큰 관리 (워커 등록용).
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+    },
+
+    /// 감사 로그 (이벤트 히스토리) 조회.
+    /// 모든 상태 변화는 `fleet_events` 테이블에 append-only로 기록됩니다.
+    Events {
+        #[command(subcommand)]
+        action: EventsAction,
+    },
+
+    /// 인프라 진단. DB 연결, 마이그레이션 상태, 워커 가용성을 점검하고
+    /// 보고서를 출력합니다.
+    Doctor {
+        /// HTTP API URL (선택). 지정된 경우 /v1/health 를 호출해 응답을 점검.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: Option<String>,
+
+        /// 대시보드 URL (선택). 지정된 경우 /health 호출.
+        #[arg(long, env = "FLEET_DASHBOARD_URL")]
+        dashboard_url: Option<String>,
+
+        /// Postgres 최대 연결 수 (진단용).
+        #[arg(long, default_value_t = 2)]
+        db_max_conn: u32,
     },
 
     /// 원격 서버에 SSH로 접속해 워커 스택을 자동 프로비저닝.
@@ -156,6 +196,95 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum WorkersAction {
+    /// 등록된 워커 목록을 테이블 형태로 출력.
+    List {
+        /// 상태 필터 (`online`, `offline`, `degraded`, `circuit_open`).
+        #[arg(long)]
+        status: Option<String>,
+
+        /// JSON 형식 출력 (스크립트용).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 이름으로 단일 워커 상세 조회.
+    Show {
+        /// 워커 이름.
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TasksAction {
+    /// 작업 목록을 최신순으로 출력.
+    List {
+        /// 위상 필터 (`pending`, `dispatched`, `completed`, `failed`, `cancelled`,
+        /// `terminal`, `active`).
+        #[arg(long)]
+        status: Option<String>,
+
+        /// 최대 출력 수.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        /// JSON 형식 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 작업 ID로 단일 작업 상세 조회.
+    Show {
+        /// 작업 ID (UUID).
+        id: String,
+    },
+
+    /// 실행 중인 작업을 취소 요청.
+    Cancel {
+        /// 작업 ID (UUID).
+        id: String,
+
+        /// 취소 사유 (기본값: "manual cancel").
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenAction {
+    /// 무작위 부트스트랩 토큰을 생성해 stdout에 출력.
+    /// 생성된 토큰은 `--api-tokens` (또는 `FLEET_API_TOKENS`)에 추가하여
+    /// 워커 등록 인증에 사용합니다.
+    New {
+        /// 토큰 접두어.
+        #[arg(long, default_value = "fleet")]
+        prefix: String,
+
+        /// 무작위 바이트 길이 (16~64 권장).
+        #[arg(long, default_value_t = 32)]
+        bytes: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EventsAction {
+    /// 최근 이벤트를 시간 역순으로 출력.
+    List {
+        /// 이 seq 이후의 이벤트만 조회 (기본값: 0 = 처음부터).
+        #[arg(long, default_value_t = 0)]
+        after_seq: u64,
+
+        /// 최대 출력 수.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+
+        /// JSON 형식 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -193,7 +322,15 @@ async fn main() -> Result<()> {
             .await
         }
         Command::Migrate => runtime::run_migrate().await,
-        Command::WorkerList { status } => runtime::run_worker_list(status).await,
+        Command::Workers { action } => runtime::run_workers(action).await,
+        Command::Tasks { action } => runtime::run_tasks(action).await,
+        Command::Token { action } => token::run_token(action).await,
+        Command::Events { action } => runtime::run_events(action).await,
+        Command::Doctor {
+            api_url,
+            dashboard_url,
+            db_max_conn,
+        } => doctor::run_doctor(api_url, dashboard_url, db_max_conn).await,
         Command::Provision {
             host,
             user,

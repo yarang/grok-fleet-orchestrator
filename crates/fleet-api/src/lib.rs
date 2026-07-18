@@ -27,7 +27,11 @@ mod app;
 mod cloudflare;
 mod error;
 mod handlers;
+pub mod metrics;
 mod schema;
+
+#[cfg(test)]
+mod test_support;
 
 pub use app::{build_app, run_http_server, AppState};
 pub use cloudflare::{cloudflare_access_middleware, VerifiedUser};

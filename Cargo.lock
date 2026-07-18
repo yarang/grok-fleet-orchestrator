@@ -845,6 +845,7 @@ name = "fleet-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "fleet-api",
  "fleet-core",
@@ -854,11 +855,13 @@ dependencies = [
  "fleet-scheduler",
  "fleet-store",
  "fleet-transport",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

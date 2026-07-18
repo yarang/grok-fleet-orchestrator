@@ -113,6 +113,18 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .nest("/v1", v1)
+        // /metrics는 인증 미들웨어 바깥에 위치 (Prometheus 스크랩 표준).
+        // 단, CF Access가 켜져 있다면 외부망에서는 여전히 CF 토큰 검증을 받음.
+        .route(
+            "/metrics",
+            get({
+                let state = state.clone();
+                move || {
+                    let state = state.clone();
+                    async move { crate::metrics::metrics_handler(state).await }
+                }
+            }),
+        )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -182,115 +194,13 @@ pub async fn run_http_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use fleet_core::{
-        CircuitState, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-        Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-    };
-    use fleet_store::{Store, StoreError};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    /// 테스트용 인메모리 Store.
-    struct MemStore {
-        workers: Mutex<HashMap<WorkerId, Worker>>,
-        events: Mutex<Vec<EventEntry>>,
-    }
-    impl MemStore {
-        fn new() -> Self {
-            Self {
-                workers: Mutex::new(HashMap::new()),
-                events: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Store for MemStore {
-        async fn insert_task(&self, _: &Task) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn get_task(&self, _: TaskId) -> Result<Option<Task>, StoreError> {
-            unimplemented!()
-        }
-        async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-            unimplemented!()
-        }
-        async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-            self.workers.lock().unwrap().insert(w.id, w.clone());
-            Ok(())
-        }
-        async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
-            Ok(self.workers.lock().unwrap().get(&id).cloned())
-        }
-        async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
-            Ok(self
-                .workers
-                .lock()
-                .unwrap()
-                .values()
-                .find(|w| w.name == name)
-                .cloned())
-        }
-        async fn list_workers(&self, f: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-            Ok(self
-                .workers
-                .lock()
-                .unwrap()
-                .values()
-                .filter(|w| f.status.map_or(true, |s| w.status == s))
-                .filter(|w| {
-                    f.labels
-                        .iter()
-                        .all(|(k, v)| w.labels.get(k) == Some(v))
-                })
-                .cloned()
-                .collect())
-        }
-        async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-            self.workers.lock().unwrap().remove(&id);
-            Ok(())
-        }
-        async fn update_worker_heartbeat(
-            &self,
-            id: WorkerId,
-            hb: &WorkerHeartbeat,
-        ) -> Result<(), StoreError> {
-            if let Some(w) = self.workers.lock().unwrap().get_mut(&id) {
-                w.active_tasks = hb.active_tasks;
-                w.last_seen = Some(chrono::Utc::now());
-            }
-            Ok(())
-        }
-        async fn append_event(&self, e: &FleetEvent) -> Result<u64, StoreError> {
-            let mut events = self.events.lock().unwrap();
-            let seq = (events.len() + 1) as u64;
-            events.push(EventEntry {
-                seq,
-                event: e.clone(),
-            });
-            Ok(seq)
-        }
-        async fn list_events(&self, _: u64, _: u32) -> Result<Vec<EventEntry>, StoreError> {
-            Ok(self.events.lock().unwrap().clone())
-        }
-        async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-            unimplemented!()
-        }
-        async fn get_output(&self, _: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-            unimplemented!()
-        }
-        async fn migrate(&self) -> Result<(), StoreError> {
-            Ok(())
-        }
-    }
+    use crate::test_support::MemStore;
+    use fleet_core::CircuitState;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn app_state_defaults_to_no_auth() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let store = MemStore::new_arc();
         let state = AppState::new(store);
         assert!(state.allow_no_auth);
         assert!(state.valid_tokens.is_none());
@@ -299,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn app_state_with_tokens_disables_no_auth() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let store = MemStore::new_arc();
         let state = AppState::new(store).with_tokens(vec!["secret".into()]);
         assert!(!state.allow_no_auth);
         assert_eq!(state.valid_tokens.as_ref().unwrap().len(), 1);
@@ -307,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_app_smoke() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let store = MemStore::new_arc();
         let state = Arc::new(AppState::new(store));
         let _router = build_app(state);
         // 빌드가 성공하면 OK — 라우터 구성 검증.
