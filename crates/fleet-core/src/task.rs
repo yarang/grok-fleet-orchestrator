@@ -26,8 +26,9 @@ pub enum TaskPriority {
 /// 작업 생성 요청 (클라이언트 → 오케스트레이터).
 ///
 /// `id`, `created_at`은 오케스트레이터가 채웁니다. `Task::from_request` 사용.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskRequest {
+    #[serde(default)]
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -43,6 +44,7 @@ pub struct TaskRequest {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub priority: TaskPriority,
+    #[serde(default)]
     pub created_by: String,
 }
 

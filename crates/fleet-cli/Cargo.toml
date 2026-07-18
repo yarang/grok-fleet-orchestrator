@@ -1,0 +1,26 @@
+[package]
+name = "fleet-cli"
+description = "Command-line interface for Grok Fleet Orchestrator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fleet"
+path = "src/main.rs"
+
+[dependencies]
+fleet-core = { workspace = true }
+fleet-store = { workspace = true }
+fleet-transport = { workspace = true }
+fleet-scheduler = { workspace = true }
+fleet-mcp = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

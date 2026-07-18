@@ -3,6 +3,10 @@ resolver = "2"
 members = [
     "crates/fleet-core",
     "crates/fleet-store",
+    "crates/fleet-transport",
+    "crates/fleet-scheduler",
+    "crates/fleet-mcp",
+    "crates/fleet-cli",
 ]
 
 [workspace.package]
@@ -47,8 +51,18 @@ sqlx = { version = "0.8", default-features = false, features = [
 futures = "0.3"
 async-stream = "0.3"
 
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# MCP / JSON-RPC
+tokio-util = "0.7"
+
 # 내부 크레이트
 fleet-core = { path = "crates/fleet-core", version = "0.1.0" }
+fleet-store = { path = "crates/fleet-store", version = "0.1.0" }
+fleet-transport = { path = "crates/fleet-transport", version = "0.1.0" }
+fleet-scheduler = { path = "crates/fleet-scheduler", version = "0.1.0" }
+fleet-mcp = { path = "crates/fleet-mcp", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3

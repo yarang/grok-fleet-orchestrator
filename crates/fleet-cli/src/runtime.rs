@@ -1,0 +1,182 @@
+//! 명령어 실행 로직. Store + Transport + Dispatcher + MCP 서버를 조립.
+//!
+//! ## Phase 1 wiring
+//!
+//! ```text
+//! DATABASE_URL ── PgStore::connect ── migrate
+//!                       │
+//!                       ▼
+//!              MockTransport (event_rx)
+//!                       │
+//!                       ▼
+//!              FleetState { store, transport, breakers, selector }
+//!                       │
+//!                       ▼
+//!              Dispatcher { state, event_rx }
+//!                       │
+//!                       ▼
+//!              tokio::spawn(dispatcher.run_event_loop())
+//!                       │
+//!                       ▼
+//!              run_mcp_server(state, dispatcher)  ← stdio
+//! ```
+
+use std::sync::Arc;
+
+use anyhow::{anyhow, Context, Result};
+
+use fleet_core::{CircuitBreakerConfig, WorkerFilter, WorkerStatus};
+use fleet_mcp::run_mcp_server;
+use fleet_scheduler::{Dispatcher, FleetState};
+use fleet_store::{PgStore, Store};
+use fleet_transport::MockTransport;
+
+/// Postgres 연결 URL 조회 (`DATABASE_URL` 필수).
+fn database_url() -> Result<String> {
+    std::env::var("DATABASE_URL").context(
+        "DATABASE_URL is not set. Export DATABASE_URL=postgres://user@host/dbname",
+    )
+}
+
+/// PgStore 생성 + 마이그레이션 실행.
+async fn connect_and_migrate(max_conn: u32) -> Result<Arc<PgStore>> {
+    let url = database_url()?;
+    tracing::info!(url = %sanitize_url(&url), max_conn, "connecting to Postgres");
+    let store = PgStore::connect(&url, max_conn)
+        .await
+        .context("failed to connect to Postgres")?;
+    store.migrate().await.context("migration failed")?;
+    tracing::info!("database migrations applied");
+    Ok(Arc::new(store))
+}
+
+/// `postgres://user:PASSWORD@host/db`에서 비밀번호 부분 마스킹.
+fn sanitize_url(url: &str) -> String {
+    // 단순한 마스킹 — `://user:secret@` 형태 감지
+    if let Some(idx) = url.find("://") {
+        let scheme_end = idx + 3;
+        if let Some(at) = url[scheme_end..].find('@') {
+            let creds_end = scheme_end + at;
+            let creds = &url[scheme_end..creds_end];
+            if let Some(colon) = creds.find(':') {
+                let user = &creds[..colon];
+                return format!(
+                    "{}{}:****{}",
+                    &url[..scheme_end],
+                    user,
+                    &url[creds_end..]
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// `serve` 명령 실행.
+pub async fn run_serve(transport_kind: &str, db_max_conn: u32) -> Result<()> {
+    let store = connect_and_migrate(db_max_conn).await?;
+
+    // Phase 1: MockTransport만 지원. Phase 3에서 HubTransport feature 추가.
+    if transport_kind != "mock" {
+        return Err(anyhow!(
+            "transport '{transport_kind}' is not supported in Phase 1. \
+             Use `--transport mock` (Phase 3 will add `hub`)."
+        ));
+    }
+
+    let (transport, event_rx) = MockTransport::new();
+    let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+
+    // TODO(Phase 3): config 파일에서 workers 로드 → transport.register + store.upsert_worker
+    // Phase 1 테스트에서는 외부 스크립트 또는 MCP 없이 workers를 미리 등록해야 함.
+    // 여기서는 사용자가 seed 쿼리를 직접 실행하거나 /workers HTTP API(Phase 3)를
+    // 사용한다고 가정. CLI에서 --register-worker 옵션은 Phase 2에 추가 예정.
+
+    let state = Arc::new(FleetState::new(
+        store,
+        transport,
+        CircuitBreakerConfig::default(),
+    ));
+
+    let dispatcher = Arc::new(Dispatcher::new(state.clone()));
+    dispatcher.attach_event_receiver(event_rx).await;
+
+    // 백그라운드에서 워커 이벤트 소비 루프 시작.
+    let dispatcher_loop = dispatcher.clone();
+    tokio::spawn(async move {
+        dispatcher_loop.run_event_loop().await;
+    });
+
+    tracing::info!("starting MCP stdio server");
+    run_mcp_server(state, dispatcher)
+        .await
+        .context("MCP server error")?;
+    Ok(())
+}
+
+/// `migrate` 명령.
+pub async fn run_migrate() -> Result<()> {
+    let _ = connect_and_migrate(1).await?;
+    println!("migrations applied successfully");
+    Ok(())
+}
+
+/// `worker list` 명령.
+pub async fn run_worker_list(status_filter: Option<String>) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+
+    let mut filter = WorkerFilter::default();
+    if let Some(s) = status_filter {
+        filter.status = Some(parse_status(&s)?);
+    }
+
+    let workers = store
+        .list_workers(&filter)
+        .await
+        .context("failed to list workers")?;
+
+    if workers.is_empty() {
+        println!("(no workers registered)");
+        return Ok(());
+    }
+
+    // 사람용 텍스트 포맷
+    println!(
+        "{:<36} {:<20} {:<14} {:<10} {:<10}",
+        "ID", "NAME", "STATUS", "ACTIVE", "CIRCUIT"
+    );
+    println!("{}", "-".repeat(96));
+    for w in workers {
+        println!(
+            "{:<36} {:<20} {:<14} {:<10} {:<10}",
+            w.id.to_string(),
+            truncate(&w.name, 20),
+            format!("{:?}", w.status).to_lowercase(),
+            format!("{}/{}", w.active_tasks, w.max_concurrent),
+            format!("{:?}", w.circuit_state).to_lowercase(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_status(s: &str) -> Result<WorkerStatus> {
+    match s.to_lowercase().as_str() {
+        "online" => Ok(WorkerStatus::Online),
+        "degraded" => Ok(WorkerStatus::Degraded),
+        "offline" => Ok(WorkerStatus::Offline),
+        "circuit_open" => Ok(WorkerStatus::CircuitOpen),
+        other => Err(anyhow!(
+            "invalid status '{other}': expected online, degraded, offline, or circuit_open"
+        )),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n.saturating_sub(1)])
+    }
+}
+
+// (Worker type reserved for future --register-worker flag in Phase 2.)
