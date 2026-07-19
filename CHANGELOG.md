@@ -6,6 +6,55 @@
 
 ## [Unreleased]
 
+### Added — Phase 8.5.2: MtlsProxy + fleet-worker [mtls] 섹션
+
+- **`ServerTlsConfig`** (`fleet-transport/src/tls.rs`): 사설 CA PEM + 서버 인증서/키
+  경로로 rustls `ServerConfig` 빌드. `WebPkiClientVerifier` 로 클라이언트 인증서
+  강제 (사설 CA로 서명된 인증서만 통과).
+- **`MtlsProxy`** (`fleet-transport/src/mtls_proxy.rs`): 외부 wss:// 연결을 mTLS로
+  종단하고 grok agent serve의 평문 TCP 엔드포인트로 양방향 복사하는 proxy.
+  - `MtlsProxy::bind(addr, upstream, server_config)` — `run` 전에 미리 bind.
+  - `MtlsProxy::run(self, shutdown)` — `watch::Receiver<bool>` 로 graceful shutdown.
+  - 단일 연결 실패는 다른 연결에 영향 없음. 영구 accept 에러만 종료.
+- **`fleet-worker` `[mtls]` 섹션** (`config.rs::MtlsSection`):
+  ```toml
+  [mtls]
+  enabled = true
+  listen_addr = "0.0.0.0:2420"
+  server_cert_path = "/etc/fleet/worker/server.pem"
+  server_key_path = "/etc/fleet/worker/server.key"
+  client_ca_path = "/etc/fleet/ca.pem"
+  advertised_host = "worker-1.fleet"   # 옵션
+  advertised_port = 2420               # 옵션
+  ```
+- **`WorkerConfig::agent_endpoint()`** 확장: mTLS 활성 시 `wss://<advertised_host>:<port>/ws?...`,
+  비활성 시 기존 `ws://<orchestrator-host>/ws?...`.
+- **`WorkerRunner::run`**: grok 서브프로세스가 bind_addr 에 바인딩될 때까지 폴링한 뒤
+  mTLS proxy 백그라운드 spawn. shutdown 시 heartbeat/grok 과 함께 cleanup.
+- **`fleet-worker` Cargo.toml**: `fleet-transport = { features = ["mtls"] }` 활성화.
+
+### Tests — Phase 8.5.2
+
+- **`crates/fleet-transport/tests/mtls_proxy.rs`** 신규 3개 통합 테스트:
+  - `mtls_proxy_forwards_plain_tcp_roundtrip` — 평문 TCP echo upstream + proxy +
+    raw TLS 클라이언트. non-WebSocket 트래픽도 단순 forward 됨을 검증.
+  - `mtls_proxy_forwards_websocket_handshake` — WebSocket echo upstream + proxy +
+    `WsConn::connect_mtls`. WebSocket 업그레이드가 proxy를 투명하게 통과함을 검증.
+  - `mtls_proxy_rejects_client_with_untrusted_cert` — 신뢰하지 않는 CA로 서명한
+    클라이언트 인증서는 핸드셰이크 단계에서 거부됨을 검증.
+- **`fleet-worker/src/config.rs`** 단위 테스트 5개 추가:
+  - `mtls_disabled_by_default`, `mtls_endpoint_uses_wss_scheme`,
+    `mtls_disabled_does_not_affect_endpoint`, `mtls_enabled_rejects_invalid_listen_addr`,
+    `mtls_enabled_rejects_empty_paths`, `mtls_section_parses_from_toml`.
+- 총 **342개 통과** (Phase 8.5.1의 334 대비 +8), 3개 `#[ignore]`.
+  clippy `-D warnings` 통과.
+
+### Changed — Phase 8.5.2
+
+- **`MtlsProxy` API**: `new` → `bind` (async, eager bind). `run` 은 이미 바인딩된
+  리스너를 사용. 이 변경으로 테스트/러너에서 `local_addr()` 로 바인딩된 주소를
+  받아올 수 있어 race condition 회피.
+
 ### Added — Phase 8.5.1: mTLS 클라이언트 구성 (orchestrator→worker wss://)
 
 - **`fleet-transport` `mtls` feature**: rustls 0.23 + rustls-pemfile 2 + tokio-rustls 0.26

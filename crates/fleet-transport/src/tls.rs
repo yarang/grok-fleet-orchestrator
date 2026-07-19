@@ -120,6 +120,76 @@ impl ClientTlsConfig {
     }
 }
 
+/// 서버 측 mTLS 구성 (worker 의 종단 proxy용).
+///
+/// `ca_path` 에 지정된 PEM 으로 서명된 클라이언트 인증서만 핸드셰이크를 통과.
+/// 자신의 서버 인증서는 `server_cert_path` + `server_key_path` 로 제출.
+#[derive(Debug, Clone)]
+pub struct ServerTlsConfig {
+    /// 클라이언트 인증서 검증용 CA (PEM).
+    pub ca_path: PathBuf,
+    /// 서버 인증서 체인 (PEM).
+    pub server_cert_path: PathBuf,
+    /// 서버 비밀키 (PEM).
+    pub server_key_path: PathBuf,
+}
+
+impl ServerTlsConfig {
+    pub fn from_paths(
+        ca: impl Into<PathBuf>,
+        server_cert: impl Into<PathBuf>,
+        server_key: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            ca_path: ca.into(),
+            server_cert_path: server_cert.into(),
+            server_key_path: server_key.into(),
+        }
+    }
+
+    /// rustls `ServerConfig` 빌드. 클라이언트 인증서 강제 (mTLS).
+    pub fn build_server_config(&self) -> Result<rustls::ServerConfig, TlsError> {
+        let ca_certs = load_certs(&self.ca_path, "CA")?;
+        let server_chain = load_certs(&self.server_cert_path, "server cert")?;
+        let server_key = load_private_key(&self.server_key_path)?;
+
+        if ca_certs.is_empty() {
+            return Err(TlsError::Build(format!(
+                "no CA certificates in {}",
+                self.ca_path.display()
+            )));
+        }
+        if server_chain.is_empty() {
+            return Err(TlsError::Build(format!(
+                "no server certificate in {}",
+                self.server_cert_path.display()
+            )));
+        }
+
+        let mut client_roots = RootCertStore::empty();
+        for cert in &ca_certs {
+            client_roots
+                .add(cert.clone())
+                .map_err(|e| TlsError::Build(format!("add client CA root: {e}")))?;
+        }
+
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(client_roots),
+            provider.clone(),
+        )
+        .build()
+        .map_err(|e| TlsError::Build(format!("client verifier: {e}")))?;
+
+        rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TlsError::Build(format!("protocol versions: {e}")))?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(server_chain, server_key)
+            .map_err(|e| TlsError::Build(format!("with_single_cert: {e}")))
+    }
+}
+
 /// PEM 파일에서 인증서 체인 로드.
 pub(crate) fn load_certs(
     path: &Path,

@@ -18,6 +18,17 @@
 //! max_concurrent_tasks = 4
 //! restart_delay_secs = 5
 //! cwd = "/var/lib/fleet-worker"       # 옵션
+//!
+//! # Phase 8.5: mTLS proxy (worker 앞단). 활성화 시 grok agent serve는
+//! # loopback에서만 듣고, 외부 연결은 wss:// 로 mTLS 프록시가 종단한다.
+//! [mtls]
+//! enabled = true
+//! listen_addr = "0.0.0.0:2420"
+//! server_cert_path = "/etc/fleet/worker/server.pem"
+//! server_key_path = "/etc/fleet/worker/server.key"
+//! client_ca_path = "/etc/fleet/ca.pem"
+//! advertised_scheme = "wss"            # 기본값 wss
+//! advertised_host = "worker-1.fleet"   # orchestrator에게 노출할 호스트명
 //! ```
 
 use std::collections::HashMap;
@@ -32,6 +43,9 @@ use crate::error::WorkerError;
 pub struct WorkerConfig {
     pub worker: WorkerSection,
     pub grok: GrokSection,
+    /// mTLS proxy 설정 (옵션). 누락 시 mTLS 비활성.
+    #[serde(default)]
+    pub mtls: Option<MtlsSection>,
 }
 
 /// `[worker]` 섹션.
@@ -90,6 +104,36 @@ fn default_restart_delay() -> u32 {
     5
 }
 
+/// `[mtls]` 섹션 (Phase 8.5).
+///
+/// 활성화 시 `grok agent serve` 앞에 mTLS 종단 TCP proxy가 배치된다.
+/// orchestrator는 사설 CA로 서명된 클라이언트 인증서로 자신을 증명해야 한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MtlsSection {
+    /// mTLS proxy 활성화 여부. false인 경우 다른 필드는 무시.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// proxy가 청취할 주소. 일반적으로 `0.0.0.0:2420`.
+    pub listen_addr: String,
+    /// 서버 인증서 PEM 경로 (사설 CA로 서명됨).
+    pub server_cert_path: PathBuf,
+    /// 서버 비밀키 PEM 경로.
+    pub server_key_path: PathBuf,
+    /// 클라이언트 인증서 검증용 CA PEM 경로 (orchestrator의 클라이언트 인증서 검증).
+    pub client_ca_path: PathBuf,
+    /// orchestrator에게 노출할 host (엔드포인트 URL의 호스트 부분).
+    /// 미지정 시 worker.orchestrator_url의 호스트 사용.
+    #[serde(default)]
+    pub advertised_host: Option<String>,
+    /// orchestrator에게 노출할 포트. 미지정 시 listen_addr의 포트 사용.
+    #[serde(default)]
+    pub advertised_port: Option<u16>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 impl WorkerConfig {
     /// 파일에서 설정 로드.
     pub fn from_file(path: &Path) -> Result<Self, WorkerError> {
@@ -144,19 +188,68 @@ impl WorkerConfig {
                 "grok.restart_delay_secs must be <= 300".into(),
             ));
         }
+        if let Some(mtls) = &self.mtls {
+            if mtls.enabled {
+                if mtls.listen_addr.trim().is_empty() {
+                    return Err(WorkerError::Config(
+                        "mtls.listen_addr must not be empty when mtls.enabled".into(),
+                    ));
+                }
+                if mtls.server_cert_path.as_os_str().is_empty() {
+                    return Err(WorkerError::Config(
+                        "mtls.server_cert_path must not be empty when mtls.enabled".into(),
+                    ));
+                }
+                if mtls.server_key_path.as_os_str().is_empty() {
+                    return Err(WorkerError::Config(
+                        "mtls.server_key_path must not be empty when mtls.enabled".into(),
+                    ));
+                }
+                if mtls.client_ca_path.as_os_str().is_empty() {
+                    return Err(WorkerError::Config(
+                        "mtls.client_ca_path must not be empty when mtls.enabled".into(),
+                    ));
+                }
+                // listen_addr 이 "host:port" 형태인지 확인.
+                if mtls.listen_addr.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(WorkerError::Config(format!(
+                        "mtls.listen_addr must be host:port — got: {}",
+                        mtls.listen_addr
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
     /// 등록 시 grok agent의 WebSocket endpoint로 노출될 URL.
     /// orchestrator는 이 값을 transport.register()에 전달.
+    ///
+    /// - mTLS 비활성: `ws://<orchestrator-host>/ws?server-key=...`
+    ///   (Phase 7 모델 — cloudflared가 localhost:2419를 터널링한다고 가정)
+    /// - mTLS 활성 (Phase 8.5): `wss://<advertised_host>:<advertised_port>/ws?server-key=...`
     pub fn agent_endpoint(&self) -> String {
-        // bind_addr이 127.0.0.1인 경우 orchestrator와 같은 호스트로 간주.
-        // 그러나 일반적으로 cloudflared 터널이 bind_addr을 외부 호스트명으로 노출.
-        // → worker.toml의 orchestrator_url과 같은 호스트를 사용하되,
-        //   cloudflared가 localhost:2419를 터널링한다고 가정.
-        // MVP: orchestrator의 host + /ws 경로 사용.
-        let host = self.orchestrator_url_host();
-        format!("ws://{host}/ws?server-key={}", self.grok.secret)
+        let secret = &self.grok.secret;
+        match &self.mtls {
+            Some(mtls) if mtls.enabled => {
+                let host = mtls
+                    .advertised_host
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| self.orchestrator_url_host().to_string());
+                let port = mtls.advertised_port.unwrap_or_else(|| {
+                    mtls.listen_addr
+                        .parse::<std::net::SocketAddr>()
+                        .map(|a| a.port())
+                        .unwrap_or(2420)
+                });
+                format!("wss://{host}:{port}/ws?server-key={secret}")
+            }
+            _ => {
+                let host = self.orchestrator_url_host();
+                format!("ws://{host}/ws?server-key={secret}")
+            }
+        }
     }
 
     /// orchestrator_url에서 host:port 추출.
@@ -199,6 +292,7 @@ pub struct WorkerConfigBuilder {
     bind_addr: Option<String>,
     max_concurrent: Option<u32>,
     labels: HashMap<String, String>,
+    mtls: Option<MtlsSection>,
 }
 
 impl WorkerConfigBuilder {
@@ -231,6 +325,11 @@ impl WorkerConfigBuilder {
         self.labels.insert(k.into(), v.into());
         self
     }
+    /// mTLS 섹션 오버라이드 (테스트용).
+    pub fn mtls(mut self, mtls: MtlsSection) -> Self {
+        self.mtls = Some(mtls);
+        self
+    }
     pub fn build(self) -> WorkerConfig {
         WorkerConfig {
             worker: WorkerSection {
@@ -253,6 +352,7 @@ impl WorkerConfigBuilder {
                 restart_delay_secs: 1,
                 cwd: None,
             },
+            mtls: self.mtls,
         }
     }
 }
@@ -364,6 +464,115 @@ secret = "x"
         let endpoint = config.agent_endpoint();
         assert!(endpoint.starts_with("ws://"));
         assert!(endpoint.contains("server-key=topsecret"));
+    }
+
+    #[test]
+    fn mtls_disabled_by_default() {
+        let config = WorkerConfig::for_test().build();
+        assert!(config.mtls.is_none(), "mtls must default to None");
+    }
+
+    #[test]
+    fn mtls_endpoint_uses_wss_scheme() {
+        let mtls = MtlsSection {
+            enabled: true,
+            listen_addr: "0.0.0.0:2420".into(),
+            server_cert_path: "/etc/server.pem".into(),
+            server_key_path: "/etc/server.key".into(),
+            client_ca_path: "/etc/ca.pem".into(),
+            advertised_host: Some("worker-1.fleet".into()),
+            advertised_port: Some(2420),
+        };
+        let config = WorkerConfig::for_test()
+            .orchestrator_url("https://fleet.example.com")
+            .grok_secret("topsecret")
+            .mtls(mtls)
+            .build();
+        let endpoint = config.agent_endpoint();
+        assert!(endpoint.starts_with("wss://"), "got: {endpoint}");
+        assert!(endpoint.contains("worker-1.fleet:2420"));
+        assert!(endpoint.contains("server-key=topsecret"));
+    }
+
+    #[test]
+    fn mtls_disabled_does_not_affect_endpoint() {
+        let mtls = MtlsSection {
+            enabled: false,
+            listen_addr: "0.0.0.0:2420".into(),
+            server_cert_path: "/etc/server.pem".into(),
+            server_key_path: "/etc/server.key".into(),
+            client_ca_path: "/etc/ca.pem".into(),
+            advertised_host: Some("ignored".into()),
+            advertised_port: Some(9999),
+        };
+        let config = WorkerConfig::for_test()
+            .orchestrator_url("https://fleet.example.com")
+            .grok_secret("topsecret")
+            .mtls(mtls)
+            .build();
+        let endpoint = config.agent_endpoint();
+        assert!(endpoint.starts_with("ws://"), "disabled mtls must keep ws://");
+        assert!(!endpoint.contains("ignored"));
+    }
+
+    #[test]
+    fn mtls_enabled_rejects_invalid_listen_addr() {
+        let mtls = MtlsSection {
+            enabled: true,
+            listen_addr: "not-an-addr".into(),
+            server_cert_path: "/x".into(),
+            server_key_path: "/x".into(),
+            client_ca_path: "/x".into(),
+            advertised_host: None,
+            advertised_port: None,
+        };
+        let config = WorkerConfig::for_test().mtls(mtls).build();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    #[test]
+    fn mtls_enabled_rejects_empty_paths() {
+        let mtls = MtlsSection {
+            enabled: true,
+            listen_addr: "0.0.0.0:2420".into(),
+            server_cert_path: "".into(),
+            server_key_path: "".into(),
+            client_ca_path: "".into(),
+            advertised_host: None,
+            advertised_port: None,
+        };
+        let config = WorkerConfig::for_test().mtls(mtls).build();
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    #[test]
+    fn mtls_section_parses_from_toml() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "http://localhost:8080"
+
+[grok]
+bin = "/x"
+secret = "x"
+
+[mtls]
+enabled = true
+listen_addr = "0.0.0.0:2420"
+server_cert_path = "/etc/server.pem"
+server_key_path = "/etc/server.key"
+client_ca_path = "/etc/ca.pem"
+advertised_host = "worker-1.fleet"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        let mtls = config.mtls.as_ref().expect("mtls section");
+        assert!(mtls.enabled);
+        assert_eq!(mtls.listen_addr, "0.0.0.0:2420");
+        assert_eq!(mtls.server_cert_path, std::path::Path::new("/etc/server.pem"));
+        assert_eq!(mtls.advertised_host.as_deref(), Some("worker-1.fleet"));
+        assert!(config.agent_endpoint().starts_with("wss://"));
     }
 
     #[test]

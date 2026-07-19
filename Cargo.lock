@@ -1098,6 +1098,7 @@ dependencies = [
  "chrono",
  "clap",
  "fleet-core",
+ "fleet-transport",
  "reqwest",
  "serde",
  "serde_json",

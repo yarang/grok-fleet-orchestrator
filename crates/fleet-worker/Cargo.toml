@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 fleet-core = { workspace = true }
+fleet-transport = { workspace = true, features = ["mtls"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
