@@ -133,8 +133,11 @@ info "detected target: ${TARGET}"
 resolve_version() {
     # --version 이 명시된 경우 그대로 사용. v 접두사 보정.
     if [[ -n "${VERSION}" ]]; then
-        [[ "${VERSION}" != v* ]] && VERSION="v${VERSION}"
-        return
+        # set -e + `[[ ]] && cmd` 패턴 회피: if 블록 사용.
+        if [[ "${VERSION}" != v* ]]; then
+            VERSION="v${VERSION}"
+        fi
+        return 0
     fi
     # GitHub API 로 latest tag 조회. (rate limit 고려: 인증 없으면 60/h 충분.)
     local api_response
@@ -202,7 +205,8 @@ install_from_release() {
     local base_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}"
     local download_dir
     download_dir="$(mktemp -d)"
-    trap 'rm -rf "${download_dir}"' EXIT
+    # trap 발생 시점에 set -u 가 빈 변수를 잡지 않도록 기본값 사용.
+    trap 'rm -rf "${download_dir:-}"' EXIT
 
     local tarball_path="${download_dir}/${tarball_name}"
     info "downloading ${tarball_name}"
@@ -283,7 +287,10 @@ install_binaries_from() {
 # ─── PATH 자동 추가 ───────────────────────────────────────────────────
 modify_path() {
     $MODIFY_PATH || return 0
-    [[ "${BIN_DIR}" == "/usr/local/bin" ]] && return 0  # 이미 표준 PATH.
+    # set -e + `[[ ]] && cmd` 회피: if 블록 사용.
+    if [[ "${BIN_DIR}" == "/usr/local/bin" ]]; then
+        return 0  # 이미 표준 PATH.
+    fi
 
     case "$(basename "${SHELL:-bash}")" in
         zsh)  rc_file="${HOME}/.zshrc" ;;
