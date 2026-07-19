@@ -174,6 +174,15 @@ enum Command {
         #[arg(long)]
         fleet_worker_bin: Option<String>,
 
+        /// grok 서브프로세스 시크릿 (worker.toml `[grok] secret`).
+        /// 인벤토리 모드에서는 per-worker로 YAML에 지정 가능.
+        #[arg(long, env = "FLEET_GROK_SECRET")]
+        grok_secret: Option<String>,
+
+        /// 오케스트레이터 등록용 bootstrap bearer 토큰.
+        #[arg(long, env = "FLEET_BOOTSTRAP_TOKEN")]
+        bootstrap_token: Option<String>,
+
         /// 인벤토리 YAML 파일 경로. --host 대신 사용.
         #[arg(long, conflicts_with = "host")]
         inventory: Option<String>,
@@ -341,6 +350,8 @@ async fn main() -> Result<()> {
             cf_token,
             orchestrator_url,
             fleet_worker_bin,
+            grok_secret,
+            bootstrap_token,
             inventory,
             parallel,
             tags,
@@ -357,6 +368,8 @@ async fn main() -> Result<()> {
                 cf_token,
                 orchestrator_url,
                 fleet_worker_bin,
+                grok_secret,
+                bootstrap_token,
                 inventory,
                 parallel,
                 tags,

@@ -6,7 +6,57 @@
 
 ## [Unreleased]
 
-### Added — Phase 7: ACP Transport
+### Added — Phase 8.1: fleet-worker 바이너리
+
+- **`fleet-worker` 크레이트** (`crates/fleet-worker/`): 워커 머신에서 실행되는
+  standalone 데몬. CLI 진입 (`--config /etc/fleet/worker.toml`, `--check`).
+  - `WorkerConfig`: 확장된 worker.toml 파서 (`[worker]` + `[grok]` 섹션).
+    DNS-safe 워커 이름 검증, http(s) URL 검증, 범위 기반 필드 검증.
+    `std::str::FromStr` trait 구현으로 `toml.parse::<WorkerConfig>()` 지원.
+  - `GrokRunner`: `grok agent serve --bind <addr> --secret <s>` 서브프로세스를
+    `tokio::process::Command`로 관리. exit 시 `restart_delay_secs` 후 재시작
+    (최대 10회). `watch::Sender<bool>`로 외부 shutdown 제어.
+    `kill_on_drop(true)` + SIGTERM(5s timeout) → SIGKILL 안전 종료.
+  - `RegistrationClient`: orchestrator HTTP API 클라이언트.
+    `register_with_retry()` (5초 간격 무한 재시도), `run_heartbeat_loop()`
+    (TCP health_check + sysinfo 메트릭 수집), `deregister()`.
+  - `WorkerRunner`: 위 두 모듈 조립. SIGINT/SIGTERM 수신 시 graceful shutdown
+    (grok 10s timeout, heartbeat 5s timeout, deregister best-effort).
+
+- **`worker.toml` 템플릿 확장** (`fleet-provisioner::templates`):
+  - `TemplateContext`에 `grok_secret` (필수), `grok_bin`, `grok_bind_addr`,
+    `max_concurrent_tasks`, `restart_delay_secs`, `grok_cwd`, `bootstrap_token`,
+    `labels` 필드 추가.
+  - `render_worker_config()`가 `[worker]` + `[grok]` 섹션 생성.
+    라벨은 key 기준 정렬하여 결정론적 직렬화.
+  - 기존 `[cloudflared]` 섹션은 worker.toml에서 제거 (별도 config.yml로 분리).
+
+- **`StepContext` 확장** (`fleet-provisioner`): `grok_secret`, `grok_bind_addr`,
+  `max_concurrent_tasks`, `bootstrap_token` 필드 추가.
+
+- **CLI 플래그**: `fleet provision`에 `--grok-secret` / `FLEET_GROK_SECRET` 및
+  `--bootstrap-token` / `FLEET_BOOTSTRAP_TOKEN` 추가.
+
+- **인벤토리 YAML**: 각 워커 항목에 `grok_secret:` (per-worker) 및
+  `options.bootstrap_token:` (전역) 필드 추가.
+
+### Tests
+
+- fleet-worker 단위 테스트 19개 (config 9 + grok_process 5 + registration 6 + runner).
+- fleet-worker 통합 테스트 3개 (`worker_lifecycle.rs`): 가짜 grok TCP 리스너 +
+  mock orchestrator로 register → heartbeat ≥ 2회 (agent_healthy=true) → deregister
+  전체 라이프사이클 검증. grok 다운 시 agent_healthy=false 전파 확인.
+- fleet-provisioner 템플릿 테스트 5개 추가/수정.
+- 총 282개 테스트 통과, 3개 `#[ignore]` (Phase 7 E2E 2 + doctest 1).
+
+### Documentation
+
+- `docs/architecture.md`: "Worker Daemon (Phase 8.1)" 섹션 추가, 로드맵 업데이트
+- `docs/deployment.md`: 3.3절 worker.toml 형식 + `--check` 검증 모드 문서화
+
+## Phase 7: ACP Transport
+
+### Added
 
 - **`AcpTransport`** (`fleet-transport::AcpTransport`): `WorkerTransport` trait의
   실제 구현체. 각 워커의 `grok agent serve` (기본 포트 2419)와 WebSocket으로 통신.

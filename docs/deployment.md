@@ -290,6 +290,53 @@ workers:
 자세한 프로비저닝 스텝은 소스 코드의
 `crates/fleet-provisioner/src/steps/` 디렉토리를 참조하세요.
 
+### 3.3 worker.toml 형식 (자동 생성)
+
+`InstallFleetWorker` 스텝이 `/etc/fleet/worker.toml`을 자동 생성합니다.
+수동으로 작성하는 경우 다음 형식을 따르세요:
+
+```toml
+[worker]
+name = "build-farm-1"
+orchestrator_url = "https://fleet.example.com"
+heartbeat_interval_secs = 15
+bootstrap_token = "fleet-xxx"        # 선택 — orchestrator가 bearer auth 요구 시
+labels = { arch = "arm64" }
+
+[grok]
+bin = "/usr/local/bin/grok"
+bind_addr = "127.0.0.1:2419"
+secret = "<random-server-key>"       # 필수 — grok agent serve가 검증
+max_concurrent_tasks = 4
+restart_delay_secs = 5
+# cwd = "/var/lib/fleet-worker"      # 선택
+```
+
+검증 모드 (`--check`)로 설정 파일 문법을 확인:
+
+```bash
+fleet-worker --config /etc/fleet/worker.toml --check
+# → "config OK: name=build-farm-1 orchestrator=https://..."
+```
+
+`grok_secret`은 프로비저닝 시 caller가 생성해 전달해야 합니다. 인벤토리 모드에서는
+각 워커 항목에 `grok_secret:` 필드로 지정:
+
+```yaml
+workers:
+  - name: build-1
+    host: 10.0.1.10
+    grok_secret: "random-32-byte-hex-string"
+```
+
+또는 CLI 플래그 / 환경변수:
+
+```bash
+fleet provision --host 10.0.1.10 \
+  --grok-secret "$(openssl rand -hex 32)" \
+  --bootstrap-token "$FLEET_BOOTSTRAP_TOKEN" ...
+```
+
 ## 4. 모니터링
 
 ### 4.1 Prometheus 스크랩

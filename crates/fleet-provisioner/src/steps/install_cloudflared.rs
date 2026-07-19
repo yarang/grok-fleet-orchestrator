@@ -97,6 +97,7 @@ impl Step for InstallCloudflared {
             tunnel_name: tunnel_name.clone(),
             hostname: hostname.clone(),
             credentials_path: "/etc/cloudflared/creds.json".into(),
+            ..Default::default()
         };
         let config_yaml = crate::templates::render_cloudflared_config(&tmpl_ctx)?;
         exec.write_file("/tmp/cloudflared-config.yml", &config_yaml)

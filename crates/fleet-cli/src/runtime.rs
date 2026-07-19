@@ -621,6 +621,8 @@ pub struct ProvisionArgs {
     pub cf_token: Option<String>,
     pub orchestrator_url: Option<String>,
     pub fleet_worker_bin: Option<String>,
+    pub grok_secret: Option<String>,
+    pub bootstrap_token: Option<String>,
     pub inventory: Option<String>,
     pub parallel: usize,
     pub tags: Vec<String>,
@@ -663,6 +665,8 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         args.orchestrator_url.as_deref(),
         args.cf_token.as_deref(),
         args.fleet_worker_bin.as_deref(),
+        args.grok_secret.as_deref(),
+        args.bootstrap_token.as_deref(),
         args.dry_run,
     );
 
@@ -830,12 +834,15 @@ async fn run_playbook(
     Ok(playbook.run(exec, &pb_ctx).await?)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_step_context(
     name: &str,
     labels: std::collections::HashMap<String, String>,
     orchestrator_url: Option<&str>,
     cf_token: Option<&str>,
     fleet_worker_bin: Option<&str>,
+    grok_secret: Option<&str>,
+    bootstrap_token: Option<&str>,
     dry_run: bool,
 ) -> PlaybookContext {
     let base = StepContext {
@@ -844,7 +851,10 @@ fn build_step_context(
         orchestrator_url: orchestrator_url.unwrap_or("").to_string(),
         cf_token: cf_token.map(String::from),
         fleet_worker_bin: fleet_worker_bin.map(String::from),
+        grok_secret: grok_secret.map(String::from),
+        bootstrap_token: bootstrap_token.map(String::from),
         dry_run,
+        ..Default::default()
     };
     PlaybookContext::new(base)
 }
@@ -864,7 +874,10 @@ fn build_inventory_step_context(
             .unwrap_or_default(),
         cf_token,
         fleet_worker_bin: None,
+        grok_secret: w.grok_secret.clone(),
+        bootstrap_token: options.bootstrap_token.clone(),
         dry_run: options.dry_run,
+        ..Default::default()
     };
     PlaybookContext::new(base)
 }

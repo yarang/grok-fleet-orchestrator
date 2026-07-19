@@ -7,11 +7,12 @@
 Claude Code, Gemini CLI, Codex, Cursor 등 MCP를 지원하는 모든 AI 코딩 도구에서
 원격 워커 풀을 동일한 인터페이스로 사용할 수 있습니다.
 
-> **상태**: 0.1.0 개발 중 — Phase 1~6 완료. Phase 7(통합 테스트, docs 최종화) 진행 예정.
+> **상태**: 0.1.0 개발 중 — Phase 1~7 완료. Phase 8.1 (fleet-worker 데몬) 완료. Phase 8.2+ 진행 예정.
 
 ## 주요 특징
 
 - **ACP transport**: 표준 [Agent Client Protocol](https://github.com/Zed-Industries/agent-client-protocol) over WebSocket으로 각 워커의 `grok agent serve`와 통신 (`--transport acp`)
+- **fleet-worker 데몬**: 워커 머신에서 `grok agent serve` 서브프로세스 관리 + orchestrator 자동 등록/하트비트 (graceful shutdown, systemd 통합)
 - **비동기 작업 디스패치**: 장기 실행 작업을 원격 워커에 제출하고 `task_id`로 추적
 - **다중 워커 관리**: 사용자 지정 (`server_hint`) 또는 least-loaded 자동 선택
 - **장애 격리**: 워커별 CircuitBreaker로 연속 실패 시 자동 차단

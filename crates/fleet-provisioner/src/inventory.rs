@@ -94,6 +94,10 @@ pub struct InventoryWorker {
     /// 리전 (메타데이터).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// 이 워커 전용 grok 서버 키 시크릿. worker.toml `[grok] secret`에 기록.
+    /// 미설정 시 프로비저닝 단계에서 실패함 — caller가 반드시 채워야 함.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_secret: Option<String>,
 }
 
 impl InventoryWorker {
@@ -139,6 +143,9 @@ pub struct ProvisionOptions {
     /// Dry-run 모드.
     #[serde(default)]
     pub dry_run: bool,
+    /// 오케스트레이터 등록용 bootstrap bearer 토큰. 모든 워커에 동일 적용.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_token: Option<String>,
 }
 
 fn default_parallel() -> usize {
@@ -158,6 +165,7 @@ impl Default for ProvisionOptions {
             tags: vec![],
             only: vec![],
             dry_run: false,
+            bootstrap_token: None,
         }
     }
 }

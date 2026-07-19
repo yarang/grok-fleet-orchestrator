@@ -72,6 +72,12 @@ impl Step for InstallFleetWorker {
             tunnel_name: ctx.worker_name.clone(),
             hostname: ctx.orchestrator_url.clone(),
             credentials_path: "/etc/cloudflared/creds.json".into(),
+            grok_secret: ctx.grok_secret.clone(),
+            grok_bind_addr: ctx.grok_bind_addr.clone(),
+            max_concurrent_tasks: ctx.max_concurrent_tasks,
+            bootstrap_token: ctx.bootstrap_token.clone(),
+            labels: Some(ctx.labels.clone()),
+            ..Default::default()
         })?;
         exec.write_file("/tmp/fleet-worker.toml", &config_toml).await?;
         let _ = exec
@@ -135,6 +141,7 @@ mod tests {
         let ctx = StepContext {
             worker_name: "build-1".into(),
             orchestrator_url: "https://orch.fleet.example.com".into(),
+            grok_secret: Some("server-secret".into()),
             ..Default::default()
         };
         let out = step.apply(&exec, &ctx).await.unwrap();
@@ -143,6 +150,23 @@ mod tests {
         assert!(calls.iter().any(|c| c.contains("upload") && c.contains("fleet-worker")));
         assert!(calls.iter().any(|c| c.contains("write /tmp/fleet-worker.toml")));
         assert!(calls.iter().any(|c| c.contains("write /tmp/fleet-worker.service")));
+    }
+
+    #[tokio::test]
+    async fn apply_fails_without_grok_secret() {
+        let exec = MockExecutor::new();
+        let step = InstallFleetWorker {
+            local_bin: Some("/tmp/test-worker".into()),
+        };
+        let ctx = StepContext {
+            worker_name: "build-1".into(),
+            orchestrator_url: "https://orch.fleet.example.com".into(),
+            ..Default::default()
+        };
+        let result = step.apply(&exec, &ctx).await;
+        assert!(matches!(result, Err(StepError::Template(_))));
+        let err = result.unwrap_err();
+        assert!(format!("{err}").contains("grok_secret"));
     }
 
     #[tokio::test]

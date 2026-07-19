@@ -108,6 +108,17 @@ pub struct StepContext {
     pub cf_token: Option<String>,
     /// fleet-worker 바이너리 로컬 경로 (cargo build 결과).
     pub fleet_worker_bin: Option<String>,
+    /// grok 서브프로세스가 listen할 로컬 호스트:포트.
+    /// 미설정 시 템플릿 기본값 `127.0.0.1:2419` 사용.
+    pub grok_bind_addr: Option<String>,
+    /// grok 서버 키 시크릿. worker.toml `[grok] secret` 필드에 필수.
+    /// 프로비저닝 호출자가 난수로 생성해서 전달.
+    pub grok_secret: Option<String>,
+    /// 동시 작업 수 (worker.toml `[grok] max_concurrent_tasks`).
+    /// 미설정 시 템플릿 기본값 4 사용.
+    pub max_concurrent_tasks: Option<u32>,
+    /// 오케스트레이터 등록용 bootstrap bearer 토큰. None이면 worker.toml에서 생략.
+    pub bootstrap_token: Option<String>,
     /// Dry-run 모드: 실제 변경 없이 무엇을 할지 로깅만.
     pub dry_run: bool,
 }
