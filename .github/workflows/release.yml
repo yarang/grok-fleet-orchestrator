@@ -134,6 +134,12 @@ jobs:
           sha256sum ./*.tar.gz > checksums.txt
           ls -la
 
+      # install.sh / uninstall.sh 를 release assets 에 포함.
+      # `curl -fsSL .../install.sh | bash` 패턴이 동작하려면 root-level asset 이 필요.
+      - name: Stage standalone scripts
+        run: |
+          cp install.sh uninstall.sh artifacts/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -141,6 +147,8 @@ jobs:
             artifacts/*.tar.gz
             artifacts/checksums.txt
             artifacts/fleet-*-checksums.txt
+            artifacts/install.sh
+            artifacts/uninstall.sh
           generate_release_notes: true
           fail_on_unmatched_files: true
           draft: false
