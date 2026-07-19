@@ -33,6 +33,10 @@ pub enum StoreError {
     /// serde_json 에러의 래핑.
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// 부트스트랩 토큰이 존재하지 않거나 소진/만료됨 (Phase 8.3).
+    #[error("bootstrap token invalid or exhausted: {0}")]
+    BootstrapTokenInvalid(String),
 }
 
 /// Result alias.

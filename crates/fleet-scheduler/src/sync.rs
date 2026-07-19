@@ -221,6 +221,30 @@ mod tests {
         async fn migrate(&self) -> Result<(), fleet_store::StoreError> {
             Ok(())
         }
+        async fn create_bootstrap_token(
+            &self,
+            _: &fleet_core::BootstrapToken,
+        ) -> Result<(), fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn consume_bootstrap_token(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn list_bootstrap_tokens(
+            &self,
+        ) -> Result<Vec<fleet_core::BootstrapToken>, fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn revoke_bootstrap_token(
+            &self,
+            _: &str,
+        ) -> Result<bool, fleet_store::StoreError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]

@@ -188,7 +188,6 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 
 ## 향후 로드맵
 
-- `fleet-worker join` CLI (부트스트랩 토큰 자동 등록; Phase 8.3)
 - 동시 다중 세션 per worker (현재는 직렬 prompt 처리; Phase 8.4)
 - mTLS for orchestrator↔worker ACP 트래픽 (Phase 8.5)
 - OIDC/JWKS 검증 (현재는 Cloudflare Access에 위임)
@@ -427,4 +426,124 @@ sender를 drop하면, supervisor가 소유한 외부 `event_rx`의 `recv()`가 `
 반환하며 reader 태스크가 자연스럽게 끝납니다. 이렇게 하면 WebSocket Close
 프레임 감지에만 의존하지 않고, AcpClient 내부의 어떤 종료 경로(`close()` 호출,
 에러 전파, drop)에도 supervisor가 반응할 수 있습니다.
+
+## Bootstrap Token & Worker Join (Phase 8.3)
+
+Phase 7/8.1의 등록 흐름은 bearer 토큰을 `--api-tokens`로 정적 설정해야 했고,
+워커 머신에는 미리 렌더링된 `worker.toml`을 SSH로 배포해야 했습니다. Phase 8.3는
+**상태 저장형 부트스트랩 토큰**과 **`fleet-worker join` CLI**를 도입하여 셀프
+서비스 등록 경로를 추가합니다.
+
+### 데이터 모델
+
+```sql
+CREATE TABLE bootstrap_tokens (
+    token           TEXT PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by      TEXT,
+    expires_at      TIMESTAMPTZ,
+    max_uses        INTEGER NOT NULL DEFAULT 1,
+    use_count       INTEGER NOT NULL DEFAULT 0,
+    notes           TEXT,
+    last_used_by    TEXT,
+    last_used_at    TIMESTAMPTZ
+);
+```
+
+- `max_uses` — 다회용 토큰 지원 (기본 1 = 일회성).
+- `use_count` — atomic UPDATE 로 증가.
+- `expires_at` — 선택적 만료.
+
+### API 엔드포인트
+
+| Method   | Path                              | 용도                              |
+|----------|-----------------------------------|-----------------------------------|
+| POST     | `/v1/bootstrap-tokens`            | 토큰 발급 (어드민 전용)            |
+| GET      | `/v1/bootstrap-tokens`            | 발급된 토큰 목록 조회              |
+| DELETE   | `/v1/bootstrap-tokens/:token`     | 토큰 회수                         |
+| POST     | `/v1/workers/join`                | 토큰으로 워커 자동 등록 + config 반환 |
+
+`/v1/workers/join` 은 `/v1/workers/register` 와 달리:
+
+1. **요청 본문의 `token`** 을 `Store::consume_bootstrap_token`으로 atomic 검증
+   (인증 미들웨어의 bearer 와 별개).
+2. 동일 name 이 존재하면 **409 Conflict** — join은 항상 신규. 재등록은 `/register`.
+3. 응답에 **`worker_config_toml`** 문자열 포함. 클라이언트가 디스크에 바로 기록.
+4. 부트스트랩 토큰은 성공 시 `use_count += 1`. `last_used_by` 에 worker name 기록.
+
+### Atomic 소비
+
+`consume_bootstrap_token(token, used_by)` 는 단일 UPDATE 문으로 race condition
+방지:
+
+```sql
+UPDATE bootstrap_tokens
+   SET use_count = use_count + 1,
+       last_used_by = $2,
+       last_used_at = NOW()
+ WHERE token = $1
+   AND use_count < max_uses
+   AND (expires_at IS NULL OR expires_at > NOW())
+RETURNING token;
+```
+
+영향받은 행이 0이면 토큰이 (a) 존재하지 않거나, (b) 소진되었거나, (c) 만료된 것.
+핸들러는 이를 `401 Unauthorized` 로 매핑.
+
+### CLI (fleet)
+
+```bash
+# 1. 어드민이 토큰 발급 (DB 저장).
+fleet token issue --api-url https://fleet.example.com \
+                  --api-token $ADMIN_TOKEN \
+                  --max-uses 1 \
+                  --expires-in-secs 3600
+# → fleet_ABCD...
+
+# 2. 발급된 토큰 목록.
+fleet token list --api-url https://fleet.example.com --api-token $ADMIN_TOKEN
+
+# 3. 회수.
+fleet token revoke fleet_ABCD... --api-url ... --api-token $ADMIN_TOKEN
+```
+
+기존 `fleet token new` (로컬 난수 생성, DB 미사용)는 하위 호환을 위해 유지.
+신규 배포에서는 추적/회수 기능이 있는 `token issue` 권장.
+
+### fleet-worker join
+
+워커 머신에서 실행하는 셀프 서비스 등록:
+
+```bash
+fleet-worker join \
+  --orchestrator-url https://fleet.example.com \
+  --token fleet_ABCD... \
+  --name build-farm-1 \
+  --labels arch=arm64,gpu=false \
+  --config-out /etc/fleet/worker.toml \
+  --start
+```
+
+흐름:
+1. `validate_worker_name` 로 DNS-safe 검증.
+2. `--grok-secret` 미지정 시 32바이트 CSPRNG 난수 생성.
+3. `--agent-endpoint` 미지정 시 orchestrator 호스트 기반으로 자동 유도
+   (`ws://<orchestrator-host>/ws?server-key=<secret>`).
+4. `POST /v1/workers/join` 호출.
+5. 응답의 `worker_config_toml` 을 `--config-out` 경로에 **atomic** 으로 기록
+   (tmp 파일 작성 후 rename).
+6. `--start` 시 현재 프로세스를 `fleet-worker --config <path>` 로 **exec**.
+
+### worker.toml 자동 생성
+
+`/v1/workers/join` 응답의 `worker_config_toml`은 다음 필드를 포함합니다:
+
+- `[worker] name`, `orchestrator_url` (플레이스홀더), `heartbeat_interval_secs`,
+  `bootstrap_token`, `existing_worker_id` (이후 재시작 시 동일 ID 유지),
+  `labels`.
+- `[grok] bin`, `bind_addr` (endpoint에서 추출), `secret` (endpoint에서 추출),
+  `max_concurrent_tasks`, `restart_delay_secs`.
+
+이로써 어드민은 `worker.toml`을 미리 렌더링해서 SSH로 배포할 필요 없이, 토큰
+하나만 전달하면 워커 운영자가 직접 `fleet-worker join` 한 줄로 등록 완료.
 

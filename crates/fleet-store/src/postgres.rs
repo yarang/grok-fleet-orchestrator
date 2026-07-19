@@ -16,13 +16,14 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    CircuitState, EventEntry, FleetEvent, Labels, Task, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, Worker, WorkerFilter,
+    BootstrapToken, CircuitState, EventEntry, FleetEvent, Labels, Task, TaskFilter, TaskId,
+    TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, Worker, WorkerFilter,
     WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
@@ -423,6 +424,109 @@ impl Store for PgStore {
             .map_err(|e| StoreError::Migration(e.to_string()))?;
         Ok(())
     }
+
+    // ── Bootstrap tokens (Phase 8.3) ───────────────────────────────────
+
+    async fn create_bootstrap_token(
+        &self,
+        token: &BootstrapToken,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO bootstrap_tokens
+                (token, created_at, created_by, expires_at, max_uses, use_count, notes,
+                 last_used_by, last_used_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(&token.token)
+        .bind(token.created_at)
+        .bind(&token.created_by)
+        .bind(token.expires_at)
+        .bind(token.max_uses as i32)
+        .bind(token.use_count as i32)
+        .bind(&token.notes)
+        .bind(&token.last_used_by)
+        .bind(token.last_used_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!("bootstrap token already exists: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn consume_bootstrap_token(
+        &self,
+        token: &str,
+        used_by: &str,
+    ) -> Result<(), StoreError> {
+        // 단일 UPDATE로 atomic하게 검사 + 증가.
+        // 조건: token 일치 + use_count < max_uses + (expires_at IS NULL OR > NOW()).
+        let now = Utc::now();
+        let result = sqlx::query(
+            r#"
+            UPDATE bootstrap_tokens
+               SET use_count = use_count + 1,
+                   last_used_by = $2,
+                   last_used_at = $3
+             WHERE token = $1
+               AND use_count < max_uses
+               AND (expires_at IS NULL OR expires_at > $3)
+            RETURNING token
+            "#,
+        )
+        .bind(token)
+        .bind(used_by)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if result.is_some() {
+            Ok(())
+        } else {
+            // 토큰이 존재하는지 확인하여 적절한 에러 메시지 구성.
+            let exists: Option<(String,)> = sqlx::query_as(
+                "SELECT token FROM bootstrap_tokens WHERE token = $1",
+            )
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await?;
+            let reason = match exists {
+                Some(_) => "token is exhausted or expired",
+                None => "token not found",
+            };
+            Err(StoreError::BootstrapTokenInvalid(format!(
+                "{reason}: {token}"
+            )))
+        }
+    }
+
+    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+        let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+            r#"
+            SELECT token, created_at, created_by, expires_at, max_uses, use_count,
+                   notes, last_used_by, last_used_at
+              FROM bootstrap_tokens
+             ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(row_to_bootstrap_token).collect()
+    }
+
+    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM bootstrap_tokens WHERE token = $1")
+            .bind(token)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -490,6 +594,30 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
         circuit_state: str_to_circuit_state(&circuit_str)?,
         worker_version,
         registered_at,
+    })
+}
+
+fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, StoreError> {
+    let token: String = row.try_get("token")?;
+    let created_at = row.try_get("created_at")?;
+    let created_by: Option<String> = row.try_get("created_by")?;
+    let expires_at = row.try_get("expires_at")?;
+    let max_uses: i32 = row.try_get("max_uses")?;
+    let use_count: i32 = row.try_get("use_count")?;
+    let notes: Option<String> = row.try_get("notes")?;
+    let last_used_by: Option<String> = row.try_get("last_used_by")?;
+    let last_used_at = row.try_get("last_used_at")?;
+
+    Ok(BootstrapToken {
+        token,
+        created_at,
+        created_by,
+        expires_at,
+        max_uses: max_uses as u32,
+        use_count: use_count as u32,
+        notes,
+        last_used_by,
+        last_used_at,
     })
 }
 

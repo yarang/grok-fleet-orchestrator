@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fleet_core::{
-    EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId,
+    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use fleet_store::{Store, StoreError};
 
@@ -18,6 +18,7 @@ pub struct MemStore {
     tasks: Mutex<HashMap<TaskId, Task>>,
     events: Mutex<Vec<EventEntry>>,
     outputs: Mutex<HashMap<TaskId, Vec<String>>>,
+    bootstrap_tokens: Mutex<HashMap<String, BootstrapToken>>,
 }
 
 impl MemStore {
@@ -27,6 +28,7 @@ impl MemStore {
             tasks: Mutex::new(HashMap::new()),
             events: Mutex::new(Vec::new()),
             outputs: Mutex::new(HashMap::new()),
+            bootstrap_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -196,5 +198,61 @@ impl Store for MemStore {
 
     async fn migrate(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    async fn create_bootstrap_token(
+        &self,
+        token: &BootstrapToken,
+    ) -> Result<(), StoreError> {
+        let mut tokens = self.bootstrap_tokens.lock().unwrap();
+        if tokens.contains_key(&token.token) {
+            return Err(StoreError::Conflict(format!(
+                "bootstrap token already exists: {}",
+                token.token
+            )));
+        }
+        tokens.insert(token.token.clone(), token.clone());
+        Ok(())
+    }
+
+    async fn consume_bootstrap_token(
+        &self,
+        token: &str,
+        used_by: &str,
+    ) -> Result<(), StoreError> {
+        let mut tokens = self.bootstrap_tokens.lock().unwrap();
+        let entry = tokens
+            .get_mut(token)
+            .ok_or_else(|| StoreError::BootstrapTokenInvalid(format!("token not found: {token}")))?;
+        if !entry.is_usable() {
+            let reason = if entry.use_count >= entry.max_uses {
+                "exhausted"
+            } else {
+                "expired"
+            };
+            return Err(StoreError::BootstrapTokenInvalid(format!(
+                "token {reason}: {token}"
+            )));
+        }
+        entry.use_count += 1;
+        entry.last_used_by = Some(used_by.to_string());
+        entry.last_used_at = Some(chrono::Utc::now());
+        Ok(())
+    }
+
+    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+        let mut all: Vec<BootstrapToken> =
+            self.bootstrap_tokens.lock().unwrap().values().cloned().collect();
+        all.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        Ok(all)
+    }
+
+    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .bootstrap_tokens
+            .lock()
+            .unwrap()
+            .remove(token)
+            .is_some())
     }
 }

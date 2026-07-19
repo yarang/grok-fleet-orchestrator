@@ -95,13 +95,19 @@ impl AppState {
 pub fn build_app(state: Arc<AppState>) -> Router {
     let api_routes = Router::new()
         .route("/register", post(handlers::register_worker))
+        .route("/join", post(handlers::join_worker))
         .route("/heartbeat", post(handlers::heartbeat))
         .route("/", get(handlers::list_workers))
         .route("/:id", get(handlers::get_worker).delete(handlers::deregister_worker));
 
+    let token_routes = Router::new()
+        .route("/", post(handlers::create_bootstrap_token).get(handlers::list_bootstrap_tokens))
+        .route("/:token", axum::routing::delete(handlers::revoke_bootstrap_token));
+
     let v1 = Router::new()
         .route("/health", get(handlers::health))
-        .nest("/workers", api_routes);
+        .nest("/workers", api_routes)
+        .nest("/bootstrap-tokens", token_routes);
 
     // Cloudflare Access 미들웨어 (가장 바깥).
     // 설정된 경우 모든 요청이 CF-Access-Jwt-Assertion 검증을 받음.

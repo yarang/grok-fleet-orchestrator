@@ -30,11 +30,13 @@
 pub mod config;
 pub mod error;
 pub mod grok_process;
+pub mod join;
 pub mod registration;
 pub mod runner;
 
 pub use config::WorkerConfig;
 pub use error::WorkerError;
+pub use join::JoinArgs;
 pub use registration::RegistrationClient;
 pub use runner::WorkerRunner;
 

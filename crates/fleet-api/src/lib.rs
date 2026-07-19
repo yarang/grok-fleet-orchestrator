@@ -36,3 +36,7 @@ mod test_support;
 pub use app::{build_app, run_http_server, AppState};
 pub use cloudflare::{cloudflare_access_middleware, VerifiedUser};
 pub use error::ApiError;
+pub use schema::{
+    BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, JoinRequest,
+    JoinResponse,
+};

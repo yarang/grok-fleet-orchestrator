@@ -25,6 +25,7 @@
 // `#![warn(missing_docs)]`로 전환. 현재는 API가 변동 중이므로 임시 허용.
 #![allow(missing_docs)]
 
+pub mod bootstrap_token;
 pub mod config;
 pub mod error;
 pub mod events;
@@ -33,6 +34,7 @@ pub mod task;
 pub mod worker;
 
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
+pub use bootstrap_token::BootstrapToken;
 pub use config::{
     ApiConfig, CircuitBreakerConfig, OrchestratorConfig, OidcConfig, SchedulerConfig,
     StaticWorkerConfig, StoreConfig, WorkerSidecarConfig,

@@ -27,8 +27,8 @@ pub use postgres::PgStore;
 
 use async_trait::async_trait;
 use fleet_core::{
-    EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId,
+    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
@@ -105,4 +105,30 @@ pub trait Store: Send + Sync {
 
     /// 보류 중인 마이그레이션을 모두 적용.
     async fn migrate(&self) -> Result<(), StoreError>;
+
+    // ── Bootstrap tokens (Phase 8.3) ───────────────────────────────
+
+    /// 부트스트랩 토큰을 저장. 동일 token이 이미 존재하면 에러.
+    async fn create_bootstrap_token(
+        &self,
+        token: &BootstrapToken,
+    ) -> Result<(), StoreError>;
+
+    /// 부트스트랩 토큰을 atomic하게 소비.
+    /// - 토큰이 존재하고 사용 가능 (use_count < max_uses, 만료 안 됨) 하면
+    ///   use_count를 1 증가시키고 last_used_by/at을 갱신한 뒤 Ok 반환.
+    /// - 존재하지 않거나 소진/만료된 경우 `StoreError::BootstrapTokenInvalid` 반환.
+    ///
+    /// 구현은 단일 UPDATE ... RETURNING 문으로 race condition을 방지해야 함.
+    async fn consume_bootstrap_token(
+        &self,
+        token: &str,
+        used_by: &str,
+    ) -> Result<(), StoreError>;
+
+    /// 모든 부트스트랩 토큰을 생성일 역순으로 조회.
+    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError>;
+
+    /// 부트스트랩 토큰 삭제 (revocation). 존재하지 않으면 false 반환.
+    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError>;
 }

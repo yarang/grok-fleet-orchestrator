@@ -8,8 +8,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 use fleet_api::{build_app, AppState};
 use fleet_core::{
-    EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId,
+    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use fleet_store::{Store, StoreError};
 
@@ -80,6 +80,18 @@ impl Store for MemStore {
     }
     async fn migrate(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+    async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+        unimplemented!()
+    }
+    async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
+        unimplemented!()
     }
 }
 

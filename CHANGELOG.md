@@ -6,7 +6,69 @@
 
 ## [Unreleased]
 
-### Added — Phase 8.2: WebSocket 재연결 (supervisor + 지수 백오프)
+### Added — Phase 8.3: Bootstrap 토큰 + Worker 자유 가입 (`fleet-worker join`)
+
+- **Bootstrap 토큰 저장 모델** (`crates/fleet-store/migrations/003_bootstrap_tokens.sql`):
+  - `bootstrap_tokens` 테이블 — `token` (PK), `created_at`, `created_by`,
+    `expires_at` (NULL = 무기한), `max_uses` (기본 1), `use_count`, `notes`,
+    `last_used_by`, `last_used_at`.
+  - `expires_at` 부분 인덱스 + `created_at DESC` 인덱스.
+- **`BootstrapToken` 도메인** (`fleet-core::bootstrap_token`): `is_usable()` (use_count <
+  max_uses AND not expired), `remaining_uses()` 계산. 직렬화에 `status` 파생 필드
+  (`active | exhausted | expired`) 포함.
+- **Store trait 확장** — 4개 메서드 추가:
+  - `create_bootstrap_token` / `consume_bootstrap_token` /
+    `list_bootstrap_tokens` / `revoke_bootstrap_token`
+  - **atomic UPDATE...RETURNING** 로 토큰 소비를 단일 SQL로 수행 — 레이스 컨디션
+    불가능 (두 클라이언트가 동시에 같은 단일-사용 토큰을 사용해도 DB가 한 쪽만
+    성공시킴).
+- **새 API 엔드포인트** (`fleet-api`):
+  - `POST /v1/workers/join` — 토큰 검증 → 워커 upsert → `worker.toml` 본문 렌더링.
+    성공 시 orchestrator가 워커를 위해 사용할 config를 응답 바디에 포함.
+  - `POST /v1/bootstrap-tokens` — CSPRNG(`/dev/urandom`, Windows UUID 폴백) +
+    base64url-no-pad 인코딩으로 토큰 생성.
+  - `GET /v1/bootstrap-tokens` — 활성/사용량/만료 상태 포함 표 형식 목록.
+  - `DELETE /v1/bootstrap-tokens/:token` — 폐기 (use_count를 max_uses로 올림).
+- **CLI 확장** (`fleet token ...`):
+  - `fleet token issue [--max-uses N] [--expires-in-secs S] [--prefix PREFIX]
+    [--bytes 32] [--notes "..."`
+  - `fleet token list [--json]` — 테이블 또는 JSON 출력.
+  - `fleet token revoke <TOKEN>`
+- **`fleet-worker join` 서브커맨드** (`crates/fleet-worker/src/join.rs`):
+  - DNS-safe 워커 이름 검증 → `/dev/urandom` 기반 grok_secret 자동 생성
+    (32바이트) → orchestrator의 `/v1/workers/join` 호출 → `worker.toml`을
+    tmp 파일 + rename으로 원자적 저장 → (옵션) `--start` 시 현 프로세스를
+    daemon으로 `exec` (Unix) / spawn+wait (Windows).
+  - `JoinArgs { orchestrator_url, token, name, labels, agent_endpoint,
+    grok_secret, config_out, start, max_concurrent_tasks }`.
+
+### Tests — Phase 8.3
+
+- **`crates/fleet-api/tests/bootstrap_tokens.rs`** (신규 13개 통합 테스트):
+  - 토큰 생성/목록/폐기 round-trip
+  - 유효/무효/소진/만료 토큰으로 join 시도 시 각각 200/401/401/401
+  - 중복 이름 충돌 시 409
+  - join 응답의 `worker_config_toml`이 필수 필드 포함 검증
+  - multi-use 토큰으로 여러 워커 연속 가입
+- **`crates/fleet-worker/tests/join.rs`** (신규 6개 통합 테스트):
+  - config 파일 디스크 저장, grok_secret 자동 생성, 라벨 직렬화, 이름 검증,
+    서버 에러 전파, 부모 디렉토리 자동 생성
+- `BootstrapToken` 단위 테스트 5개 추가.
+- 총 **327개 테스트 통과**, 3개 `#[ignore]` (Phase 7 E2E 2 + doctest 1).
+
+### Documentation — Phase 8.3
+
+- `docs/architecture.md`: "Bootstrap Token & Worker Join (Phase 8.3)" 섹션 추가
+  (데이터 모델, atomic UPDATE 쿼리 설명, join 흐름, CLI 예시). 로드맵에서
+  Phase 8.3 제거하고 8.4(동시 다중 세션)를 다음 항목으로 표시.
+- `docs/deployment.md`: 3.4절 — `fleet-worker join` 셀프 서비스 가입 워크플로,
+  `fleet token issue` 예시, 자동 생성된 `worker.toml` 구조.
+- `docs/api-reference.md`: `/v1/workers/join` + `/v1/bootstrap-tokens` 엔드포인트
+  스키마 추가.
+
+## Phase 8.2: WebSocket 재연결 (supervisor + 지수 백오프)
+
+### Added
 
 - **per-worker supervisor 태스크**: `register()` 시점에 각 워커마다 전용
   `tokio::spawn` 태스크를 생성. WebSocket 수명 주기, reader 종료 감지, 자동

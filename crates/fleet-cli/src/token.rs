@@ -1,10 +1,19 @@
-//! `fleet token` 명령 — 부트스트랩 토큰 생성.
+//! `fleet token` 명령 — 부트스트랩 토큰 생성/발급/조회/회수.
 //!
-//! 워커가 오케스트레이터에 처음 등록할 때 `--api-tokens`에 추가할 수 있는
-//! 무작위 bearer 토큰을 생성합니다. CSPRNG 난수를 base64url로 인코딩하여
-//! 출력합니다.
+//! ## 명령
+//!
+//! - `fleet token new` — 로컬 무작위 토큰 생성 (DB 미사용). `--api-tokens`에
+//!   수동으로 추가.
+//! - `fleet token issue` — orchestrator DB에 토큰을 영속 발급. Phase 8.3.
+//! - `fleet token list` — 발급된 토큰 목록.
+//! - `fleet token revoke TOKEN` — 토큰 회수.
+//!
+//! `token new`는 이전 버전 호환용으로 유지. 신규 배포에서는 `token issue` 권장.
 
-use anyhow::{Context, Result};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::TokenAction;
 
@@ -12,13 +21,41 @@ use crate::TokenAction;
 pub async fn run_token(action: TokenAction) -> Result<()> {
     match action {
         TokenAction::New { prefix, bytes } => run_token_new(&prefix, bytes).await,
+        TokenAction::Issue {
+            api_url,
+            api_token,
+            prefix,
+            bytes,
+            max_uses,
+            expires_in_secs,
+            created_by,
+            notes,
+        } => {
+            run_token_issue(IssueArgs {
+                api_url,
+                api_token,
+                prefix,
+                bytes,
+                max_uses,
+                expires_in_secs,
+                created_by,
+                notes,
+            })
+            .await
+        }
+        TokenAction::List { api_url, api_token, json } => {
+            run_token_list(&api_url, &api_token, json).await
+        }
+        TokenAction::Revoke { api_url, api_token, token } => {
+            run_token_revoke(&api_url, &api_token, &token).await
+        }
     }
 }
 
 /// `token new` — 무작위 토큰 생성 후 stdout 출력.
 async fn run_token_new(prefix: &str, bytes: usize) -> Result<()> {
     if !(8..=256).contains(&bytes) {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow!(
             "--bytes must be between 8 and 256 (got {bytes})"
         ));
     }
@@ -31,6 +68,184 @@ async fn run_token_new(prefix: &str, bytes: usize) -> Result<()> {
     };
     println!("{token}");
     Ok(())
+}
+
+// ── Phase 8.3: stateful token management via orchestrator API ──────────
+
+#[derive(Debug, Serialize)]
+struct CreateTokenApiRequest {
+    prefix: String,
+    bytes: usize,
+    max_uses: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTokenApiResponse {
+    token: String,
+    #[allow(dead_code)]
+    created_at: String,
+    #[allow(dead_code)]
+    expires_at: Option<String>,
+    #[allow(dead_code)]
+    max_uses: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TokenListItem {
+    token: String,
+    created_at: String,
+    expires_at: Option<String>,
+    max_uses: u32,
+    use_count: u32,
+    remaining_uses: u32,
+    notes: Option<String>,
+    last_used_by: Option<String>,
+    last_used_at: Option<String>,
+}
+
+/// `token issue` 인자.
+struct IssueArgs {
+    api_url: String,
+    api_token: String,
+    prefix: String,
+    bytes: usize,
+    max_uses: u32,
+    expires_in_secs: Option<u64>,
+    created_by: Option<String>,
+    notes: Option<String>,
+}
+
+/// `token issue` — orchestrator에 토큰 발급 요청.
+async fn run_token_issue(args: IssueArgs) -> Result<()> {
+    let http = build_http_client()?;
+    let url = format!("{}/v1/bootstrap-tokens", args.api_url.trim_end_matches('/'));
+    let body = CreateTokenApiRequest {
+        prefix: args.prefix.clone(),
+        bytes: args.bytes,
+        max_uses: args.max_uses,
+        expires_in_secs: args.expires_in_secs,
+        created_by: args.created_by.clone(),
+        notes: args.notes.clone(),
+    };
+    let resp = http
+        .post(&url)
+        .bearer_auth(&args.api_token)
+        .json(&body)
+        .send()
+        .await
+        .context("token issue request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("token issue failed: {status} — {text}"));
+    }
+    let parsed: CreateTokenApiResponse = resp.json().await.context("parsing issue response")?;
+    println!("{}", parsed.token);
+    Ok(())
+}
+
+/// `token list` — 발급된 토큰을 테이블 형태로 출력.
+async fn run_token_list(api_url: &str, api_token: &str, json: bool) -> Result<()> {
+    let http = build_http_client()?;
+    let url = format!("{}/v1/bootstrap-tokens", api_url.trim_end_matches('/'));
+    let resp = http.get(&url).bearer_auth(api_token).send().await
+        .context("token list request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("token list failed: {status} — {text}"));
+    }
+    let items: Vec<TokenListItem> = resp.json().await.context("parsing list response")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&items)?);
+        return Ok(());
+    }
+
+    if items.is_empty() {
+        println!("No bootstrap tokens issued.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<40} {:<23} {:<13} {:<11} {:<20}",
+        "TOKEN", "CREATED", "USES", "REMAINING", "LAST_USED_BY"
+    );
+    println!("{}", "-".repeat(112));
+    for t in items {
+        let truncated = if t.token.len() > 38 {
+            format!("{}…{}", &t.token[..24], &t.token[t.token.len() - 12..])
+        } else {
+            t.token.clone()
+        };
+        println!(
+            "{:<40} {:<23} {}/{}        {:<11} {:<20}",
+            truncated,
+            &t.created_at[..23.min(t.created_at.len())],
+            t.use_count,
+            t.max_uses,
+            t.remaining_uses,
+            t.last_used_by.unwrap_or_else(|| "-".into()),
+        );
+    }
+    Ok(())
+}
+
+/// `token revoke TOKEN` — 토큰 회수.
+async fn run_token_revoke(api_url: &str, api_token: &str, token: &str) -> Result<()> {
+    let http = build_http_client()?;
+    let url = format!(
+        "{}/v1/bootstrap-tokens/{}",
+        api_url.trim_end_matches('/'),
+        urlencoding::encode_or_self(token)
+    );
+    let resp = http.delete(&url).bearer_auth(api_token).send().await
+        .context("token revoke request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("token revoke failed: {status} — {text}"));
+    }
+    println!("revoked: {token}");
+    Ok(())
+}
+
+/// 공유 HTTP 클라이언트 (타임아웃 10s).
+fn build_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?)
+}
+
+// `urlencoding` crate 의존성 추가 없이 안전한 경로 인코딩을 제공하기 위한 폴백.
+mod urlencoding {
+    pub fn encode_or_self(s: &str) -> String {
+        // 부트스트랩 토큰은 알파벳/숫자/-/_ 만 포함하므로 인코딩이 불필요.
+        // 혹시 몰라 percent-encoding을 적용.
+        if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+            s.to_string()
+        } else {
+            percent_encode(s)
+        }
+    }
+
+    fn percent_encode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() * 3);
+        for b in s.as_bytes() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                out.push(*b as char);
+            } else {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+        out
+    }
 }
 
 /// 운영체제 CSPRNG에서 `n` 바이트 읽기.
@@ -169,6 +384,7 @@ mod tests {
                 assert_eq!(prefix, "p");
                 assert_eq!(bytes, 24);
             }
+            _ => panic!("expected TokenAction::New"),
         }
     }
 }

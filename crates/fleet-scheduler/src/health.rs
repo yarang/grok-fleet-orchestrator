@@ -188,8 +188,8 @@ mod tests {
     use crate::state::FleetState;
     use async_trait::async_trait;
     use fleet_core::{
-        CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput,
-        TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+        BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
+        TaskOutput, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
     };
     use fleet_store::{Store, StoreError};
     use std::collections::HashMap;
@@ -273,6 +273,18 @@ mod tests {
         }
         async fn migrate(&self) -> Result<(), StoreError> {
             Ok(())
+        }
+        async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+            unimplemented!()
+        }
+        async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
+            unimplemented!()
         }
     }
 

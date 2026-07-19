@@ -262,9 +262,11 @@ enum TasksAction {
 
 #[derive(Debug, Subcommand)]
 enum TokenAction {
-    /// 무작위 부트스트랩 토큰을 생성해 stdout에 출력.
+    /// 무작위 부트스트랩 토큰을 생성해 stdout에 출력 (로컬 전용, DB 저장 안 함).
     /// 생성된 토큰은 `--api-tokens` (또는 `FLEET_API_TOKENS`)에 추가하여
     /// 워커 등록 인증에 사용합니다.
+    ///
+    /// **참고**: 영속 추적/회수가 필요하면 `token issue` 를 사용하세요.
     New {
         /// 토큰 접두어.
         #[arg(long, default_value = "fleet")]
@@ -273,6 +275,71 @@ enum TokenAction {
         /// 무작위 바이트 길이 (16~64 권장).
         #[arg(long, default_value_t = 32)]
         bytes: usize,
+    },
+
+    /// 부트스트랩 토큰을 발급하여 orchestrator의 DB에 저장 (Phase 8.3).
+    /// `token new`와 달리 상태를 추적할 수 있고, 사용 후 자동 소진/회수 가능.
+    Issue {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Bearer 토큰 (orchestrator `--api-tokens`에 포함된 값).
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 토큰 접두어.
+        #[arg(long, default_value = "fleet")]
+        prefix: String,
+
+        /// 무작위 바이트 길이.
+        #[arg(long, default_value_t = 32)]
+        bytes: usize,
+
+        /// 최대 사용 횟수 (기본 1 = 일회성).
+        #[arg(long, default_value_t = 1)]
+        max_uses: u32,
+
+        /// 만료까지 초. 생략하면 무기한.
+        #[arg(long)]
+        expires_in_secs: Option<u64>,
+
+        /// 발급자 식별자 (감사 로그용).
+        #[arg(long)]
+        created_by: Option<String>,
+
+        /// 자유 메모.
+        #[arg(long)]
+        notes: Option<String>,
+    },
+
+    /// 발급된 부트스트랩 토큰 목록 조회.
+    List {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// JSON 형식 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 부트스트랩 토큰을 회수 (즉시 사용 불가능하게 만듦).
+    Revoke {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 회수할 토큰 문자열.
+        token: String,
     },
 }
 

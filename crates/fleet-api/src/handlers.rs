@@ -16,8 +16,9 @@ use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 
 use crate::error::ApiError;
 use crate::schema::{
-    DeregisterRequest, HealthResponse, HeartbeatRequest, HeartbeatResponse, RegisterRequest,
-    RegisterResponse, WorkerSummary,
+    BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
+    DeregisterRequest, HealthResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest,
+    JoinResponse, RegisterRequest, RegisterResponse, WorkerSummary,
 };
 use crate::app::AppState;
 
@@ -51,14 +52,7 @@ pub async fn register_worker(
 
     // DNS-safe 이름 검증 (간단한 버전)
     let name = req.name.trim();
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return Err(ApiError::BadRequest(
-            "name must be alphanumeric, '-', '_', or '.' only".into(),
-        ));
-    }
+    validate_worker_name(name)?;
 
     // 1. 기존 워커 조회 (name 기준 또는 existing_worker_id)
     let existing_by_name = state.store.get_worker_by_name(name).await?;
@@ -87,57 +81,26 @@ pub async fn register_worker(
         .map(|w| w.id)
         .unwrap_or_else(WorkerId::new);
 
-    // 2. Worker 엔티티 구성
-    let now = Utc::now();
-    let registered_at = existing_by_name
-        .as_ref()
-        .or(existing_by_id.as_ref())
-        .map(|w| w.registered_at)
-        .unwrap_or(now);
+    let worker = build_worker(
+        worker_id,
+        name,
+        req.agent_endpoint.as_str(),
+        req.labels.clone(),
+        req.max_concurrent_tasks,
+        req.worker_version.clone(),
+        existing_by_name.as_ref().or(existing_by_id.as_ref()),
+    );
 
-    let worker = Worker {
-        id: worker_id,
-        name: name.to_string(),
-        endpoint: req.agent_endpoint.clone(),
-        labels: req.labels.clone(),
-        status: WorkerStatus::Online,
-        last_seen: Some(now),
-        active_tasks: 0, // 재등록 시 0으로 리셋
-        max_concurrent: req.max_concurrent_tasks,
-        circuit_state: fleet_core::CircuitState::Closed,
-        worker_version: req.worker_version.clone(),
-        registered_at,
-    };
-
-    // 3. Store에 upsert
-    state.store.upsert_worker(&worker).await?;
-
-    // 3.5. Transport에 워커 등록 (설정된 경우).
-    // 실패해도 Store는 이미 기록되었으므로 warn 로그만.
-    // HealthChecker가 곧 연결 불가 상태를 감지하여 offline으로 강등.
-    if let Some(transport) = &state.transport {
-        if let Err(e) = transport.register(worker_id, &worker.endpoint).await {
-            tracing::warn!(
-                %worker_id,
-                endpoint = %worker.endpoint,
-                error = %e,
-                "transport.register failed — worker is in Store but cannot accept tasks until healthy"
-            );
-        }
-    }
+    let worker_id = upsert_and_register(&state, &worker).await?;
 
     // 4. WorkerJoined 이벤트 (재등록인지 신규인지 구분)
+    let now = Utc::now();
     let is_new = existing_by_name.is_none() && existing_by_id.is_none();
     let event = if is_new {
         info!(%worker_id, name = %worker.name, "worker registered");
-        fleet_core::FleetEvent::worker_joined(
-            worker_id,
-            &worker.name,
-            &worker.endpoint,
-        )
+        fleet_core::FleetEvent::worker_joined(worker_id, &worker.name, &worker.endpoint)
     } else {
         info!(%worker_id, name = %worker.name, "worker re-registered");
-        // 재등록은 별도 이벤트가 없으므로 WorkerHeartbeat로 처리
         fleet_core::FleetEvent::WorkerHeartbeat {
             worker_id,
             active_tasks: 0,
@@ -323,6 +286,351 @@ pub async fn deregister_worker(
 }
 
 // ── 헬퍼 ────────────────────────────────────────────────────────────────
+
+/// `POST /v1/workers/join` — 부트스트랩 토큰으로 신규 워커 등록 (Phase 8.3).
+///
+/// `/register`와 달리:
+/// - 요청 본문의 `token`을 Store.consume_bootstrap_token으로 atomic하게 검증.
+///   (인증 미들웨어의 bearer token과 별개)
+/// - 응답에 worker_config_toml을 포함하여 클라이언트가 디스크에 바로 기록 가능.
+/// - 항상 신규 worker_id 발급 (재등록은 `/register` 사용).
+pub async fn join_worker(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<JoinRequest>,
+) -> Result<Json<JoinResponse>, ApiError> {
+    if req.token.trim().is_empty() {
+        return Err(ApiError::BadRequest("token must not be empty".into()));
+    }
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+    validate_worker_name(name)?;
+    if req.agent_endpoint.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "agent_endpoint must not be empty".into(),
+        ));
+    }
+
+    // 1. 부트스트랩 토큰 atomic 소비.
+    if let Err(e) = state.store.consume_bootstrap_token(&req.token, name).await {
+        match e {
+            fleet_store::StoreError::BootstrapTokenInvalid(msg) => {
+                return Err(ApiError::Unauthorized(format!(
+                    "bootstrap token rejected: {msg}"
+                )));
+            }
+            other => return Err(other.into()),
+        }
+    }
+
+    // 2. 동일 name이 이미 존재하면 거부 — join은 항상 신규.
+    if let Some(_existing) = state.store.get_worker_by_name(name).await? {
+        return Err(ApiError::Conflict(format!(
+            "worker name '{name}' already exists — use POST /v1/workers/register to re-register"
+        )));
+    }
+
+    // 3. Worker 엔티티 생성 + 등록.
+    let worker_id = WorkerId::new();
+    let worker = build_worker(
+        worker_id,
+        name,
+        req.agent_endpoint.as_str(),
+        req.labels.clone(),
+        req.max_concurrent_tasks,
+        req.worker_version.clone(),
+        None,
+    );
+    let worker_id = upsert_and_register(&state, &worker).await?;
+
+    info!(%worker_id, name = %worker.name, "worker joined via bootstrap token");
+    let _ = state
+        .store
+        .append_event(&fleet_core::FleetEvent::worker_joined(
+            worker_id,
+            &worker.name,
+            &worker.endpoint,
+        ))
+        .await;
+
+    // 4. worker.toml 렌더링.
+    let worker_config_toml = render_worker_config_toml(
+        name,
+        &req.agent_endpoint,
+        &req.labels,
+        &req.token,
+        worker_id,
+        state.heartbeat_interval_secs,
+        req.max_concurrent_tasks,
+    );
+
+    Ok(Json(JoinResponse {
+        worker_id: worker_id.to_string(),
+        heartbeat_interval_secs: state.heartbeat_interval_secs,
+        config_revision: 1,
+        orchestrator_version: env!("CARGO_PKG_VERSION"),
+        status: "online",
+        worker_config_toml,
+    }))
+}
+
+/// `POST /v1/bootstrap-tokens` — 어드민이 부트스트랩 토큰 발급.
+pub async fn create_bootstrap_token(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateBootstrapTokenRequest>,
+) -> Result<Json<CreateBootstrapTokenResponse>, ApiError> {
+    if !(8..=256).contains(&req.bytes) {
+        return Err(ApiError::BadRequest(format!(
+            "bytes must be between 8 and 256 (got {})",
+            req.bytes
+        )));
+    }
+    if req.max_uses == 0 {
+        return Err(ApiError::BadRequest("max_uses must be >= 1".into()));
+    }
+    if req.prefix.chars().any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+        return Err(ApiError::BadRequest(
+            "prefix must be alphanumeric, '_', or '-' only".into(),
+        ));
+    }
+
+    let raw = generate_random_bytes(req.bytes)
+        .map_err(|e| ApiError::Internal(format!("CSPRNG failure: {e}")))?;
+    let encoded = base64url(&raw);
+    let token = if req.prefix.is_empty() {
+        encoded
+    } else {
+        format!("{}_{}", req.prefix, encoded)
+    };
+    let now = Utc::now();
+    let expires_at = req.expires_in_secs.map(|s| now + chrono::Duration::seconds(s as i64));
+
+    let bt = fleet_core::BootstrapToken {
+        token: token.clone(),
+        created_at: now,
+        created_by: req.created_by.clone(),
+        expires_at,
+        max_uses: req.max_uses,
+        use_count: 0,
+        notes: req.notes.clone(),
+        last_used_by: None,
+        last_used_at: None,
+    };
+    state.store.create_bootstrap_token(&bt).await?;
+
+    info!(token_prefix = %req.prefix, max_uses = req.max_uses, "bootstrap token issued");
+    Ok(Json(CreateBootstrapTokenResponse {
+        token,
+        created_at: now,
+        expires_at,
+        max_uses: req.max_uses,
+    }))
+}
+
+/// `GET /v1/bootstrap-tokens` — 발급된 토큰 목록.
+pub async fn list_bootstrap_tokens(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<BootstrapTokenSummary>>, ApiError> {
+    let tokens = state.store.list_bootstrap_tokens().await?;
+    Ok(Json(tokens.into_iter().map(BootstrapTokenSummary::from).collect()))
+}
+
+/// `DELETE /v1/bootstrap-tokens/:token` — 토큰 회수.
+pub async fn revoke_bootstrap_token(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let revoked = state.store.revoke_bootstrap_token(&token).await?;
+    if !revoked {
+        return Err(ApiError::NotFound(format!(
+            "bootstrap token not found: {token}"
+        )));
+    }
+    info!("bootstrap token revoked");
+    Ok(Json(serde_json::json!({
+        "status": "revoked",
+        "token": token,
+    })))
+}
+
+/// worker.toml 문자열 렌더링.
+///
+/// 클라이언트가 받아서 그대로 디스크에 기록할 수 있는 TOML을 생성.
+/// `[worker] existing_worker_id`를 포함하여, 이후 재시작 시 동일 ID로 재등록 가능.
+fn render_worker_config_toml(
+    name: &str,
+    agent_endpoint: &str,
+    labels: &HashMap<String, String>,
+    bootstrap_token: &str,
+    worker_id: WorkerId,
+    heartbeat_interval_secs: u32,
+    max_concurrent_tasks: u32,
+) -> String {
+    // server-key 시크릿 추출 (agent_endpoint에 포함된 경우).
+    let grok_secret = agent_endpoint
+        .find("server-key=")
+        .map(|i| {
+            let start = i + "server-key=".len();
+            let rest = &agent_endpoint[start..];
+            let end = rest.find(['&', '#']).unwrap_or(rest.len());
+            &rest[..end]
+        })
+        .unwrap_or("<replace-with-grok-secret>");
+
+    // bind_addr 추출 시도 (endpoint에서 host:port).
+    let bind_addr = agent_endpoint
+        .split("://")
+        .nth(1)
+        .map(|rest| {
+            let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            &rest[..host_end]
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or("127.0.0.1:2419");
+
+    let mut out = String::new();
+    out.push_str("# worker.toml — generated by fleet orchestrator (Phase 8.3 join)\n\n");
+
+    out.push_str("[worker]\n");
+    out.push_str(&format!("name = \"{name}\"\n"));
+    out.push_str("orchestrator_url = \"<set-to-your-orchestrator-url>\"\n");
+    out.push_str(&format!("heartbeat_interval_secs = {heartbeat_interval_secs}\n"));
+    out.push_str(&format!("bootstrap_token = \"{bootstrap_token}\"\n"));
+    out.push_str(&format!("existing_worker_id = \"{worker_id}\"\n"));
+    if !labels.is_empty() {
+        let mut sorted: Vec<_> = labels.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        let pairs: Vec<String> = sorted
+            .iter()
+            .map(|(k, v)| format!("{k} = \"{v}\""))
+            .collect();
+        out.push_str(&format!("labels = {{ {} }}\n", pairs.join(", ")));
+    }
+    out.push_str("\n[grok]\n");
+    out.push_str("bin = \"/usr/local/bin/grok\"\n");
+    out.push_str(&format!("bind_addr = \"{bind_addr}\"\n"));
+    out.push_str(&format!("secret = \"{grok_secret}\"\n"));
+    out.push_str(&format!("max_concurrent_tasks = {max_concurrent_tasks}\n"));
+    out.push_str("restart_delay_secs = 5\n");
+
+    out
+}
+
+/// 운영체제 CSPRNG에서 n 바이트 읽기.
+fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    #[cfg(unix)]
+    {
+        let mut f = std::fs::File::open("/dev/urandom")?;
+        f.read_exact(&mut buf)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut filled = 0;
+        while filled < n {
+            let id = uuid::Uuid::new_v4();
+            let b = id.as_bytes();
+            let take = (n - filled).min(b.len());
+            buf[filled..filled + take].copy_from_slice(&b[..take]);
+            filled += take;
+        }
+    }
+    Ok(buf)
+}
+
+/// base64url-no-pad 인코딩.
+fn base64url(input: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
+    let mut chunks = input.chunks_exact(3);
+    for c in &mut chunks {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(n & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let n = (rem[0] as u32) << 16;
+            out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        }
+        2 => {
+            let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        }
+        _ => {}
+    }
+    out
+}
+
+// ── 기존 헬퍼 ────────────────────────────────────────────────────────────
+
+/// DNS-safe 워커 이름 검증.
+fn validate_worker_name(name: &str) -> Result<(), ApiError> {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(ApiError::BadRequest(
+            "name must be alphanumeric, '-', '_', or '.' only".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `Worker` 엔티티 생성. 기존 워커가 있으면 registered_at을 유지.
+fn build_worker(
+    worker_id: WorkerId,
+    name: &str,
+    endpoint: &str,
+    labels: HashMap<String, String>,
+    max_concurrent: u32,
+    worker_version: Option<String>,
+    existing: Option<&Worker>,
+) -> Worker {
+    let now = Utc::now();
+    let registered_at = existing.map(|w| w.registered_at).unwrap_or(now);
+    Worker {
+        id: worker_id,
+        name: name.to_string(),
+        endpoint: endpoint.to_string(),
+        labels,
+        status: WorkerStatus::Online,
+        last_seen: Some(now),
+        active_tasks: 0,
+        max_concurrent,
+        circuit_state: fleet_core::CircuitState::Closed,
+        worker_version,
+        registered_at,
+    }
+}
+
+/// Store upsert + transport.register 호출. transport 실패는 warn 로그만.
+async fn upsert_and_register(
+    state: &AppState,
+    worker: &Worker,
+) -> Result<WorkerId, ApiError> {
+    state.store.upsert_worker(worker).await?;
+    if let Some(transport) = &state.transport {
+        if let Err(e) = transport.register(worker.id, &worker.endpoint).await {
+            tracing::warn!(
+                worker_id = %worker.id,
+                endpoint = %worker.endpoint,
+                error = %e,
+                "transport.register failed — worker is in Store but cannot accept tasks until healthy"
+            );
+        }
+    }
+    Ok(worker.id)
+}
 
 fn parse_status(s: &str) -> Result<WorkerStatus, ApiError> {
     match s {

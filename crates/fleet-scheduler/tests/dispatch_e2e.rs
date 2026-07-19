@@ -24,8 +24,9 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use fleet_core::{
-    CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput,
-    TaskRequest, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
+    TaskOutput, TaskRequest, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    WorkerStatus,
 };
 use fleet_scheduler::{Dispatcher, FleetState};
 use fleet_store::{Store, StoreError};
@@ -209,6 +210,18 @@ impl Store for InMemoryStore {
 
     async fn migrate(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+    async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+        unimplemented!()
+    }
+    async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
+        unimplemented!()
     }
 }
 

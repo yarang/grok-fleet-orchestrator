@@ -124,7 +124,7 @@ mod tests {
     use crate::breaker::BreakerRegistry;
     use async_trait::async_trait;
     use fleet_core::{
-        CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
+        BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
         TaskOutput, TaskRequest, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
         WorkerStatus,
     };
@@ -201,6 +201,18 @@ mod tests {
         }
         async fn migrate(&self) -> Result<(), StoreError> {
             Ok(())
+        }
+        async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
+            unimplemented!()
+        }
+        async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
+            unimplemented!()
         }
     }
 
