@@ -6,6 +6,48 @@
 
 ## [Unreleased]
 
+### Added — Phase 8.5.1: mTLS 클라이언트 구성 (orchestrator→worker wss://)
+
+- **`fleet-transport` `mtls` feature**: rustls 0.23 + rustls-pemfile 2 + tokio-rustls 0.26
+  을 옵션 의존성으로 추가. `acp` feature에 의존하므로 `--features "acp mtls"` 로 활성화.
+- **`ClientTlsConfig`** (`fleet-transport/src/tls.rs`): 사설 CA PEM + 클라이언트
+  인증서 PEM + 클라이언트 키 PEM 경로를 보관. `build_connector()` / `build_client_config()`
+  으로 rustls `TlsConnector` / `ClientConfig` 생성. 매 호출마다 파일을 다시 읽어
+  인증서 갱신 시 프로세스 재시작 불필요.
+- **`TlsError`** 에러 타입: 파일 읽기 / 파싱 / 빌드 단계 구분.
+- **`WsConn::connect_mtls(url, &ClientTlsConfig)`** (`acp/transport.rs`): tokio-tungstenite
+  의 `Connector::Rustls(Arc<ClientConfig>)` 를 주입해 mTLS 핸드셰이크 수행.
+  `wss://` URL만 허용.
+- 기존 `WsConn::connect` 는 `into_client_request()` 기반으로 리팩터. Host /
+  Sec-WebSocket-* 헤더 자동 설정.
+
+### Tests — Phase 8.5.1
+
+- **`crates/fleet-transport/tests/mtls_handshake.rs`** 신규 3개 통합 테스트:
+  - `wsconn_connect_mtls_roundtrips_text` — rcgen 으로 ephemeral CA + 서버/클라이언트
+    인증서 발급 → 클라이언트 인증서를 요구하는 TLS WebSocket echo 서버 구동 →
+    `WsConn::connect_mtls` 로 접속해 텍스트 프레임 라운드트립.
+  - `wsconn_connect_mtls_rejects_ws_url` — `ws://` URL은 `connect_mtls`에서 거부.
+  - `wsconn_connect_mtls_fails_with_untrusted_client_cert` — 서버가 신뢰하지 않는
+    CA로 서명한 클라이언트 인증서는 핸드셰이크 단계에서 거부됨을 검증.
+- 총 **334개 통과**, 3개 `#[ignore]` (Phase 8.4의 331 대비 +3). clippy `-D warnings`
+  통과 (`--features "acp mtls"`).
+
+### Changed — Phase 8.5.1
+
+- **Workspace deps**: `rustls = "0.23"` (default-features = false, ring + std +
+  logging), `rustls-pemfile = "2"`, `tokio-rustls = "0.26"`, `rcgen = "0.13"` 추가.
+- **`fleet-transport` 의존성 변경**: `tokio-tungstenite` 의 TLS feature를
+  `rustls-tls-native-roots` → `rustls-tls-webpki-roots` 로 교체 (이식성 향상,
+  system root 의존 제거).
+
+### Notes — Phase 8.5.1
+
+- `ClientTlsConfig` 는 rustls 0.23 의 CryptoProvider 문제를 피하기 위해
+  `builder_with_provider(Arc<ring::default_provider()>)` 를 사용.
+- `AcpTransport` 에 mTLS 구성을 plumbed하는 것은 Phase 8.5.3에서 수행
+  (orchestrator CLI 플래그와 함께).
+
 ### Added — Phase 8.4: 동시 다중 세션 per worker
 
 - **`WorkerTransport::register` 시그니처 변경**: `max_concurrent_tasks: u32` 인수

@@ -35,12 +35,16 @@ pub mod mock;
 pub mod acp;
 #[cfg(feature = "acp")]
 pub mod acp_transport;
+#[cfg(feature = "mtls")]
+pub mod tls;
 
 pub use error::TransportError;
 pub use mock::{MockTransport, MockWorker};
 
 #[cfg(feature = "acp")]
 pub use acp_transport::{AcpTransport, ConnState, ReconnectConfig};
+#[cfg(feature = "mtls")]
+pub use tls::{ClientTlsConfig, TlsError};
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};

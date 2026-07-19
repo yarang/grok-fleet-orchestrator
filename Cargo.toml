@@ -61,6 +61,12 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # MCP / JSON-RPC
 tokio-util = "0.7"
 
+# TLS (Phase 8.5: mTLS for orchestrator↔worker ACP)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+rcgen = "0.13"
+
 # SSH 프로비저닝 (Phase 4)
 russh = "0.46"
 russh-keys = "0.46"

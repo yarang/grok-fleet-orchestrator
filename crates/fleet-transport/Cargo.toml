@@ -17,6 +17,14 @@ acp = [
     "dep:url",
     "dep:rand",
 ]
+# mTLS client support for the ACP WebSocket (Phase 8.5).
+# Enables wss:// endpoints with custom CA + client cert.
+mtls = [
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:tokio-rustls",
+    "acp",
+]
 
 [dependencies]
 fleet-core = { workspace = true }
@@ -29,10 +37,15 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 
 # ACP-only (optional)
-tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", optional = true }
 url = { version = "2", optional = true }
 rand = { version = "0.8", optional = true }
+
+# mTLS-only (optional; Phase 8.5)
+rustls = { workspace = true, optional = true, features = ["ring"] }
+rustls-pemfile = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -42,3 +55,8 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 tower = { version = "0.5" }
 http-body-util = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rcgen = { workspace = true }
+# mTLS 테스트 (mtls feature 활성화 시 사용). 중복 버전 회피를 위해 workspace 진실 공급원 사용.
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
