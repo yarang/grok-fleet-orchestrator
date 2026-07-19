@@ -3,9 +3,111 @@
 이 문서는 Grok Fleet Orchestrator를 로컬 개발에서 프로덕션까지 배포하는 방법을
 다룁니다.
 
+## 0. 설치
+
+orchestrator 바이너리(`fleet`)와 워커 데몬(`fleet-worker`)을 내려받는 세 가지 방법.
+운영 환경에서는 **(A)** 를 기본으로, cargo 가 이미 있다면 **(B)** 가 더 빠르다.
+소스 수정 중이거나 특정 feature 조합이 필요하면 **(C)**.
+
+### (A) install.sh — curl | bash 원라인 설치
+
+```bash
+curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/download/install.sh \
+  | bash
+```
+
+이 명령은:
+
+1. OS · 아키텍처 자동 감지 (Linux/macOS × x86_64/aarch64).
+2. GitHub Release 에서 미리 빌드된 tarball 다운로드 (`fleet-v<ver>-<target>.tar.gz`).
+3. `sha256sum` 으로 무결성 검증 (`fleet-v<ver>-checksums.txt`).
+4. `fleet` + `fleet-worker` 바이너리를 `~/.local/bin` (또는 `--bin-dir`)에 설치.
+5. `~/.zshrc` / `~/.bashrc` 에 `PATH` 추가 (이미 있으면 skip).
+
+주요 플래그:
+
+| 플래그               | 용도                                                |
+|----------------------|-----------------------------------------------------|
+| `--version <tag>`    | 특정 릴리스 설치 (예: `v0.1.0`). 미지정 시 latest. |
+| `--bin-dir <path>`   | 설치 경로 오버라이드 (기본 `~/.local/bin`).         |
+| `--user`             | 시스템 전역(`/usr/local/bin`) 대신 사용자 디렉토리. |
+| `--no-modify-path`   | 셸 rc 파일 수정하지 않음.                           |
+| `--build`            | tarball 대신 `cargo build --release` 폴백.          |
+| `--dry-run`          | 다운로드/설치 단계 출력만 하고 실제 실행은 skip.    |
+| `--uninstall`        | 설치 제거 (또는 `uninstall.sh` 실행).               |
+| `--help`             | 전체 도움말.                                        |
+
+환경변수: `FLEET_VERSION=<tag>`, `FLEET_BIN_DIR=<path>`.
+
+설치 확인:
+
+```bash
+fleet --version
+fleet-worker --version
+fleet doctor   # 아직 DB 없으면 실패 — 다음 단계 참조
+```
+
+제거:
+
+```bash
+curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/download/uninstall.sh \
+  | bash
+# 또는
+install.sh --uninstall
+# --purge 를 붙이면 /etc/fleet, ~/.config/fleet 도 함께 제거
+```
+
+### (B) cargo-binstall — cargo 패키지 매니저 통합
+
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall) 가 설치되어 있으면
+GitHub Release tarball 을 직접 내려받아 cargo 의 바이너리 디렉토리에 배치.
+
+```bash
+cargo binstall --git https://github.com/yarang/grok-fleet-orchestrator \
+    fleet-cli fleet-worker
+```
+
+`fleet-cli` 패키지는 `fleet` 바이너리를, `fleet-worker` 패키지는
+`fleet-worker` 바이너리를 제공한다. 두 패키지 모두 동일한 tarball 에서
+해당 바이너리만 추출한다 (cargo-binstall 메타데이터는 각 Cargo.toml 의
+`[package.metadata.binstall]` 참조).
+
+### (C) 소스에서 빌드
+
+```bash
+git clone https://github.com/yarang/grok-fleet-orchestrator
+cd grok-fleet-orchestrator
+
+# release 빌드 (acp + mtls feature 포함; release.yml 과 동일)
+cargo build --release --features "acp mtls"
+
+# 결과:
+#   target/release/fleet         (~10MB)
+#   target/release/fleet-worker  (~5MB)
+
+sudo cp target/release/fleet target/release/fleet-worker /usr/local/bin/
+```
+
+`acp` 가 기본 feature 이지만 `mtls` 는 명시해야 한다.
+`--no-default-features` 로 최소 빌드도 가능 (이 경우 `--transport mock` 만 사용 가능).
+
+### 샘플 설정 파일
+
+`examples/` 디렉토리에 운영용 샘플이 준비되어 있다:
+
+| 파일                       | 용도                                            |
+|----------------------------|-------------------------------------------------|
+| `examples/worker.toml`     | fleet-worker 가 읽는 메인 설정                  |
+| `examples/workers.yaml`    | SSH 자동 프로비저닝용 인벤토리                  |
+| `examples/fleet.service`   | orchestrator 용 systemd 유닛                    |
+| `examples/fleet-worker.service` | 워커 데몬용 systemd 유닛                  |
+| `examples/fleet.env`       | orchestrator 환경변수                           |
+| `examples/mcp-clients.json`| MCP 클라이언트(grok build, Claude, Cursor 등) 연결 예시 |
+| `examples/README.md`       | 전체 배포 플로우 + 커스터마이징 체크리스트      |
+
 ## 사전 요구사항
 
-- Rust 1.75+ (rustup 권장)
+- Rust 1.75+ (rustup 권장) — **소스 빌드 시에만 필요**, install.sh / cargo-binstall 은 Rust 없이도 동작
 - PostgreSQL 14+ (15 또는 16 권장)
 - (워커 머신) Linux x86_64 또는 arm64, systemd
 

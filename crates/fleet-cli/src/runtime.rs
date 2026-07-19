@@ -55,6 +55,9 @@ fn database_url() -> Result<String> {
 ///
 /// 세 값이 모두 `Some` 이거나 모두 `None` 이어야 함 (`requires` 제약).
 /// `Some` 인 경우 `AcpTransport` 가 `wss://` endpoint 에 mTLS 핸드셰이크를 수행.
+//
+// acp 와 mtls 가 모두 꺼진 최소 빌드에서는 어디서도 읽히지 않으므로 dead_code 허용.
+#[cfg_attr(not(any(feature = "acp", feature = "mtls")), allow(dead_code))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MtlsFlags<'a> {
     /// 사설 CA 인증서 PEM 경로.
@@ -145,6 +148,9 @@ fn sanitize_url(url: &str) -> String {
 }
 
 /// `serve` 명령 실행.
+//
+// acp feature 가 꺼진 최소 빌드에서는 mtls_flags 가 사용되지 않으므로 unused 허용.
+#[cfg_attr(not(feature = "acp"), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub async fn run_serve(
     transport_kind: &str,

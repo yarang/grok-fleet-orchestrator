@@ -1,0 +1,71 @@
+# examples/fleet.service
+#
+# Grok Fleet Orchestrator 용 systemd 유닛.
+# 사용:
+#   sudo cp examples/fleet.service /etc/systemd/system/fleet.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fleet
+#
+# 로그 확인:
+#   journalctl -u fleet -f
+#
+# 주의: 환경에 맞춰 User, WorkingDirectory, EnvironmentFile 경로 수정할 것.
+
+[Unit]
+Description=Grok Fleet Orchestrator (MCP server + HTTP API + dashboard)
+Documentation=https://github.com/yarang/grok-fleet-orchestrator
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Postgres 가 다른 머신에 있다면 아래 줄을 제거하고 식별 가능한
+# remote-db.target 등으로 교체.
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=fleet
+Group=fleet
+WorkingDirectory=/var/lib/fleet
+
+# /etc/fleet/fleet.env 파일에서 아래 환경변수를 덮어쓸 수 있다:
+#   DATABASE_URL=postgres://fleet:secret@db.example.com/fleet
+#   FLEET_API_TOKENS=token1,token2
+#   FLEET_HTTP_BIND=0.0.0.0:8081
+#   FLEET_DASHBOARD_BIND=0.0.0.0:8082
+#   RUST_LOG=fleet=info,sqlx=warn
+EnvironmentFile=-/etc/fleet/fleet.env
+
+# 명령행 인자도 환경변수도 아니면 fleet serve 의 기본값이 사용된다.
+# DATABASE_URL 만은 반드시 설정되어야 한다.
+ExecStart=/usr/local/bin/fleet serve \
+    --transport acp \
+    --health-interval-secs 15 \
+    --health-missed 3 \
+    --db-max-conn 20
+
+# graceful shutdown: SIGTERM 후 30초 대기.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# 보안 강화 (systemd 240+ 권장).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fleet
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# 리소스 제한 (환경에 맞춰 조정).
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

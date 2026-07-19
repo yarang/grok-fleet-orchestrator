@@ -7,7 +7,40 @@
 Claude Code, Gemini CLI, Codex, Cursor 등 MCP를 지원하는 모든 AI 코딩 도구에서
 원격 워커 풀을 동일한 인터페이스로 사용할 수 있습니다.
 
-> **상태**: 0.1.0 개발 중 — Phase 1~7 완료. Phase 8.1 (fleet-worker 데몬) 완료. Phase 8.2+ 진행 예정.
+> **상태**: 0.1.0 — Phase 1~8.5 완료. 설치 인프라(install.sh, GitHub Release, cargo-binstall) 갖춰짐.
+
+## 설치
+
+세 가지 방법. 운영 환경에서는 (A) 가 기본, cargo 가 있다면 (B) 도 가능.
+
+### (A) install.sh (curl | bash)
+
+```bash
+curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/download/install.sh \
+  | bash
+```
+
+`fleet` + `fleet-worker` 바이너리를 `~/.local/bin` 에 설치하고 PATH 에 추가.
+`--bin-dir`, `--version`, `--build`, `--uninstall` 등의 플래그 지원 (`install.sh --help`).
+
+### (B) cargo-binstall
+
+```bash
+cargo binstall --git https://github.com/yarang/grok-fleet-orchestrator fleet-cli fleet-worker
+```
+
+### (C) 소스 빌드
+
+```bash
+git clone https://github.com/yarang/grok-fleet-orchestrator
+cd grok-fleet-orchestrator
+cargo build --release --features "acp mtls"
+# target/release/{fleet, fleet-worker}
+```
+
+운영용 샘플 설정은 `examples/` 디렉토리 참조 (`worker.toml`, `workers.yaml`,
+`fleet.service`, `fleet-worker.service`, `fleet.env`, `mcp-clients.json`).
+자세한 설치 절차는 [`docs/deployment.md`](docs/deployment.md#0-설치) 의 §0.
 
 ## 주요 특징
 
@@ -106,6 +139,7 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 - [`docs/architecture.md`](docs/architecture.md) — 시스템 아키텍처, 데이터 흐름, 핵심 추상화
 - [`docs/api-reference.md`](docs/api-reference.md) — HTTP API + MCP 도구 레퍼런스
 - [`docs/deployment.md`](docs/deployment.md) — 단일 서버 및 분산 배포 가이드 (Cloudflare Tunnel 포함)
+- [`examples/`](examples/) — 운영용 샘플 설정 (`worker.toml`, `workers.yaml`, systemd units, MCP 클라이언트 예시)
 
 ## 라이선스
 

@@ -1,0 +1,82 @@
+{
+  "_comment": "examples/mcp-clients.json — MCP 클라이언트(grok build, Claude Code, Cursor, Gemini CLI 등) 연결 예시. 이 파일 자체는 JSON-with-comments(JSONC) 이며 실제 클라이언트 설정 파일에는 주석을 포함할 수 없으므로 복사 후 // 줄을 제거할 것.",
+
+  "_clients": {
+    "grok_build": {
+      "_path": "~/.config/grok/mcp.json",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "command": "/usr/local/bin/fleet",
+            "args": ["serve"]
+          }
+        }
+      }
+    },
+
+    "claude_desktop": {
+      "_path": "~/Library/Application Support/Claude/claude_desktop_config.json (macOS) 또는 ~/.config/Claude/claude_desktop_config.json (Linux)",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "command": "/usr/local/bin/fleet",
+            "args": ["serve"]
+          }
+        }
+      }
+    },
+
+    "cursor": {
+      "_path": "~/.cursor/mcp.json",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "command": "/usr/local/bin/fleet",
+            "args": ["serve"]
+          }
+        }
+      }
+    },
+
+    "gemini_cli": {
+      "_path": "~/.gemini/settings.json 의 mcpServers 필드",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "command": "/usr/local/bin/fleet",
+            "args": ["serve"]
+          }
+        }
+      }
+    },
+
+    "stdio_over_ssh": {
+      "_comment": "orchestrator 가 원격 머신에 있다면 ssh 를 통해 stdio 연결. MCP 는 stdin/stdout 만 사용하므로 SSH 터널이면 충분.",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "command": "ssh",
+            "args": [
+              "fleet@orchestrator-host",
+              "/usr/local/bin/fleet serve"
+            ]
+          }
+        }
+      }
+    },
+
+    "remote_http": {
+      "_comment": "fleet serve 가 --http-bind 0.0.0.0:8081 로 노출된 경우, MCP-over-HTTP 클라이언트는 다음과 같이 연결. bearer 토큰은 FLEET_API_TOKENS 중 하나.",
+      "_content": {
+        "mcpServers": {
+          "fleet": {
+            "url": "https://fleet.example.com/mcp",
+            "headers": {
+              "Authorization": "Bearer fleet-CHANGE_ME_TOKEN_1"
+            }
+          }
+        }
+      }
+    }
+  }
+}

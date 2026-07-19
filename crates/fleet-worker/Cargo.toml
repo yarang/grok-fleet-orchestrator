@@ -11,6 +11,15 @@ repository.workspace = true
 name = "fleet-worker"
 path = "src/main.rs"
 
+# ─── cargo-binstall 메타데이터 ─────────────────────────────────────────
+# `cargo binstall --git <repo> fleet-worker` 로 미리 빌드된 `fleet-worker`
+# 바이너리를 설치. tarball 은 fleet-cli 와 동일 (`fleet-v<ver>-<target>.tar.gz`),
+# 이 패키지는 그 안의 `fleet-worker` 파일만 추출한다.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/fleet-v{ version }-{ target }.tar.gz"
+bin-dir = "fleet-worker"
+pkg-fmt = "tgz"
+
 [lib]
 name = "fleet_worker"
 path = "src/lib.rs"

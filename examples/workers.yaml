@@ -1,0 +1,76 @@
+# examples/workers.yaml
+#
+# SSH 자동 프로비저닝용 인벤토리 (`fleet provision --inventory`).
+# `crates/fleet-provisioner/src/inventory.rs::Inventory` 스키마와 1:1 매핑.
+#
+# 사용:
+#   fleet provision --inventory examples/workers.yaml \
+#                   --ssh-key ~/.ssh/id_ed25519
+#
+# 동작:
+#   1. 각 호스트에 SSH 접속.
+#   2. (필요 시) cloudflared 설치 및 tunnel 연결.
+#   3. grok CLI + fleet-worker 바이너리 배포.
+#   4. /etc/fleet-worker/worker.toml 생성 (각 호스트의 name/labels 자동 치환).
+#   5. systemd 유닛 활성화 (examples/fleet-worker.service 참조).
+#   6. orchestrator 에 워커로 등록.
+
+# ─── 공통 기본값 (각 워커가 오버라이드 가능) ───────────────────────────
+defaults:
+  user: ubuntu
+  ssh_key: ~/.ssh/id_ed25519   # None 이면 --ssh-key 플래그 필수
+  ssh_port: 22
+  # Cloudflare API 토큰 — tunnel 자동 생성에 필요. 미지정 시 tunnel 건너뜀.
+  # cf_token: cloudflare-api-token-from-dashboard
+
+# ─── 프로비저닝 동작 옵션 ──────────────────────────────────────────────
+options:
+  # orchestrator 의 퍼블릭 URL. 워커의 worker.toml 에 자동으로 들어감.
+  orchestrator_url: https://fleet.example.com
+  # 동시에 프로비저닝할 호스트 수. 네트워크/disk I/O 고려해 조정.
+  parallel: 2
+  # 1차 실패 시 재시도.
+  retry_failed: true
+  # 이 태그가 달린 워커만 프로비저닝 (빈 배열 = 전체).
+  tags: []
+  # 이 이름의 워커만 프로비저닝 (빈 배열 = 전체).
+  only: []
+  # 실제 변경사항 없이 어떤 단계가 실행될지 미리 보기.
+  dry_run: false
+  # orchestrator 등록용 bootstrap 토큰. `fleet token new` 로 발급한 값.
+  # 운영 환경에서는 환경변수 FLEET_BOOTSTRAP_TOKEN 으로 주입 권장.
+  # bootstrap_token: fleet-xxxxxxxxxxxxxxxxxxxxxxxx
+
+# ─── 워커 목록 ─────────────────────────────────────────────────────────
+# 각 엔트리의 최소 필수 필드는 host, name, grok_secret.
+# grok_secret 은 워커의 worker.toml [grok] secret 으로 들어감 (ACP 인증).
+# 32바이트 랜덤 hex 권장 (`openssl rand -hex 32`).
+workers:
+  - host: 10.0.1.10
+    name: build-arm64-01
+    labels:
+      arch: arm64
+      gpu: "false"
+      region: ap-northeast-2
+    region: ap-northeast-2
+    grok_secret: "REPLACE_WITH_RANDOM_32_BYTE_HEX"
+
+  - host: 10.0.1.11
+    name: build-arm64-02
+    labels:
+      arch: arm64
+      gpu: "false"
+      region: ap-northeast-2
+    region: ap-northeast-2
+    grok_secret: "REPLACE_WITH_RANDOM_32_BYTE_HEX"
+
+  - host: 10.0.2.20
+    name: gpu-x86-01
+    user: ec2-user             # defaults.user 오버라이드
+    ssh_port: 2222             # defaults.ssh_port 오버라이드
+    labels:
+      arch: x86_64
+      gpu: "true"
+      region: us-west-2
+    region: us-west-2
+    grok_secret: "REPLACE_WITH_RANDOM_32_BYTE_HEX"

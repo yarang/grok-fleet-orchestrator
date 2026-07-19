@@ -20,6 +20,21 @@ mtls = ["fleet-transport/mtls", "dep:rcgen"]
 name = "fleet"
 path = "src/main.rs"
 
+# ─── cargo-binstall 메타데이터 ─────────────────────────────────────────
+# `cargo binstall --git <repo> fleet-cli` 로 미리 빌드된 `fleet` 바이너리를
+# 설치. tarball 은 release.yml 에서 생성되며 동일 아카이브에 `fleet-worker`
+# 바이너리도 함께 포함되어 있다 (fleet-worker 패키지 메타데이터 참조).
+#
+# 템플릿 변수:
+#   { repo }    = workspace.package.repository
+#   { version } = Cargo.toml version (v 접두사 없음)
+#   { target }  = rustc target triple (예: x86_64-unknown-linux-gnu)
+#   { bin }     = `[[bin]] name` (위에서 "fleet")
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/fleet-v{ version }-{ target }.tar.gz"
+bin-dir = "{ bin }"
+pkg-fmt = "tgz"
+
 [dependencies]
 fleet-core = { workspace = true }
 fleet-store = { workspace = true }

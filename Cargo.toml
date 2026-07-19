@@ -89,3 +89,14 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# ─── cargo-binstall 메타데이터 ─────────────────────────────────────────
+# `cargo binstall --git <this-repo> fleet-cli` 로 미리 빌드된 바이너리를 설치.
+# 각 tarball 의 layout (release.yml 참조):
+#   fleet-<version>-<target>.tar.gz
+#     ├─ fleet           (orchestrator binary)
+#     ├─ fleet-worker    (worker daemon binary)
+#     ├─ install.sh
+#     └─ README.md
+# 실제 메타데이터는 `crates/fleet-cli/Cargo.toml` 의 `[package.metadata.binstall]`
+# 참조. workspace 메타데이터는 단순 문서화 용도.

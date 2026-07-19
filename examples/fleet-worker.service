@@ -1,0 +1,67 @@
+# examples/fleet-worker.service
+#
+# fleet-worker 데몬용 systemd 유닛.
+# 이 파일은 `fleet provision` 이 원격 서버에 자동으로 배포하지만,
+# 수동 설치 시 아래와 같이 설정한다.
+#
+# 사용:
+#   sudo cp examples/fleet-worker.service /etc/systemd/system/fleet-worker.service
+#   sudo cp examples/worker.toml /etc/fleet-worker/worker.toml  # 값 채운 버전
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fleet-worker
+#
+# 로그 확인:
+#   journalctl -u fleet-worker -f
+
+[Unit]
+Description=Grok Fleet Worker (manages grok agent serve + registers with orchestrator)
+Documentation=https://github.com/yarang/grok-fleet-orchestrator
+After=network-online.target
+Wants=network-online.target
+# grok 서브프로세스를 띄우므로 PATH 가 /usr/local/bin 등을 포함해야 한다.
+AssertPathExists=/etc/fleet-worker/worker.toml
+AssertPathExists=/usr/local/bin/grok
+
+[Service]
+Type=simple
+User=fleet-worker
+Group=fleet-worker
+WorkingDirectory=/var/lib/fleet-worker
+
+# PATH 에 /usr/local/bin 을 포함시켜야 fleet-worker 가 grok 을 찾을 수 있다.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# RUST_LOG=fleet_worker=info,grok_process=debug
+EnvironmentFile=-/etc/fleet-worker/fleet-worker.env
+
+ExecStart=/usr/local/bin/fleet-worker --config /etc/fleet-worker/worker.toml
+
+# grok 서브프로세스도 함께 종료.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+# 핵심: worker_id 파일을 /var/lib/fleet-worker 에 유지해야
+# 재시작 후에도 동일한 worker_id 로 재등록됨.
+StateDirectory=fleet-worker
+RuntimeDirectory=fleet-worker
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fleet-worker /var/log/fleet-worker
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
