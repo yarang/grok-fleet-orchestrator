@@ -60,7 +60,10 @@ jobs:
         run: cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings
 
       - name: cargo test (acp+mtls)
-        run: cargo test --workspace --features "acp mtls" -- --nocapture --test-threads=4
+        # --test-threads=1 필수: fleet-store integration test 가 TRUNCATE ... CASCADE 로
+        # 매 테스트마다 테이블을 비우므로 병렬 실행하면 race condition 발생.
+        # cf. crates/fleet-store/tests/integration.rs 헤더 주석.
+        run: cargo test --workspace --features "acp mtls" -- --test-threads=1
 
   test-no-default:
     name: Test + Clippy (no features)
@@ -96,7 +99,8 @@ jobs:
       - name: cargo clippy (no-default-features)
         run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
       - name: cargo test (no-default-features)
-        run: cargo test --workspace --no-default-features
+        # 위 test job 과 동일한 이유로 직렬 실행.
+        run: cargo test --workspace --no-default-features -- --test-threads=1
 
   shellcheck:
     name: Shellcheck install/uninstall
