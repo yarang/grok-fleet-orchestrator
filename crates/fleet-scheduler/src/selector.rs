@@ -250,11 +250,7 @@ mod tests {
         ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
             unimplemented!()
         }
-        async fn delete_worker_credential(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<bool, StoreError> {
+        async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
             unimplemented!()
         }
     }

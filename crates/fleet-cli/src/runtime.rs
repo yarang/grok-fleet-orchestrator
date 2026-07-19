@@ -715,6 +715,7 @@ pub struct ProvisionArgs {
     pub fleet_worker_bin: Option<String>,
     pub grok_secret: Option<String>,
     pub bootstrap_token: Option<String>,
+    pub api_token: Option<String>,
     pub inventory: Option<String>,
     pub parallel: usize,
     pub tags: Vec<String>,
@@ -814,6 +815,12 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
     if let Some(p) = Some(args.parallel) {
         if p > 0 {
             options.parallel = p;
+        }
+    }
+    // CLI --api-token 이 있으면 inventory options 보다 우선.
+    if let Some(tok) = args.api_token.as_deref() {
+        if !tok.is_empty() {
+            options.api_token = Some(tok.to_string());
         }
     }
 
@@ -959,6 +966,7 @@ fn build_step_context(
         fleet_worker_bin: fleet_worker_bin.map(String::from),
         grok_secret: grok_secret.map(String::from),
         bootstrap_token: bootstrap_token.map(String::from),
+        orchestrator_api_token: args.api_token.clone(),
         dry_run,
         mtls_enabled: args.mtls_enabled,
         mtls_listen_addr: args.mtls_listen_addr.clone(),
@@ -986,6 +994,7 @@ fn build_inventory_step_context(
         fleet_worker_bin: None,
         grok_secret: w.grok_secret.clone(),
         bootstrap_token: options.bootstrap_token.clone(),
+        orchestrator_api_token: options.api_token.clone(),
         dry_run: options.dry_run,
         ..Default::default()
     };

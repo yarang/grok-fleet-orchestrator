@@ -182,9 +182,7 @@ impl EncryptedBlob {
 
     /// DB에서 로드.
     pub fn from_string(s: impl Into<String>) -> Self {
-        Self {
-            encoded: s.into(),
-        }
+        Self { encoded: s.into() }
     }
 }
 

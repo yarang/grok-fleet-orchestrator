@@ -136,6 +136,34 @@ impl Store for MemStore {
     async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
         unimplemented!()
     }
+    async fn upsert_worker_credential(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: Option<&str>,
+    ) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn get_worker_credential(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
+        unimplemented!()
+    }
+    async fn list_worker_credentials(
+        &self,
+        _: &str,
+    ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
+        unimplemented!()
+    }
+    async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
+        unimplemented!()
+    }
 }
 
 struct Server {

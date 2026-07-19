@@ -16,7 +16,7 @@ use crate::ssh::RemoteExecutor;
 use crate::steps::StepContext;
 use crate::steps::{
     CheckPrereqs, InstallCloudflared, InstallDeps, InstallFleetWorker, InstallGrok, PrereqReport,
-    StartServices, Step,
+    PushCredentials, StartServices, Step,
 };
 
 /// 개별 스텝 실행 결과 (report에 포함).
@@ -77,7 +77,16 @@ impl Playbook {
         Self { steps }
     }
 
-    /// 표준 Playbook (6개 스텝). `prereq`는 check_prereqs 이후 스텝들이 사용.
+    /// 표준 Playbook (7개 스텝). `prereq`는 check_prereqs 이후 스텝들이 사용.
+    ///
+    /// 스텝 순서:
+    /// 1. CheckPrereqs — 사전 검증
+    /// 2. InstallDeps — rust, cloudflared 바이너리
+    /// 3. InstallGrok — grok CLI
+    /// 4. InstallCloudflared — 터널 설정
+    /// 5. InstallFleetWorker — worker 바이너리 + worker.toml + systemd 유닛
+    /// 6. PushCredentials — orchestrator credentials → `/root/.grok/config.toml` 병합
+    /// 7. StartServices — systemd enable/start
     pub fn standard(prereq: &PrereqReport) -> Self {
         let steps: Vec<Arc<dyn Step>> = vec![
             Arc::new(CheckPrereqs::default()),
@@ -87,6 +96,7 @@ impl Playbook {
             Arc::new(InstallGrok::default()),
             Arc::new(InstallCloudflared::default()),
             Arc::new(InstallFleetWorker::default()),
+            Arc::new(PushCredentials::default()),
             Arc::new(StartServices::default()),
         ];
         Self::new(steps)
@@ -337,7 +347,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standard_playbook_has_six_steps() {
+    async fn standard_playbook_has_seven_steps() {
         let prereq = PrereqReport {
             os: "ubuntu".into(),
             arch: "x86_64".into(),
@@ -347,6 +357,9 @@ mod tests {
             has_systemd: true,
         };
         let pb = Playbook::standard(&prereq);
-        assert_eq!(pb.len(), 6);
+        assert_eq!(pb.len(), 7);
+        // 6번째 스텝이 PushCredentials 여야 함 (인덱스 5).
+        // step.name()은 trait 메서드라 내부 벡터 접근이 필요하지만
+        // Playbook::steps는 private 이므로 len()으로 대신 검증.
     }
 }

@@ -224,6 +224,12 @@ enum Command {
         #[arg(long, env = "FLEET_BOOTSTRAP_TOKEN")]
         bootstrap_token: Option<String>,
 
+        /// 오케스트레이터 관리 API 용 bearer 토큰.
+        /// PushCredentials 스텝이 credentials 엔드포인트 호출 시 사용.
+        /// bootstrap_token 과 별개 — `/v1/workers/:name/credentials` 권한 필요.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: Option<String>,
+
         /// 인벤토리 YAML 파일 경로. --host 대신 사용.
         #[arg(long, conflicts_with = "host")]
         inventory: Option<String>,
@@ -685,6 +691,7 @@ async fn main() -> Result<()> {
             fleet_worker_bin,
             grok_secret,
             bootstrap_token,
+            api_token,
             inventory,
             parallel,
             tags,
@@ -710,6 +717,7 @@ async fn main() -> Result<()> {
                 fleet_worker_bin,
                 grok_secret,
                 bootstrap_token,
+                api_token,
                 inventory,
                 parallel,
                 tags,

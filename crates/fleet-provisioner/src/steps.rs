@@ -12,6 +12,7 @@ pub mod install_cloudflared;
 pub mod install_deps;
 pub mod install_fleet_worker;
 pub mod install_grok;
+pub mod push_credentials;
 pub mod start_services;
 
 // 하위 모듈의 공개 타입을 steps:: 직접 노출.
@@ -20,6 +21,7 @@ pub use install_cloudflared::InstallCloudflared;
 pub use install_deps::InstallDeps;
 pub use install_fleet_worker::InstallFleetWorker;
 pub use install_grok::InstallGrok;
+pub use push_credentials::PushCredentials;
 pub use start_services::StartServices;
 
 // ── 공통 타입 ──────────────────────────────────────────────────────────
@@ -119,6 +121,10 @@ pub struct StepContext {
     pub max_concurrent_tasks: Option<u32>,
     /// 오케스트레이터 등록용 bootstrap bearer 토큰. None이면 worker.toml에서 생략.
     pub bootstrap_token: Option<String>,
+    /// 오케스트레이터 관리 API 호출용 bearer 토큰 (PushCredentials 스텝이 사용).
+    /// bootstrap_token 과 별개 스코프 — 이 토큰은 `/v1/workers/:name/credentials`
+    /// 등 관리 엔드포인트 접근 권한을 가져야 함.
+    pub orchestrator_api_token: Option<String>,
     /// Dry-run 모드: 실제 변경 없이 무엇을 할지 로깅만.
     pub dry_run: bool,
     // ── mTLS (Phase 8.5; 선택) ───────────────────────────────────────────

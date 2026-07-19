@@ -126,10 +126,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             axum::routing::put(handlers::put_worker_credential)
                 .get(handlers::list_worker_credentials),
         )
-        .route(
-            "/:model_id/export",
-            get(handlers::export_worker_credential),
-        )
+        .route("/:model_id/export", get(handlers::export_worker_credential))
         .route(
             "/:model_id",
             axum::routing::delete(handlers::delete_worker_credential),

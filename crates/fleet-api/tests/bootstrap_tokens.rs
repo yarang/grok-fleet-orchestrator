@@ -500,4 +500,32 @@ impl Store for BsStore {
     async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
         Ok(self.tokens.lock().unwrap().remove(token).is_some())
     }
+    async fn upsert_worker_credential(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: u32,
+        _: Option<&str>,
+    ) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn get_worker_credential(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
+        unimplemented!()
+    }
+    async fn list_worker_credentials(
+        &self,
+        _: &str,
+    ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
+        unimplemented!()
+    }
+    async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
+        unimplemented!()
+    }
 }

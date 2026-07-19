@@ -268,17 +268,19 @@ impl Store for MemStore {
         let mut creds = self.credentials.lock().unwrap();
         let key = (worker_name.to_string(), model_id.to_string());
         let now = chrono::Utc::now();
-        let entry = creds.entry(key).or_insert_with(|| fleet_store::StoredCredential {
-            worker_name: worker_name.to_string(),
-            model_id: model_id.to_string(),
-            encrypted_blob: encrypted_blob.to_string(),
-            base_url: base_url.to_string(),
-            api_backend: api_backend.to_string(),
-            context_window,
-            model_name: model_name.map(|s| s.to_string()),
-            created_at: now,
-            rotated_at: now,
-        });
+        let entry = creds
+            .entry(key)
+            .or_insert_with(|| fleet_store::StoredCredential {
+                worker_name: worker_name.to_string(),
+                model_id: model_id.to_string(),
+                encrypted_blob: encrypted_blob.to_string(),
+                base_url: base_url.to_string(),
+                api_backend: api_backend.to_string(),
+                context_window,
+                model_name: model_name.map(|s| s.to_string()),
+                created_at: now,
+                rotated_at: now,
+            });
         entry.encrypted_blob = encrypted_blob.to_string();
         entry.base_url = base_url.to_string();
         entry.api_backend = api_backend.to_string();

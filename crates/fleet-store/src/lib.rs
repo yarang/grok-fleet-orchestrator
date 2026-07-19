@@ -125,6 +125,7 @@ pub trait Store: Send + Sync {
     /// `encrypted_blob`은 이미 암호화된 상태로 전달되어야 함 — 이 trait은
     /// 암호화를 수행하지 않음. (암호화는 상위 크레이트 `fleet-credentials`와
     /// `fleet-api`/`fleet-cli`에서 처리.)
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_worker_credential(
         &self,
         worker_name: &str,

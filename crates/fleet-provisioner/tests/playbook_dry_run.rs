@@ -51,7 +51,7 @@ async fn dry_run_playbook_completes_without_network_calls() {
 }
 
 #[tokio::test]
-async fn standard_playbook_has_six_steps_in_order() {
+async fn standard_playbook_has_seven_steps_in_order() {
     let exec: Arc<dyn RemoteExecutor> = Arc::new(healthy_executor());
     let pb = Playbook::standard(&ubuntu_prereq());
     let ctx = PlaybookContext::new(StepContext {
@@ -72,6 +72,7 @@ async fn standard_playbook_has_six_steps_in_order() {
             "install_grok",
             "install_cloudflared",
             "install_fleet_worker",
+            "push_credentials",
             "start_services",
         ]
     );

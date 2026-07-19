@@ -146,6 +146,10 @@ pub struct ProvisionOptions {
     /// 오케스트레이터 등록용 bootstrap bearer 토큰. 모든 워커에 동일 적용.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_token: Option<String>,
+    /// 오케스트레이터 관리 API 용 bearer 토큰 (PushCredentials 스텝이 사용).
+    /// bootstrap_token 과 별개 — `/v1/workers/:name/credentials` 권한 필요.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token: Option<String>,
 }
 
 fn default_parallel() -> usize {
@@ -166,6 +170,7 @@ impl Default for ProvisionOptions {
             only: vec![],
             dry_run: false,
             bootstrap_token: None,
+            api_token: None,
         }
     }
 }

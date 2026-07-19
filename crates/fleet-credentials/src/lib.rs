@@ -102,11 +102,11 @@ impl WorkerCredentials {
         if let Some(m) = &self.model {
             s.push_str(&format!("model = {}\n", toml_escape(m)));
         }
-        s.push_str(&format!("api_backend = {}\n", toml_escape(&self.api_backend)));
         s.push_str(&format!(
-            "context_window = {}\n",
-            self.context_window
+            "api_backend = {}\n",
+            toml_escape(&self.api_backend)
         ));
+        s.push_str(&format!("context_window = {}\n", self.context_window));
         s
     }
 }

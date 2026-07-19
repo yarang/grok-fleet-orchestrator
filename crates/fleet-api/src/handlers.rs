@@ -693,10 +693,9 @@ pub async fn put_worker_credential(
         .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
 
     // 마스터 키 필수.
-    let master_key = state
-        .master_key
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("master key not configured on this orchestrator".into()))?;
+    let master_key = state.master_key.as_ref().ok_or_else(|| {
+        ApiError::Internal("master key not configured on this orchestrator".into())
+    })?;
 
     // 입력 검증.
     if req.api_key.is_empty() {
@@ -733,7 +732,9 @@ pub async fn put_worker_credential(
         .store
         .get_worker_credential(&worker.name, &req.model_id)
         .await?
-        .ok_or_else(|| ApiError::Internal("credential upsert succeeded but row not found".into()))?;
+        .ok_or_else(|| {
+            ApiError::Internal("credential upsert succeeded but row not found".into())
+        })?;
 
     info!(
         worker = %worker.name,
@@ -763,7 +764,9 @@ pub async fn list_worker_credentials(
         .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
 
     let creds = state.store.list_worker_credentials(&worker.name).await?;
-    Ok(Json(creds.into_iter().map(CredentialSummary::from).collect()))
+    Ok(Json(
+        creds.into_iter().map(CredentialSummary::from).collect(),
+    ))
 }
 
 /// `GET /v1/workers/:name/credentials/:model_id/export` — 복호화된 전체 자격 증명.
@@ -780,10 +783,9 @@ pub async fn export_worker_credential(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
 
-    let master_key = state
-        .master_key
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("master key not configured on this orchestrator".into()))?;
+    let master_key = state.master_key.as_ref().ok_or_else(|| {
+        ApiError::Internal("master key not configured on this orchestrator".into())
+    })?;
 
     let stored = state
         .store

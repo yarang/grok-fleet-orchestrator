@@ -181,8 +181,7 @@ async fn run_set(args: SetArgs) -> Result<()> {
         let text = resp.text().await.unwrap_or_default();
         return Err(anyhow!("credentials set failed: {status} — {text}"));
     }
-    let parsed: PutCredentialResponse =
-        resp.json().await.context("parsing set response")?;
+    let parsed: PutCredentialResponse = resp.json().await.context("parsing set response")?;
     println!(
         "rotated: worker={} model={} rotated_at={}",
         parsed.worker_name, parsed.model_id, parsed.rotated_at
@@ -382,7 +381,7 @@ mod tests {
         // max 이상이면 말줄임. s.len() > max 일 때 앞 (max-1) 문자 + "…".
         assert_eq!(truncate("hello world", 5), "hell…"); // 11 > 5 → 앞 4문자 + "…"
         assert_eq!(truncate("ok", 10), "ok"); // 2 ≤ 10 → 그대로
-        // "exactly5" 길이 8 > 5 → 앞 4문자 + "…"
+                                              // "exactly5" 길이 8 > 5 → 앞 4문자 + "…"
         assert_eq!(truncate("exactly5", 5), "exac…");
     }
 

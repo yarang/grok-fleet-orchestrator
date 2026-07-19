@@ -28,7 +28,7 @@ use fleet_core::{
 };
 
 use crate::error::StoreError;
-use crate::{StoredCredential, Store};
+use crate::{Store, StoredCredential};
 
 /// PostgreSQL 기반 `Store` 구현.
 pub struct PgStore {
@@ -593,9 +593,7 @@ impl Store for PgStore {
         .bind(worker_name)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(row_to_stored_credential)
-            .collect()
+        rows.into_iter().map(row_to_stored_credential).collect()
     }
 
     async fn delete_worker_credential(
@@ -603,13 +601,12 @@ impl Store for PgStore {
         worker_name: &str,
         model_id: &str,
     ) -> Result<bool, StoreError> {
-        let result = sqlx::query(
-            "DELETE FROM worker_credentials WHERE worker_name = $1 AND model_id = $2",
-        )
-        .bind(worker_name)
-        .bind(model_id)
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("DELETE FROM worker_credentials WHERE worker_name = $1 AND model_id = $2")
+                .bind(worker_name)
+                .bind(model_id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 }
