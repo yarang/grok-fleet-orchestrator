@@ -132,11 +132,16 @@ impl Default for InitializeParams {
 
 // --- session/new ---
 
+/// `session/new` 파라미터. grok 0.2.x ACP 서버는 `cwd`와 `mcpServers`(sequence)를
+/// 필수로 요구한다 (이전 ACP 스펙 revision 변경).
 #[derive(Debug, Clone, Serialize)]
+#[allow(non_snake_case)]
 pub struct SessionNewParams {
-    /// 워킹 디렉토리. None이면 서버 기본값 사용.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
+    /// 워킹 디렉토리. 미지정 시 서버 기본값 (대부분 "/").
+    pub cwd: String,
+    /// MCP 서버 정의 목록. 빈 시퀀스여도 필드 자체는 반드시 보내야 함.
+    #[serde(default)]
+    pub mcpServers: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -324,10 +329,12 @@ pub fn build_initialize(id: u64) -> RpcRequest {
     RpcRequest::request(id, "initialize", Some(json!(InitializeParams::default())))
 }
 
-/// `session/new` 요청 빌더.
+/// `session/new` 요청 빌더. `cwd`는 기본값 "/"를 사용하고 `mcpServers`는
+/// 빈 시퀀스를 보낸다. grok 0.2.x ACP 서버는 두 필드 모두 필수로 요구.
 pub fn build_session_new(id: u64, cwd: Option<&str>) -> RpcRequest {
     let params = SessionNewParams {
-        cwd: cwd.map(|s| s.to_string()),
+        cwd: cwd.unwrap_or("/").to_string(),
+        mcpServers: Vec::new(),
     };
     RpcRequest::request(id, "session/new", Some(json!(params)))
 }

@@ -36,11 +36,18 @@ EnvironmentFile=-/etc/fleet/fleet.env
 
 # 명령행 인자도 환경변수도 아니면 fleet serve 의 기본값이 사용된다.
 # DATABASE_URL 만은 반드시 설정되어야 한다.
-ExecStart=/usr/local/bin/fleet serve \
+# 참고: fleet serve 는 stdin EOF 시 MCP stdio 서버가 종료되면서 메인 프로세스가
+# 함께 종료됨. systemd 환경에서는 stdin 이 /dev/null 이므로 즉시 EOF 가 와서
+# 서비스가 1초 만에 죽음. 아래 `bash -c '... < <(sleep infinity)'` 파이프는
+# stdin 을 영원히 열어둬 daemon 처럼 구동시키는 workaround.
+# (근본 해결은 fleet 코드에서 HTTP server 가 떠 있는 한 MCP 종료에도 종료되지
+#  않도록 하는 것 — 다음 릴리스에 반영 예정.)
+ExecStart=/usr/bin/bash -c 'exec /usr/local/bin/fleet serve \
     --transport acp \
     --health-interval-secs 15 \
     --health-missed 3 \
-    --db-max-conn 20
+    --db-max-conn 20 \
+    < <(exec sleep infinity)'
 
 # graceful shutdown: SIGTERM 후 30초 대기.
 KillSignal=SIGTERM
