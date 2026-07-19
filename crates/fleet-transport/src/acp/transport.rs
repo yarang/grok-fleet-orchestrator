@@ -23,8 +23,10 @@ use tokio_tungstenite::{
         http::Request,
         protocol::Message,
     },
-    Connector, MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream,
 };
+#[cfg(feature = "mtls")]
+use tokio_tungstenite::Connector;
 
 use super::error::AcpError;
 

@@ -346,6 +346,11 @@ pub struct AcpTransport {
     event_broadcaster: broadcast::Sender<WorkerEvent>,
     /// 재연결 백오프 설정.
     reconnect: ReconnectConfig,
+    /// orchestrator 클라이언트 mTLS 구성 (Phase 8.5).
+    /// `Some` 인 경우, `wss://` endpoint 에 대해 `WsConn::connect_mtls` 사용.
+    /// `ws://` endpoint 는 이 값의 유무와 무관하게 일반 TCP 로 연결.
+    #[cfg(feature = "mtls")]
+    client_tls: Option<Arc<crate::tls::ClientTlsConfig>>,
 }
 
 impl AcpTransport {
@@ -361,7 +366,20 @@ impl AcpTransport {
             clients: Arc::new(RwLock::new(HashMap::new())),
             event_broadcaster,
             reconnect,
+            #[cfg(feature = "mtls")]
+            client_tls: None,
         }
+    }
+
+    /// orchestrator 클라이언트 mTLS 구성을 지정 (Phase 8.5).
+    ///
+    /// 이후 `register()` 되는 모든 워커에 대해, `wss://` endpoint 인 경우
+    /// `ClientTlsConfig` 로 mTLS 핸드셰이크를 수행. 이미 등록된 워커는
+    /// 재연결 시점부터 새 구성을 사용.
+    #[cfg(feature = "mtls")]
+    pub fn with_client_tls(mut self, tls: crate::tls::ClientTlsConfig) -> Self {
+        self.client_tls = Some(Arc::new(tls));
+        self
     }
 
     /// 특정 워커의 연결 상태 조회. 미등록 워커면 None.
@@ -436,6 +454,8 @@ impl WorkerTransport for AcpTransport {
             cmd_rx,
             Some(first_result_tx),
             self.reconnect,
+            #[cfg(feature = "mtls")]
+            self.client_tls.clone(),
         );
         *session.supervisor.lock().await = Some(supervisor_handle);
 
@@ -689,12 +709,14 @@ impl WorkerTransport for AcpTransport {
 ///
 /// `first_result`가 Some이면 첫 번째 연결 시도의 결과를 전송.
 /// None이면 register()가 이미 동기적으로 처리했거나 외부에서 사용하지 않음.
+#[allow(clippy::too_many_arguments)]
 fn spawn_supervisor(
     session: Arc<WorkerSession>,
     broadcaster: broadcast::Sender<WorkerEvent>,
     mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCmd>,
     first_result: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     reconnect: ReconnectConfig,
+    #[cfg(feature = "mtls")] client_tls: Option<Arc<crate::tls::ClientTlsConfig>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let worker_id = session.worker_id;
@@ -708,7 +730,13 @@ fn spawn_supervisor(
             *session.state.write().await = ConnState::Connecting;
 
             // 2. 연결 + 세션 열기 시도.
-            let (client, session_id, event_rx) = match establish_session(&endpoint).await {
+            let (client, session_id, event_rx) = match establish_session(
+                &endpoint,
+                #[cfg(feature = "mtls")]
+                client_tls.as_deref(),
+            )
+            .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(%worker_id, error = %e, "supervisor connect failed");
@@ -806,8 +834,13 @@ enum ReaderExit {
 
 /// endpoint로 AcpClient를 연결하고 초기 세션을 엹.
 /// 실패 시 재시도는 호출자(supervisor) 담당.
+///
+/// Phase 8.5: `client_tls` 가 `Some` 이고 endpoint 가 `wss://` 인 경우 mTLS 핸드셰이크.
+/// `client_tls` 가 `Some` 인데 endpoint 가 `ws://` 인 경우 mTLS 없이 일반 TCP (경고 로그).
+/// `client_tls` 가 `None` 인데 endpoint 가 `wss://` 인 경우 공용 CA (webpki-roots) 사용.
 async fn establish_session(
     endpoint: &str,
+    #[cfg(feature = "mtls")] client_tls: Option<&crate::tls::ClientTlsConfig>,
 ) -> Result<
     (
         AcpClient,
@@ -816,9 +849,35 @@ async fn establish_session(
     ),
     String,
 > {
-    let (client, event_rx) = AcpClient::connect(endpoint)
-        .await
-        .map_err(|e| format!("acp connect: {e}"))?;
+    #[cfg(feature = "mtls")]
+    let use_mtls = client_tls.is_some() && endpoint.starts_with("wss://");
+    #[cfg(not(feature = "mtls"))]
+    let use_mtls = false;
+
+    let (client, event_rx) = if use_mtls {
+        #[cfg(feature = "mtls")]
+        {
+            let tls = client_tls.expect("checked above");
+            AcpClient::connect_mtls(endpoint, tls)
+                .await
+                .map_err(|e| format!("acp connect (mTLS): {e}"))?
+        }
+        #[cfg(not(feature = "mtls"))]
+        {
+            unreachable!("use_mtls requires the mtls feature")
+        }
+    } else {
+        #[cfg(feature = "mtls")]
+        if client_tls.is_some() && endpoint.starts_with("ws://") {
+            warn!(
+                endpoint = %sanitize_endpoint(endpoint),
+                "client_tls configured but endpoint is ws:// — falling back to plain TCP"
+            );
+        }
+        AcpClient::connect(endpoint)
+            .await
+            .map_err(|e| format!("acp connect: {e}"))?
+    };
     let session_id = client
         .open_session(None)
         .await

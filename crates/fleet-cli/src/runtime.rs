@@ -51,6 +51,65 @@ fn database_url() -> Result<String> {
     )
 }
 
+/// `--mtls-ca/--mtls-cert/--mtls-key` CLI 플래그 묶음 (Phase 8.5).
+///
+/// 세 값이 모두 `Some` 이거나 모두 `None` 이어야 함 (`requires` 제약).
+/// `Some` 인 경우 `AcpTransport` 가 `wss://` endpoint 에 mTLS 핸드셰이크를 수행.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MtlsFlags<'a> {
+    /// 사설 CA 인증서 PEM 경로.
+    pub ca: Option<&'a str>,
+    /// orchestrator 클라이언트 인증서 PEM 경로.
+    pub cert: Option<&'a str>,
+    /// orchestrator 클라이언트 비밀키 PEM 경로.
+    pub key: Option<&'a str>,
+}
+
+#[cfg(feature = "mtls")]
+impl<'a> MtlsFlags<'a> {
+    /// 세 플래그가 모두 설정된 경우 `Some(ClientTlsConfig)` 반환.
+    /// 하나라도 누락되면 `None`.
+    fn to_tls_config(self) -> Option<fleet_transport::ClientTlsConfig> {
+        let ca = self.ca?;
+        let cert = self.cert?;
+        let key = self.key?;
+        Some(fleet_transport::ClientTlsConfig::from_paths(
+            ca, cert, key,
+        ))
+    }
+}
+
+/// `--transport acp` 인 경우 `AcpTransport` 생성. mTLS 플래그가 모두
+/// 설정된 경우 `with_client_tls` 로 클라이언트 인증서를 전달.
+#[cfg(feature = "acp")]
+fn build_acp_transport(
+    mtls_flags: &MtlsFlags,
+) -> Result<fleet_transport::AcpTransport, anyhow::Error> {
+    let transport = fleet_transport::AcpTransport::new();
+    #[cfg(feature = "mtls")]
+    {
+        if let Some(ca) = mtls_flags.ca {
+            let tls = mtls_flags.to_tls_config().expect("checked ca above");
+            tracing::info!(
+                %ca,
+                "enabling mTLS on AcpTransport (wss:// endpoints only)"
+            );
+            return Ok(transport.with_client_tls(tls));
+        }
+    }
+    #[cfg(not(feature = "mtls"))]
+    {
+        // mtls 플래그가 일부라도 설정된 경우 명확한 에러 (run_serve 에서 사전 검증되지만
+        // 방어적으로 한 번 더).
+        if mtls_flags.ca.is_some() || mtls_flags.cert.is_some() || mtls_flags.key.is_some() {
+            return Err(anyhow!(
+                "--mtls-ca/--mtls-cert/--mtls-key require building with --features mtls"
+            ));
+        }
+    }
+    Ok(transport)
+}
+
 /// PgStore 생성 + 마이그레이션 실행.
 async fn connect_and_migrate(max_conn: u32) -> Result<Arc<PgStore>> {
     let url = database_url()?;
@@ -97,6 +156,7 @@ pub async fn run_serve(
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
     dashboard_bind: Option<&str>,
+    mtls_flags: MtlsFlags<'_>,
 ) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
 
@@ -114,8 +174,13 @@ pub async fn run_serve(
         "acp" => {
             #[cfg(feature = "acp")]
             {
+                if mtls_flags.ca.is_some() && !cfg!(feature = "mtls") {
+                    return Err(anyhow!(
+                        "--mtls-ca requires building with --features mtls"
+                    ));
+                }
                 tracing::info!("using AcpTransport (will connect to grok agent serve on each registered worker)");
-                let t = fleet_transport::AcpTransport::new();
+                let t = build_acp_transport(&mtls_flags)?;
                 let rx = t.subscribe().await?;
                 (Arc::new(t) as Arc<dyn fleet_transport::WorkerTransport>, rx)
             }
@@ -628,6 +693,15 @@ pub struct ProvisionArgs {
     pub tags: Vec<String>,
     pub only: Vec<String>,
     pub dry_run: bool,
+    // ── mTLS (Phase 8.5) ────────────────────────────────────────────────
+    /// mTLS 종단 proxy 활성화. 다른 mtls_* 필드는 이 값이 true 인 경우에만 사용됨.
+    pub mtls_enabled: bool,
+    pub mtls_listen_addr: Option<String>,
+    pub mtls_server_cert_path: Option<String>,
+    pub mtls_server_key_path: Option<String>,
+    pub mtls_client_ca_path: Option<String>,
+    pub mtls_advertised_host: Option<String>,
+    pub mtls_advertised_port: Option<u16>,
 }
 
 /// `provision` 명령 실행.
@@ -668,6 +742,7 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         args.grok_secret.as_deref(),
         args.bootstrap_token.as_deref(),
         args.dry_run,
+        args,
     );
 
     let report = if args.dry_run {
@@ -844,6 +919,7 @@ fn build_step_context(
     grok_secret: Option<&str>,
     bootstrap_token: Option<&str>,
     dry_run: bool,
+    args: &ProvisionArgs,
 ) -> PlaybookContext {
     let base = StepContext {
         worker_name: name.to_string(),
@@ -854,6 +930,13 @@ fn build_step_context(
         grok_secret: grok_secret.map(String::from),
         bootstrap_token: bootstrap_token.map(String::from),
         dry_run,
+        mtls_enabled: args.mtls_enabled,
+        mtls_listen_addr: args.mtls_listen_addr.clone(),
+        mtls_server_cert_path: args.mtls_server_cert_path.clone(),
+        mtls_server_key_path: args.mtls_server_key_path.clone(),
+        mtls_client_ca_path: args.mtls_client_ca_path.clone(),
+        mtls_advertised_host: args.mtls_advertised_host.clone(),
+        mtls_advertised_port: args.mtls_advertised_port,
         ..Default::default()
     };
     PlaybookContext::new(base)

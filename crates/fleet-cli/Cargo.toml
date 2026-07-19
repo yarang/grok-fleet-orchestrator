@@ -12,6 +12,9 @@ default = ["acp"]
 # ACP transport — `--transport acp` 모드 활성화 (grok agent serve와 통신).
 # 기본 켜짐; rustls을 빼서 바이너리를 줄이려면 `--no-default-features` 사용.
 acp = ["fleet-transport/acp"]
+# mTLS: 사설 CA + 클라이언트 인증서 기반 orchestrator↔worker TLS 보호.
+# `fleet mtls` 서브커맨드와 `--mtls-ca/--mtls-cert/--mtls-key` 플래그 활성화.
+mtls = ["fleet-transport/mtls", "dep:rcgen"]
 
 [[bin]]
 name = "fleet"
@@ -36,3 +39,13 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# mTLS-only (optional; Phase 8.5)
+rcgen = { workspace = true, optional = true, features = ["pem", "x509-parser"] }
+time = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+# rustls-pemfile 단위 테스트용 (mtls feature 켜진 빌드에서만 사용).
+rustls-pemfile = { workspace = true }
+rustls = { workspace = true }

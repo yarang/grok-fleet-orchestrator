@@ -189,7 +189,7 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 ## 향후 로드맵
 
 - ~~동시 다중 세션 per worker (현재는 직렬 prompt 처리; Phase 8.4)~~ → **Phase 8.4에서 per-worker 동시 다중 세션 구현** (아래 "동시 다중 세션 (Phase 8.4)" 절 참조)
-- ~~mTLS for orchestrator↔worker ACP 트래픽 (Phase 8.5)~~ → **Phase 8.5.1/8.5.2에서 클라이언트/서버 mTLS 구현** (아래 "mTLS for Orchestrator↔Worker ACP 트래픽 (Phase 8.5)" 절 참조). Phase 8.5.3 CLI 통합은 후속 진행.
+- ~~mTLS for orchestrator↔worker ACP 트래픽 (Phase 8.5)~~ → **Phase 8.5.1/8.5.2/8.5.3에서 클라이언트/서버 mTLS + CLI 통합 구현** (아래 "mTLS for Orchestrator↔Worker ACP 트래픽 (Phase 8.5)" 절 참조).
 - OIDC/JWKS 검증 (현재는 Cloudflare Access에 위임)
 - 작업 우선순위 큐 +抢占 스케줄링
 - 워커 오토스케일링 (로드 기반)
@@ -746,6 +746,32 @@ fleet mtls issue-client --ca /etc/fleet/ca \
                        --out /etc/fleet/orchestrator/
 ```
 
+발급된 인증서는 각 프로세스에 배포한 뒤 아래처럼 사용한다:
+
+```bash
+# 4. orchestrator 구동 (클라이언트 인증서로 worker mTLS proxy 에 인증).
+fleet serve --transport acp \
+            --mtls-ca /etc/fleet/ca/ca.pem \
+            --mtls-cert /etc/fleet/orchestrator/client.pem \
+            --mtls-key  /etc/fleet/orchestrator/client.key
+
+# 5. 워커 프로비저닝 시 [mtls] 섹션 활성화 (fleet-worker 가 자체적으로 proxy 구동).
+fleet provision --host 10.0.0.5 --name worker-1 \
+               --mtls-enabled \
+               --mtls-server-cert /etc/fleet/worker-1/server.pem \
+               --mtls-server-key  /etc/fleet/worker-1/server.key \
+               --mtls-client-ca   /etc/fleet/ca/ca.pem \
+               --mtls-advertised-host worker-1.fleet.local
+```
+
+`AcpTransport::with_client_tls(ClientTlsConfig)` 로 transport 가 구성된 경우,
+supervisor 의 `establish_session` 은 endpoint 스킴에 따라 다음과 같이 분기한다:
+
+- `wss://` → `AcpClient::connect_mtls` → `WsConn::connect_mtls` (사설 CA + 클라이언트 인증서).
+- `ws://`  → `AcpClient::connect` (일반 TCP, `client_tls` 무시 — 경고 로그).
+
+즉 orchestrator 는 동일한 바이너리로 mTLS 활성/비활성 워커를 모두 다룰 수 있다.
+
 ### 보안 속성
 
 - **기밀성**: TLS 1.3 (ring provider, AES-256-GCM). ACP 패킷이 중간자에 의해
@@ -765,5 +791,8 @@ fleet mtls issue-client --ca /etc/fleet/ca \
   재시작 불필요, 하지만 fleet-worker의 proxy는 시작 시 한 번만 읽음).
 - CRL/OCSP 미지원. 폐기된 클라이언트 인증서는 CA 자체를 교체하지 않는 한
   유효. (대안: mTLS + Cloudflare Access 동시 사용.)
-- 인증서 발급 CLI (`fleet mtls`)는 Phase 8.5.3에서 추가.
+- 인벤토리 모드(`--inventory`)의 mTLS 미지원 — Phase 8.5.3 의 프로비저닝
+  mTLS 통합은 단일 호스트 모드(`--host`)만 지원. 인벤토리 YAML 에
+  per-worker mTLS 메타데이터를 추가하려면 `InventoryWorker` 스키마 확장이
+  필요 (후속 과제).
 

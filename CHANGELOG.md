@@ -6,6 +6,56 @@
 
 ## [Unreleased]
 
+### Added — Phase 8.5.3: fleet mtls CLI + AcpTransport mTLS 통합
+
+- **`fleet mtls` 서브커맨드** (`fleet-cli/src/mtls.rs`): 사설 CA + 서버/클라이언트
+  인증서 발급 로컬 도구. rcgen 0.13 (`pem` + `x509-parser` features) 사용.
+  - `fleet mtls init-ca --out <dir>` — self-signed CA 발급 (`ca.pem` + `ca.key`).
+    `--common-name`, `--validity-days` (기본 10년) 옵션.
+  - `fleet mtls issue-server --ca <dir> --out <dir> --dns <name>[,<name>...]` —
+    CA 로 서명한 워커 서버 인증서. `ServerAuth` EKU + DNS SAN. SAN 은 orchestrator
+    가 `wss://<host>:<port>/...` 로 접속할 호스트와 일치해야 함.
+  - `fleet mtls issue-client --ca <dir> --out <dir>` — orchestrator 클라이언트 인증서.
+    `ClientAuth` EKU.
+  - 모든 키 파일은 0600 권한으로 저장 (`PermissionsExt`).
+- **`fleet serve` mTLS 플래그**: `--mtls-ca <ca.pem> --mtls-cert <client.pem>
+  --mtls-key <client.key>`. 세 값은 `requires` 제약으로 모두 함께 지정되어야 함.
+  `--features mtls` 빌드에서만 사용 가능.
+- **`AcpTransport::with_client_tls(ClientTlsConfig)`** (`fleet-transport/src/acp_transport.rs`):
+  transport 에 클라이언트 mTLS 구성 주입. supervisor 의 `establish_session` 이
+  endpoint 스킴에 따라 `AcpClient::connect_mtls` (wss://) 또는 `AcpClient::connect`
+  (ws://) 로 자동 분기.
+- **`AcpClient::connect_mtls`** (`fleet-transport/src/acp/mod.rs`): `WsConn::connect_mtls`
+  를 감싸 JSON-RPC reader spawn. 기존 `connect` 와 동일한 후처리.
+- **`fleet provision --mtls-enabled ...`** 플래그 그룹: 프로비저닝하는 워커의
+  worker.toml 에 `[mtls]` 섹션을 포함. 단일 호스트 모드(`--host`)만 지원.
+  - `--mtls-listen-addr`, `--mtls-server-cert`, `--mtls-server-key`, `--mtls-client-ca`,
+    `--mtls-advertised-host`, `--mtls-advertised-port` 옵션.
+  - `TemplateContext` / `StepContext` 에 mTLS 필드 추가; `install_fleet_worker` 스텝이
+    `[mtls]` 섹션을 worker.toml 템플릿으로 렌더링.
+- **runtime.rs `MtlsFlags`**: CLI → `run_serve` → `build_acp_transport` 간 mTLS
+  구성 전달. `build_acp_transport` 는 세 플래그가 모두 설정된 경우
+  `with_client_tls` 로 `AcpTransport` 생성.
+
+### Tests — Phase 8.5.3
+
+- **`fleet-cli/src/mtls.rs`** 단위 테스트 4개:
+  - `init_ca_and_issue_certs_roundtrip` — init-ca → issue-server → issue-client 풀 플로우.
+    발급된 PEM 들이 rustls-pemfile 로 파싱 가능함을 검증.
+  - `key_files_have_restricted_perms` (unix) — 키 파일이 0600 권한으로 생성됨.
+  - `issue_server_requires_at_least_one_san` — SAN 없이 issue-server 호출 시 명확한 에러.
+  - `load_ca_missing_file_errors` — 존재하지 않는 CA 디렉토리 로드 시 에러.
+- **`fleet-transport/tests/acp_transport_mtls.rs`** 통합 테스트 2개:
+  - `acp_transport_with_client_tls_registers_via_wss` — `with_client_tls` 로
+    구성된 transport 가 mTLS ACP 서버에 register 성공.
+  - `acp_transport_without_client_tls_fails_wss_to_private_ca` — mTLS 구성 없이
+    사설 CA 서버에 접속 시 공용 CA 검증 실패로 register 실패.
+- **`fleet-provisioner/src/templates.rs`** 단위 테스트 4개:
+  - `mtls_section_omitted_when_disabled`, `mtls_section_rendered_when_enabled`,
+    `mtls_section_defaults_port_from_listen_addr`, `mtls_section_requires_all_paths`.
+- 총 **353개 통과** (Phase 8.5.2의 342 대비 +11), 3개 `#[ignore]`.
+  clippy `-D warnings` 통과.
+
 ### Added — Phase 8.5.2: MtlsProxy + fleet-worker [mtls] 섹션
 
 - **`ServerTlsConfig`** (`fleet-transport/src/tls.rs`): 사설 CA PEM + 서버 인증서/키

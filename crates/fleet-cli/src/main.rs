@@ -22,11 +22,15 @@
 
 mod doctor;
 mod logging;
+#[cfg(feature = "mtls")]
+mod mtls;
 mod runtime;
 mod token;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+#[cfg(feature = "mtls")]
+use std::path::PathBuf;
 
 /// Grok Fleet Orchestrator CLI.
 #[derive(Debug, Parser)]
@@ -41,6 +45,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)] // CLI dispatch enum — 한 번만 평가되므로 크기 영향 무시.
 enum Command {
     /// MCP stdio 서버 실행. AI 클라이언트(grok build, Claude Code 등)에
     /// Fleet 도구를 노출합니다.
@@ -88,6 +93,19 @@ enum Command {
         /// `/api/events/stream` (SSE) 엔드포인트가 제공됩니다.
         #[arg(long, env = "FLEET_DASHBOARD_BIND")]
         dashboard_bind: Option<String>,
+
+        /// mTLS: 사설 CA PEM 파일 경로. orchestrator↔worker ACP 트래픽을
+        /// TLS로 보호 (`--features mtls` 필요). `--mtls-cert`, `--mtls-key` 도 함께 필요.
+        #[arg(long, env = "FLEET_MTLS_CA", requires = "mtls_cert", requires = "mtls_key")]
+        mtls_ca: Option<String>,
+
+        /// mTLS: orchestrator 클라이언트 인증서 PEM.
+        #[arg(long, env = "FLEET_MTLS_CERT", requires = "mtls_ca", requires = "mtls_key")]
+        mtls_cert: Option<String>,
+
+        /// mTLS: orchestrator 클라이언트 비밀키 PEM.
+        #[arg(long, env = "FLEET_MTLS_KEY", requires = "mtls_ca", requires = "mtls_cert")]
+        mtls_key: Option<String>,
     },
 
     /// 데이터베이스 마이그레이션만 실행하고 종료.
@@ -202,6 +220,45 @@ enum Command {
         /// Dry-run — 실제 변경 없이 무엇을 할지 로깅.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+
+        /// mTLS: 프로비저닝하는 워커의 worker.toml 에 `[mtls]` 섹션을 포함.
+        /// `--mtls-server-cert`/`--mtls-server-key`/`--mtls-client-ca` 도 함께 필요.
+        #[arg(long, default_value_t = false)]
+        mtls_enabled: bool,
+
+        /// mTLS 종단 proxy 가 listen할 주소. 기본값 `0.0.0.0:2420`.
+        #[arg(long)]
+        mtls_listen_addr: Option<String>,
+
+        /// 워커 측 서버 인증서 PEM 의 원격 절대경로 (예: `/etc/fleet/worker-1.pem`).
+        /// 프로비저너는 파일 자체를 업로드하지 않고 worker.toml 의 경로만 채운다 —
+        /// 인증서 발급은 `fleet mtls issue-server` 로 사전에 수행해 두어야 함.
+        #[arg(long)]
+        mtls_server_cert: Option<String>,
+
+        /// 워커 측 서버 비밀키 PEM 의 원격 절대경로.
+        #[arg(long)]
+        mtls_server_key: Option<String>,
+
+        /// 워커가 orchestrator 클라이언트 인증서 검증에 사용할 CA PEM 원격 경로.
+        #[arg(long)]
+        mtls_client_ca: Option<String>,
+
+        /// orchestrator 에게 광고할 워커 호스트명. 미지정 시 `--name` 사용.
+        #[arg(long)]
+        mtls_advertised_host: Option<String>,
+
+        /// orchestrator 에게 광고할 포트. 미지정 시 `--mtls-listen-addr` 포트 사용.
+        #[arg(long)]
+        mtls_advertised_port: Option<u16>,
+    },
+
+    /// mTLS 인증서 발급 도구 (Phase 8.5). 사설 CA + 워커 서버 인증서 +
+    /// orchestrator 클라이언트 인증서를 로컬에서 생성.
+    #[cfg(feature = "mtls")]
+    Mtls {
+        #[command(subcommand)]
+        action: MtlsAction,
     },
 }
 
@@ -361,6 +418,68 @@ enum EventsAction {
     },
 }
 
+#[cfg(feature = "mtls")]
+#[derive(Debug, Subcommand)]
+pub enum MtlsAction {
+    /// 사설 CA 발급 (self-signed). ca.pem + ca.key 가 out 디렉토리에 생성됨.
+    InitCa {
+        /// 출력 디렉토리 (존재하지 않으면 생성).
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Common Name (기본값: "Fleet Internal CA").
+        #[arg(long, default_value = "Fleet Internal CA")]
+        common_name: String,
+
+        /// 유효기간 (일). 기본 10년.
+        #[arg(long, default_value_t = 365 * 10)]
+        validity_days: u64,
+    },
+
+    /// 워커 서버 인증서 발급 (CA로 서명).
+    IssueServer {
+        /// CA 디렉토리 (init-ca 로 만든 경로. ca.pem, ca.key 포함).
+        #[arg(long)]
+        ca: PathBuf,
+
+        /// 출력 디렉토리. server.pem + server.key 생성.
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Common Name. 기본값 "worker".
+        #[arg(long, default_value = "worker")]
+        common_name: String,
+
+        /// DNS Subject Alternative Names (쉼표 구분). 최소 1개 권장.
+        /// orchestrator가 wss://<host>:<port>/... 로 접속할 때 이 값과 일치해야 함.
+        #[arg(long, value_delimiter = ',')]
+        dns: Vec<String>,
+
+        /// 유효기간 (일). 기본 1년.
+        #[arg(long, default_value_t = 365)]
+        validity_days: u64,
+    },
+
+    /// orchestrator 클라이언트 인증서 발급 (CA로 서명).
+    IssueClient {
+        /// CA 디렉토리.
+        #[arg(long)]
+        ca: PathBuf,
+
+        /// 출력 디렉토리. client.pem + client.key 생성.
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Common Name. 기본값 "orchestrator".
+        #[arg(long, default_value = "orchestrator")]
+        common_name: String,
+
+        /// 유효기간 (일). 기본 1년.
+        #[arg(long, default_value_t = 365)]
+        validity_days: u64,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -383,6 +502,9 @@ async fn main() -> Result<()> {
             api_tokens,
             cf_audience,
             dashboard_bind,
+            mtls_ca,
+            mtls_cert,
+            mtls_key,
         } => {
             runtime::run_serve(
                 &transport,
@@ -394,6 +516,11 @@ async fn main() -> Result<()> {
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
                 dashboard_bind.as_deref(),
+                runtime::MtlsFlags {
+                    ca: mtls_ca.as_deref(),
+                    cert: mtls_cert.as_deref(),
+                    key: mtls_key.as_deref(),
+                },
             )
             .await
         }
@@ -402,6 +529,8 @@ async fn main() -> Result<()> {
         Command::Tasks { action } => runtime::run_tasks(action).await,
         Command::Token { action } => token::run_token(action).await,
         Command::Events { action } => runtime::run_events(action).await,
+        #[cfg(feature = "mtls")]
+        Command::Mtls { action } => mtls::run_mtls(action).await,
         Command::Doctor {
             api_url,
             dashboard_url,
@@ -424,6 +553,13 @@ async fn main() -> Result<()> {
             tags,
             only,
             dry_run,
+            mtls_enabled,
+            mtls_listen_addr,
+            mtls_server_cert,
+            mtls_server_key,
+            mtls_client_ca,
+            mtls_advertised_host,
+            mtls_advertised_port,
         } => {
             runtime::run_provision(runtime::ProvisionArgs {
                 host,
@@ -442,6 +578,13 @@ async fn main() -> Result<()> {
                 tags,
                 only,
                 dry_run,
+                mtls_enabled,
+                mtls_listen_addr,
+                mtls_server_cert_path: mtls_server_cert,
+                mtls_server_key_path: mtls_server_key,
+                mtls_client_ca_path: mtls_client_ca,
+                mtls_advertised_host,
+                mtls_advertised_port,
             })
             .await
         }

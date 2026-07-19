@@ -38,6 +38,22 @@ pub struct TemplateContext {
     pub bootstrap_token: Option<String>,
     /// worker 라벨. TOML inline table로 정렬해서 출력.
     pub labels: Option<HashMap<String, String>>,
+    // ── mTLS (Phase 8.5; 선택) ───────────────────────────────────────────
+    /// mTLS 종단 proxy 활성화. `mtls_*` 필드는 이 값이 true 인 경우에만 출력.
+    pub mtls_enabled: bool,
+    /// mTLS 리스닝 주소 (예: `0.0.0.0:2420`). None이면 `0.0.0.0:2420`.
+    pub mtls_listen_addr: Option<String>,
+    /// 서버 인증서 PEM 절대경로.
+    pub mtls_server_cert_path: Option<String>,
+    /// 서버 비밀키 PEM 절대경로.
+    pub mtls_server_key_path: Option<String>,
+    /// 클라이언트 인증서 검증용 CA PEM 절대경로.
+    pub mtls_client_ca_path: Option<String>,
+    /// orchestrator 에 광고할 호스트명 (wss://<advertised_host>:<advertised_port>).
+    /// None이면 worker 이름 또는 tunnel_name 사용.
+    pub mtls_advertised_host: Option<String>,
+    /// orchestrator 에 광고할 포트. None이면 listen_addr 의 포트 사용.
+    pub mtls_advertised_port: Option<u16>,
 }
 
 /// cloudflared config.yml 렌더링.
@@ -138,6 +154,62 @@ pub fn render_worker_config(ctx: &TemplateContext) -> Result<String, StepError> 
         out.push_str(&format!("cwd = \"{cwd}\"\n"));
     }
     out.push('\n');
+
+    // [mtls] 섹션 — ctx.mtls_enabled 가 true 인 경우에만 출력 (Phase 8.5).
+    if ctx.mtls_enabled {
+        let listen = ctx
+            .mtls_listen_addr
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("0.0.0.0:2420");
+        let cert = ctx
+            .mtls_server_cert_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                StepError::Template("mtls_enabled=true requires mtls_server_cert_path".into())
+            })?;
+        let key = ctx
+            .mtls_server_key_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                StepError::Template("mtls_enabled=true requires mtls_server_key_path".into())
+            })?;
+        let ca = ctx
+            .mtls_client_ca_path
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                StepError::Template("mtls_enabled=true requires mtls_client_ca_path".into())
+            })?;
+        let advertised_host = ctx
+            .mtls_advertised_host
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&ctx.tunnel_name);
+        let advertised_port = ctx
+            .mtls_advertised_port
+            .unwrap_or_else(|| {
+                // listen_addr 의 포트 파싱; 실패 시 2420.
+                listen
+                    .rsplit(':')
+                    .next()
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(2420)
+            });
+
+        out.push_str("[mtls]\n");
+        out.push_str("enabled = true\n");
+        out.push_str(&format!("listen_addr = \"{listen}\"\n"));
+        out.push_str(&format!("server_cert_path = \"{cert}\"\n"));
+        out.push_str(&format!("server_key_path = \"{key}\"\n"));
+        out.push_str(&format!("client_ca_path = \"{ca}\"\n"));
+        out.push_str(&format!("advertised_host = \"{advertised_host}\"\n"));
+        out.push_str(&format!("advertised_port = {advertised_port}\n"));
+        out.push('\n');
+    }
+
     Ok(out)
 }
 
@@ -294,5 +366,71 @@ mod tests {
         assert!(FLEET_WORKER_UNIT.contains("[Unit]"));
         assert!(FLEET_WORKER_UNIT.contains("ExecStart=/usr/local/bin/fleet-worker"));
         assert!(FLEET_WORKER_UNIT.contains("Restart=on-failure"));
+    }
+
+    #[test]
+    fn mtls_section_omitted_when_disabled() {
+        let ctx = sample_ctx(); // mtls_enabled = false (default)
+        let cfg = render_worker_config(&ctx).unwrap();
+        assert!(!cfg.contains("[mtls]"));
+    }
+
+    #[test]
+    fn mtls_section_rendered_when_enabled() {
+        let mut ctx = sample_ctx();
+        ctx.mtls_enabled = true;
+        ctx.mtls_listen_addr = Some("0.0.0.0:2420".into());
+        ctx.mtls_server_cert_path = Some("/etc/fleet/server.pem".into());
+        ctx.mtls_server_key_path = Some("/etc/fleet/server.key".into());
+        ctx.mtls_client_ca_path = Some("/etc/fleet/ca.pem".into());
+        ctx.mtls_advertised_host = Some("worker-1.fleet.internal".into());
+        ctx.mtls_advertised_port = Some(2420);
+
+        let cfg = render_worker_config(&ctx).unwrap();
+        assert!(cfg.contains("[mtls]"), "cfg must contain [mtls] section:\n{cfg}");
+        assert!(cfg.contains("enabled = true"));
+        assert!(cfg.contains("listen_addr = \"0.0.0.0:2420\""));
+        assert!(cfg.contains("server_cert_path = \"/etc/fleet/server.pem\""));
+        assert!(cfg.contains("server_key_path = \"/etc/fleet/server.key\""));
+        assert!(cfg.contains("client_ca_path = \"/etc/fleet/ca.pem\""));
+        assert!(cfg.contains("advertised_host = \"worker-1.fleet.internal\""));
+        assert!(cfg.contains("advertised_port = 2420"));
+    }
+
+    #[test]
+    fn mtls_section_defaults_port_from_listen_addr() {
+        let mut ctx = sample_ctx();
+        ctx.mtls_enabled = true;
+        ctx.mtls_server_cert_path = Some("/x.pem".into());
+        ctx.mtls_server_key_path = Some("/x.key".into());
+        ctx.mtls_client_ca_path = Some("/ca.pem".into());
+        ctx.mtls_listen_addr = Some("0.0.0.0:9999".into()); // 포트 9999.
+        let cfg = render_worker_config(&ctx).unwrap();
+        assert!(cfg.contains("advertised_port = 9999"));
+        // advertised_host 가 없으면 tunnel_name 사용.
+        assert!(cfg.contains(&format!("advertised_host = \"{}\"", ctx.tunnel_name)));
+    }
+
+    #[test]
+    fn mtls_section_requires_all_paths() {
+        let mut ctx = sample_ctx();
+        ctx.mtls_enabled = true;
+        // cert 만 누락.
+        ctx.mtls_server_key_path = Some("/x.key".into());
+        ctx.mtls_client_ca_path = Some("/ca.pem".into());
+        let err = render_worker_config(&ctx).unwrap_err();
+        assert!(format!("{err}").contains("mtls_server_cert_path"));
+
+        // key 도 누락.
+        ctx.mtls_server_cert_path = Some("/x.pem".into());
+        ctx.mtls_server_key_path = None;
+        let err = render_worker_config(&ctx).unwrap_err();
+        assert!(format!("{err}").contains("mtls_server_key_path"));
+
+        // ca 도 누락.
+        ctx.mtls_server_key_path = Some("/x.key".into());
+        ctx.mtls_client_ca_path = None;
+        let err = render_worker_config(&ctx).unwrap_err();
+        assert!(format!("{err}").contains("mtls_client_ca_path"));
     }
 }

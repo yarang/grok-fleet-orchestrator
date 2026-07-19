@@ -64,6 +64,7 @@ fleet events list    # 감사 로그 (--after-seq, --limit, --json)
 fleet token new      # 부트스트랩 토큰 생성
 fleet doctor         # 인프라 진단 (DB, 마이그레이션, 워커, API, 대시보드)
 fleet provision ...  # SSH 자동 프로비저닝 (단일/인벤토리)
+fleet mtls init-ca/issue-server/issue-client  # 사설 CA + 인증서 발급 (--features mtls)
 ```
 
 각 명령에 `--help`를 붙여 상세 옵션을 확인하세요.

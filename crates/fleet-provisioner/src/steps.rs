@@ -121,6 +121,21 @@ pub struct StepContext {
     pub bootstrap_token: Option<String>,
     /// Dry-run 모드: 실제 변경 없이 무엇을 할지 로깅만.
     pub dry_run: bool,
+    // ── mTLS (Phase 8.5; 선택) ───────────────────────────────────────────
+    /// mTLS 종단 proxy 활성화.
+    pub mtls_enabled: bool,
+    /// mTLS 리스닝 주소.
+    pub mtls_listen_addr: Option<String>,
+    /// 서버 인증서 PEM 절대경로.
+    pub mtls_server_cert_path: Option<String>,
+    /// 서버 비밀키 PEM 절대경로.
+    pub mtls_server_key_path: Option<String>,
+    /// 클라이언트 CA PEM 절대경로.
+    pub mtls_client_ca_path: Option<String>,
+    /// orchestrator 에 광고할 호스트명.
+    pub mtls_advertised_host: Option<String>,
+    /// orchestrator 에 광고할 포트.
+    pub mtls_advertised_port: Option<u16>,
 }
 
 impl StepContext {

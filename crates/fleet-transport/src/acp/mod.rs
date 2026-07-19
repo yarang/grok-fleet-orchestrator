@@ -163,10 +163,35 @@ impl AcpClient {
     ///
     /// 반환: `(클라이언트, 이벤트 수신기)`. 이벤트 수신기는
     /// `Output` / `Completed` / `Failed` 이벤트를 수신.
+    #[allow(clippy::result_large_err)] // AcpError::Ws 가 크지만 박스화는 추후 과제.
     pub async fn connect(
         endpoint: &str,
     ) -> Result<(Self, tokio::sync::mpsc::UnboundedReceiver<AcpEvent>), AcpError> {
         let (ws, reader) = WsConn::connect(endpoint).await?;
+        Self::from_ws(ws, reader)
+    }
+
+    /// WebSocket 연결 (mTLS). `wss://host:port/ws?server-key=...` 형태의 endpoint
+    /// 에 대해 사설 CA + 클라이언트 인증서로 핸드셰이크 (Phase 8.5).
+    ///
+    /// `tls` 구성이 신뢰하는 CA로 서버 인증서를 검증하고, `tls` 의 클라이언트
+    /// 인증서로 자신을 증명. orchestrator→worker ACP 트래픽 보호용.
+    #[cfg(feature = "mtls")]
+    #[allow(clippy::result_large_err)] // AcpError::Ws 가 크지만 박스화는 추후 과제.
+    pub async fn connect_mtls(
+        endpoint: &str,
+        tls: &crate::tls::ClientTlsConfig,
+    ) -> Result<(Self, tokio::sync::mpsc::UnboundedReceiver<AcpEvent>), AcpError> {
+        let (ws, reader) = WsConn::connect_mtls(endpoint, tls).await?;
+        Self::from_ws(ws, reader)
+    }
+
+    /// 공통 초기화 로직. WebSocket 연결이 완료된 후 reader 태스크를 spawn.
+    #[allow(clippy::result_large_err)] // AcpError::Ws 가 크지만 박스화는 추후 과제.
+    fn from_ws(
+        ws: WsConn,
+        reader: WsStream,
+    ) -> Result<(Self, tokio::sync::mpsc::UnboundedReceiver<AcpEvent>), AcpError> {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let inner = Arc::new(ClientInner {

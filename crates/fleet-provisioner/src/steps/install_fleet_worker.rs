@@ -77,6 +77,13 @@ impl Step for InstallFleetWorker {
             max_concurrent_tasks: ctx.max_concurrent_tasks,
             bootstrap_token: ctx.bootstrap_token.clone(),
             labels: Some(ctx.labels.clone()),
+            mtls_enabled: ctx.mtls_enabled,
+            mtls_listen_addr: ctx.mtls_listen_addr.clone(),
+            mtls_server_cert_path: ctx.mtls_server_cert_path.clone(),
+            mtls_server_key_path: ctx.mtls_server_key_path.clone(),
+            mtls_client_ca_path: ctx.mtls_client_ca_path.clone(),
+            mtls_advertised_host: ctx.mtls_advertised_host.clone(),
+            mtls_advertised_port: ctx.mtls_advertised_port,
             ..Default::default()
         })?;
         exec.write_file("/tmp/fleet-worker.toml", &config_toml).await?;
