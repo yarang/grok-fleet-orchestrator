@@ -28,7 +28,7 @@ use fleet_core::{
 };
 
 use crate::error::StoreError;
-use crate::Store;
+use crate::{StoredCredential, Store};
 
 /// PostgreSQL 기반 `Store` 구현.
 pub struct PgStore {
@@ -516,6 +516,102 @@ impl Store for PgStore {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    // ── Worker credentials (Phase 8.6) ─────────────────────────────────
+
+    async fn upsert_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+        encrypted_blob: &str,
+        base_url: &str,
+        api_backend: &str,
+        context_window: u32,
+        model_name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        // ON CONFLICT 시 rotated_at만 NOW()로 갱신 (회전 시간 기록).
+        sqlx::query(
+            r#"
+            INSERT INTO worker_credentials
+                (worker_name, model_id, encrypted_blob, base_url, api_backend,
+                 context_window, model_name, created_at, rotated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+            ON CONFLICT (worker_name, model_id) DO UPDATE
+                SET encrypted_blob = EXCLUDED.encrypted_blob,
+                    base_url       = EXCLUDED.base_url,
+                    api_backend    = EXCLUDED.api_backend,
+                    context_window = EXCLUDED.context_window,
+                    model_name     = EXCLUDED.model_name,
+                    rotated_at     = NOW()
+            "#,
+        )
+        .bind(worker_name)
+        .bind(model_id)
+        .bind(encrypted_blob)
+        .bind(base_url)
+        .bind(api_backend)
+        .bind(context_window as i32)
+        .bind(model_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<Option<StoredCredential>, StoreError> {
+        let row = sqlx::query(
+            r#"
+            SELECT worker_name, model_id, encrypted_blob, base_url, api_backend,
+                   context_window, model_name, created_at, rotated_at
+              FROM worker_credentials
+             WHERE worker_name = $1 AND model_id = $2
+            "#,
+        )
+        .bind(worker_name)
+        .bind(model_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_stored_credential).transpose()?)
+    }
+
+    async fn list_worker_credentials(
+        &self,
+        worker_name: &str,
+    ) -> Result<Vec<StoredCredential>, StoreError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT worker_name, model_id, encrypted_blob, base_url, api_backend,
+                   context_window, model_name, created_at, rotated_at
+              FROM worker_credentials
+             WHERE worker_name = $1
+             ORDER BY model_id
+            "#,
+        )
+        .bind(worker_name)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(row_to_stored_credential)
+            .collect()
+    }
+
+    async fn delete_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM worker_credentials WHERE worker_name = $1 AND model_id = $2",
+        )
+        .bind(worker_name)
+        .bind(model_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -696,4 +792,23 @@ fn str_to_circuit_state(s: &str) -> Result<CircuitState, StoreError> {
             "unknown circuit state: {other}"
         ))),
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Phase 8.6: worker_credentials 행 변환
+// ═══════════════════════════════════════════════════════════════════════
+
+fn row_to_stored_credential(row: sqlx::postgres::PgRow) -> Result<StoredCredential, StoreError> {
+    let context_window: i32 = row.try_get("context_window")?;
+    Ok(StoredCredential {
+        worker_name: row.try_get("worker_name")?,
+        model_id: row.try_get("model_id")?,
+        encrypted_blob: row.try_get("encrypted_blob")?,
+        base_url: row.try_get("base_url")?,
+        api_backend: row.try_get("api_backend")?,
+        context_window: context_window as u32,
+        model_name: row.try_get("model_name")?,
+        created_at: row.try_get("created_at")?,
+        rotated_at: row.try_get("rotated_at")?,
+    })
 }

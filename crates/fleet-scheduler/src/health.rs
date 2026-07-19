@@ -286,6 +286,40 @@ mod tests {
         async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
             unimplemented!()
         }
+
+        // Phase 8.6: credentials 메서드 — health 테스트에서 미사용.
+        async fn upsert_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Option<&str>,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn get_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
+            unimplemented!()
+        }
+        async fn list_worker_credentials(
+            &self,
+            _: &str,
+        ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
+            unimplemented!()
+        }
+        async fn delete_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, StoreError> {
+            unimplemented!()
+        }
     }
 
     fn make_state(store: Arc<dyn Store>) -> Arc<FleetState> {

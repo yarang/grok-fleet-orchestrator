@@ -246,6 +246,40 @@ mod tests {
         async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, fleet_store::StoreError> {
             unimplemented!()
         }
+
+        // Phase 8.6: credentials 메서드 — NoopStore에서는 미지원.
+        async fn upsert_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: u32,
+            _: Option<&str>,
+        ) -> Result<(), fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn get_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<fleet_store::StoredCredential>, fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn list_worker_credentials(
+            &self,
+            _: &str,
+        ) -> Result<Vec<fleet_store::StoredCredential>, fleet_store::StoreError> {
+            unimplemented!()
+        }
+        async fn delete_worker_credential(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<bool, fleet_store::StoreError> {
+            unimplemented!()
+        }
     }
 
     #[tokio::test]

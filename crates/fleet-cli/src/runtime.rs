@@ -154,6 +154,7 @@ pub async fn run_serve(
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
     dashboard_bind: Option<&str>,
+    master_key_env: Option<&str>,
     mtls_flags: MtlsFlags<'_>,
 ) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
@@ -238,6 +239,36 @@ pub async fn run_serve(
         let mut app_state = AppState::new(store.clone())
             .with_heartbeat_interval(health_interval_secs as u32)
             .with_transport(transport_handle.clone());
+
+        // Phase 8.6: master key 로드 (credentials 암호화용).
+        // FLEET_MASTER_KEY env 또는 /etc/fleet/master.key 파일에서.
+        // 로드 실패 시 credentials API 엔드포인트가 503 반환 (다른 API는 정상 동작).
+        match fleet_credentials::MasterKey::load_with_paths(
+            fleet_credentials::ENV_VAR,
+            fleet_credentials::DEFAULT_KEY_FILE,
+        ) {
+            Ok(key) => {
+                tracing::info!(
+                    "master key loaded — worker credentials API enabled ({} env or {} file)",
+                    fleet_credentials::ENV_VAR,
+                    fleet_credentials::DEFAULT_KEY_FILE
+                );
+                app_state = app_state.with_master_key(key);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "master key not available — worker credentials API will return 503 \
+                     (set {} env or create {} to enable)",
+                    fleet_credentials::ENV_VAR,
+                    fleet_credentials::DEFAULT_KEY_FILE
+                );
+            }
+        }
+        // 참고: master_key_env 인자는 현재 사용하지 않음 —
+        // 향후 --master-key-path 같은 플래그로 커스텀 경로 지원 가능.
+        let _ = master_key_env;
+
         if let Some(aud) = cf_audience {
             app_state = app_state.with_cf_audience(aud);
             tracing::info!(bind = %bind, aud = %aud, "HTTP API server with Cloudflare Access auth");

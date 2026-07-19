@@ -222,3 +222,96 @@ impl From<BootstrapToken> for BootstrapTokenSummary {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Phase 8.6: Worker credentials
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `PUT /v1/workers/:name/credentials` 요청 바디.
+///
+/// 한 번에 하나의 (model_id, api_key) 조합을 설정.
+/// `api_key`는 평문으로 전송되며, 서버에서 암호화하여 저장.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutCredentialRequest {
+    /// grok config의 `[model.<id>]` 키 (예: `grok-build`).
+    pub model_id: String,
+    /// API 엔드포인트 base URL.
+    pub base_url: String,
+    /// 평문 API 키. 암호화되어 DB에 저장됨.
+    pub api_key: String,
+    /// `chat_completions` 또는 `responses`. 기본 `chat_completions`.
+    #[serde(default = "default_credential_api_backend")]
+    pub api_backend: String,
+    /// 컨텍스트 윈도우. 기본 200000.
+    #[serde(default = "default_credential_context_window")]
+    pub context_window: u32,
+    /// 모델 이름 (예: `GLM-5.1`). 선택적.
+    #[serde(default)]
+    pub model_name: Option<String>,
+}
+
+fn default_credential_api_backend() -> String {
+    "chat_completions".to_string()
+}
+
+fn default_credential_context_window() -> u32 {
+    200_000
+}
+
+/// `PUT /v1/workers/:name/credentials` 응답.
+#[derive(Debug, Clone, Serialize)]
+pub struct PutCredentialResponse {
+    pub status: &'static str,
+    pub worker_name: String,
+    pub model_id: String,
+    pub rotated_at: DateTime<Utc>,
+}
+
+/// `GET /v1/workers/:name/credentials` 응답의 개별 항목.
+///
+/// **api_key는 절대 반환하지 않음** — 복호화는 worker 측에서만.
+/// 이 API는 메타데이터(어떤 모델이 설정되었는지, 회전 시간 등)만 반환.
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialSummary {
+    pub worker_name: String,
+    pub model_id: String,
+    pub base_url: String,
+    pub api_backend: String,
+    pub context_window: u32,
+    pub model_name: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: DateTime<Utc>,
+}
+
+impl From<fleet_store::StoredCredential> for CredentialSummary {
+    fn from(c: fleet_store::StoredCredential) -> Self {
+        Self {
+            worker_name: c.worker_name,
+            model_id: c.model_id,
+            base_url: c.base_url,
+            api_backend: c.api_backend,
+            context_window: c.context_window,
+            model_name: c.model_name,
+            created_at: c.created_at,
+            rotated_at: c.rotated_at,
+        }
+    }
+}
+
+/// `GET /v1/workers/:name/credentials/:model_id/export` 응답.
+///
+/// 복호화된 API 키 + 메타데이터를 반환. 이 엔드포인트는 프로비저닝
+/// 시에만 사용되며, bearer 토큰 인증을 필수로 받음.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportedCredential {
+    pub worker_name: String,
+    pub model_id: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub api_backend: String,
+    pub context_window: u32,
+    pub model_name: Option<String>,
+    pub rotated_at: DateTime<Utc>,
+    /// 워커의 `~/.grok/config.toml`에 추가할 TOML 섹션 (렌더링된 문자열).
+    pub grok_config_section: String,
+}

@@ -37,6 +37,7 @@ pkg-fmt = "tgz"
 
 [dependencies]
 fleet-core = { workspace = true }
+fleet-credentials = { workspace = true }
 fleet-store = { workspace = true }
 fleet-transport = { workspace = true }
 fleet-scheduler = { workspace = true }

@@ -19,6 +19,7 @@ pub struct MemStore {
     events: Mutex<Vec<EventEntry>>,
     outputs: Mutex<HashMap<TaskId, Vec<String>>>,
     bootstrap_tokens: Mutex<HashMap<String, BootstrapToken>>,
+    credentials: Mutex<HashMap<(String, String), fleet_store::StoredCredential>>,
 }
 
 impl MemStore {
@@ -29,6 +30,7 @@ impl MemStore {
             events: Mutex::new(Vec::new()),
             outputs: Mutex::new(HashMap::new()),
             bootstrap_tokens: Mutex::new(HashMap::new()),
+            credentials: Mutex::new(HashMap::new()),
         }
     }
 
@@ -248,6 +250,81 @@ impl Store for MemStore {
             .lock()
             .unwrap()
             .remove(token)
+            .is_some())
+    }
+
+    // ── Phase 8.6: credentials (in-memory) ─────────────────────────────
+
+    async fn upsert_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+        encrypted_blob: &str,
+        base_url: &str,
+        api_backend: &str,
+        context_window: u32,
+        model_name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut creds = self.credentials.lock().unwrap();
+        let key = (worker_name.to_string(), model_id.to_string());
+        let now = chrono::Utc::now();
+        let entry = creds.entry(key).or_insert_with(|| fleet_store::StoredCredential {
+            worker_name: worker_name.to_string(),
+            model_id: model_id.to_string(),
+            encrypted_blob: encrypted_blob.to_string(),
+            base_url: base_url.to_string(),
+            api_backend: api_backend.to_string(),
+            context_window,
+            model_name: model_name.map(|s| s.to_string()),
+            created_at: now,
+            rotated_at: now,
+        });
+        entry.encrypted_blob = encrypted_blob.to_string();
+        entry.base_url = base_url.to_string();
+        entry.api_backend = api_backend.to_string();
+        entry.context_window = context_window;
+        entry.model_name = model_name.map(|s| s.to_string());
+        entry.rotated_at = now;
+        Ok(())
+    }
+
+    async fn get_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
+        Ok(self
+            .credentials
+            .lock()
+            .unwrap()
+            .get(&(worker_name.to_string(), model_id.to_string()))
+            .cloned())
+    }
+
+    async fn list_worker_credentials(
+        &self,
+        worker_name: &str,
+    ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
+        Ok(self
+            .credentials
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((w, _), _)| w == worker_name)
+            .map(|(_, v)| v.clone())
+            .collect())
+    }
+
+    async fn delete_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .credentials
+            .lock()
+            .unwrap()
+            .remove(&(worker_name.to_string(), model_id.to_string()))
             .is_some())
     }
 }

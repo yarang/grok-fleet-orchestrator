@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 fleet-core = { workspace = true }
+fleet-credentials = { workspace = true }
 fleet-store = { workspace = true }
 fleet-transport = { workspace = true }
 async-trait = { workspace = true }

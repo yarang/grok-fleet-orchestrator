@@ -18,6 +18,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use fleet_credentials::MasterKey;
 use fleet_store::Store;
 use fleet_transport::WorkerTransport;
 
@@ -40,6 +41,9 @@ pub struct AppState {
     /// Cloudflare Access Application AUD (Phase 4).
     /// 설정된 경우 CF-Access-Jwt-Assertion 헤더의 aud 클레임과 비교.
     pub cf_audience: Option<String>,
+    /// Credentials 암호화용 마스터 키 (Phase 8.6).
+    /// `None`이면 credentials API 엔드포인트가 503 반환.
+    pub master_key: Option<Arc<MasterKey>>,
 }
 
 impl AppState {
@@ -51,6 +55,7 @@ impl AppState {
             allow_no_auth: true,
             valid_tokens: None,
             cf_audience: None,
+            master_key: None,
         }
     }
 
@@ -78,6 +83,13 @@ impl AppState {
         self.allow_no_auth = false;
         self
     }
+
+    /// Credentials 암호화 마스터 키 설정. 설정하지 않으면 credentials API
+    /// 엔드포인트가 503 Service Unavailable 반환.
+    pub fn with_master_key(mut self, key: MasterKey) -> Self {
+        self.master_key = Some(Arc::new(key));
+        self
+    }
 }
 
 /// 전체 라우터를 조립. 라우트 구조:
@@ -102,6 +114,30 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             "/:id",
             get(handlers::get_worker).delete(handlers::deregister_worker),
         );
+
+    // Phase 8.6: worker credentials (sub-resource under /v1/workers/:name/credentials).
+    // PUT  /v1/workers/:name/credentials                       — set/rotate
+    // GET  /v1/workers/:name/credentials                       — list (metadata only)
+    // GET  /v1/workers/:name/credentials/:model_id/export      — decrypted (admin)
+    // DELETE /v1/workers/:name/credentials/:model_id           — remove
+    let cred_routes = Router::new()
+        .route(
+            "/",
+            axum::routing::put(handlers::put_worker_credential)
+                .get(handlers::list_worker_credentials),
+        )
+        .route(
+            "/:model_id/export",
+            get(handlers::export_worker_credential),
+        )
+        .route(
+            "/:model_id",
+            axum::routing::delete(handlers::delete_worker_credential),
+        );
+
+    // /v1/workers/:name/credentials/* 라우팅을 위해 api_routes에 nest.
+    // axum에서는 /:name 하위에 또다른 /:model_id를 두려면 별도 nest가 필요.
+    let api_routes = api_routes.nest("/:name/credentials", cred_routes);
 
     let token_routes = Router::new()
         .route(

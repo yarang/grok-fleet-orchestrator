@@ -116,4 +116,59 @@ pub trait Store: Send + Sync {
 
     /// 부트스트랩 토큰 삭제 (revocation). 존재하지 않으면 false 반환.
     async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError>;
+
+    // ── Worker credentials (Phase 8.6) ─────────────────────────────
+
+    /// 워커의 자격 증명(API 키 등)을 암호화하여 저장하거나 갱신.
+    ///
+    /// 동일한 (worker_name, model_id) 조합이 이미 존재하면 덮어씀(upsert).
+    /// `encrypted_blob`은 이미 암호화된 상태로 전달되어야 함 — 이 trait은
+    /// 암호화를 수행하지 않음. (암호화는 상위 크레이트 `fleet-credentials`와
+    /// `fleet-api`/`fleet-cli`에서 처리.)
+    async fn upsert_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+        encrypted_blob: &str,
+        base_url: &str,
+        api_backend: &str,
+        context_window: u32,
+        model_name: Option<&str>,
+    ) -> Result<(), StoreError>;
+
+    /// 특정 (worker_name, model_id) 자격 증명 조회.
+    /// 암호화된 blob을 그대로 반환 (복호화는 호출자 책임).
+    async fn get_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<Option<StoredCredential>, StoreError>;
+
+    /// 워커의 모든 자격 증명 조회 (모델별 여러 개일 수 있음).
+    async fn list_worker_credentials(
+        &self,
+        worker_name: &str,
+    ) -> Result<Vec<StoredCredential>, StoreError>;
+
+    /// 자격 증명 삭제. 존재하지 않으면 false 반환.
+    async fn delete_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<bool, StoreError>;
+}
+
+/// DB에 저장된 자격 증명 행. api_key는 암호화된 상태로 반환됨.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StoredCredential {
+    pub worker_name: String,
+    pub model_id: String,
+    /// AES-256-GCM으로 암호화된 blob (base64).
+    pub encrypted_blob: String,
+    pub base_url: String,
+    pub api_backend: String,
+    pub context_window: u32,
+    pub model_name: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub rotated_at: chrono::DateTime<chrono::Utc>,
 }

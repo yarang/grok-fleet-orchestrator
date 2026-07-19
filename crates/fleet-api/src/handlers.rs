@@ -18,8 +18,9 @@ use crate::app::AppState;
 use crate::error::ApiError;
 use crate::schema::{
     BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
-    DeregisterRequest, HealthResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest,
-    JoinResponse, RegisterRequest, RegisterResponse, WorkerSummary,
+    CredentialSummary, DeregisterRequest, ExportedCredential, HealthResponse, HeartbeatRequest,
+    HeartbeatResponse, JoinRequest, JoinResponse, PutCredentialRequest, PutCredentialResponse,
+    RegisterRequest, RegisterResponse, WorkerSummary,
 };
 
 /// `GET /v1/health` — 단순 헬스 프로브.
@@ -670,3 +671,188 @@ fn worker_to_summary(w: &Worker) -> WorkerSummary {
 }
 
 // 사용하지 않을 수 있는 import 정리 — warning 방지
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Phase 8.6: Worker credentials 핸들러
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `PUT /v1/workers/:name/credentials` — API 키 저장/회전.
+///
+/// 요청 바디의 `api_key` (평문)를 마스터 키로 AES-256-GCM 암호화하여
+/// DB에 저장. `master_key`가 설정되지 않은 경우 503 반환.
+pub async fn put_worker_credential(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<PutCredentialRequest>,
+) -> Result<Json<PutCredentialResponse>, ApiError> {
+    // worker 존재 확인.
+    let worker = state
+        .store
+        .get_worker_by_name(&name)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
+
+    // 마스터 키 필수.
+    let master_key = state
+        .master_key
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("master key not configured on this orchestrator".into()))?;
+
+    // 입력 검증.
+    if req.api_key.is_empty() {
+        return Err(ApiError::BadRequest("api_key must not be empty".into()));
+    }
+    if req.base_url.is_empty() {
+        return Err(ApiError::BadRequest("base_url must not be empty".into()));
+    }
+    if req.model_id.is_empty() {
+        return Err(ApiError::BadRequest("model_id must not be empty".into()));
+    }
+
+    // 암호화.
+    let blob = master_key
+        .encrypt(req.api_key.as_bytes())
+        .map_err(|e| ApiError::Internal(format!("encryption failed: {e}")))?;
+
+    // upsert.
+    state
+        .store
+        .upsert_worker_credential(
+            &worker.name,
+            &req.model_id,
+            blob.as_str(),
+            &req.base_url,
+            &req.api_backend,
+            req.context_window,
+            req.model_name.as_deref(),
+        )
+        .await?;
+
+    // 회전 시간을 반환하기 위해 다시 조회.
+    let stored = state
+        .store
+        .get_worker_credential(&worker.name, &req.model_id)
+        .await?
+        .ok_or_else(|| ApiError::Internal("credential upsert succeeded but row not found".into()))?;
+
+    info!(
+        worker = %worker.name,
+        model_id = %req.model_id,
+        rotated_at = %stored.rotated_at,
+        "worker credential stored/rotated"
+    );
+
+    Ok(Json(PutCredentialResponse {
+        status: "rotated",
+        worker_name: worker.name,
+        model_id: req.model_id,
+        rotated_at: stored.rotated_at,
+    }))
+}
+
+/// `GET /v1/workers/:name/credentials` — 메타데이터만 조회 (api_key 제외).
+pub async fn list_worker_credentials(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<Vec<CredentialSummary>>, ApiError> {
+    // worker 존재 확인 (NotFound 명확화).
+    let worker = state
+        .store
+        .get_worker_by_name(&name)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
+
+    let creds = state.store.list_worker_credentials(&worker.name).await?;
+    Ok(Json(creds.into_iter().map(CredentialSummary::from).collect()))
+}
+
+/// `GET /v1/workers/:name/credentials/:model_id/export` — 복호화된 전체 자격 증명.
+///
+/// **주의**: api_key가 평문으로 반환됨. 프로비저닝 스크립트 전용 엔드포인트.
+/// 운영 환경에서는 bearer 토큰 인증 (또는 CF Access) 하에서만 노출되어야 함.
+pub async fn export_worker_credential(
+    State(state): State<Arc<AppState>>,
+    Path((name, model_id)): Path<(String, String)>,
+) -> Result<Json<ExportedCredential>, ApiError> {
+    let worker = state
+        .store
+        .get_worker_by_name(&name)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("worker '{name}' not found")))?;
+
+    let master_key = state
+        .master_key
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("master key not configured on this orchestrator".into()))?;
+
+    let stored = state
+        .store
+        .get_worker_credential(&worker.name, &model_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "credential not found for worker '{name}' model '{model_id}'"
+            ))
+        })?;
+
+    // 복호화.
+    let blob = fleet_credentials::EncryptedBlob::from_string(stored.encrypted_blob.clone());
+    let plaintext = master_key
+        .decrypt(&blob)
+        .map_err(|e| ApiError::Internal(format!("decryption failed: {e}")))?;
+    let api_key = String::from_utf8(plaintext)
+        .map_err(|e| ApiError::Internal(format!("decrypted bytes are not UTF-8: {e}")))?;
+
+    // grok config 섹션 렌더링.
+    let cred = fleet_credentials::WorkerCredentials {
+        worker_name: stored.worker_name.clone(),
+        model_id: stored.model_id.clone(),
+        base_url: stored.base_url.clone(),
+        api_key: api_key.clone(),
+        api_backend: stored.api_backend.clone(),
+        context_window: stored.context_window,
+        model: stored.model_name.clone(),
+        rotated_at: Some(stored.rotated_at),
+    };
+    let grok_config_section = cred.render_grok_config_section();
+
+    debug!(
+        worker = %stored.worker_name,
+        model_id = %stored.model_id,
+        "credential exported (decrypted)"
+    );
+
+    Ok(Json(ExportedCredential {
+        worker_name: stored.worker_name,
+        model_id: stored.model_id,
+        base_url: stored.base_url,
+        api_key,
+        api_backend: stored.api_backend,
+        context_window: stored.context_window,
+        model_name: stored.model_name,
+        rotated_at: stored.rotated_at,
+        grok_config_section,
+    }))
+}
+
+/// `DELETE /v1/workers/:name/credentials/:model_id` — 자격 증명 제거.
+pub async fn delete_worker_credential(
+    State(state): State<Arc<AppState>>,
+    Path((name, model_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let deleted = state
+        .store
+        .delete_worker_credential(&name, &model_id)
+        .await?;
+    if !deleted {
+        return Err(ApiError::NotFound(format!(
+            "credential not found for worker '{name}' model '{model_id}'"
+        )));
+    }
+    info!(worker = %name, model_id = %model_id, "credential deleted");
+    Ok(Json(serde_json::json!({
+        "status": "deleted",
+        "worker_name": name,
+        "model_id": model_id,
+    })))
+}

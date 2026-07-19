@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+mod credentials;
 mod doctor;
 mod logging;
 #[cfg(feature = "mtls")]
@@ -142,6 +143,13 @@ enum Command {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+    },
+
+    /// 워커 자격 증명(API 키) 중앙 관리.
+    /// 마스터 키로 AES-256-GCM 암호화하여 Postgres에 저장.
+    Credentials {
+        #[command(subcommand)]
+        action: CredentialsAction,
     },
 
     /// 감사 로그 (이벤트 히스토리) 조회.
@@ -433,6 +441,118 @@ enum EventsAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum CredentialsAction {
+    /// 마스터 키 초기화. 새 무작위 키를 생성해 stdout 또는 파일로 출력.
+    /// 이 키를 FLEET_MASTER_KEY 환경변수 또는 /etc/fleet/master.key 로 배포.
+    InitKey {
+        /// 파일로 저장 (지정하지 않으면 hex 문자열을 stdout에 출력).
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+
+    /// 워커에 API 키 자격 증명을 저장 (신규 또는 회전).
+    Set {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Orchestrator API bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 워커 이름 (DB에 등록된 name).
+        #[arg(long)]
+        worker: String,
+
+        /// grok config의 `[model.<id>]` 키.
+        #[arg(long, default_value = "grok-build")]
+        model_id: String,
+
+        /// API 엔드포인트 base URL.
+        #[arg(long)]
+        base_url: String,
+
+        /// 평문 API 키. 명령행 인자로 주지 않으면 stdin이나 환경변수에서 읽음.
+        #[arg(long, env = "FLEET_CRED_API_KEY")]
+        api_key: Option<String>,
+
+        /// `chat_completions` 또는 `responses`.
+        #[arg(long, default_value = "chat_completions")]
+        api_backend: String,
+
+        /// 컨텍스트 윈도우.
+        #[arg(long, default_value_t = 200_000)]
+        context_window: u32,
+
+        /// 모델 이름 (예: `GLM-5.1`).
+        #[arg(long)]
+        model_name: Option<String>,
+    },
+
+    /// 워커의 자격 증명 목록을 출력 (api_key는 절대 출력하지 않음).
+    List {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Orchestrator API bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 워커 이름.
+        #[arg(long)]
+        worker: String,
+
+        /// JSON 형식 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 워커의 자격 증명을 복호화하여 내보내기.
+    /// **경고**: API 키가 평문으로 출력됨. 프로비저닝 스크립트에서만 사용.
+    Export {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Orchestrator API bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 워커 이름.
+        #[arg(long)]
+        worker: String,
+
+        /// 모델 ID (기본값: `grok-build`).
+        #[arg(long, default_value = "grok-build")]
+        model_id: String,
+
+        /// JSON 형식 출력 (기본: TOML 섹션만 stdout).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 워커의 자격 증명을 제거.
+    Delete {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// Orchestrator API bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 워커 이름.
+        #[arg(long)]
+        worker: String,
+
+        /// 모델 ID (기본값: `grok-build`).
+        #[arg(long, default_value = "grok-build")]
+        model_id: String,
+    },
+}
+
 #[cfg(feature = "mtls")]
 #[derive(Debug, Subcommand)]
 pub enum MtlsAction {
@@ -531,6 +651,7 @@ async fn main() -> Result<()> {
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
                 dashboard_bind.as_deref(),
+                None, // master_key_env: 현재 사용 안 함 (FLEET_MASTER_KEY env 또는 파일에서 자동 로드)
                 runtime::MtlsFlags {
                     ca: mtls_ca.as_deref(),
                     cert: mtls_cert.as_deref(),
@@ -543,6 +664,7 @@ async fn main() -> Result<()> {
         Command::Workers { action } => runtime::run_workers(action).await,
         Command::Tasks { action } => runtime::run_tasks(action).await,
         Command::Token { action } => token::run_token(action).await,
+        Command::Credentials { action } => credentials::run_credentials(action).await,
         Command::Events { action } => runtime::run_events(action).await,
         #[cfg(feature = "mtls")]
         Command::Mtls { action } => mtls::run_mtls(action).await,
