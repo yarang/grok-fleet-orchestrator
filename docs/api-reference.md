@@ -30,23 +30,33 @@
 
 새 워커 등록 또는 재연결.
 
+> **Phase 7 변경**: `agent_endpoint`는 `AcpTransport`가 WebSocket 연결을 맺는
+> 대상이 됩니다. 형식: `ws://host:port/ws?server-key=<token>`. `fleet serve
+> --transport acp` 모드에서는 등록 즉시 transport.register가 호출되어
+> 세션까지 열립니다 (실패 시 Store는 갱신되지만 task dispatch 불가 —
+> HealthChecker가 offline으로 강등).
+
 **요청 바디**:
 ```json
 {
   "name": "build-farm-1",
-  "endpoint": "wss://worker-a.fleet.example/ws",
+  "agent_endpoint": "ws://127.0.0.1:2419/ws?server-key=secret",
   "labels": { "arch": "arm64", "gpu": "false" },
-  "max_concurrent": 4
+  "max_concurrent_tasks": 4
 }
 ```
 
-**응답** (201):
+**응답** (200):
 ```json
 {
-  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "worker_id": "550e8400-e29b-41d4-a716-446655440000",
   "heartbeat_interval_secs": 15
 }
 ```
+
+#### `DELETE /v1/workers/:id`
+
+워커 등록 해제. Store 삭제 전에 transport.unregister를 호출하여 WebSocket 세션 정리.
 
 #### `POST /v1/workers/heartbeat`
 

@@ -7,6 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["acp"]
+# ACP transport — `--transport acp` 모드 활성화 (grok agent serve와 통신).
+# 기본 켜짐; rustls을 빼서 바이너리를 줄이려면 `--no-default-features` 사용.
+acp = ["fleet-transport/acp"]
+
 [[bin]]
 name = "fleet"
 path = "src/main.rs"

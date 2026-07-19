@@ -188,8 +188,62 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 
 ## 향후 로드맵
 
-- HubTransport (실제 워커 SSH/WebSocket 연결)
+- `fleet-worker` 바이너리 (원격 서버에서 실행되는 데몬 — `grok agent serve` 래핑 + 자동 등록/하트비트)
+- WebSocket 재연결 로직 (현재 AcpTransport는 첫 연결 실패 시 에러; Phase 8에서 지수 백오프 추가)
+- 동시 다중 세션 per worker (현재는 직렬 prompt 처리)
 - OIDC/JWKS 검증 (현재는 Cloudflare Access에 위임)
 - 작업 우선순위 큐 +抢占 스케줄링
 - 워커 오토스케일링 (로드 기반)
 - 다중 리전 페더레이션
+
+## ACP Transport (Phase 7)
+
+`AcpTransport`는 `WorkerTransport` trait의 실제 구현체로, [Agent Client Protocol](https://github.com/Zed-Industries/agent-client-protocol) (ACP) over WebSocket을 사용해 각 워커의 `grok agent serve`와 통신합니다.
+
+### 아키텍처
+
+```text
+[fleet serve --transport acp]
+   │
+   ├─ HTTP API /v1/workers/register
+   │      └─► AcpTransport::register(worker_id, "ws://worker:2419/ws?server-key=...")
+   │              ├─ AcpClient::connect(endpoint)     ← WebSocket handshake
+   │              ├─ client.open_session(None)         ← session/new JSON-RPC
+   │              └─ spawn reader task                 ← AcpEvent → WorkerEvent 변환
+   │
+   ├─ MCP submit_task
+   │      └─► Dispatcher::dispatch
+   │              └─► AcpTransport::dispatch(req)
+   │                      ├─ session.active_task = task_id
+   │                      └─ spawn: client.prompt(session, &prompt)
+   │
+   └─ Transport event stream (broadcast)
+           ├─ WorkerEvent::Output   (agent_message_chunk 스트리밍)
+           ├─ WorkerEvent::Completed (end_of_turn 응답)
+           └─ WorkerEvent::Failed    (오류)
+```
+
+### ACP 메서드 지원
+
+| Method           | 방향     | 용도                                   |
+|------------------|----------|----------------------------------------|
+| `initialize`     | req→res  | capabilities 교환 (protocolVersion=1)  |
+| `session/new`    | req→res  | cwd로 세션 생성, sessionId 반환        |
+| `session/prompt` | req→res  | 프롬프트 전송 + end_of_turn 시 결과    |
+| `session/cancel` | req→res  | 진행 중 프롬프트 취소                  |
+| `session/update` | notif    | 스트리밍 출력 (agent_message_chunk 등) |
+
+### 동시성 모델
+
+grok agent serve의 MvpAgent는 직렬 프롬프트 처리를 가정합니다. 따라서 `AcpTransport`는 워커당 동시에 1개의 진행 중 task를 추적 (`active_task: RwLock<Option<TaskId>>`). Phase 8에서 세션 풀링으로 동시성을 늘릴 예정.
+
+### 왜 `xai-computer-hub-sdk`가 아닌가
+
+`xai-computer-hub-sdk`는 *tool routing* 프로토콜 (에이전트가 외부 도구를 호출하는 용도)이며, 작업 디스패치 용도가 아닙니다. 따라서 fleet은 표준 ACP를 직접 구현했습니다.
+
+### 제한 (Phase 7 MVP)
+
+- 단일 WebSocket 연결 (재연결 없음 — Phase 8에서 지수 백오프 추가 예정)
+- 단일 세션 per worker (다중 세션은 Phase 8)
+- mTLS 없음 (Cloudflare Tunnel에 위임)
+- ACP의 `session/load`, `authorize`, `x.ai/*` 확장 미구현

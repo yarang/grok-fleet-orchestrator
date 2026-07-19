@@ -20,8 +20,16 @@
 pub mod error;
 pub mod mock;
 
+#[cfg(feature = "acp")]
+pub mod acp;
+#[cfg(feature = "acp")]
+pub mod acp_transport;
+
 pub use error::TransportError;
 pub use mock::{MockTransport, MockWorker};
+
+#[cfg(feature = "acp")]
+pub use acp_transport::AcpTransport;
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};
@@ -74,7 +82,7 @@ pub trait WorkerTransport: Send + Sync {
     async fn is_connected(&self, worker_id: WorkerId) -> bool;
 
     /// 작업을 워커에 디스패치. 완료를 기다리지 않고 즉시 반환.
-    /// 결과는 `poll_event`로 폴링하거나 이벤트 스트림으로 수신.
+    /// 결과는 `subscribe()`로 수신한 이벤트 스트림으로 전달.
     async fn dispatch(&self, req: DispatchRequest) -> Result<(), TransportError>;
 
     /// 진행 중인 작업을 취소.
@@ -82,4 +90,14 @@ pub trait WorkerTransport: Send + Sync {
 
     /// 워커 연결을 테스트 (헬스체크용).
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError>;
+
+    /// 워커 이벤트 스트림을 구독.
+    ///
+    /// Dispatcher는 시작 시 1회 호출하여 receiver를 얻고,
+    /// 이후 백그라운드 루프에서 이벤트를 소비합니다.
+    /// 구현체는 내부적으로 broadcast 채널을 운영하며, 호출 시마다
+    /// 새로운 receiver를 반환합니다 (멀티 구독자 지원).
+    async fn subscribe(
+        &self,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>, TransportError>;
 }

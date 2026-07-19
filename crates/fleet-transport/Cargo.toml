@@ -7,6 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# ACP (Agent Client Protocol) over WebSocket transport.
+# grok agent serve (port 2419) speaks this protocol.
+acp = [
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:rand",
+]
+
 [dependencies]
 fleet-core = { workspace = true }
 async-trait = { workspace = true }
@@ -17,5 +28,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
+# ACP-only (optional)
+tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+rand = { version = "0.8", optional = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+tower = { version = "0.5" }
+http-body-util = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

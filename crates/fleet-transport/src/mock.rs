@@ -10,11 +10,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::debug;
 
 use crate::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
+
+/// Mock 내부 브로드캐스트 채널의 버퍼 크기.
+/// WorkerEvent는 Clone 가능해야 broadcast로 전달 가능.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Mock 워커의 동작을 제어하기 위한 핸들.
 #[derive(Clone)]
@@ -48,8 +52,9 @@ struct Inner {
     completed: HashMap<TaskId, (WorkerId, Result<TaskResult, String>)>,
     /// 활성 작업 수 (용량 검증용).
     active: HashMap<WorkerId, u32>,
-    /// 이벤트 브로드캐스트 채널 (scheduler/dispatcher가 구독).
-    event_tx: mpsc::UnboundedSender<WorkerEvent>,
+    /// 이벤트 브로드캐스트 채널 (subscribe()가 호출될 때마다 새 receiver 생성).
+    /// 모든 WorkerEvent는 여기로 송출됨.
+    event_tx: broadcast::Sender<WorkerEvent>,
 }
 
 /// 인메모리 `WorkerTransport`. 테스트에서 `Arc<MockTransport>`로 공유.
@@ -58,21 +63,21 @@ pub struct MockTransport {
 }
 
 impl MockTransport {
-    /// 새 mock transport 생성. 반환된 receiver로 워커 이벤트를 수신.
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<WorkerEvent>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    /// 새 mock transport 생성.
+    ///
+    /// 이전 버전(Phase 1-6)은 `(Self, Receiver)` 튜플을 반환했으나,
+    /// trait 객체로 사용하기 위해 이벤트 스트림은 `subscribe()`로 분리.
+    pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel::<WorkerEvent>(EVENT_CHANNEL_CAPACITY);
         let inner = Inner {
             workers: HashMap::new(),
             completed: HashMap::new(),
             active: HashMap::new(),
             event_tx,
         };
-        (
-            Self {
-                inner: Arc::new(Mutex::new(inner)),
-            },
-            event_rx,
-        )
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
     }
 
     /// 테스트에서 워커를 미리 추가.
@@ -98,7 +103,7 @@ impl MockTransport {
 
 impl Default for MockTransport {
     fn default() -> Self {
-        Self::new().0
+        Self::new()
     }
 }
 
@@ -133,7 +138,7 @@ impl WorkerTransport for MockTransport {
 
     async fn dispatch(&self, req: DispatchRequest) -> Result<(), TransportError> {
         let worker_config: MockWorker;
-        let event_tx: mpsc::UnboundedSender<WorkerEvent>;
+        let event_tx: broadcast::Sender<WorkerEvent>;
 
         {
             let mut guard = self.inner.lock().await;
@@ -187,6 +192,8 @@ impl WorkerTransport for MockTransport {
                         worker_id,
                         finished_at: chrono::Utc::now(),
                     };
+                    // broadcast::send는 수신자가 없으면 Err를 반환하지만,
+                    // dispatcher가 아직 subscribe하지 않았을 수 있으므로 에러는 무시.
                     let _ = event_tx.send(WorkerEvent::Completed {
                         task_id,
                         result: task_result,
@@ -217,6 +224,43 @@ impl WorkerTransport for MockTransport {
         }
         Ok(Duration::from_millis(1))
     }
+
+    async fn subscribe(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
+        // broadcast receiver를 mpsc receiver로 브리지.
+        // 이렇게 하면 trait 시그니처(`mpsc::UnboundedReceiver`)를 그대로 유지하면서
+        // 멀티 구독자를 지원할 수 있음.
+        let mut bcast_rx = self.inner.lock().await.event_tx.subscribe();
+        let (tx, rx) = mpsc::unbounded_channel::<WorkerEvent>();
+
+        tokio::spawn(async move {
+            loop {
+                match bcast_rx.recv().await {
+                    Ok(event) => {
+                        if tx.send(event).is_err() {
+                            // 구독자가 드롭됨 — 브리지 태스크 종료.
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // 느린 구독자가 일부 이벤트를 놓침.
+                        // 테스트 환경에서는 발생하지 않아야 함 (capacity=256).
+                        tracing::warn!(
+                            "mock transport subscriber lagged — some worker events dropped"
+                        );
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // transport가 드롭됨 — 정상 종료.
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
 }
 
 #[cfg(test)]
@@ -226,7 +270,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_and_dispatch() {
-        let (transport, mut event_rx) = MockTransport::new();
+        let transport = MockTransport::new();
+        let mut event_rx = transport.subscribe().await.unwrap();
         let worker_id = WorkerId::new();
 
         transport
@@ -262,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregistered_worker_errors() {
-        let (transport, _rx) = MockTransport::new();
+        let transport = MockTransport::new();
         let req = DispatchRequest {
             task_id: TaskId::new(),
             worker_id: WorkerId::new(),

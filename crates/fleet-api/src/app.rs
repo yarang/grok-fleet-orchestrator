@@ -19,6 +19,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use fleet_store::Store;
+use fleet_transport::WorkerTransport;
 
 use crate::handlers;
 
@@ -26,6 +27,9 @@ use crate::handlers;
 pub struct AppState {
     /// Store trait 구현체 (보통 `Arc<PgStore>`).
     pub store: Arc<dyn Store>,
+    /// 워커 통신 transport. `None`이면 register/deregister가 Store만 갱신
+    /// (MockTransport 사용 시나 테스트에서 transport 연동이 불필요한 경우).
+    pub transport: Option<Arc<dyn WorkerTransport>>,
     /// 워커에게 권장할 하트비트 주기 (초).
     pub heartbeat_interval_secs: u32,
     /// 인증 생략 여부 (개발 모드).
@@ -42,6 +46,7 @@ impl AppState {
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self {
             store,
+            transport: None,
             heartbeat_interval_secs: 15,
             allow_no_auth: true,
             valid_tokens: None,
@@ -51,6 +56,12 @@ impl AppState {
 
     pub fn with_heartbeat_interval(mut self, secs: u32) -> Self {
         self.heartbeat_interval_secs = secs;
+        self
+    }
+
+    /// Worker transport 연결. 설정 시 register/deregister가 transport도 갱신.
+    pub fn with_transport(mut self, transport: Arc<dyn WorkerTransport>) -> Self {
+        self.transport = Some(transport);
         self
     }
 

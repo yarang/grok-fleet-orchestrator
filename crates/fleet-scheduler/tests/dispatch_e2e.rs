@@ -233,10 +233,11 @@ async fn setup(
         store.upsert_worker(&w).await.unwrap();
     }
 
-    let (transport, event_rx) = MockTransport::new();
+    let transport = MockTransport::new();
     for mw in mock_workers {
         transport.add_worker(mw).await;
     }
+    let event_rx = fleet_transport::WorkerTransport::subscribe(&transport).await.unwrap();
     let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
 
     let state = Arc::new(FleetState::new(

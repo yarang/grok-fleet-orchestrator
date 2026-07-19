@@ -112,6 +112,20 @@ pub async fn register_worker(
     // 3. Store에 upsert
     state.store.upsert_worker(&worker).await?;
 
+    // 3.5. Transport에 워커 등록 (설정된 경우).
+    // 실패해도 Store는 이미 기록되었으므로 warn 로그만.
+    // HealthChecker가 곧 연결 불가 상태를 감지하여 offline으로 강등.
+    if let Some(transport) = &state.transport {
+        if let Err(e) = transport.register(worker_id, &worker.endpoint).await {
+            tracing::warn!(
+                %worker_id,
+                endpoint = %worker.endpoint,
+                error = %e,
+                "transport.register failed — worker is in Store but cannot accept tasks until healthy"
+            );
+        }
+    }
+
     // 4. WorkerJoined 이벤트 (재등록인지 신규인지 구분)
     let is_new = existing_by_name.is_none() && existing_by_id.is_none();
     let event = if is_new {
@@ -285,6 +299,18 @@ pub async fn deregister_worker(
             &reason,
         ))
         .await;
+
+    // Transport에서 워커 제거 (설정된 경우).
+    // best-effort: 실패해도 Store 삭제는 진행.
+    if let Some(transport) = &state.transport {
+        if let Err(e) = transport.unregister(worker_id).await {
+            tracing::warn!(
+                %worker_id,
+                error = %e,
+                "transport.unregister failed — proceeding with Store delete"
+            );
+        }
+    }
 
     state.store.delete_worker(worker_id).await?;
 

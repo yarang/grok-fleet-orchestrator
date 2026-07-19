@@ -11,6 +11,7 @@ Claude Code, Gemini CLI, Codex, Cursor 등 MCP를 지원하는 모든 AI 코딩 
 
 ## 주요 특징
 
+- **ACP transport**: 표준 [Agent Client Protocol](https://github.com/Zed-Industries/agent-client-protocol) over WebSocket으로 각 워커의 `grok agent serve`와 통신 (`--transport acp`)
 - **비동기 작업 디스패치**: 장기 실행 작업을 원격 워커에 제출하고 `task_id`로 추적
 - **다중 워커 관리**: 사용자 지정 (`server_hint`) 또는 least-loaded 자동 선택
 - **장애 격리**: 워커별 CircuitBreaker로 연속 실패 시 자동 차단

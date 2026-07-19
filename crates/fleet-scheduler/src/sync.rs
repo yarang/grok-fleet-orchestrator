@@ -132,7 +132,7 @@ mod tests {
     };
 
     fn make_state() -> Arc<FleetState> {
-        let (transport, _rx) = fleet_transport::MockTransport::new();
+        let transport = fleet_transport::MockTransport::new();
         let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
         Arc::new(FleetState::new(
             // Store는 동기화 로직에서 사용되지 않음 — breaker만.

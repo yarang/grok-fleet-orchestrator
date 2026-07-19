@@ -45,8 +45,8 @@ enum Command {
     /// MCP stdio 서버 실행. AI 클라이언트(grok build, Claude Code 등)에
     /// Fleet 도구를 노출합니다.
     Serve {
-        /// `mock` (개발/테스트) 또는 `hub` (프로덕션, Phase 3).
-        /// 현재는 `mock`만 구현됨.
+        /// `mock` (개발/테스트, 가상 워커) 또는 `acp` (실제 grok agent serve와 WebSocket 통신).
+        /// `acp`는 빌드 시 `--features acp` 필요 (기본 활성화).
         #[arg(long, env = "FLEET_TRANSPORT", default_value = "mock")]
         transport: String,
 

@@ -42,7 +42,7 @@ use fleet_provisioner::{
 };
 use fleet_scheduler::{Dispatcher, FleetState, HealthChecker, HealthConfig};
 use fleet_store::{PgStore, Store};
-use fleet_transport::MockTransport;
+use fleet_transport::{MockTransport, WorkerTransport};
 
 /// Postgres 연결 URL 조회 (`DATABASE_URL` 필수).
 fn database_url() -> Result<String> {
@@ -100,16 +100,40 @@ pub async fn run_serve(
 ) -> Result<()> {
     let store = connect_and_migrate(db_max_conn).await?;
 
-    // Phase 1: MockTransport만 지원. Phase 3에서 HubTransport feature 추가.
-    if transport_kind != "mock" {
-        return Err(anyhow!(
-            "transport '{transport_kind}' is not supported in Phase 1. \
-             Use `--transport mock` (Phase 3 will add `hub`)."
-        ));
-    }
+    // Transport 선택: `mock` (기본, 테스트/개발) 또는 `acp` (Phase 7 — 실제 grok agent).
+    let (transport, event_rx): (
+        Arc<dyn fleet_transport::WorkerTransport>,
+        tokio::sync::mpsc::UnboundedReceiver<fleet_transport::WorkerEvent>,
+    ) = match transport_kind {
+        "mock" => {
+            tracing::info!("using MockTransport (no real workers will be contacted)");
+            let t = MockTransport::new();
+            let rx = t.subscribe().await?;
+            (Arc::new(t) as Arc<dyn fleet_transport::WorkerTransport>, rx)
+        }
+        "acp" => {
+            #[cfg(feature = "acp")]
+            {
+                tracing::info!("using AcpTransport (will connect to grok agent serve on each registered worker)");
+                let t = fleet_transport::AcpTransport::new();
+                let rx = t.subscribe().await?;
+                (Arc::new(t) as Arc<dyn fleet_transport::WorkerTransport>, rx)
+            }
+            #[cfg(not(feature = "acp"))]
+            {
+                return Err(anyhow!(
+                    "transport 'acp' requires building with --features fleet-transport/acp"
+                ));
+            }
+        }
+        other => {
+            return Err(anyhow!(
+                "unknown transport '{other}'. Supported: `mock`, `acp`."
+            ));
+        }
+    };
 
-    let (transport, event_rx) = MockTransport::new();
-    let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+    let transport_handle = transport.clone();
 
     let state = Arc::new(FleetState::new(
         store.clone(),
@@ -151,7 +175,8 @@ pub async fn run_serve(
             .with_context(|| format!("invalid --http-bind address: {bind_str}"))?;
 
         let mut app_state = AppState::new(store.clone())
-            .with_heartbeat_interval(health_interval_secs as u32);
+            .with_heartbeat_interval(health_interval_secs as u32)
+            .with_transport(transport_handle.clone());
         if let Some(aud) = cf_audience {
             app_state = app_state.with_cf_audience(aud);
             tracing::info!(bind = %bind, aud = %aud, "HTTP API server with Cloudflare Access auth");
