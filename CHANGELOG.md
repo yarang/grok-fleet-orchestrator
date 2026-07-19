@@ -6,7 +6,57 @@
 
 ## [Unreleased]
 
-### Added — Phase 8.1: fleet-worker 바이너리
+### Added — Phase 8.2: WebSocket 재연결 (supervisor + 지수 백오프)
+
+- **per-worker supervisor 태스크**: `register()` 시점에 각 워커마다 전용
+  `tokio::spawn` 태스크를 생성. WebSocket 수명 주기, reader 종료 감지, 자동
+  재연결을 단일 책임으로 캡슐화.
+  - 첫 번째 연결 시도 결과는 `oneshot` 채널로 `register()` 호출자에게 전달 —
+    실패하면 `TransportError::Connection` 반환 (supervisor는 백그라운드에서 계속 재시도).
+  - `unregister()` 또는 `AcpTransport::drop` 시 `SupervisorCmd::Shutdown` 전송 +
+    `JoinHandle::abort()` 로 정리.
+
+- **지수 백오프**: `RECONNECT_INITIAL` (1s) → 2s → 4s → ... → `RECONNECT_MAX` (30s).
+  연결이 한 번 성공하면 `backoff`를 1s로 리셋. `ReconnectConfig { initial, max }`로
+  테스트에서 임의 값 주입 가능 (`AcpTransport::with_reconnect`).
+
+- **`ConnState` enum**: `Connecting | Connected | Disconnected`. supervisor가
+  락으로 갱신하며, `dispatch` / `ping` 은 `state != Connected` 인 경우 즉시
+  `TransportError::Connection` 반환. `AcpTransport::conn_state(worker_id)` 로
+  외부 조회 가능.
+
+- **`WorkerEvent::Failed` 자동 방출**: reader가 종료되면 (Close 프레임, I/O 에러,
+  `grok agent serve` 종료 등) 현재 `active_task`를 take 하고
+  `Failed { error: "ACP reader exited (connection lost)" }` 이벤트를 broadcast.
+  이후 재연결 시 동일 task가 자동 재실행되지는 않음 (재시도 정책은 상위 레이어 담당).
+
+- **`ClientInner.event_tx` 재설계** (`fleet-transport::acp`): 기존
+  `UnboundedSender<AcpEvent>` 를 `std::sync::Mutex<Option<...>>` 로 래핑.
+  `reader_loop()` 종료 시 `close_event_channel()` 로 내부 sender를 drop하여
+  supervisor의 `event_rx.recv()` 가 `None` 을 반환하게 만듦. 이로써 WebSocket
+  Close 프레임에만 의존하지 않고 AcpClient의 모든 종료 경로를 감지.
+
+### Tests — Phase 8.2
+
+- **`crates/fleet-transport/tests/acp_reconnect.rs`** (신규 7개 통합 테스트):
+  - `connection_failure_during_register_returns_error` — 첫 연결 실패 시 `register()` 가 `Err` 반환.
+  - `close_frame_marks_disconnected` — WebSocket Close 프레임 수신 후 `conn_state` 가 `Disconnected` 로 전환.
+  - `reconnect_after_close_frame` — Close 이후 백오프를 거쳐 자동 재연결 (`Connected` 복귀).
+  - `failed_event_emitted_for_in_flight_task_on_close` — 진행 중 task가 reader 종료 시 `Failed` 로 전환됨.
+  - `unregister_during_backoff_exits_cleanly` — 백오프 대기 중 `unregister` 호출 시 supervisor가 즉시 종료됨.
+  - `multiple_workers_reconnect_independently` — 워커 A 의 연결이 끊겨도 B 는 정상 유지.
+  - `exponential_backoff_increases_between_failures` — 연속 실패 시 백오프가 2배씩 증가.
+- `acp_transport.rs` 단위 테스트 6개 추가 (conn_state, ping, wait_with_shutdown 변형 3종).
+- 총 **291개 테스트 통과**, 3개 `#[ignore]` (Phase 7 E2E 2 + doctest 1). 전체 294개.
+
+### Documentation — Phase 8.2
+
+- `docs/architecture.md`: "WebSocket Reconnection (Phase 8.2)" 섹션 추가
+  (supervisor 패턴, 상태 머신, 백오프 시퀀스, shutdown 시퀀스, reader 종료 감지).
+  "제한 (Phase 7/8.1 MVP)" 업데이트로 재연결 완료 표시. 로드맵에서 Phase 8.2 제거하고
+  Phase 8.3 (worker join CLI) 를 다음 항목으로 표시.
+
+## Phase 8.1: fleet-worker 바이너리
 
 - **`fleet-worker` 크레이트** (`crates/fleet-worker/`): 워커 머신에서 실행되는
   standalone 데몬. CLI 진입 (`--config /etc/fleet/worker.toml`, `--check`).

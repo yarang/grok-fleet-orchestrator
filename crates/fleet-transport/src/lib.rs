@@ -29,7 +29,7 @@ pub use error::TransportError;
 pub use mock::{MockTransport, MockWorker};
 
 #[cfg(feature = "acp")]
-pub use acp_transport::AcpTransport;
+pub use acp_transport::{AcpTransport, ConnState, ReconnectConfig};
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};

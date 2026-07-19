@@ -114,13 +114,37 @@ struct ClientInner {
     /// reader task가 응답을 받으면 해당 sender를 꺼내서 resolve.
     pending: Mutex<HashMap<u64, oneshot::Sender<RpcMessage>>>,
     /// 모든 AcpEvent를 fan-out.
-    event_tx: tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+    /// `Option` + std Mutex — reader_loop가 종료될 때 take하여 채널을 닫음.
+    /// 그러면 구독자 (event_rx)가 recv()에서 None을 받고 종료 가능.
+    /// None이 된 이후의 send 호출은 no-op.
+    event_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>>,
     /// 출력 시퀀스 번호 (Output 이벤트의 seq용).
     output_seq: AtomicU64,
     /// WebSocket writer.
     ws: WsConn,
     /// close 여부 (idempotency).
     closed: AtomicBool,
+}
+
+impl ClientInner {
+    /// event_tx로 이벤트 전송. 채널이 닫혀 있으면 no-op.
+    fn emit_event(&self, event: AcpEvent) {
+        if let Some(tx) = self
+            .event_tx
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+        {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// reader_loop 종료 시 호출 — event_tx를 take하여 채널 닫기.
+    fn close_event_channel(&self) {
+        if let Ok(mut guard) = self.event_tx.lock() {
+            *guard = None;
+        }
+    }
 }
 
 /// ACP 클라이언트 핸들.
@@ -143,7 +167,7 @@ impl AcpClient {
         let inner = Arc::new(ClientInner {
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
-            event_tx,
+            event_tx: std::sync::Mutex::new(Some(event_tx)),
             output_seq: AtomicU64::new(0),
             ws,
             closed: AtomicBool::new(false),
@@ -209,7 +233,7 @@ impl AcpClient {
         // Completed 이벤트 emit (이 시점까지 도착한 session/update 외의
         // 완료 신호 — end_of_turn=true인 경우에는 ACP가 update로도 end_of_turn을
         // 보냈을 수 있지만, 안전하게 한 번 더 emit하여 구독자가 결과를 받도록).
-        let _ = self.inner.event_tx.send(AcpEvent::Completed {
+        self.inner.emit_event(AcpEvent::Completed {
             prompt_id,
             result,
         });
@@ -362,6 +386,11 @@ async fn reader_loop(mut reader: WsStream, inner: Arc<ClientInner>) {
             params: None,
         });
     }
+
+    // event_tx를 take하여 채널 닫기 — 구독자가 recv()에서 None을 받아 종료.
+    // supervisor (acp_transport.rs)가 이를 감지하여 재연결 루프로 진입.
+    inner.close_event_channel();
+    debug!("ACP inner reader_loop fully terminated — event channel closed");
 }
 
 /// 단일 text 프레임 처리.
@@ -431,7 +460,7 @@ fn handle_single_update(value: serde_json::Value, inner: &Arc<ClientInner>) {
         UpdateContent::AgentMessageChunk { content } => {
             if let Some(text) = content.extract_text() {
                 let seq = inner.output_seq.fetch_add(1, Ordering::Relaxed);
-                let _ = inner.event_tx.send(AcpEvent::Output {
+                inner.emit_event(AcpEvent::Output {
                     prompt_id,
                     seq,
                     chunk: text,
@@ -445,7 +474,7 @@ fn handle_single_update(value: serde_json::Value, inner: &Arc<ClientInner>) {
             debug!(?prompt_id, "ACP end_of_turn notification");
         }
         UpdateContent::Error { content } => {
-            let _ = inner.event_tx.send(AcpEvent::Failed {
+            inner.emit_event(AcpEvent::Failed {
                 prompt_id,
                 error: content.message,
             });
