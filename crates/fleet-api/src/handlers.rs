@@ -620,10 +620,14 @@ async fn upsert_and_register(
 ) -> Result<WorkerId, ApiError> {
     state.store.upsert_worker(worker).await?;
     if let Some(transport) = &state.transport {
-        if let Err(e) = transport.register(worker.id, &worker.endpoint).await {
+        if let Err(e) = transport
+            .register(worker.id, &worker.endpoint, worker.max_concurrent)
+            .await
+        {
             tracing::warn!(
                 worker_id = %worker.id,
                 endpoint = %worker.endpoint,
+                max_concurrent = worker.max_concurrent,
                 error = %e,
                 "transport.register failed — worker is in Store but cannot accept tasks until healthy"
             );

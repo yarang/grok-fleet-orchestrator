@@ -4,10 +4,19 @@
 //! 하나의 `SessionId`를 가짐. 워커에서 발생하는 AcpEvent는 fan-in 되어
 //! 하나의 broadcast 채널로 subscriber(dispatcher)에게 전달.
 //!
-//! ## 동시성 모델 (Phase 7)
+//! ## 동시성 모델 (Phase 8.4)
 //!
-//! grok agent serve의 MvpAgent는 직렬 프롬프트 처리를 가정하므로,
-//! 워커당 동시에 실행 중인 프롬프트는 1개. 이를 `active_task`로 추적.
+//! 워커당 동시에 실행 중인 프롬프트는 `max_concurrent_tasks`개 (기본 1, 상한은
+//! `register()` 호출 시 결정). dispatch는 다음 규칙을 따릅니다:
+//!
+//! - `in_flight.len() >= max_concurrent`인 경우 즉시
+//!   `TransportError::WorkerAtCapacity` 반환 (큐잉 없음).
+//! - 그 외에는 `in_flight`에 `(task_id, InFlightTask { prompt_id: None, ... })`로
+//!   즉시 슬롯을 확보하고 백그라운드에서 `session/prompt`를 보냄.
+//! - `prompt()` 응답이 도착하면 `prompt_id`를 채우고 역색인 `prompt_index`에
+//!   `(prompt_id, task_id)`를 등록 — 이후 들어오는 `Output`/`Completed`/
+//!   `Failed` notification이 정확한 task로 라우팅됨.
+//! - `Output` 이벤트의 `prompt_id`가 `None`인 경우 (드문 레이스) 는 drop.
 //!
 //! ## 재연결 (Phase 8.2)
 //!
@@ -15,7 +24,7 @@
 //!
 //! 1. `AcpClient::connect()` + `open_session()` 으로 초기 연결 확립.
 //! 2. reader 루프가 종료되면 (WebSocket close / I/O 에러):
-//!    - 진행 중인 `active_task`를 `WorkerEvent::Failed`로 emit.
+//!    - 진행 중인 **모든** `in_flight` 태스크를 `WorkerEvent::Failed`로 emit.
 //!    - 상태를 `Disconnected`로 표시.
 //!    - 지수 백오프 (1s → 2s → ... → 최대 30s) 후 재연결 시도.
 //! 3. unregister 시 `shutdown_rx`로 supervisor를 종료.
@@ -23,23 +32,24 @@
 //! ```text
 //! [AcpTransport]
 //!   │
-//!   ├── register(worker_id, endpoint)
+//!   ├── register(worker_id, endpoint, max_concurrent)
 //!   │     └─► spawn supervisor(worker_id, endpoint)
 //!   │           │
 //!   │           ├── loop {
 //!   │           │     connect + open_session
 //!   │           │       └─► reader_loop (event_rx → WorkerEvent)
-//!   │           │     on exit: emit Failed for active_task, sleep(backoff)
+//!   │           │     on exit: emit Failed for ALL in_flight tasks, sleep(backoff)
 //!   │           │   }
 //!   │           │
 //!   │           └── shutdown_rx → break
 //!   │
 //!   ├── dispatch(req)
 //!   │     └─► if state != Connected → Err(Connection)
-//!   │     └─► set active_task, spawn prompt
+//!   │     └─► if in_flight.len() >= max_concurrent → Err(WorkerAtCapacity)
+//!   │     └─► insert in_flight entry, spawn prompt
 //!   │
 //!   └── cancel(task_id)
-//!         └─► lookup active_prompt, send session/cancel
+//!         └─► lookup in_flight, send session/cancel for known prompt_id
 //! ```
 
 use std::collections::HashMap;
@@ -114,6 +124,24 @@ struct ActiveSession {
     session_id: SessionId,
 }
 
+/// 워커에서 진행 중인 단일 task의 메타데이터.
+struct InFlightTask {
+    /// `session/prompt` 응답이 도착하기 전에는 `None`.
+    /// 응답 도착 후 `set_prompt_id`로 채워짐 — 이후 Output 이벤트 라우팅에 사용.
+    prompt_id: Option<PromptId>,
+    /// dispatch 시각 (로그/진단용).
+    started: Instant,
+}
+
+impl InFlightTask {
+    fn new() -> Self {
+        Self {
+            prompt_id: None,
+            started: Instant::now(),
+        }
+    }
+}
+
 /// 워커별 세션. supervisor와 dispatch/cancel 양쪽에서 공유.
 struct WorkerSession {
     worker_id: WorkerId,
@@ -124,17 +152,162 @@ struct WorkerSession {
     /// 활성 AcpClient / SessionId — Connected 상태에서만 Some.
     /// supervisor가 spawn한 reader와 수명을 같이 함.
     inner: Mutex<Option<ActiveSession>>,
-    /// 현재 진행 중인 태스크 (없으면 None).
-    active_task: RwLock<Option<TaskId>>,
-    /// 현재 진행 중인 프롬프트의 서버 발급 id.
-    active_prompt: RwLock<Option<PromptId>>,
+    /// 이 워커의 동시 작업 상한 (register 시 고정).
+    max_concurrent: u32,
+    /// 현재 진행 중인 태스크 맵 (task_id → 메타데이터).
+    /// Phase 8.4 이전에는 단일 `active_task: Option<TaskId>`였으나,
+    /// 이제 N개까지 동시에 추적 가능.
+    in_flight: Mutex<HashMap<TaskId, InFlightTask>>,
+    /// 역색인: prompt_id → task_id. Output/Completed/Failed 이벤트 라우팅용.
+    /// `prompt_id`가 결정된 시점(prompt() 응답 도착)에 삽입됨.
+    prompt_index: Mutex<HashMap<PromptId, TaskId>>,
+    /// prompt_id가 아직 dispatch에 의해 등록되기 전에 도착한 이벤트 버퍼.
+    /// session/update (Output)가 session/prompt 응답보다 먼저 도착하는
+    /// 레이스 윈도우를 커버. set_prompt_id 호출 시 drain되어 emit됨.
+    pending_events: Mutex<HashMap<PromptId, Vec<BufferedEvent>>>,
     /// supervisor 태스크로 보내는 명령 채널.
     cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
     /// supervisor 태스크 핸들 (Drop에서 abort).
     supervisor: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// prompt_id 등록 전에 버퍼링되는 이벤트.
+#[derive(Debug, Clone)]
+enum BufferedEvent {
+    Output { seq: u64, chunk: String },
+    Failed { error: String },
+}
+
 impl WorkerSession {
+    /// 빈 in-flight 상태로 새 세션 생성 (register 호출 시).
+    fn new(
+        worker_id: WorkerId,
+        endpoint: String,
+        max_concurrent: u32,
+        cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            worker_id,
+            endpoint,
+            state: RwLock::new(ConnState::Connecting),
+            inner: Mutex::new(None),
+            max_concurrent: max_concurrent.max(1),
+            in_flight: Mutex::new(HashMap::new()),
+            prompt_index: Mutex::new(HashMap::new()),
+            pending_events: Mutex::new(HashMap::new()),
+            cmd_tx,
+            supervisor: Mutex::new(None),
+        })
+    }
+
+    /// 현재 in-flight 카운트.
+    async fn in_flight_count(&self) -> usize {
+        self.in_flight.lock().await.len()
+    }
+
+    /// dispatch 시 슬롯 확보. 용량 초과 시 `WorkerAtCapacity` 에러.
+    async fn try_acquire(&self, task_id: TaskId) -> Result<(), TransportError> {
+        let mut guard = self.in_flight.lock().await;
+        if guard.len() >= self.max_concurrent as usize {
+            return Err(TransportError::WorkerAtCapacity(self.worker_id.to_string()));
+        }
+        guard.insert(task_id, InFlightTask::new());
+        Ok(())
+    }
+
+    /// `prompt()` 응답 도착 후 prompt_id 등록.
+    /// in_flight와 prompt_index 양쪽을 갱신하고, prompt_id가 알려지기 전에
+    /// 버퍼링된 이벤트를 drain하여 반환 — 호출자(dispatch)가 emit.
+    async fn set_prompt_id(
+        &self,
+        task_id: TaskId,
+        prompt_id: PromptId,
+    ) -> Vec<BufferedEvent> {
+        let mut in_flight = self.in_flight.lock().await;
+        if let Some(task) = in_flight.get_mut(&task_id) {
+            task.prompt_id = Some(prompt_id);
+        } else {
+            debug!(
+                %task_id, prompt_id = prompt_id.0,
+                "set_prompt_id: task not in in_flight — likely already completed"
+            );
+            return Vec::new();
+        }
+        drop(in_flight);
+        self.prompt_index.lock().await.insert(prompt_id, task_id);
+        self.pending_events
+            .lock()
+            .await
+            .remove(&prompt_id)
+            .unwrap_or_default()
+    }
+
+    /// prompt_id가 아직 등록되지 않은 경우 이벤트를 버퍼에 추가.
+    /// reader_loop에서 Output/Failed 처리 시 사용.
+    async fn buffer_event(&self, prompt_id: PromptId, event: BufferedEvent) {
+        self.pending_events
+            .lock()
+            .await
+            .entry(prompt_id)
+            .or_default()
+            .push(event);
+    }
+
+    /// task_id를 in_flight와 prompt_index에서 제거. 완료/실패 시 호출.
+    /// 제거된 task의 prompt_id를 반환 (사용처에서 필요시 index 정리용).
+    async fn complete(&self, task_id: TaskId) -> Option<InFlightTask> {
+        let removed = self.in_flight.lock().await.remove(&task_id);
+        if let Some(ref task) = removed {
+            debug!(
+                worker_id = %self.worker_id,
+                %task_id,
+                elapsed_secs = task.started.elapsed().as_secs_f64(),
+                "in-flight task removed"
+            );
+            if let Some(pid) = task.prompt_id {
+                self.prompt_index.lock().await.remove(&pid);
+                // 버퍼링된 이벤트도 함께 정리 — emit 주체가 정해지지 않은 상태에서
+                // task가 종료되었으므로 드롭.
+                self.pending_events.lock().await.remove(&pid);
+            }
+        }
+        removed
+    }
+
+    /// prompt_id로 task_id 역조회 (reader_loop에서 Output/Completed/Failed 처리용).
+    async fn task_for_prompt(&self, prompt_id: PromptId) -> Option<TaskId> {
+        self.prompt_index.lock().await.get(&prompt_id).copied()
+    }
+
+    /// 진행 중인 모든 task를 한 번에 실패 처리 (연결 끊김 시).
+    /// 각 task마다 `WorkerEvent::Failed`를 emit하고 맵 정리.
+    async fn fail_all(
+        self: &Arc<Self>,
+        broadcaster: &broadcast::Sender<WorkerEvent>,
+        reason: &str,
+    ) {
+        let drained: Vec<TaskId> = {
+            let guard = self.in_flight.lock().await;
+            guard.keys().copied().collect()
+        };
+        if drained.is_empty() {
+            return;
+        }
+        warn!(
+            worker_id = %self.worker_id,
+            count = drained.len(),
+            reason,
+            "failing all in-flight tasks due to connection loss"
+        );
+        for task_id in drained {
+            self.complete(task_id).await;
+            let _ = broadcaster.send(WorkerEvent::Failed {
+                task_id,
+                error: reason.to_string(),
+            });
+        }
+    }
+
     /// 활성 세션 정리 (dispatch/cancel이 빌려간 Arc 참조가 떨어지면 자동 close).
     /// supervisor에서만 호출.
     async fn clear_active(&self) {
@@ -199,6 +372,21 @@ impl AcpTransport {
         let state = *session.state.read().await;
         Some(state)
     }
+
+    /// 특정 워커의 현재 in-flight task 수. 미등록 워커면 None.
+    /// 관측/디버그/테스트용 — dispatch 결정은 selector가 미리 수행.
+    pub async fn in_flight_count(&self, worker_id: WorkerId) -> Option<usize> {
+        let clients = self.clients.read().await;
+        let session = clients.get(&worker_id).cloned()?;
+        drop(clients);
+        Some(session.in_flight_count().await)
+    }
+
+    /// 특정 워커의 동시 작업 상한. 미등록 워커면 None.
+    pub async fn max_concurrent(&self, worker_id: WorkerId) -> Option<u32> {
+        let clients = self.clients.read().await;
+        clients.get(&worker_id).map(|s| s.max_concurrent)
+    }
 }
 
 impl Default for AcpTransport {
@@ -209,13 +397,24 @@ impl Default for AcpTransport {
 
 #[async_trait]
 impl WorkerTransport for AcpTransport {
-    async fn register(&self, worker_id: WorkerId, endpoint: &str) -> Result<(), TransportError> {
+    async fn register(
+        &self,
+        worker_id: WorkerId,
+        endpoint: &str,
+        max_concurrent_tasks: u32,
+    ) -> Result<(), TransportError> {
         // 중복 등록 체크.
         if self.clients.read().await.contains_key(&worker_id) {
             return Err(TransportError::AlreadyRegistered(worker_id.to_string()));
         }
 
-        info!(%worker_id, endpoint = %sanitize_endpoint(endpoint), "registering ACP worker");
+        let cap = max_concurrent_tasks.max(1);
+        info!(
+            %worker_id,
+            endpoint = %sanitize_endpoint(endpoint),
+            max_concurrent = cap,
+            "registering ACP worker"
+        );
 
         // supervisor 명령 채널.
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SupervisorCmd>();
@@ -223,16 +422,12 @@ impl WorkerTransport for AcpTransport {
         let (first_result_tx, first_result_rx) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
 
-        let session = Arc::new(WorkerSession {
+        let session = WorkerSession::new(
             worker_id,
-            endpoint: endpoint.to_string(),
-            state: RwLock::new(ConnState::Connecting),
-            inner: Mutex::new(None),
-            active_task: RwLock::new(None),
-            active_prompt: RwLock::new(None),
-            cmd_tx: cmd_tx.clone(),
-            supervisor: Mutex::new(None),
-        });
+            endpoint.to_string(),
+            cap,
+            cmd_tx.clone(),
+        );
 
         // supervisor spawn.
         let supervisor_handle = spawn_supervisor(
@@ -306,12 +501,12 @@ impl WorkerTransport for AcpTransport {
             )));
         }
 
-        // active_task 설정.
-        *session.active_task.write().await = Some(task_id);
-        *session.active_prompt.write().await = None;
+        // 용량 검증 후 슬롯 확보 (in_flight에 등록).
+        session.try_acquire(task_id).await?;
 
         // 백그라운드에서 prompt 실행.
         let session_clone = session.clone();
+        let broadcaster = self.event_broadcaster.clone();
         let timeout_secs = req.timeout_secs;
         tokio::spawn(async move {
             let started = Instant::now();
@@ -333,20 +528,63 @@ impl WorkerTransport for AcpTransport {
             };
 
             match result {
-                Ok(_prompt_id) => {
+                Ok(prompt_id) => {
+                    // prompt_id를 in_flight와 prompt_index에 등록.
+                    // 동시에, prompt_id가 알려지기 전에 도착해 버퍼링된
+                    // 이벤트들을 drain하여 emit.
+                    let buffered = session_clone
+                        .set_prompt_id(task_id, prompt_id)
+                        .await;
+                    for event in buffered {
+                        match event {
+                            BufferedEvent::Output { seq, chunk } => {
+                                let _ = broadcaster.send(WorkerEvent::Output {
+                                    task_id,
+                                    seq,
+                                    chunk,
+                                });
+                            }
+                            BufferedEvent::Failed { error } => {
+                                let _ = broadcaster.send(WorkerEvent::Failed {
+                                    task_id,
+                                    error,
+                                });
+                            }
+                        }
+                    }
                     debug!(
                         %task_id, %worker_id,
                         elapsed_secs = started.elapsed().as_secs_f64(),
-                        "acp prompt completed"
+                        "acp prompt accepted by server"
                     );
                     // Completed는 background reader가 AcpEvent::Completed에서 emit.
                 }
                 Err(e) => {
-                    warn!(%task_id, %worker_id, error = %e, "acp prompt failed");
-                    // reader가 이미 Failed를 emit했을 수 있음 — 그 경우 active_task는 None.
-                    // 여전히 active면 사용자가 timeout으로 인지할 수 있도록
-                    // 별도 처리는 하지 않음 (간소화).
-                    let _ = session_clone;
+                    // prompt() 실패. 두 가지 시나리오를 구분:
+                    // (a) 일반적인 prompt 실패 (timeout, malformed response, 서버 에러):
+                    //     즉시 complete + Failed emit.
+                    // (b) ACP 연결 종료로 인한 실패 (에러 메시지에 "ACP connection
+                    //     closed" 포함): supervisor의 fail_all이 "reader exited"
+                    //     에러로 emit할 것이므로 여기서는 in_flight를 그대로 둠.
+                    if e.contains("ACP connection closed") {
+                        debug!(
+                            %task_id, %worker_id, error = %e,
+                            "prompt failed due to ACP close — deferring to supervisor fail_all"
+                        );
+                        // in_flight에 그대로 두어 supervisor가 emit.
+                    } else if session_clone.complete(task_id).await.is_some() {
+                        warn!(%task_id, %worker_id, error = %e, "acp prompt failed");
+                        let _ = broadcaster.send(WorkerEvent::Failed {
+                            task_id,
+                            error: e,
+                        });
+                    } else {
+                        // 다른 스레드가 이미 complete — 중복 emit 방지.
+                        debug!(
+                            %task_id, %worker_id, error = %e,
+                            "prompt failure overlapped with concurrent cleanup — skipping emit"
+                        );
+                    }
                 }
             }
         });
@@ -356,51 +594,45 @@ impl WorkerTransport for AcpTransport {
 
     async fn cancel(&self, task_id: TaskId) -> Result<(), TransportError> {
         // task_id → (worker_id, prompt_id, session_id, client) 역조회.
-        let target: Option<(
-            WorkerId,
-            Option<PromptId>,
-            Option<Arc<AcpClient>>,
-            Option<SessionId>,
-        )> = {
-            let clients = self.clients.read().await;
-            let mut found = None;
-            for (worker_id, session) in clients.iter() {
-                let active = *session.active_task.read().await;
-                if active == Some(task_id) {
-                    let prompt_id = *session.active_prompt.read().await;
-                    let (client, session_id) = {
-                        let guard = session.inner.lock().await;
-                        guard
-                            .as_ref()
-                            .map(|a| (Some(a.client.clone()), Some(a.session_id.clone())))
-                            .unwrap_or((None, None))
-                    };
-                    found = Some((*worker_id, prompt_id, client, session_id));
-                    break;
-                }
-            }
-            found
-        };
-
-        if let Some((worker_id, prompt_id_opt, client_opt, session_id_opt)) = target {
-            info!(%task_id, %worker_id, "sending ACP cancel");
-            let (client, session_id) = match (client_opt, session_id_opt) {
-                (Some(c), Some(s)) => (c, s),
-                _ => {
-                    debug!(
-                        %task_id, %worker_id,
-                        "cancel: active session missing — likely disconnected, treating as idempotent success"
-                    );
-                    return Ok(());
+        // 어느 워커에 있는지 모르므로 모든 워커를 순회. 동시에 여러 워커에
+        // 같은 task_id가 있을 수는 없으므로 첫 번째 발견에서 return.
+        let clients = self.clients.read().await;
+        for (worker_id, session) in clients.iter() {
+            let prompt_id = {
+                let in_flight = session.in_flight.lock().await;
+                match in_flight.get(&task_id) {
+                    Some(t) => t.prompt_id,
+                    None => continue, // 이 워커에 없음 — 다음 워커 시도.
                 }
             };
-            if let Some(prompt_id) = prompt_id_opt {
+
+            // in_flight에서 제거하지 않음 — Completed/Failed 이벤트가 정리.
+            // 여기서 제거하면 서버가 이미 응답을 보낸 후 orphan 상태가 됨.
+            let (client, session_id) = {
+                let guard = session.inner.lock().await;
+                match guard.as_ref() {
+                    Some(a) => (a.client.clone(), a.session_id.clone()),
+                    None => {
+                        debug!(
+                            %task_id, %worker_id,
+                            "cancel: active session missing — likely disconnected, treating as idempotent success"
+                        );
+                        return Ok(());
+                    }
+                }
+            };
+
+            info!(%task_id, %worker_id, ?prompt_id, "sending ACP cancel");
+            if let Some(pid) = prompt_id {
                 client
-                    .cancel(&session_id, prompt_id)
+                    .cancel(&session_id, pid)
                     .await
                     .map_err(|e| TransportError::Connection(format!("acp cancel: {e}")))?;
             } else {
-                debug!(%task_id, "prompt_id not yet known — cancel no-op until first output arrives");
+                debug!(
+                    %task_id,
+                    "prompt_id not yet known — cancel will be applied once prompt is registered"
+                );
             }
             return Ok(());
         }
@@ -538,13 +770,10 @@ fn spawn_supervisor(
                 }
                 ReaderExit::ReaderExited => {
                     warn!(%worker_id, "ACP reader exited — will reconnect");
-                    // 진행 중인 태스크를 Failed로 처리.
-                    fail_active_task(
-                        &session,
-                        &broadcaster,
-                        "ACP reader exited (connection lost)",
-                    )
-                    .await;
+                    // 진행 중인 **모든** 태스크를 Failed로 처리 (Phase 8.4).
+                    session
+                        .fail_all(&broadcaster, "ACP reader exited (connection lost)")
+                        .await;
                     // 활성 세션 정리.
                     session.clear_active().await;
                     *session.state.write().await = ConnState::Disconnected;
@@ -597,25 +826,19 @@ async fn establish_session(
     Ok((client, session_id, event_rx))
 }
 
-/// reader 종료 시 진행 중인 active_task가 있으면 WorkerEvent::Failed emit.
+/// reader 종료 시 진행 중인 active_task가 있면 WorkerEvent::Failed emit.
+///
+/// Phase 8.4부터 이 함수는 사용되지 않습니다 — `WorkerSession::fail_all`이
+/// 단일 호출로 모든 in-flight task를 실패 처리합니다. 호환성을 위해
+/// #[cfg(test)] 에서만 노출.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn fail_active_task(
     session: &Arc<WorkerSession>,
     broadcaster: &broadcast::Sender<WorkerEvent>,
     reason: &str,
 ) {
-    let active = session.active_task.write().await.take();
-    if let Some(task_id) = active {
-        *session.active_prompt.write().await = None;
-        warn!(
-            worker_id = %session.worker_id,
-            %task_id, reason,
-            "failing in-flight task due to reader exit"
-        );
-        let _ = broadcaster.send(WorkerEvent::Failed {
-            task_id,
-            error: reason.to_string(),
-        });
-    }
+    session.fail_all(broadcaster, reason).await;
 }
 
 /// backoff 대기 중 shutdown 신호가 오면 true 반환.
@@ -634,6 +857,13 @@ async fn wait_with_shutdown(
 }
 
 /// 백그라운드 reader 루프. AcpEvent → WorkerEvent 변환.
+///
+/// Phase 8.4부터 다중 동시 task를 지원 — 각 이벤트는 `prompt_id` 기반으로
+/// `session.prompt_index`에서 올바른 task_id를 찾아 라우팅됨. 단,
+/// session/update notification이 session/prompt 응답보다 먼저 도착하는
+/// 레이스 윈도우에서는 prompt_id가 아직 dispatch에 의해 등록되지 않았을
+/// 수 있음 — 이 경우 이벤트를 버퍼에 넣고, dispatch의 set_prompt_id가
+/// 호출될 때 drain되어 emit.
 async fn run_reader_loop(
     session: Arc<WorkerSession>,
     broadcaster: broadcast::Sender<WorkerEvent>,
@@ -643,28 +873,59 @@ async fn run_reader_loop(
     while let Some(event) = event_rx.recv().await {
         match event {
             AcpEvent::Output { prompt_id, seq, chunk } => {
-                // 첫 Output이면 active_prompt를 prompt_id로 설정.
-                if session.active_prompt.read().await.is_none() {
-                    if let Some(pid) = prompt_id {
-                        *session.active_prompt.write().await = Some(pid);
+                // prompt_id로 task_id 역조회. None인 경우 (드문 레이스)
+                // 출력을 drop — Phase 8.4 동시성 모델에서는 단일 active_task
+                // 가정이 더 이상 유효하지 않음.
+                let task_id_opt: Option<TaskId> = match prompt_id {
+                    Some(pid) => match session.task_for_prompt(pid).await {
+                        Some(tid) => Some(tid),
+                        None => {
+                            // dispatch가 아직 prompt_id를 등록하지 않음.
+                            // 버퍼에 저장 후 set_prompt_id 호출 시 emit.
+                            session
+                                .buffer_event(
+                                    pid,
+                                    BufferedEvent::Output {
+                                        seq,
+                                        chunk: chunk.clone(),
+                                    },
+                                )
+                                .await;
+                            debug!(
+                                %worker_id, prompt_id = pid.0,
+                                "buffered early Output — will flush on prompt_id register"
+                            );
+                            None
+                        }
+                    },
+                    None => {
+                        debug!(
+                            %worker_id,
+                            "Output event without prompt_id — cannot route in concurrent mode, dropping"
+                        );
+                        None
                     }
-                }
-                let task_id_opt = *session.active_task.read().await;
+                };
                 if let Some(task_id) = task_id_opt {
                     let _ = broadcaster.send(WorkerEvent::Output {
                         task_id,
                         seq,
                         chunk,
                     });
-                } else {
-                    debug!(
-                        %worker_id, ?prompt_id,
-                        "Output event arrived but no active task — dropping"
-                    );
                 }
             }
-            AcpEvent::Completed { prompt_id: _, result } => {
-                let task_id_opt = *session.active_task.read().await;
+            AcpEvent::Completed { prompt_id, result } => {
+                // prompt_id로 task 역조회. unknown인 경우 이미 complete된 task.
+                let task_id_opt = match prompt_id {
+                    Some(pid) => session.task_for_prompt(pid).await,
+                    None => {
+                        debug!(
+                            %worker_id,
+                            "Completed event without prompt_id — cannot route in concurrent mode, dropping"
+                        );
+                        None
+                    }
+                };
                 if let Some(task_id) = task_id_opt {
                     let output = extract_output_text(&result);
                     let token_usage = result.usage.map(|u| TokenUsage {
@@ -684,17 +945,48 @@ async fn run_reader_loop(
                         task_id,
                         result: task_result,
                     });
+                    session.complete(task_id).await;
+                } else if let Some(pid) = prompt_id {
+                    debug!(
+                        %worker_id, prompt_id = pid.0,
+                        "Completed event for unregistered prompt_id — likely set_prompt_id hasn't run yet; dropping (rare race)"
+                    );
                 }
-                *session.active_task.write().await = None;
-                *session.active_prompt.write().await = None;
             }
-            AcpEvent::Failed { prompt_id: _, error } => {
-                let task_id_opt = *session.active_task.read().await;
+            AcpEvent::Failed { prompt_id, error } => {
+                let task_id_opt: Option<TaskId> = match prompt_id {
+                    Some(pid) => match session.task_for_prompt(pid).await {
+                        Some(tid) => Some(tid),
+                        None => {
+                            // dispatch가 아직 prompt_id를 등록하지 않은 상태에서
+                            // 서버가 Failed update를 보낸 경우 — 버퍼링.
+                            session
+                                .buffer_event(
+                                    pid,
+                                    BufferedEvent::Failed {
+                                        error: error.clone(),
+                                    },
+                                )
+                                .await;
+                            debug!(
+                                %worker_id, prompt_id = pid.0,
+                                "buffered early Failed event"
+                            );
+                            None
+                        }
+                    },
+                    None => {
+                        debug!(
+                            %worker_id,
+                            "Failed event without prompt_id — cannot route in concurrent mode, dropping"
+                        );
+                        None
+                    }
+                };
                 if let Some(task_id) = task_id_opt {
                     let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
+                    session.complete(task_id).await;
                 }
-                *session.active_task.write().await = None;
-                *session.active_prompt.write().await = None;
             }
         }
     }

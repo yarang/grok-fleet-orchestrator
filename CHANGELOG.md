@@ -6,7 +6,77 @@
 
 ## [Unreleased]
 
-### Added — Phase 8.3: Bootstrap 토큰 + Worker 자유 가입 (`fleet-worker join`)
+### Added — Phase 8.4: 동시 다중 세션 per worker
+
+- **`WorkerTransport::register` 시그니처 변경**: `max_concurrent_tasks: u32` 인수
+  추가. transport는 dispatch 시 이 값을 검사하여 `WorkerAtCapacity` 에러를
+  반환. 0은 1로 정규화 (최소 1개 슬롯 보장).
+- **`TransportError::WorkerAtCapacity(WorkerId)`**: 새 에러 variant.
+  dispatcher는 이 에러를 일반 WorkerError와 동일하게 처리 (task를 Failed로
+  마킹). 사용자는 다시 submit하거나 다른 worker를 hint로 지정 가능.
+
+- **`AcpTransport` 동시성 모델 전면 개편** (`acp_transport.rs`):
+  - `WorkerSession.active_task: Option<TaskId>` (단일) →
+    `in_flight: HashMap<TaskId, InFlightTask>` + `prompt_index: HashMap<PromptId, TaskId>` (역색인).
+  - `dispatch(req)`: 용량 검증 → `try_acquire(task_id)`로 슬롯 확보 →
+    백그라운드에서 `session/prompt` 호출 → 응답 도착 시 `set_prompt_id`로
+    prompt_id 등록.
+  - **`pending_events` 버퍼**: `session/update` (Output) notification이
+    `session/prompt` 응답보다 먼저 도착하는 레이스 윈도우 커버. prompt_id가
+    등록되기 전의 Output/Failed 이벤트를 버퍼에 저장, `set_prompt_id` 호출
+    시 drain하여 emit.
+  - `run_reader_loop`: 모든 이벤트를 `prompt_id` 기반으로 라우팅. 동시에
+    진행 중인 N개의 task의 Output/Completed/Failed가 정확히 해당 task로 전달.
+  - `fail_all` (Phase 8.2의 `fail_active_task` 확장): reader 종료 시
+    in_flight에 있는 **모든** task에 대해 `WorkerEvent::Failed` emit.
+  - `AcpTransport::in_flight_count(worker_id)` / `max_concurrent(worker_id)`:
+    관측/디버그용 public 메서드.
+  - **`AcpClient::reader_loop` drain 개선**: WebSocket 종료 시 pending
+    요청에 빈 응답 대신 특수 에러 코드 -32001 ("ACP connection closed")를
+    보내어 상위 dispatch가 supervisor의 `fail_all`에 위임 가능하게 함.
+
+- **`MockTransport` 동시성 지원**: `register`에서 `max_concurrent_tasks`를
+  받아 `capacities` 맵에 저장. `dispatch`에서 `active >= cap` 검사 후
+  `WorkerAtCapacity` 반환.
+
+- **`WorkerSelector` 용량 필터** (`selector.rs`): `candidates.retain(|w|
+  w.has_capacity())` 추가. 단, `Worker.active_tasks`는 heartbeat 기반으로
+  갱신되므로 eventual consistent — 최종 강제는 transport가 담당.
+
+### Tests — Phase 8.4
+
+- **`crates/fleet-transport/tests/acp_concurrent.rs`** (신규 4개 통합 테스트):
+  - `concurrent_dispatches_within_capacity_all_complete` — max=3 워커에 3개
+    동시 dispatch → 모두 Completed.
+  - `dispatch_beyond_capacity_returns_worker_at_capacity` — max=1 워커에 2개
+    연속 dispatch → 두 번째는 `WorkerAtCapacity`.
+  - `output_events_routed_to_correct_task_by_prompt_id` — 2개 동시 dispatch,
+    각 task에 도착하는 Output이 서로 다른 promptId로 식별되는지 검증.
+  - `in_flight_count_reflects_active_dispatches` — `in_flight_count` /
+    `max_concurrent` 조회 메서드 검증.
+
+- **`acp_reconnect.rs::failed_event_emitted_for_in_flight_task_on_close`**:
+  다중 in-flight task 시나리오로 재작성. mock 서버에 `close_now` AtomicBool
+  추가 — 메시지 dispatch 없이 WebSocket Close를 트리거. 두 task 모두 Failed
+  수신 검증.
+
+- 총 **331개 테스트 통과**, 3개 `#[ignore]` (Phase 7 E2E 2 + doctest 1).
+  Phase 8.3 (327) 대비 +4.
+
+### Changed — Phase 8.4 (Breaking)
+
+- `WorkerTransport::register` 시그니처 변경: 모든 caller가 `max_concurrent_tasks`
+  인수를 전달해야 함. 영향받는 호출부:
+  - `fleet-api::handlers::upsert_and_register` (worker.max_concurrent 전달)
+  - 모든 테스트의 `register` 호출 (`4` 또는 `1`을 명시적으로 전달)
+  - `RecordingTransportShared` / `FailingTransport` 등 테스트용 mock trait 구현
+
+### Documentation — Phase 8.4
+
+- `docs/architecture.md`: "동시 다중 세션 (Phase 8.4)" 섹션 추가.
+- 로드맵에서 Phase 8.4 제거, 8.5 (mTLS)를 다음 항목으로 표시.
+
+## Phase 8.3: Bootstrap 토큰 + Worker 자유 가입 (`fleet-worker join`)
 
 - **Bootstrap 토큰 저장 모델** (`crates/fleet-store/migrations/003_bootstrap_tokens.sql`):
   - `bootstrap_tokens` 테이블 — `token` (PK), `created_at`, `created_by`,

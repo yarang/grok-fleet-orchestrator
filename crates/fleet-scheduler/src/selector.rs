@@ -71,6 +71,11 @@ impl WorkerSelector {
         // 3. 회로 차단된 워커 제외
         candidates.retain(|w| !self.breakers.state_of(w.id).is_open());
 
+        // 3.5. (Phase 8.4) 용량이 없는 워커 제외 — 동시 상한에 도달한 워커는
+        // dispatch해도 즉시 WorkerAtCapacity 에러가 나므로 selector 단에서
+        // 사전 필터링.
+        candidates.retain(|w| w.has_capacity());
+
         // 4. server_hint 처리 (폴백 없음)
         if let Some(hint) = &task.server_hint {
             let hinted = candidates.iter().find(|w| &w.name == hint);

@@ -83,7 +83,7 @@ async fn e2e_dispatch_to_real_grok() {
 
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint)
+        .register(worker, &endpoint, 4)
         .await
         .expect("register real worker");
 
@@ -148,7 +148,7 @@ async fn e2e_ping_real_worker() {
     let transport = std::sync::Arc::new(AcpTransport::new());
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint)
+        .register(worker, &endpoint, 4)
         .await
         .expect("register");
 

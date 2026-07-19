@@ -13,6 +13,17 @@
 //!
 //! - [`MockTransport`] — 테스트/개발용 인메모리 구현
 //! - (`hub` feature) `HubTransport` — `HubConnectionPool` 래핑 (Phase 3)
+//!
+//! ## 동시성 모델 (Phase 8.4)
+//!
+//! 각 워커는 `max_concurrent_tasks`개의 동시 작업을 처리할 수 있습니다.
+//! - `dispatch(req)`는 워커의 활성 작업 수가 상한에 도달한 경우 즉시
+//!   `TransportError::WorkerAtCapacity`를 반환합니다 (dispatch 큐잉 없음 —
+//!   Selector가 사전에 필터링함).
+//! - 동시 프롬프트는 단일 ACP 세션 내에서 병렬로 실행됩니다
+//!   (`session/prompt`는 `promptId`로 구분됨).
+//! - `Output` / `Completed` / `Failed` 이벤트는 `promptId`를 통해
+//!   올바른 `task_id`로 라우팅됩니다.
 
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
@@ -73,7 +84,16 @@ pub enum WorkerEvent {
 #[async_trait]
 pub trait WorkerTransport: Send + Sync {
     /// 워커를 풀에 등록. 이미 등록된 워커 ID면 에러.
-    async fn register(&self, worker_id: WorkerId, endpoint: &str) -> Result<(), TransportError>;
+    ///
+    /// `max_concurrent_tasks`는 이 워커가 동시에 처리할 수 있는 상한.
+    /// 0은 허용하지 않음 (에러). 1은 직렬 처리, N≥2는 동시 다중 세션.
+    /// transport는 dispatch 시 이 값을 검사하여 `WorkerAtCapacity` 에러를 반환.
+    async fn register(
+        &self,
+        worker_id: WorkerId,
+        endpoint: &str,
+        max_concurrent_tasks: u32,
+    ) -> Result<(), TransportError>;
 
     /// 워커를 풀에서 제거.
     async fn unregister(&self, worker_id: WorkerId) -> Result<(), TransportError>;

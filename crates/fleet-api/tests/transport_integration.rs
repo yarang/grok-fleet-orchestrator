@@ -49,7 +49,12 @@ struct RecordingTransportShared {
 
 #[async_trait]
 impl WorkerTransport for RecordingTransportShared {
-    async fn register(&self, worker_id: WorkerId, endpoint: &str) -> Result<(), TransportError> {
+    async fn register(
+        &self,
+        worker_id: WorkerId,
+        endpoint: &str,
+        _max_concurrent_tasks: u32,
+    ) -> Result<(), TransportError> {
         self.registrations
             .lock()
             .unwrap()
@@ -278,7 +283,12 @@ async fn transport_failure_does_not_break_store_registration() {
     struct FailingTransport;
     #[async_trait]
     impl WorkerTransport for FailingTransport {
-        async fn register(&self, _: WorkerId, _: &str) -> Result<(), TransportError> {
+        async fn register(
+            &self,
+            _: WorkerId,
+            _: &str,
+            _max_concurrent_tasks: u32,
+        ) -> Result<(), TransportError> {
             Err(TransportError::Connection("synthetic failure".into()))
         }
         async fn unregister(&self, _: WorkerId) -> Result<(), TransportError> {

@@ -193,7 +193,7 @@ async fn register_unregister_worker() {
 
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint(addr))
+        .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
 
@@ -210,10 +210,10 @@ async fn duplicate_register_rejected() {
 
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint(addr))
+        .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
-    let second = transport.register(worker, &endpoint(addr)).await;
+    let second = transport.register(worker, &endpoint(addr), 1).await;
     assert!(second.is_err(), "duplicate register should fail");
 }
 
@@ -227,7 +227,7 @@ async fn dispatch_streams_output_and_completes() {
 
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint(addr))
+        .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
 
@@ -272,7 +272,7 @@ async fn completed_includes_token_usage() {
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr)).await.unwrap();
+    transport.register(worker, &endpoint(addr), 1).await.unwrap();
 
     let task_id = TaskId::new();
     transport.dispatch(dispatch_req(task_id, worker, "x")).await.unwrap();
@@ -311,7 +311,7 @@ async fn ping_registered_worker_ok() {
     let transport = AcpTransport::new();
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr)).await.unwrap();
+    transport.register(worker, &endpoint(addr), 1).await.unwrap();
 
     let dur = transport.ping(worker).await.expect("ping");
     assert!(dur.as_millis() <= 1);
@@ -330,7 +330,7 @@ async fn cancel_unknown_task_is_noop() {
     let transport = AcpTransport::new();
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr)).await.unwrap();
+    transport.register(worker, &endpoint(addr), 1).await.unwrap();
 
     // 활성 task가 없으므로 cancel은 idempotent success.
     transport
@@ -348,13 +348,13 @@ async fn multiple_workers_dispatched_independently() {
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let w1 = WorkerId::new();
-    transport.register(w1, &endpoint(addr)).await.unwrap();
+    transport.register(w1, &endpoint(addr), 1).await.unwrap();
 
     // 두 번째 워커 등록을 위해 다른 서버 인스턴스 (scripted_output 다르게).
     let (state2, addr2) = start_mock_server().await;
     *state2.scripted_output.lock().await = vec!["from-w2".to_string()];
     let w2 = WorkerId::new();
-    transport.register(w2, &endpoint(addr2)).await.unwrap();
+    transport.register(w2, &endpoint(addr2), 1).await.unwrap();
 
     let t1 = TaskId::new();
     let t2 = TaskId::new();

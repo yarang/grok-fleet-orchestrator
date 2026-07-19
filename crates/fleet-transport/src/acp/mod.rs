@@ -53,6 +53,11 @@ use super::acp::messages::{
 };
 use super::acp::transport::{WsConn, WsStream};
 
+/// 특수 RPC 에러 코드 — WebSocket 종료로 인해 pending 요청이 실패했음을 표시.
+/// 표준 JSON-RPC 에러 코드 범위 (-32000 ~ -32099) 내에서 임의 선택.
+/// 상위 dispatch 레이어가 이 코드를 보고 supervisor의 fail_all에 위임 가능.
+pub const ACP_ERR_CONNECTION_CLOSED: i64 = -32001;
+
 /// ACP 세션 식별자 (서버가 `session/new` 응답에서 발급).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub String);
@@ -369,6 +374,10 @@ async fn reader_loop(mut reader: WsStream, inner: Arc<ClientInner>) {
     }
 
     // WebSocket 종료 시 모든 pending 요청을 실패 처리.
+    // 특수 에러 코드 -32001 ("connection closed")로 표시하여
+    // 호출자 (AcpClient::send_request)가 일반적인 RPC 에러와 구분 가능.
+    // 상위 dispatch 레이어는 이 에러를 보고 supervisor의 fail_all에
+    // 위임할지 결정함.
     let pending: Vec<(u64, oneshot::Sender<RpcMessage>)> = {
         let mut p = inner.pending.lock().await;
         p.drain().collect()
@@ -382,7 +391,11 @@ async fn reader_loop(mut reader: WsStream, inner: Arc<ClientInner>) {
             id: Some(id),
             method: None,
             result: None,
-            error: None,
+            error: Some(messages::RpcError {
+                code: ACP_ERR_CONNECTION_CLOSED,
+                message: "ACP connection closed".to_string(),
+                data: None,
+            }),
             params: None,
         });
     }

@@ -20,6 +20,9 @@ use crate::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
 /// WorkerEvent는 Clone 가능해야 broadcast로 전달 가능.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// Mock 워커의 기본 동시 작업 상한 (명시적 값이 없을 때).
+const DEFAULT_MOCK_MAX_CONCURRENT: u32 = 4;
+
 /// Mock 워커의 동작을 제어하기 위한 핸들.
 #[derive(Clone)]
 pub struct MockWorker {
@@ -31,6 +34,8 @@ pub struct MockWorker {
     pub latency: Duration,
     /// 워커가 강제로 실패해야 하는지.
     pub force_fail: bool,
+    /// 동시 작업 상한. register()에서 전달된 값으로 덮어씀.
+    pub max_concurrent: u32,
 }
 
 impl MockWorker {
@@ -41,6 +46,7 @@ impl MockWorker {
             forced_result: None,
             latency: Duration::from_millis(10),
             force_fail: false,
+            max_concurrent: DEFAULT_MOCK_MAX_CONCURRENT,
         }
     }
 }
@@ -52,6 +58,8 @@ struct Inner {
     completed: HashMap<TaskId, (WorkerId, Result<TaskResult, String>)>,
     /// 활성 작업 수 (용량 검증용).
     active: HashMap<WorkerId, u32>,
+    /// 등록 시점에 전달된 동시 상한. `MockWorker.max_concurrent`와 동기화.
+    capacities: HashMap<WorkerId, u32>,
     /// 이벤트 브로드캐스트 채널 (subscribe()가 호출될 때마다 새 receiver 생성).
     /// 모든 WorkerEvent는 여기로 송출됨.
     event_tx: broadcast::Sender<WorkerEvent>,
@@ -73,6 +81,7 @@ impl MockTransport {
             workers: HashMap::new(),
             completed: HashMap::new(),
             active: HashMap::new(),
+            capacities: HashMap::new(),
             event_tx,
         };
         Self {
@@ -109,16 +118,21 @@ impl Default for MockTransport {
 
 #[async_trait]
 impl WorkerTransport for MockTransport {
-    async fn register(&self, worker_id: WorkerId, endpoint: &str) -> Result<(), TransportError> {
+    async fn register(
+        &self,
+        worker_id: WorkerId,
+        endpoint: &str,
+        max_concurrent_tasks: u32,
+    ) -> Result<(), TransportError> {
         let mut guard = self.inner.lock().await;
         if guard.workers.contains_key(&worker_id) {
             return Err(TransportError::AlreadyRegistered(worker_id.to_string()));
         }
-        guard.workers.insert(
-            worker_id,
-            MockWorker::new(worker_id, endpoint),
-        );
-        debug!(%worker_id, %endpoint, "mock worker registered");
+        let mut worker = MockWorker::new(worker_id, endpoint);
+        worker.max_concurrent = max_concurrent_tasks.max(1);
+        guard.capacities.insert(worker_id, worker.max_concurrent);
+        guard.workers.insert(worker_id, worker);
+        debug!(%worker_id, %endpoint, max_concurrent_tasks, "mock worker registered");
         Ok(())
     }
 
@@ -129,6 +143,7 @@ impl WorkerTransport for MockTransport {
             .remove(&worker_id)
             .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?;
         guard.active.remove(&worker_id);
+        guard.capacities.remove(&worker_id);
         Ok(())
     }
 
@@ -149,8 +164,21 @@ impl WorkerTransport for MockTransport {
                 .ok_or_else(|| TransportError::WorkerNotRegistered(req.worker_id.to_string()))?;
             event_tx = guard.event_tx.clone();
 
+            // 용량 검증 (Phase 8.4).
+            // capacities에서 먼저 상한을 읽고 active entry를 얻어야
+            // 동시에 &mut와 &를 빌리지 않음.
+            let cap = guard
+                .capacities
+                .get(&req.worker_id)
+                .copied()
+                .unwrap_or(worker_config.max_concurrent);
+            let active = guard.active.entry(req.worker_id).or_insert(0);
+            if *active >= cap {
+                return Err(TransportError::WorkerAtCapacity(req.worker_id.to_string()));
+            }
+
             // 활성 작업 카운트 증가
-            *guard.active.entry(req.worker_id).or_insert(0) += 1;
+            *active += 1;
         }
 
         let task_id = req.task_id;
@@ -275,7 +303,7 @@ mod tests {
         let worker_id = WorkerId::new();
 
         transport
-            .register(worker_id, "wss://mock/ws")
+            .register(worker_id, "wss://mock/ws", 4)
             .await
             .unwrap();
 

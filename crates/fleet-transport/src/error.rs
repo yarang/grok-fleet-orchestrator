@@ -25,6 +25,10 @@ pub enum TransportError {
     #[error("worker {0} already registered")]
     AlreadyRegistered(String),
 
+    /// 워커가 동시 작업 상한에 도달해 추가 dispatch 불가.
+    #[error("worker {0} is at capacity (max_concurrent_tasks reached)")]
+    WorkerAtCapacity(String),
+
     /// 인증 실패.
     #[error("authentication failed: {0}")]
     Auth(String),

@@ -44,6 +44,9 @@ struct MockState {
     close_after_next: Arc<AtomicBool>,
     /// prompt 처리를 차단할지 여부. true면 session/prompt 응답 없이 대기.
     block_prompt: Arc<AtomicBool>,
+    /// 백그라운드 태스크가 폴링 — true로 설정 시 모든 활성 WebSocket을 즉시 닫음.
+    /// Phase 8.4에서 추가: 디스패치 없이 close를 트리거하는 깔끔한 방법.
+    close_now: Arc<AtomicBool>,
 }
 
 impl Default for MockState {
@@ -53,6 +56,7 @@ impl Default for MockState {
             next_prompt_id: Arc::new(Mutex::new(0)),
             close_after_next: Arc::new(AtomicBool::new(false)),
             block_prompt: Arc::new(AtomicBool::new(false)),
+            close_now: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -76,13 +80,26 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
     use futures_util::{SinkExt, StreamExt};
     let (mut writer, mut reader) = socket.split();
 
-    while let Some(msg) = reader.next().await {
-        let text = match msg {
-            Ok(WsMessage::Text(t)) => t,
-            Ok(WsMessage::Close(_)) | Err(_) => break,
-            _ => continue,
+    loop {
+        // close_now가 설정되었는지 폴링하면서 메시지를 동시에 기다림.
+        // close_now가 설정되면 즉시 Close 프레임 전송 후 종료.
+        let next_msg = tokio::select! {
+            biased; // close_now를 우선 검사.
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                if state.close_now.load(Ordering::SeqCst) {
+                    let _ = writer.close().await;
+                    return;
+                }
+                continue;
+            }
+            msg = reader.next() => match msg {
+                Some(Ok(WsMessage::Text(t))) => t,
+                Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => return,
+                _ => continue,
+            },
         };
-        let req: Value = match serde_json::from_str(&text) {
+
+        let req: Value = match serde_json::from_str(&next_msg) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -159,7 +176,7 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
         // writer.close()로 확실히 WebSocket을 닫는다 (Close 전송 + ack 대기).
         if state.close_after_next.load(Ordering::SeqCst) {
             let _ = writer.close().await;
-            break;
+            return;
         }
     }
 }
@@ -212,7 +229,7 @@ async fn connection_failure_during_register_returns_error() {
     let worker = WorkerId::new();
     // 127.0.0.1:9 — discard 포트.
     let result = transport
-        .register(worker, "ws://127.0.0.1:9/ws?server-key=x")
+        .register(worker, "ws://127.0.0.1:9/ws?server-key=x", 1)
         .await;
     assert!(result.is_err(), "register should fail on initial connect");
     let err = result.unwrap_err();
@@ -234,7 +251,7 @@ async fn close_frame_marks_disconnected() {
         max: Duration::from_millis(100),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr)).await.expect("register");
+    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
     assert_eq!(transport.conn_state(worker).await, Some(ConnState::Connected));
 
     // close_after_next 설정 → 다음 요청 후 Close 전송.
@@ -270,7 +287,7 @@ async fn reconnect_after_close_frame() {
         max: Duration::from_millis(200),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr)).await.expect("register");
+    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
     assert_eq!(transport.conn_state(worker).await, Some(ConnState::Connected));
 
     // close 트리거.
@@ -321,63 +338,64 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
         max: Duration::from_secs(120),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr)).await.expect("register");
+    // max_concurrent=2 — 두 개의 동시 task를 in-flight로 두어
+    // close 시 fail_all이 모두 처리하는지 검증.
+    transport
+        .register(worker, &endpoint(&addr), 2)
+        .await
+        .expect("register");
 
     let mut rx = transport.subscribe().await.unwrap();
 
-    // block_prompt=true → prompt가 응답하지 않음. active_task는 유지.
+    // block_prompt=true → 두 prompt 모두 서버 응답 없이 대기. in_flight 유지.
     state.block_prompt.store(true, Ordering::SeqCst);
-    let task = TaskId::new();
-    transport.dispatch(dispatch_req(task, worker, "blocked")).await.unwrap();
 
-    // prompt 도달 대기.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // received에 session/prompt가 들어있어야 함.
+    let task1 = TaskId::new();
+    let task2 = TaskId::new();
+    transport.dispatch(dispatch_req(task1, worker, "blocked-1")).await.unwrap();
+    transport.dispatch(dispatch_req(task2, worker, "blocked-2")).await.unwrap();
+
+    // 두 prompt 도달 대기.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     {
         let reqs = state.received.lock().await;
-        assert!(
-            reqs.iter().any(|r| r.get("method").and_then(|v| v.as_str()) == Some("session/prompt")),
-            "expected prompt to be received by mock"
-        );
+        let prompt_count = reqs
+            .iter()
+            .filter(|r| r.get("method").and_then(|v| v.as_str()) == Some("session/prompt"))
+            .count();
+        assert_eq!(prompt_count, 2, "expected both prompts to be received by mock");
     }
 
-    // close_after_next 설정 후 block_prompt 해제 → 다음 요청에서 닫음.
-    // 하지만 prompt는 차단 중이므로 다른 방식으로 close를 트리거해야 함.
-    // 간단히: block_prompt는 false로 두되, close_after_next를 설정하고
-    // 다른 prompt를 dispatch해서 close를 유발.
-    state.block_prompt.store(false, Ordering::SeqCst);
-    state.close_after_next.store(true, Ordering::SeqCst);
+    // close_now로 WebSocket 즉시 종료 — 디스패치 추가 없이 close 트리거.
+    state.close_now.store(true, Ordering::SeqCst);
 
-    // 두 번째 prompt로 close 트리거 — 첫 번째는 여전히 active.
-    let task2 = TaskId::new();
-    // 단, dispatch는 state != Connected일 때 에러.
-    // 현재는 여전히 Connected (첫 번째 prompt가 블록 중이더라도 연결 자체는 살아있음).
-    let r = transport.dispatch(dispatch_req(task2, worker, "trigger")).await;
-    // 가능하면 Ok, 아니면 무시 — 어차피 close 프레임이 전송되면 reader 종료.
-    let _ = r;
-
-    // Failed 이벤트 대기 — 첫 번째 task에 대해 emit되어야 함.
-    let mut got_failed = false;
+    // Failed 이벤트 대기 — 두 task 모두 emit되어야 함 (Phase 8.4 fail_all).
+    let mut got_failed_1 = false;
+    let mut got_failed_2 = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), rx.recv()).await {
             Ok(Some(WorkerEvent::Failed { task_id, error })) => {
-                // task 또는 task2에 대해 emit될 수 있음.
-                assert!(
-                    task_id == task || task_id == task2,
-                    "Failed for unexpected task {task_id}"
-                );
                 assert!(
                     error.contains("reader exited") || error.contains("connection"),
                     "unexpected error: {error}"
                 );
-                got_failed = true;
-                break;
+                if task_id == task1 {
+                    got_failed_1 = true;
+                } else if task_id == task2 {
+                    got_failed_2 = true;
+                } else {
+                    panic!("Failed for unexpected task {task_id}");
+                }
+                if got_failed_1 && got_failed_2 {
+                    break;
+                }
             }
             _ => continue,
         }
     }
-    assert!(got_failed, "expected Failed event for in-flight task on close");
+    assert!(got_failed_1, "expected Failed event for task1 on close");
+    assert!(got_failed_2, "expected Failed event for task2 on close");
 
     wait_for_state(&transport, worker, ConnState::Disconnected, "after close").await;
     transport.unregister(worker).await.unwrap();
@@ -398,7 +416,7 @@ async fn unregister_during_backoff_exits_cleanly() {
         max: Duration::from_secs(120),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr)).await.expect("register");
+    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
 
     // close 트리거.
     state.close_after_next.store(true, Ordering::SeqCst);
@@ -438,8 +456,8 @@ async fn multiple_workers_reconnect_independently() {
     });
     let w1 = WorkerId::new();
     let w2 = WorkerId::new();
-    transport.register(w1, &endpoint(&addr1)).await.unwrap();
-    transport.register(w2, &endpoint(&addr2)).await.unwrap();
+    transport.register(w1, &endpoint(&addr1), 1).await.unwrap();
+    transport.register(w2, &endpoint(&addr2), 1).await.unwrap();
     assert_eq!(transport.conn_state(w1).await, Some(ConnState::Connected));
     assert_eq!(transport.conn_state(w2).await, Some(ConnState::Connected));
 
@@ -469,7 +487,7 @@ async fn exponential_backoff_increases_between_failures() {
     });
     let worker = WorkerId::new();
     let result = transport
-        .register(worker, "ws://127.0.0.1:9/ws?server-key=x")
+        .register(worker, "ws://127.0.0.1:9/ws?server-key=x", 1)
         .await;
     assert!(result.is_err());
 
