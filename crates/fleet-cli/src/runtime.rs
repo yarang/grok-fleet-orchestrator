@@ -46,9 +46,8 @@ use fleet_transport::{MockTransport, WorkerTransport};
 
 /// Postgres 연결 URL 조회 (`DATABASE_URL` 필수).
 fn database_url() -> Result<String> {
-    std::env::var("DATABASE_URL").context(
-        "DATABASE_URL is not set. Export DATABASE_URL=postgres://user@host/dbname",
-    )
+    std::env::var("DATABASE_URL")
+        .context("DATABASE_URL is not set. Export DATABASE_URL=postgres://user@host/dbname")
 }
 
 /// `--mtls-ca/--mtls-cert/--mtls-key` CLI 플래그 묶음 (Phase 8.5).
@@ -76,9 +75,7 @@ impl<'a> MtlsFlags<'a> {
         let ca = self.ca?;
         let cert = self.cert?;
         let key = self.key?;
-        Some(fleet_transport::ClientTlsConfig::from_paths(
-            ca, cert, key,
-        ))
+        Some(fleet_transport::ClientTlsConfig::from_paths(ca, cert, key))
     }
 }
 
@@ -135,12 +132,7 @@ fn sanitize_url(url: &str) -> String {
             let creds = &url[scheme_end..creds_end];
             if let Some(colon) = creds.find(':') {
                 let user = &creds[..colon];
-                return format!(
-                    "{}{}:****{}",
-                    &url[..scheme_end],
-                    user,
-                    &url[creds_end..]
-                );
+                return format!("{}{}:****{}", &url[..scheme_end], user, &url[creds_end..]);
             }
         }
     }
@@ -181,9 +173,7 @@ pub async fn run_serve(
             #[cfg(feature = "acp")]
             {
                 if mtls_flags.ca.is_some() && !cfg!(feature = "mtls") {
-                    return Err(anyhow!(
-                        "--mtls-ca requires building with --features mtls"
-                    ));
+                    return Err(anyhow!("--mtls-ca requires building with --features mtls"));
                 }
                 tracing::info!("using AcpTransport (will connect to grok agent serve on each registered worker)");
                 let t = build_acp_transport(&mtls_flags)?;
@@ -337,7 +327,11 @@ pub async fn run_workers(action: WorkersAction) -> Result<()> {
 /// `tasks` 명령 그룹 디스패치.
 pub async fn run_tasks(action: TasksAction) -> Result<()> {
     match action {
-        TasksAction::List { status, limit, json } => run_tasks_list(status, limit, json).await,
+        TasksAction::List {
+            status,
+            limit,
+            json,
+        } => run_tasks_list(status, limit, json).await,
         TasksAction::Show { id } => run_tasks_show(&id).await,
         TasksAction::Cancel { id, reason } => run_tasks_cancel(&id, reason).await,
     }
@@ -373,10 +367,7 @@ async fn run_events_list(after_seq: u64, limit: u32, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<8} {:<24} {:<22} DETAIL",
-        "SEQ", "TIMESTAMP", "TYPE"
-    );
+    println!("{:<8} {:<24} {:<22} DETAIL", "SEQ", "TIMESTAMP", "TYPE");
     println!("{}", "-".repeat(100));
     for e in events {
         let type_str = event_type_str(&e.event);
@@ -478,11 +469,12 @@ async fn run_workers_show(name: &str) -> Result<()> {
     println!("{:<20} {}", "ID:", w.id);
     println!("{:<20} {}", "NAME:", w.name);
     println!("{:<20} {}", "ENDPOINT:", w.endpoint);
-    println!("{:<20} {}", "STATUS:", format!("{:?}", w.status).to_lowercase());
     println!(
-        "{:<20} {}/{}",
-        "ACTIVE:", w.active_tasks, w.max_concurrent
+        "{:<20} {}",
+        "STATUS:",
+        format!("{:?}", w.status).to_lowercase()
     );
+    println!("{:<20} {}/{}", "ACTIVE:", w.active_tasks, w.max_concurrent);
     println!(
         "{:<20} {}",
         "CIRCUIT:",
@@ -495,21 +487,13 @@ async fn run_workers_show(name: &str) -> Result<()> {
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "(never)".into())
     );
-    println!(
-        "{:<20} {}",
-        "REGISTERED_AT:",
-        w.registered_at.to_rfc3339()
-    );
+    println!("{:<20} {}", "REGISTERED_AT:", w.registered_at.to_rfc3339());
     println!("{:<20} {:?}", "LABELS:", w.labels);
     Ok(())
 }
 
 /// `tasks list` 명령.
-async fn run_tasks_list(
-    status_filter: Option<String>,
-    limit: usize,
-    json: bool,
-) -> Result<()> {
+async fn run_tasks_list(status_filter: Option<String>, limit: usize, json: bool) -> Result<()> {
     let store = connect_and_migrate(2).await?;
     let mut filter = TaskFilter {
         limit,
@@ -577,7 +561,10 @@ async fn run_tasks_show(id_str: &str) -> Result<()> {
         println!("{:<20} {hint}", "SERVER_HINT:");
     }
     match &t.status {
-        TaskStatus::Dispatched { worker_id, started_at } => {
+        TaskStatus::Dispatched {
+            worker_id,
+            started_at,
+        } => {
             println!("{:<20} {worker_id}", "WORKER_ID:");
             println!("{:<20} {}", "STARTED_AT:", started_at.to_rfc3339());
         }
@@ -593,7 +580,10 @@ async fn run_tasks_show(id_str: &str) -> Result<()> {
             println!("{:<20} {}", "ERROR:", f.error);
             println!("{:<20} {:?}", "KIND:", f.kind);
         }
-        TaskStatus::Cancelled { reason, cancelled_at } => {
+        TaskStatus::Cancelled {
+            reason,
+            cancelled_at,
+        } => {
             println!("{:<20} {reason}", "REASON:");
             println!("{:<20} {}", "CANCELLED_AT:", cancelled_at.to_rfc3339());
         }
@@ -756,8 +746,8 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         let mock = MockExecutor::new();
         run_playbook(&mock, &ctx, &args.tags).await?
     } else {
-        let connect_info = SshConnectInfo::new(host, &args.user, PathBuf::from(&ssh_key))
-            .with_port(args.ssh_port);
+        let connect_info =
+            SshConnectInfo::new(host, &args.user, PathBuf::from(&ssh_key)).with_port(args.ssh_port);
         let ssh = SshClient::connect(connect_info)
             .await
             .context("SSH connection failed")?;
@@ -840,8 +830,8 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
                 tracing::info!(%worker_name, %host, "starting provisioning");
-                let connect_info = SshConnectInfo::new(&host, &user, PathBuf::from(&ssh_key))
-                    .with_port(port);
+                let connect_info =
+                    SshConnectInfo::new(&host, &user, PathBuf::from(&ssh_key)).with_port(port);
                 match SshClient::connect(connect_info).await {
                     Ok(ssh) => match run_playbook(&ssh, &ctx, &tags).await {
                         Ok(r) => r,
@@ -878,7 +868,10 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
     let succeeded = reports.iter().filter(|r| r.succeeded).count();
     let failed = reports.len() - succeeded;
     println!("\n{}", "=".repeat(60));
-    println!("Provisioning summary: {} succeeded, {} failed", succeeded, failed);
+    println!(
+        "Provisioning summary: {} succeeded, {} failed",
+        succeeded, failed
+    );
     for r in &reports {
         let mark = if r.succeeded { "✓" } else { "✗" };
         println!("  {mark} {}", r.worker_name);
@@ -957,10 +950,7 @@ fn build_inventory_step_context(
     let base = StepContext {
         worker_name: w.name.clone(),
         labels: w.labels.clone(),
-        orchestrator_url: options
-            .orchestrator_url
-            .clone()
-            .unwrap_or_default(),
+        orchestrator_url: options.orchestrator_url.clone().unwrap_or_default(),
         cf_token,
         fleet_worker_bin: None,
         grok_secret: w.grok_secret.clone(),
@@ -997,7 +987,14 @@ fn parse_labels(labels: &[String]) -> Result<std::collections::HashMap<String, S
 fn print_report(report: &PlaybookReport) {
     println!("\n{}", "=".repeat(60));
     println!("Worker: {}", report.worker_name);
-    println!("Status: {}", if report.succeeded { "✓ success" } else { "✗ failed" });
+    println!(
+        "Status: {}",
+        if report.succeeded {
+            "✓ success"
+        } else {
+            "✗ failed"
+        }
+    );
     for step in &report.steps {
         let mark = match &step.status {
             fleet_provisioner::StepStatus::Skipped => "→".to_string(),

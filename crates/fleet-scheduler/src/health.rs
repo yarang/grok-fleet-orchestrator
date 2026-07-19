@@ -363,10 +363,7 @@ mod tests {
         store.upsert_worker(&w).await.unwrap();
 
         let state = make_state(store.clone());
-        let checker = HealthChecker::new(
-            state,
-            HealthConfig::default(),
-        );
+        let checker = HealthChecker::new(state, HealthConfig::default());
 
         let expired = checker.scan_once().await.unwrap();
         assert_eq!(expired, 0);

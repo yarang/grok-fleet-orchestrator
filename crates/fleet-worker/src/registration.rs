@@ -128,7 +128,10 @@ impl RegistrationClient {
             existing_worker_id: self.config.worker.existing_worker_id.clone(),
         };
 
-        let url = format!("{}/v1/workers/register", self.config.worker.orchestrator_url);
+        let url = format!(
+            "{}/v1/workers/register",
+            self.config.worker.orchestrator_url
+        );
         let mut req = self.http.post(&url).json(&body);
         if let Some(token) = &self.config.worker.bootstrap_token {
             req = req.bearer_auth(token);
@@ -171,7 +174,10 @@ impl RegistrationClient {
             agent_healthy,
         };
 
-        let url = format!("{}/v1/workers/heartbeat", self.config.worker.orchestrator_url);
+        let url = format!(
+            "{}/v1/workers/heartbeat",
+            self.config.worker.orchestrator_url
+        );
         let mut req = self.http.post(&url).json(&body);
         if let Some(token) = &self.config.worker.bootstrap_token {
             req = req.bearer_auth(token);
@@ -298,7 +304,12 @@ fn collect_system_metrics() -> (Option<Vec<f32>>, Option<u64>, Option<u64>, u32)
         .map(|d| (d.total_space() - d.available_space()) / 1024 / 1024)
         .sum();
 
-    (Some(load_vec), Some(mem_available_mb), Some(disk_free_mb), 0)
+    (
+        Some(load_vec),
+        Some(mem_available_mb),
+        Some(disk_free_mb),
+        0,
+    )
 }
 
 #[cfg(test)]
@@ -306,8 +317,8 @@ mod tests {
     use super::*;
     use axum::{routing::post, Json, Router};
     use serde_json::Value;
-    use tokio::sync::Mutex as TokioMutex;
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex as TokioMutex;
 
     /// mock orchestrator의 공유 상태.
     #[derive(Clone)]
@@ -331,8 +342,8 @@ mod tests {
     }
 
     async fn start_mock_orchestrator(state: MockState) -> String {
-        use axum::routing::delete;
         use axum::extract::Path;
+        use axum::routing::delete;
 
         let register_state = state.clone();
         let hb_state = state.clone();
@@ -370,7 +381,10 @@ mod tests {
                     let s = hb_state.clone();
                     async move {
                         s.heartbeats.lock().await.push(body);
-                        (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})))
+                        (
+                            axum::http::StatusCode::OK,
+                            Json(serde_json::json!({"ok": true})),
+                        )
                     }
                 }),
             )
@@ -410,11 +424,7 @@ mod tests {
         let state = MockState::default();
         let url = start_mock_orchestrator(state.clone()).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = RegistrationClient::new(config).unwrap();
         let resp = client.register_once().await.unwrap();
 
@@ -425,7 +435,10 @@ mod tests {
         let registers = state.registers.lock().await;
         assert_eq!(registers.len(), 1);
         assert_eq!(registers[0]["name"], "test-worker");
-        assert!(registers[0]["agent_endpoint"].as_str().unwrap().contains("server-key="));
+        assert!(registers[0]["agent_endpoint"]
+            .as_str()
+            .unwrap()
+            .contains("server-key="));
     }
 
     #[tokio::test]
@@ -434,11 +447,7 @@ mod tests {
         *state.register_status.lock().await = 500;
         let url = start_mock_orchestrator(state).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = RegistrationClient::new(config).unwrap();
         let result = client.register_once().await;
         assert!(result.is_err());
@@ -449,11 +458,7 @@ mod tests {
         let state = MockState::default();
         let url = start_mock_orchestrator(state.clone()).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = RegistrationClient::new(config).unwrap();
 
         // 등록 없이 heartbeat 시도 → 실패.
@@ -474,11 +479,7 @@ mod tests {
         let state = MockState::default();
         let url = start_mock_orchestrator(state.clone()).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = Arc::new(RegistrationClient::new(config).unwrap());
         client.register_once().await.unwrap();
 
@@ -499,7 +500,11 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), hb_handle).await;
 
         let hbs = state.heartbeats.lock().await;
-        assert!(hbs.len() >= 2, "expected at least 2 heartbeats, got {}", hbs.len());
+        assert!(
+            hbs.len() >= 2,
+            "expected at least 2 heartbeats, got {}",
+            hbs.len()
+        );
     }
 
     #[tokio::test]
@@ -507,11 +512,7 @@ mod tests {
         let state = MockState::default();
         let url = start_mock_orchestrator(state.clone()).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = RegistrationClient::new(config).unwrap();
         client.register_once().await.unwrap();
         client.deregister("test shutdown").await;
@@ -527,11 +528,7 @@ mod tests {
         let state = MockState::default();
         let url = start_mock_orchestrator(state.clone()).await;
 
-        let config = Arc::new(
-            WorkerConfig::for_test()
-                .orchestrator_url(url)
-                .build(),
-        );
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
         let client = RegistrationClient::new(config).unwrap();
         // register 없이 deregister — 조용히 무시.
         client.deregister("nothing").await;

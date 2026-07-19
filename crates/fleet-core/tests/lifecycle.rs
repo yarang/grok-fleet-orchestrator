@@ -37,7 +37,10 @@ fn task_lifecycle_pending_to_completed() {
 
     // 2. Dispatched로 전이
     let worker_id = WorkerId::new();
-    let dispatched = TaskStatus::Dispatched { worker_id, started_at: Utc::now() };
+    let dispatched = TaskStatus::Dispatched {
+        worker_id,
+        started_at: Utc::now(),
+    };
     let mut task = task;
     task.status = dispatched.clone();
     assert!(task.is_running());

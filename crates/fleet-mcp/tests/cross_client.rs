@@ -44,7 +44,9 @@ async fn spawn_server() -> Option<tokio::process::Child> {
         .ok()?;
 
     if !fleet_bin.exists() {
-        eprintln!("cross_client test: {fleet_bin:?} not found — run `cargo build -p fleet-cli` first");
+        eprintln!(
+            "cross_client test: {fleet_bin:?} not found — run `cargo build -p fleet-cli` first"
+        );
         return None;
     }
 
@@ -64,10 +66,7 @@ async fn spawn_server() -> Option<tokio::process::Child> {
 }
 
 /// 한 줄을 newline로 종료하여 전송.
-async fn write_line<W: AsyncWriteExt + Unpin>(
-    stdin: &mut W,
-    value: &Value,
-) -> std::io::Result<()> {
+async fn write_line<W: AsyncWriteExt + Unpin>(stdin: &mut W, value: &Value) -> std::io::Result<()> {
     let mut s = serde_json::to_string(value)?;
     s.push('\n');
     stdin.write_all(s.as_bytes()).await
@@ -163,7 +162,9 @@ async fn standard_initialize<W: AsyncWriteExt + Unpin, R: AsyncBufReadExt + Unpi
     });
     write_line(stdin, &req).await.unwrap();
 
-    let resp = read_response_for_id(stdout, &id).await.expect("no initialize response");
+    let resp = read_response_for_id(stdout, &id)
+        .await
+        .expect("no initialize response");
 
     // initialized notification 전송 (MCP 사양)
     let notif = json!({
@@ -198,14 +199,14 @@ async fn claude_code_initialize_handshake() {
         resp.get("result").is_some(),
         "must have result field, got: {resp}"
     );
-    assert!(
-        resp.get("error").is_none(),
-        "must not have error field"
-    );
+    assert!(resp.get("error").is_none(), "must not have error field");
 
     let result = &resp["result"];
     // MCP 사양 필수 필드
-    assert!(result.get("protocolVersion").is_some(), "missing protocolVersion");
+    assert!(
+        result.get("protocolVersion").is_some(),
+        "missing protocolVersion"
+    );
     assert!(result.get("capabilities").is_some(), "missing capabilities");
     assert!(result.get("serverInfo").is_some(), "missing serverInfo");
     assert!(
@@ -256,8 +257,12 @@ async fn gemini_cli_tools_list_shape() {
     });
     write_line(&mut stdin, &req).await.unwrap();
 
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no tools/list response");
-    let tools = resp["result"].as_array().expect("tools/list result must be array");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no tools/list response");
+    let tools = resp["result"]
+        .as_array()
+        .expect("tools/list result must be array");
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"fleet_dispatch_task"), "names: {names:?}");
@@ -298,7 +303,9 @@ async fn grok_build_tools_call_no_arguments() {
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no response");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no response");
 
     assert_eq!(resp["jsonrpc"], "2.0");
     assert!(resp.get("result").is_some(), "expected result, got: {resp}");
@@ -337,7 +344,9 @@ async fn codex_dispatch_task_minimal_prompt() {
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no response");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no response");
 
     let result = &resp["result"];
     assert!(result["content"].is_array());
@@ -369,12 +378,17 @@ async fn unknown_tool_returns_error() {
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no response");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no response");
 
     assert_eq!(resp["jsonrpc"], "2.0");
     let err = resp.get("error").expect("unknown tool must return error");
     assert_eq!(err["code"], -32601, "method_not_found code");
-    assert!(err["message"].as_str().unwrap().contains("nonexistent_tool"));
+    assert!(err["message"]
+        .as_str()
+        .unwrap()
+        .contains("nonexistent_tool"));
 }
 
 /// 잘못된 JSON-RPC 버전 — invalid_request 에러.
@@ -394,7 +408,9 @@ async fn wrong_jsonrpc_version_rejected() {
         "method": "initialize"
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(1)).await.expect("no response");
+    let resp = read_response_for_id(&mut reader, &json!(1))
+        .await
+        .expect("no response");
 
     let err = resp.get("error").expect("must reject version 1.0");
     assert_eq!(err["code"], -32600, "invalid_request code");
@@ -423,7 +439,9 @@ async fn empty_prompt_rejected() {
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no response");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no response");
 
     let err = resp.get("error").expect("empty prompt must be rejected");
     assert_eq!(err["code"], -32602, "invalid_params code");
@@ -448,7 +466,11 @@ async fn notifications_have_no_response() {
     write_line(&mut stdin, &notif).await.unwrap();
 
     // 300ms 동안 응답이 오지 않아야 함
-    let result = timeout(Duration::from_millis(300), reader.read_line(&mut String::new())).await;
+    let result = timeout(
+        Duration::from_millis(300),
+        reader.read_line(&mut String::new()),
+    )
+    .await;
     assert!(
         result.is_err() || result.unwrap().unwrap() == 0,
         "notifications must not produce a response"
@@ -490,7 +512,9 @@ async fn ping_returns_null_result() {
         "method": "ping"
     });
     write_line(&mut stdin, &req).await.unwrap();
-    let resp = read_response_for_id(&mut reader, &json!(2)).await.expect("no ping response");
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no ping response");
     assert!(resp.get("result").is_some());
 }
 
@@ -531,7 +555,9 @@ async fn malformed_json_returns_parse_error() {
     stdin.write_all(b"{ this is not json\n").await.unwrap();
 
     // parse_error 응답이 와야 함 (id는 null)
-    let resp = read_line(&mut reader).await.expect("no response for bad json");
+    let resp = read_line(&mut reader)
+        .await
+        .expect("no response for bad json");
     assert_eq!(resp["jsonrpc"], "2.0");
     assert_eq!(resp["id"], Value::Null);
     let err = resp.get("error").expect("must have error");

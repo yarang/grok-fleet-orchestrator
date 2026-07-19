@@ -245,11 +245,7 @@ impl AcpClient {
     ///
     /// 응답 도착 후, 메서드는 자체적으로 `Completed` 이벤트를 emit하고
     /// `PromptId`를 반환.
-    pub async fn prompt(
-        &self,
-        session: &SessionId,
-        prompt: &str,
-    ) -> Result<PromptId, AcpError> {
+    pub async fn prompt(&self, session: &SessionId, prompt: &str) -> Result<PromptId, AcpError> {
         let req = build_session_prompt(self.alloc_id(), session.as_str(), prompt);
         let id = req.id.expect("prompt request must have id");
         let resp = self.send_request(req).await?;
@@ -263,10 +259,8 @@ impl AcpClient {
         // Completed 이벤트 emit (이 시점까지 도착한 session/update 외의
         // 완료 신호 — end_of_turn=true인 경우에는 ACP가 update로도 end_of_turn을
         // 보냈을 수 있지만, 안전하게 한 번 더 emit하여 구독자가 결과를 받도록).
-        self.inner.emit_event(AcpEvent::Completed {
-            prompt_id,
-            result,
-        });
+        self.inner
+            .emit_event(AcpEvent::Completed { prompt_id, result });
 
         Ok(prompt_id.unwrap_or(PromptId(id)))
     }
@@ -312,10 +306,7 @@ impl AcpClient {
     }
 
     /// 요청을 보내고 응답을 대기.
-    async fn send_request(
-        &self,
-        req: messages::RpcRequest,
-    ) -> Result<RpcMessage, AcpError> {
+    async fn send_request(&self, req: messages::RpcRequest) -> Result<RpcMessage, AcpError> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(AcpError::AlreadyClosed);
         }
@@ -408,7 +399,10 @@ async fn reader_loop(mut reader: WsStream, inner: Arc<ClientInner>) {
         p.drain().collect()
     };
     if !pending.is_empty() {
-        debug!(count = pending.len(), "failing pending ACP requests on close");
+        debug!(
+            count = pending.len(),
+            "failing pending ACP requests on close"
+        );
     }
     for (id, sender) in pending {
         let _ = sender.send(RpcMessage {

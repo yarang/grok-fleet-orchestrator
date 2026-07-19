@@ -13,7 +13,7 @@ use thiserror::Error;
 use fleet_core::{Task, WorkerId, WorkerStatus};
 use fleet_store::Store;
 
-use crate::breaker::{BreakerState, BreakerRegistry};
+use crate::breaker::{BreakerRegistry, BreakerState};
 
 /// 워커 선택 실패.
 #[derive(Debug, Error)]
@@ -62,7 +62,11 @@ impl WorkerSelector {
         }
 
         // 2. 라벨 매칭 필터
-        candidates.retain(|w| task.required_labels.iter().all(|lbl| w.labels.contains_key(lbl)));
+        candidates.retain(|w| {
+            task.required_labels
+                .iter()
+                .all(|lbl| w.labels.contains_key(lbl))
+        });
 
         if candidates.is_empty() {
             return Err(SelectionError::NoMatchingLabels);
@@ -125,8 +129,8 @@ mod tests {
     // 명시적 임포트 — fleet_core의 SelectionError를 제외하고 가져옴
     use std::sync::Arc;
 
-    use crate::selector::{SelectionError, WorkerSelector};
     use crate::breaker::BreakerRegistry;
+    use crate::selector::{SelectionError, WorkerSelector};
     use async_trait::async_trait;
     use fleet_core::{
         BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
@@ -263,10 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_hint_respected() {
-        let workers = vec![
-            make_worker("w1", 0, &[]),
-            make_worker("gpu-1", 0, &[]),
-        ];
+        let workers = vec![make_worker("w1", 0, &[]), make_worker("gpu-1", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
         let selector = WorkerSelector::new(store.clone(), breakers);

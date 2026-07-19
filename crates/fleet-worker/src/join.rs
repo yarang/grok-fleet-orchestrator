@@ -197,8 +197,7 @@ fn generate_random_secret(bytes: usize) -> Result<String> {
 
 /// base64url-no-pad 인코딩.
 fn base64url(input: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut chunks = input.chunks_exact(3);
     for c in &mut chunks {
@@ -243,8 +242,7 @@ fn write_config_atomic(path: &Path, content: &str) -> Result<()> {
 #[cfg(unix)]
 fn exec_daemon(config_path: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let bin = std::env::current_exe()
-        .context("locating current_exe")?;
+    let bin = std::env::current_exe().context("locating current_exe")?;
     tracing::info!(bin = %bin.display(), config = %config_path.display(), "exec-ing into daemon");
     let err = std::process::Command::new(&bin)
         .arg("--config")
@@ -293,18 +291,23 @@ mod tests {
 
     #[test]
     fn extract_host_works() {
-        assert_eq!(extract_host("https://fleet.example.com").unwrap(), "fleet.example.com");
+        assert_eq!(
+            extract_host("https://fleet.example.com").unwrap(),
+            "fleet.example.com"
+        );
         assert_eq!(
             extract_host("http://localhost:8080/foo").unwrap(),
             "localhost:8080"
         );
-        assert_eq!(extract_host("fleet.example.com").unwrap(), "fleet.example.com");
+        assert_eq!(
+            extract_host("fleet.example.com").unwrap(),
+            "fleet.example.com"
+        );
     }
 
     #[test]
     fn derive_endpoint_includes_secret() {
-        let endpoint =
-            derive_agent_endpoint("https://fleet.example.com", "topsecret").unwrap();
+        let endpoint = derive_agent_endpoint("https://fleet.example.com", "topsecret").unwrap();
         assert_eq!(endpoint, "ws://fleet.example.com/ws?server-key=topsecret");
     }
 
@@ -318,7 +321,9 @@ mod tests {
     fn random_secret_is_base64url() {
         let s = generate_random_secret(32).unwrap();
         assert_eq!(s.len(), 43); // 32 bytes → 43 base64url chars (no padding)
-        assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -332,10 +337,7 @@ mod tests {
 
     #[test]
     fn write_atomic_creates_parent_dirs() {
-        let dir = std::env::temp_dir().join(format!(
-            "fleet-worker-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fleet-worker-test-{}", std::process::id()));
         let path = dir.join("sub/dir/worker.toml");
         write_config_atomic(&path, "# test\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# test\n");
@@ -344,10 +346,7 @@ mod tests {
 
     #[test]
     fn write_atomic_replaces_existing() {
-        let dir = std::env::temp_dir().join(format!(
-            "fleet-worker-replace-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fleet-worker-replace-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("worker.toml");
         std::fs::write(&path, "OLD\n").unwrap();

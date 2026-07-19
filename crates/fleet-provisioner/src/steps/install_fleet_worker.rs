@@ -26,7 +26,9 @@ impl Step for InstallFleetWorker {
     }
 
     async fn is_applied(&self, exec: &dyn RemoteExecutor) -> Result<bool, StepError> {
-        let bin = exec.exec("test -x /usr/local/bin/fleet-worker && echo yes").await?;
+        let bin = exec
+            .exec("test -x /usr/local/bin/fleet-worker && echo yes")
+            .await?;
         let unit = exec
             .exec("test -f /etc/systemd/system/fleet-worker.service && echo yes")
             .await?;
@@ -86,7 +88,8 @@ impl Step for InstallFleetWorker {
             mtls_advertised_port: ctx.mtls_advertised_port,
             ..Default::default()
         })?;
-        exec.write_file("/tmp/fleet-worker.toml", &config_toml).await?;
+        exec.write_file("/tmp/fleet-worker.toml", &config_toml)
+            .await?;
         let _ = exec
             .exec("sudo mv /tmp/fleet-worker.toml /etc/fleet/worker.toml && sudo chmod 600 /etc/fleet/worker.toml")
             .await;
@@ -131,9 +134,7 @@ mod tests {
     async fn apply_requires_bin_path() {
         let exec = MockExecutor::new();
         let step = InstallFleetWorker::default();
-        let result = step
-            .apply(&exec, &StepContext::default())
-            .await;
+        let result = step.apply(&exec, &StepContext::default()).await;
         assert!(matches!(result, Err(StepError::PrereqFailed(_))));
         let err = result.unwrap_err();
         assert!(format!("{err}").contains("fleet_worker_bin"));
@@ -154,9 +155,15 @@ mod tests {
         let out = step.apply(&exec, &ctx).await.unwrap();
         assert!(out.message.contains("/tmp/test-worker"));
         let calls = exec.recorded_calls();
-        assert!(calls.iter().any(|c| c.contains("upload") && c.contains("fleet-worker")));
-        assert!(calls.iter().any(|c| c.contains("write /tmp/fleet-worker.toml")));
-        assert!(calls.iter().any(|c| c.contains("write /tmp/fleet-worker.service")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("upload") && c.contains("fleet-worker")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("write /tmp/fleet-worker.toml")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("write /tmp/fleet-worker.service")));
     }
 
     #[tokio::test]

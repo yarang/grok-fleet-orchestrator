@@ -109,11 +109,7 @@ impl Store for PgStore {
         row.map(row_to_task).transpose()
     }
 
-    async fn update_task_status(
-        &self,
-        id: TaskId,
-        status: &TaskStatus,
-    ) -> Result<(), StoreError> {
+    async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError> {
         let status_json = serde_json::to_value(status)?;
         let result = sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
             .bind(id.as_uuid())
@@ -153,7 +149,10 @@ impl Store for PgStore {
             .await?
         };
 
-        let mut tasks: Vec<Task> = rows.into_iter().map(row_to_task).collect::<Result<_, _>>()?;
+        let mut tasks: Vec<Task> = rows
+            .into_iter()
+            .map(row_to_task)
+            .collect::<Result<_, _>>()?;
 
         // 상태 위상 필터 (SQL의 status_phase 대응, 단 Terminal/Active 합성도 처리)
         if let Some(status_filter) = filter.status {
@@ -264,8 +263,10 @@ impl Store for PgStore {
             .await?
         };
 
-        let mut workers: Vec<Worker> =
-            rows.into_iter().map(row_to_worker).collect::<Result<_, _>>()?;
+        let mut workers: Vec<Worker> = rows
+            .into_iter()
+            .map(row_to_worker)
+            .collect::<Result<_, _>>()?;
 
         // 라벨 필터 (GIN 인덱스 활용 가능하지만, 단순 containment로 처리)
         if !filter.labels.is_empty() {
@@ -337,11 +338,7 @@ impl Store for PgStore {
         Ok(seq as u64)
     }
 
-    async fn list_events(
-        &self,
-        after_seq: u64,
-        limit: u32,
-    ) -> Result<Vec<EventEntry>, StoreError> {
+    async fn list_events(&self, after_seq: u64, limit: u32) -> Result<Vec<EventEntry>, StoreError> {
         let rows = sqlx::query(
             r#"SELECT seq, payload FROM events
                WHERE seq > $1 ORDER BY seq ASC LIMIT $2"#,
@@ -427,10 +424,7 @@ impl Store for PgStore {
 
     // ── Bootstrap tokens (Phase 8.3) ───────────────────────────────────
 
-    async fn create_bootstrap_token(
-        &self,
-        token: &BootstrapToken,
-    ) -> Result<(), StoreError> {
+    async fn create_bootstrap_token(&self, token: &BootstrapToken) -> Result<(), StoreError> {
         sqlx::query(
             r#"
             INSERT INTO bootstrap_tokens
@@ -459,11 +453,7 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn consume_bootstrap_token(
-        &self,
-        token: &str,
-        used_by: &str,
-    ) -> Result<(), StoreError> {
+    async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError> {
         // 단일 UPDATE로 atomic하게 검사 + 증가.
         // 조건: token 일치 + use_count < max_uses + (expires_at IS NULL OR > NOW()).
         let now = Utc::now();
@@ -489,12 +479,11 @@ impl Store for PgStore {
             Ok(())
         } else {
             // 토큰이 존재하는지 확인하여 적절한 에러 메시지 구성.
-            let exists: Option<(String,)> = sqlx::query_as(
-                "SELECT token FROM bootstrap_tokens WHERE token = $1",
-            )
-            .bind(token)
-            .fetch_optional(&self.pool)
-            .await?;
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT token FROM bootstrap_tokens WHERE token = $1")
+                    .bind(token)
+                    .fetch_optional(&self.pool)
+                    .await?;
             let reason = match exists {
                 Some(_) => "token is exhausted or expired",
                 None => "token not found",
@@ -665,9 +654,7 @@ fn str_to_priority(s: &str) -> Result<TaskPriority, StoreError> {
         "low" => Ok(TaskPriority::Low),
         "normal" => Ok(TaskPriority::Normal),
         "high" => Ok(TaskPriority::High),
-        other => Err(StoreError::Decode(format!(
-            "unknown priority: {other}"
-        ))),
+        other => Err(StoreError::Decode(format!("unknown priority: {other}"))),
     }
 }
 

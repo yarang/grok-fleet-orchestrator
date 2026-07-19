@@ -61,13 +61,10 @@ pub async fn dispatch_tool(
 
 // ── fleet_dispatch_task ─────────────────────────────────────────────────
 
-async fn handle_dispatch_task(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let prompt = args
         .get("prompt")
@@ -98,7 +95,10 @@ async fn handle_dispatch_task(
                 .collect()
         })
         .unwrap_or_default();
-    req.max_turns = args.get("max_turns").and_then(|v| v.as_u64()).map(|n| n as u32);
+    req.max_turns = args
+        .get("max_turns")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
     req.timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
     req.created_by = "mcp".to_string();
 
@@ -126,13 +126,10 @@ async fn handle_dispatch_task(
 
 // ── fleet_get_task_status ───────────────────────────────────────────────
 
-async fn handle_get_task_status(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_get_task_status(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let id_str = args
         .get("task_id")
@@ -151,9 +148,7 @@ async fn handle_get_task_status(
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
     let Some(task) = task else {
-        return Ok(schema::tool_error(format!(
-            "task not found: {task_id}"
-        )));
+        return Ok(schema::tool_error(format!("task not found: {task_id}")));
     };
 
     Ok(schema::tool_json(&task_summary(&task)))
@@ -161,13 +156,10 @@ async fn handle_get_task_status(
 
 // ── fleet_cancel_task ───────────────────────────────────────────────────
 
-async fn handle_cancel_task(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_cancel_task(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let id_str = args
         .get("task_id")
@@ -196,13 +188,10 @@ async fn handle_cancel_task(
 
 // ── fleet_wait_for_task ─────────────────────────────────────────────────
 
-async fn handle_wait_for_task(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_wait_for_task(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let id_str = args
         .get("task_id")
@@ -229,13 +218,10 @@ async fn handle_wait_for_task(
 
 // ── fleet_stream_task_output ────────────────────────────────────────────
 
-async fn handle_stream_task_output(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_stream_task_output(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let id_str = args
         .get("task_id")
@@ -352,13 +338,10 @@ async fn handle_stream_task_output(
 
 // ── fleet_collect_results ───────────────────────────────────────────────
 
-async fn handle_collect_results(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
-    let args = args.as_object().ok_or_else(|| {
-        JsonRpcError::invalid_params("arguments must be a JSON object")
-    })?;
+async fn handle_collect_results(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
     let ids_arr = args
         .get("task_ids")
@@ -467,7 +450,10 @@ fn task_summary_with_options(task: &Task, include_output: bool) -> Value {
     }
 
     match &task.status {
-        fleet_core::TaskStatus::Dispatched { worker_id, started_at } => {
+        fleet_core::TaskStatus::Dispatched {
+            worker_id,
+            started_at,
+        } => {
             summary["worker_id"] = json!(worker_id.to_string());
             summary["started_at"] = json!(started_at.to_rfc3339());
         }
@@ -489,7 +475,10 @@ fn task_summary_with_options(task: &Task, include_output: bool) -> Value {
                 summary["worker_id"] = json!(wid.to_string());
             }
         }
-        fleet_core::TaskStatus::Cancelled { reason, cancelled_at } => {
+        fleet_core::TaskStatus::Cancelled {
+            reason,
+            cancelled_at,
+        } => {
             summary["reason"] = json!(reason);
             summary["cancelled_at"] = json!(cancelled_at.to_rfc3339());
         }
@@ -518,10 +507,7 @@ fn phase_str(status: &fleet_core::TaskStatus) -> &'static str {
 
 // ── fleet_list_workers ──────────────────────────────────────────────────
 
-async fn handle_list_workers(
-    ctx: &ToolContext,
-    args: &Value,
-) -> Result<Value, JsonRpcError> {
+async fn handle_list_workers(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
     let mut filter = WorkerFilter::default();
 
     if let Some(obj) = args.as_object() {
@@ -531,9 +517,7 @@ async fn handle_list_workers(
         if let Some(labels) = obj.get("labels").and_then(|v| v.as_object()) {
             for (k, v) in labels {
                 let val = v.as_str().ok_or_else(|| {
-                    JsonRpcError::invalid_params(format!(
-                        "label '{k}' value must be a string"
-                    ))
+                    JsonRpcError::invalid_params(format!("label '{k}' value must be a string"))
                 })?;
                 filter.labels.insert(k.clone(), val.to_string());
             }
@@ -598,7 +582,7 @@ mod tests {
 
     #[test]
     fn phase_string_failed_and_cancelled() {
-        use fleet_core::{TaskFailure, FailureKind};
+        use fleet_core::{FailureKind, TaskFailure};
         let failed = fleet_core::TaskStatus::Failed(TaskFailure {
             error: "boom".into(),
             kind: FailureKind::WorkerError,

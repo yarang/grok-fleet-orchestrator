@@ -14,13 +14,13 @@ use uuid::Uuid;
 
 use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 
+use crate::app::AppState;
 use crate::error::ApiError;
 use crate::schema::{
     BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
     DeregisterRequest, HealthResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest,
     JoinResponse, RegisterRequest, RegisterResponse, WorkerSummary,
 };
-use crate::app::AppState;
 
 /// `GET /v1/health` — 단순 헬스 프로브.
 pub async fn health() -> Json<HealthResponse> {
@@ -257,10 +257,7 @@ pub async fn deregister_worker(
     // 이벤트 먼저 발행 (삭제 전에 이름 보존)
     let _ = state
         .store
-        .append_event(&fleet_core::FleetEvent::worker_left(
-            worker_id,
-            &reason,
-        ))
+        .append_event(&fleet_core::FleetEvent::worker_left(worker_id, &reason))
         .await;
 
     // Transport에서 워커 제거 (설정된 경우).
@@ -389,7 +386,11 @@ pub async fn create_bootstrap_token(
     if req.max_uses == 0 {
         return Err(ApiError::BadRequest("max_uses must be >= 1".into()));
     }
-    if req.prefix.chars().any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+    if req
+        .prefix
+        .chars()
+        .any(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+    {
         return Err(ApiError::BadRequest(
             "prefix must be alphanumeric, '_', or '-' only".into(),
         ));
@@ -404,7 +405,9 @@ pub async fn create_bootstrap_token(
         format!("{}_{}", req.prefix, encoded)
     };
     let now = Utc::now();
-    let expires_at = req.expires_in_secs.map(|s| now + chrono::Duration::seconds(s as i64));
+    let expires_at = req
+        .expires_in_secs
+        .map(|s| now + chrono::Duration::seconds(s as i64));
 
     let bt = fleet_core::BootstrapToken {
         token: token.clone(),
@@ -433,7 +436,12 @@ pub async fn list_bootstrap_tokens(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<BootstrapTokenSummary>>, ApiError> {
     let tokens = state.store.list_bootstrap_tokens().await?;
-    Ok(Json(tokens.into_iter().map(BootstrapTokenSummary::from).collect()))
+    Ok(Json(
+        tokens
+            .into_iter()
+            .map(BootstrapTokenSummary::from)
+            .collect(),
+    ))
 }
 
 /// `DELETE /v1/bootstrap-tokens/:token` — 토큰 회수.
@@ -495,7 +503,9 @@ fn render_worker_config_toml(
     out.push_str("[worker]\n");
     out.push_str(&format!("name = \"{name}\"\n"));
     out.push_str("orchestrator_url = \"<set-to-your-orchestrator-url>\"\n");
-    out.push_str(&format!("heartbeat_interval_secs = {heartbeat_interval_secs}\n"));
+    out.push_str(&format!(
+        "heartbeat_interval_secs = {heartbeat_interval_secs}\n"
+    ));
     out.push_str(&format!("bootstrap_token = \"{bootstrap_token}\"\n"));
     out.push_str(&format!("existing_worker_id = \"{worker_id}\"\n"));
     if !labels.is_empty() {
@@ -542,8 +552,7 @@ fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
 
 /// base64url-no-pad 인코딩.
 fn base64url(input: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut chunks = input.chunks_exact(3);
     for c in &mut chunks {
@@ -614,10 +623,7 @@ fn build_worker(
 }
 
 /// Store upsert + transport.register 호출. transport 실패는 warn 로그만.
-async fn upsert_and_register(
-    state: &AppState,
-    worker: &Worker,
-) -> Result<WorkerId, ApiError> {
+async fn upsert_and_register(state: &AppState, worker: &Worker) -> Result<WorkerId, ApiError> {
     state.store.upsert_worker(worker).await?;
     if let Some(transport) = &state.transport {
         if let Err(e) = transport

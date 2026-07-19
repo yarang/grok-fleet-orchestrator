@@ -36,9 +36,9 @@ pub mod acp;
 #[cfg(feature = "acp")]
 pub mod acp_transport;
 #[cfg(feature = "mtls")]
-pub mod tls;
-#[cfg(feature = "mtls")]
 pub mod mtls_proxy;
+#[cfg(feature = "mtls")]
+pub mod tls;
 
 pub use error::TransportError;
 pub use mock::{MockTransport, MockWorker};
@@ -46,9 +46,9 @@ pub use mock::{MockTransport, MockWorker};
 #[cfg(feature = "acp")]
 pub use acp_transport::{AcpTransport, ConnState, ReconnectConfig};
 #[cfg(feature = "mtls")]
-pub use tls::{ClientTlsConfig, ServerTlsConfig, TlsError};
-#[cfg(feature = "mtls")]
 pub use mtls_proxy::{MtlsProxy, ProxyError};
+#[cfg(feature = "mtls")]
+pub use tls::{ClientTlsConfig, ServerTlsConfig, TlsError};
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};
@@ -76,15 +76,9 @@ pub enum WorkerEvent {
         chunk: String,
     },
     /// 작업 완료.
-    Completed {
-        task_id: TaskId,
-        result: TaskResult,
-    },
+    Completed { task_id: TaskId, result: TaskResult },
     /// 워커 측 에러 (작업은 실패로 처리됨).
-    Failed {
-        task_id: TaskId,
-        error: String,
-    },
+    Failed { task_id: TaskId, error: String },
 }
 
 /// 워커 통신 trait. 각 워커 엔드포인트당 하나의 인스턴스가 아닌,

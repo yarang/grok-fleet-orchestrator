@@ -7,12 +7,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    middleware::{self, Next},
     extract::Request,
+    http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
-    http::StatusCode,
-    response::Response,
 };
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -98,11 +98,20 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/join", post(handlers::join_worker))
         .route("/heartbeat", post(handlers::heartbeat))
         .route("/", get(handlers::list_workers))
-        .route("/:id", get(handlers::get_worker).delete(handlers::deregister_worker));
+        .route(
+            "/:id",
+            get(handlers::get_worker).delete(handlers::deregister_worker),
+        );
 
     let token_routes = Router::new()
-        .route("/", post(handlers::create_bootstrap_token).get(handlers::list_bootstrap_tokens))
-        .route("/:token", axum::routing::delete(handlers::revoke_bootstrap_token));
+        .route(
+            "/",
+            post(handlers::create_bootstrap_token).get(handlers::list_bootstrap_tokens),
+        )
+        .route(
+            "/:token",
+            axum::routing::delete(handlers::revoke_bootstrap_token),
+        );
 
     let v1 = Router::new()
         .route("/health", get(handlers::health))
@@ -197,10 +206,7 @@ async fn auth_middleware(
 }
 
 /// 서버 바인딩 + serve. shutdown 시그널은 호출자가 처리.
-pub async fn run_http_server(
-    state: Arc<AppState>,
-    bind: SocketAddr,
-) -> std::io::Result<()> {
+pub async fn run_http_server(state: Arc<AppState>, bind: SocketAddr) -> std::io::Result<()> {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, "HTTP API server listening");

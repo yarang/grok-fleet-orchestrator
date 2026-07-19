@@ -13,7 +13,11 @@ fn examples_worker_toml_parses_and_validates() {
         .join("..")
         .join("examples")
         .join("worker.toml");
-    assert!(path.exists(), "examples/worker.toml not found at {}", path.display());
+    assert!(
+        path.exists(),
+        "examples/worker.toml not found at {}",
+        path.display()
+    );
 
     let cfg = fleet_worker::config::WorkerConfig::from_file(&path)
         .expect("examples/worker.toml must parse and pass validation");
@@ -24,7 +28,10 @@ fn examples_worker_toml_parses_and_validates() {
         cfg.worker.orchestrator_url.starts_with("https://"),
         "example should use https:// for orchestrator_url"
     );
-    assert!(cfg.grok.bin.starts_with('/'), "grok.bin should be absolute path");
+    assert!(
+        cfg.grok.bin.starts_with('/'),
+        "grok.bin should be absolute path"
+    );
     assert!(
         cfg.grok.secret.len() >= 16,
         "example secret should be at least 16 chars (placeholder is fine, empty is not)"

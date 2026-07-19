@@ -174,7 +174,11 @@ fn endpoint(addr: SocketAddr) -> String {
     format!("ws://{addr}/ws?server-key=test")
 }
 
-fn dispatch_req(task_id: TaskId, worker_id: WorkerId, prompt: &str) -> fleet_transport::DispatchRequest {
+fn dispatch_req(
+    task_id: TaskId,
+    worker_id: WorkerId,
+    prompt: &str,
+) -> fleet_transport::DispatchRequest {
     fleet_transport::DispatchRequest {
         task_id,
         worker_id,
@@ -243,7 +247,9 @@ async fn dispatch_streams_output_and_completes() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Output { task_id: t, chunk, .. })) => {
+            Ok(Some(WorkerEvent::Output {
+                task_id: t, chunk, ..
+            })) => {
                 assert_eq!(t, task_id);
                 output.push_str(&chunk);
             }
@@ -272,10 +278,16 @@ async fn completed_includes_token_usage() {
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr), 1).await.unwrap();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .unwrap();
 
     let task_id = TaskId::new();
-    transport.dispatch(dispatch_req(task_id, worker, "x")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "x"))
+        .await
+        .unwrap();
 
     let mut found = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -311,7 +323,10 @@ async fn ping_registered_worker_ok() {
     let transport = AcpTransport::new();
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr), 1).await.unwrap();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .unwrap();
 
     let dur = transport.ping(worker).await.expect("ping");
     assert!(dur.as_millis() <= 1);
@@ -330,13 +345,13 @@ async fn cancel_unknown_task_is_noop() {
     let transport = AcpTransport::new();
 
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(addr), 1).await.unwrap();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .unwrap();
 
     // 활성 task가 없으므로 cancel은 idempotent success.
-    transport
-        .cancel(TaskId::new())
-        .await
-        .expect("cancel no-op");
+    transport.cancel(TaskId::new()).await.expect("cancel no-op");
 }
 
 #[tokio::test]

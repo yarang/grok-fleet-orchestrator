@@ -117,13 +117,19 @@ pub enum TaskStatus {
     #[default]
     Pending,
     /// 워커에서 실행 중.
-    Dispatched { worker_id: WorkerId, started_at: DateTime<Utc> },
+    Dispatched {
+        worker_id: WorkerId,
+        started_at: DateTime<Utc>,
+    },
     /// 성공적으로 완료.
     Completed(TaskResult),
     /// 실패 (워커 에러, 타임아웃, 회로 차단 등).
     Failed(TaskFailure),
     /// 사용자 요청으로 취소.
-    Cancelled { reason: String, cancelled_at: DateTime<Utc> },
+    Cancelled {
+        reason: String,
+        cancelled_at: DateTime<Utc>,
+    },
 }
 
 /// 작업 완료 결과.

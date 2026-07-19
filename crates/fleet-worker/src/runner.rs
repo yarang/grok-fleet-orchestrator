@@ -111,8 +111,7 @@ impl WorkerRunner {
 
         // 6. 백그라운드 태스크 정리.
         // grok이 종료될 때까지 최대 10초 대기.
-        let grok_join =
-            tokio::time::timeout(std::time::Duration::from_secs(10), grok_handle).await;
+        let grok_join = tokio::time::timeout(std::time::Duration::from_secs(10), grok_handle).await;
         match grok_join {
             Ok(Ok(Ok(()))) => info!("grok runner exited cleanly"),
             Ok(Ok(Err(e))) => warn!(error = %e, "grok runner exited with error"),
@@ -121,8 +120,7 @@ impl WorkerRunner {
         }
 
         // heartbeat 루프 정리 (최대 5초).
-        let hb_join =
-            tokio::time::timeout(std::time::Duration::from_secs(5), hb_handle).await;
+        let hb_join = tokio::time::timeout(std::time::Duration::from_secs(5), hb_handle).await;
         match hb_join {
             Ok(Ok(())) => info!("heartbeat loop exited"),
             _ => warn!("heartbeat loop did not exit cleanly"),
@@ -131,8 +129,7 @@ impl WorkerRunner {
         // mTLS proxy 정리 (최대 5초). shutdown 신호는 shutdown_rx 채널을 통해
         // 전달되므로, mtls_handle 은 shutdown_tx drop 후 자연 종료.
         if let Some(handle) = mtls_handle {
-            let mtls_join =
-                tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+            let mtls_join = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
             match mtls_join {
                 Ok(Ok(())) => info!("mTLS proxy exited"),
                 _ => warn!("mTLS proxy did not exit cleanly"),
@@ -162,9 +159,10 @@ async fn spawn_mtls_proxy_if_enabled(
         _ => return Ok(None),
     };
 
-    let listen_addr: std::net::SocketAddr = mtls.listen_addr.parse().map_err(|e| {
-        WorkerError::Config(format!("mtls.listen_addr parse: {e}"))
-    })?;
+    let listen_addr: std::net::SocketAddr = mtls
+        .listen_addr
+        .parse()
+        .map_err(|e| WorkerError::Config(format!("mtls.listen_addr parse: {e}")))?;
     let upstream_addr: std::net::SocketAddr =
         format!("127.0.0.1:{}", grok_port(&config.grok.bind_addr))
             .parse()
@@ -192,9 +190,9 @@ async fn spawn_mtls_proxy_if_enabled(
         &mtls.server_cert_path,
         &mtls.server_key_path,
     );
-    let server_config = server_tls.build_server_config().map_err(|e| {
-        WorkerError::Config(format!("mtls server config: {e}"))
-    })?;
+    let server_config = server_tls
+        .build_server_config()
+        .map_err(|e| WorkerError::Config(format!("mtls server config: {e}")))?;
 
     let proxy = MtlsProxy::bind(listen_addr, upstream_addr, Arc::new(server_config))
         .await

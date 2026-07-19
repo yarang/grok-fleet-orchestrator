@@ -4,8 +4,8 @@
 //! CircuitBreaker에 결과를 기록합니다. grok-build의 PendingGuard RAII 패턴과
 //! sync_running_gauge 패턴을 차용했습니다.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -133,7 +133,11 @@ impl Dispatcher {
                 dec_running();
                 warn!(%task_id, "task failed");
             }
-            WorkerEvent::Output { task_id, seq, chunk } => {
+            WorkerEvent::Output {
+                task_id,
+                seq,
+                chunk,
+            } => {
                 let _ = self.state.store.append_output(task_id, &chunk).await;
                 tracing::debug!(%task_id, seq, "output chunk buffered");
             }

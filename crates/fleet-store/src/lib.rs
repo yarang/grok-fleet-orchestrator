@@ -47,11 +47,7 @@ pub trait Store: Send + Sync {
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
 
     /// 작업 상태 업데이트. `status_phase` 생성 칼럼도 자동 갱신.
-    async fn update_task_status(
-        &self,
-        id: TaskId,
-        status: &TaskStatus,
-    ) -> Result<(), StoreError>;
+    async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError>;
 
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError>;
@@ -87,11 +83,7 @@ pub trait Store: Send + Sync {
     async fn append_event(&self, event: &FleetEvent) -> Result<u64, StoreError>;
 
     /// `after_seq` 이후의 이벤트를 최대 `limit`개 조회 (페이지네이션용).
-    async fn list_events(
-        &self,
-        after_seq: u64,
-        limit: u32,
-    ) -> Result<Vec<EventEntry>, StoreError>;
+    async fn list_events(&self, after_seq: u64, limit: u32) -> Result<Vec<EventEntry>, StoreError>;
 
     // ── Output buffer (스트리밍 stdout) ─────────────────────────────
 
@@ -109,10 +101,7 @@ pub trait Store: Send + Sync {
     // ── Bootstrap tokens (Phase 8.3) ───────────────────────────────
 
     /// 부트스트랩 토큰을 저장. 동일 token이 이미 존재하면 에러.
-    async fn create_bootstrap_token(
-        &self,
-        token: &BootstrapToken,
-    ) -> Result<(), StoreError>;
+    async fn create_bootstrap_token(&self, token: &BootstrapToken) -> Result<(), StoreError>;
 
     /// 부트스트랩 토큰을 atomic하게 소비.
     /// - 토큰이 존재하고 사용 가능 (use_count < max_uses, 만료 안 됨) 하면
@@ -120,11 +109,7 @@ pub trait Store: Send + Sync {
     /// - 존재하지 않거나 소진/만료된 경우 `StoreError::BootstrapTokenInvalid` 반환.
     ///
     /// 구현은 단일 UPDATE ... RETURNING 문으로 race condition을 방지해야 함.
-    async fn consume_bootstrap_token(
-        &self,
-        token: &str,
-        used_by: &str,
-    ) -> Result<(), StoreError>;
+    async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError>;
 
     /// 모든 부트스트랩 토큰을 생성일 역순으로 조회.
     async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError>;

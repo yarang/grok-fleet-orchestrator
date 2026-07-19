@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use fleet_core::{
-    FleetEvent, Task, TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TaskFilter, TaskId,
-    TaskPriority, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    FleetEvent, Task, TaskFilter, TaskId, TaskPriority, TaskRequest, TaskResult, TaskStatus,
+    TaskStatusFilter, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
@@ -36,11 +36,7 @@ fn database_url() -> Option<String> {
 /// DB 연결 가능 여부 확인. `DATABASE_URL`이 없거나 연결 불가하면 None (테스트 skip).
 async fn try_connect() -> Option<PgStore> {
     let url = database_url()?;
-    match PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-    {
+    match PgPoolOptions::new().max_connections(2).connect(&url).await {
         Ok(pool) => {
             let store = PgStore::from_pool(pool);
             // 마이그레이션 실행 (실패해도 None 반환)
@@ -107,7 +103,11 @@ async fn task_insert_and_get() {
 
     store.insert_task(&task).await.unwrap();
 
-    let fetched = store.get_task(task_id).await.unwrap().expect("task should exist");
+    let fetched = store
+        .get_task(task_id)
+        .await
+        .unwrap()
+        .expect("task should exist");
     assert_eq!(fetched.id, task_id);
     assert_eq!(fetched.prompt, "Build the project");
     assert_eq!(fetched.created_by, "alice");
@@ -137,7 +137,10 @@ async fn task_update_status() {
         worker_id,
         started_at: Utc::now(),
     };
-    store.update_task_status(task_id, &dispatched).await.unwrap();
+    store
+        .update_task_status(task_id, &dispatched)
+        .await
+        .unwrap();
 
     let fetched = store.get_task(task_id).await.unwrap().unwrap();
     assert!(matches!(fetched.status, TaskStatus::Dispatched { .. }));
@@ -429,8 +432,14 @@ async fn output_append_and_get() {
     store.insert_task(&task).await.unwrap();
 
     // 청크 3개 추가
-    let seq1 = store.append_output(task_id, "Compiling...\n").await.unwrap();
-    let seq2 = store.append_output(task_id, "Running tests...\n").await.unwrap();
+    let seq1 = store
+        .append_output(task_id, "Compiling...\n")
+        .await
+        .unwrap();
+    let seq2 = store
+        .append_output(task_id, "Running tests...\n")
+        .await
+        .unwrap();
     let seq3 = store.append_output(task_id, "Done\n").await.unwrap();
 
     assert!(seq1 < seq2);

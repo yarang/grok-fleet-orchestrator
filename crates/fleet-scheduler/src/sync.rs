@@ -127,9 +127,7 @@ impl MultiAdminSync {
 mod tests {
     use super::*;
     use crate::breaker::BreakerState;
-    use fleet_core::{
-        CircuitBreakerConfig, CircuitState, TaskId, WorkerId,
-    };
+    use fleet_core::{CircuitBreakerConfig, CircuitState, TaskId, WorkerId};
 
     fn make_state() -> Arc<FleetState> {
         let transport = fleet_transport::MockTransport::new();
@@ -151,7 +149,10 @@ mod tests {
         async fn insert_task(&self, _: &fleet_core::Task) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }
-        async fn get_task(&self, _: TaskId) -> Result<Option<fleet_core::Task>, fleet_store::StoreError> {
+        async fn get_task(
+            &self,
+            _: TaskId,
+        ) -> Result<Option<fleet_core::Task>, fleet_store::StoreError> {
             unimplemented!()
         }
         async fn update_task_status(
@@ -167,10 +168,16 @@ mod tests {
         ) -> Result<Vec<fleet_core::Task>, fleet_store::StoreError> {
             unimplemented!()
         }
-        async fn upsert_worker(&self, _: &fleet_core::Worker) -> Result<(), fleet_store::StoreError> {
+        async fn upsert_worker(
+            &self,
+            _: &fleet_core::Worker,
+        ) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }
-        async fn get_worker(&self, _: WorkerId) -> Result<Option<fleet_core::Worker>, fleet_store::StoreError> {
+        async fn get_worker(
+            &self,
+            _: WorkerId,
+        ) -> Result<Option<fleet_core::Worker>, fleet_store::StoreError> {
             unimplemented!()
         }
         async fn get_worker_by_name(
@@ -195,10 +202,7 @@ mod tests {
         ) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }
-        async fn append_event(
-            &self,
-            _: &FleetEvent,
-        ) -> Result<u64, fleet_store::StoreError> {
+        async fn append_event(&self, _: &FleetEvent) -> Result<u64, fleet_store::StoreError> {
             unimplemented!()
         }
         async fn list_events(
@@ -239,10 +243,7 @@ mod tests {
         ) -> Result<Vec<fleet_core::BootstrapToken>, fleet_store::StoreError> {
             unimplemented!()
         }
-        async fn revoke_bootstrap_token(
-            &self,
-            _: &str,
-        ) -> Result<bool, fleet_store::StoreError> {
+        async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, fleet_store::StoreError> {
             unimplemented!()
         }
     }

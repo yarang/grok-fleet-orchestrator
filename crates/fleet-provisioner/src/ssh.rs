@@ -276,7 +276,8 @@ mod russh_impl {
         async fn write_file(&self, path: &str, content: &str) -> Result<(), SshError> {
             use base64::{engine::general_purpose::STANDARD, Engine as _};
             let b64 = STANDARD.encode(content.as_bytes());
-            self.exec(&format!("echo '{b64}' | base64 -d > {path}")).await?;
+            self.exec(&format!("echo '{b64}' | base64 -d > {path}"))
+                .await?;
             Ok(())
         }
     }
@@ -340,10 +341,7 @@ impl MockExecutor {
 
     /// 특정 명령의 exit 코드 지정 (기본 0).
     pub fn expect_exit(&self, command: impl Into<String>, code: i32) {
-        self.exit_codes
-            .lock()
-            .unwrap()
-            .insert(command.into(), code);
+        self.exit_codes.lock().unwrap().insert(command.into(), code);
     }
 
     /// 실행된 모든 명령 기록 조회 (호출 순서대로).
@@ -478,10 +476,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 0);
-        assert_eq!(
-            *collected.lock().unwrap(),
-            vec!["line1", "line2", "line3"]
-        );
+        assert_eq!(*collected.lock().unwrap(), vec!["line1", "line2", "line3"]);
     }
 
     #[tokio::test]

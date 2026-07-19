@@ -109,10 +109,14 @@ ingress:
 /// `grok_secret`은 필수. None이거나 빈 문자열이면 에러.
 pub fn render_worker_config(ctx: &TemplateContext) -> Result<String, StepError> {
     if ctx.tunnel_name.is_empty() {
-        return Err(StepError::Template("tunnel_name (worker name) is empty".into()));
+        return Err(StepError::Template(
+            "tunnel_name (worker name) is empty".into(),
+        ));
     }
     if ctx.hostname.is_empty() {
-        return Err(StepError::Template("hostname (orchestrator_url) is empty".into()));
+        return Err(StepError::Template(
+            "hostname (orchestrator_url) is empty".into(),
+        ));
     }
     let secret = ctx
         .grok_secret
@@ -188,16 +192,14 @@ pub fn render_worker_config(ctx: &TemplateContext) -> Result<String, StepError> 
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(&ctx.tunnel_name);
-        let advertised_port = ctx
-            .mtls_advertised_port
-            .unwrap_or_else(|| {
-                // listen_addr 의 포트 파싱; 실패 시 2420.
-                listen
-                    .rsplit(':')
-                    .next()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(2420)
-            });
+        let advertised_port = ctx.mtls_advertised_port.unwrap_or_else(|| {
+            // listen_addr 의 포트 파싱; 실패 시 2420.
+            listen
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(2420)
+        });
 
         out.push_str("[mtls]\n");
         out.push_str("enabled = true\n");
@@ -387,7 +389,10 @@ mod tests {
         ctx.mtls_advertised_port = Some(2420);
 
         let cfg = render_worker_config(&ctx).unwrap();
-        assert!(cfg.contains("[mtls]"), "cfg must contain [mtls] section:\n{cfg}");
+        assert!(
+            cfg.contains("[mtls]"),
+            "cfg must contain [mtls] section:\n{cfg}"
+        );
         assert!(cfg.contains("enabled = true"));
         assert!(cfg.contains("listen_addr = \"0.0.0.0:2420\""));
         assert!(cfg.contains("server_cert_path = \"/etc/fleet/server.pem\""));

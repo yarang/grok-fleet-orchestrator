@@ -74,7 +74,11 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
             Err(_) => continue,
         };
 
-        let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let method = req
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let id = req.get("id").cloned();
         let params = req.get("params").cloned();
 
@@ -126,9 +130,7 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                             },
                         },
                     });
-                    let _ = writer
-                        .send(WsMessage::Text(update.to_string()))
-                        .await;
+                    let _ = writer.send(WsMessage::Text(update.to_string())).await;
                 }
 
                 // 최종 응답.
@@ -201,11 +203,13 @@ async fn initialize_and_open_session() {
     let _ = tracing_subscriber::fmt::try_init();
     let (_state, addr) = start_mock_server().await;
 
-    let (client, mut events) =
-        timeout(Duration::from_secs(5), AcpClient::connect(&endpoint(addr, "test")))
-            .await
-            .expect("connect timeout")
-            .expect("connect ok");
+    let (client, mut events) = timeout(
+        Duration::from_secs(5),
+        AcpClient::connect(&endpoint(addr, "test")),
+    )
+    .await
+    .expect("connect timeout")
+    .expect("connect ok");
 
     let session = timeout(Duration::from_secs(5), client.open_session(Some("/tmp")))
         .await
@@ -225,8 +229,9 @@ async fn prompt_streams_chunks_then_completes() {
     let (state, addr) = start_mock_server().await;
     *state.scripted_output.lock().await = vec!["Hello ".to_string(), "world".to_string()];
 
-    let (client, mut events) =
-        AcpClient::connect(&endpoint(addr, "test")).await.expect("connect");
+    let (client, mut events) = AcpClient::connect(&endpoint(addr, "test"))
+        .await
+        .expect("connect");
     let session = client.open_session(None).await.expect("session");
 
     let prompt_id = timeout(Duration::from_secs(5), client.prompt(&session, "hi"))
@@ -263,16 +268,14 @@ async fn cancel_request_round_trip() {
     let (state, addr) = start_mock_server().await;
     *state.scripted_output.lock().await = vec![];
 
-    let (client, _events) =
-        AcpClient::connect(&endpoint(addr, "test")).await.expect("connect");
+    let (client, _events) = AcpClient::connect(&endpoint(addr, "test"))
+        .await
+        .expect("connect");
     let session = client.open_session(None).await.expect("session");
     let prompt_id = client.prompt(&session, "long").await.expect("prompt");
 
     // cancel 전송 (이미 끝났지만 round-trip 검증).
-    client
-        .cancel(&session, prompt_id)
-        .await
-        .expect("cancel ok");
+    client.cancel(&session, prompt_id).await.expect("cancel ok");
 
     client.close().await.unwrap();
 }
@@ -281,8 +284,9 @@ async fn cancel_request_round_trip() {
 async fn rpc_error_response_returns_acp_error() {
     let (state, addr) = start_mock_server().await;
 
-    let (client, _events) =
-        AcpClient::connect(&endpoint(addr, "test")).await.expect("connect");
+    let (client, _events) = AcpClient::connect(&endpoint(addr, "test"))
+        .await
+        .expect("connect");
 
     // 알 수 없는 메서드 직접 전송 (클라이언트 API로는 못 보내니 raw 사용).
     // — 클라이언트는 알려진 메서드만 지원하므로, 대신 MockState에서
@@ -330,8 +334,9 @@ async fn invalid_endpoint_rejected() {
 #[tokio::test]
 async fn close_is_idempotent() {
     let (_state, addr) = start_mock_server().await;
-    let (client, _events) =
-        AcpClient::connect(&endpoint(addr, "test")).await.expect("connect");
+    let (client, _events) = AcpClient::connect(&endpoint(addr, "test"))
+        .await
+        .expect("connect");
 
     client.close().await.expect("first close");
     // 두 번째 close는 자체적으로 no-op.

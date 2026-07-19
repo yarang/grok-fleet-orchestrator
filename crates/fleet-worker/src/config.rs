@@ -143,7 +143,12 @@ impl WorkerConfig {
 
     /// 정규화: trailing slash 제거, 공백 trim.
     fn normalize(&mut self) {
-        self.worker.orchestrator_url = self.worker.orchestrator_url.trim().trim_end_matches('/').to_string();
+        self.worker.orchestrator_url = self
+            .worker
+            .orchestrator_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
         self.worker.name = self.worker.name.trim().to_string();
         self.grok.bin = self.grok.bin.trim().to_string();
         self.grok.bind_addr = self.grok.bind_addr.trim().to_string();
@@ -344,9 +349,7 @@ impl WorkerConfigBuilder {
             },
             grok: GrokSection {
                 bin: self.grok_bin.unwrap_or_else(|| "/bin/true".into()),
-                bind_addr: self
-                    .bind_addr
-                    .unwrap_or_else(|| "127.0.0.1:2419".into()),
+                bind_addr: self.bind_addr.unwrap_or_else(|| "127.0.0.1:2419".into()),
                 secret: self.grok_secret.unwrap_or_else(|| "test-secret".into()),
                 max_concurrent_tasks: self.max_concurrent.unwrap_or(2),
                 restart_delay_secs: 1,
@@ -359,7 +362,8 @@ impl WorkerConfigBuilder {
 
 /// 파일 경로가 비어있는지 확인 (CLI에서 사용).
 pub fn config_path_or_error(path: &Option<PathBuf>) -> Result<&Path, WorkerError> {
-    path.as_deref().ok_or_else(|| WorkerError::Config("no --config provided".into()))
+    path.as_deref()
+        .ok_or_else(|| WorkerError::Config("no --config provided".into()))
 }
 
 #[cfg(test)]
@@ -511,7 +515,10 @@ secret = "x"
             .mtls(mtls)
             .build();
         let endpoint = config.agent_endpoint();
-        assert!(endpoint.starts_with("ws://"), "disabled mtls must keep ws://");
+        assert!(
+            endpoint.starts_with("ws://"),
+            "disabled mtls must keep ws://"
+        );
         assert!(!endpoint.contains("ignored"));
     }
 
@@ -570,7 +577,10 @@ advertised_host = "worker-1.fleet"
         let mtls = config.mtls.as_ref().expect("mtls section");
         assert!(mtls.enabled);
         assert_eq!(mtls.listen_addr, "0.0.0.0:2420");
-        assert_eq!(mtls.server_cert_path, std::path::Path::new("/etc/server.pem"));
+        assert_eq!(
+            mtls.server_cert_path,
+            std::path::Path::new("/etc/server.pem")
+        );
         assert_eq!(mtls.advertised_host.as_deref(), Some("worker-1.fleet"));
         assert!(config.agent_endpoint().starts_with("wss://"));
     }

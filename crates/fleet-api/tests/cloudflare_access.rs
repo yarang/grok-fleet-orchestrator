@@ -129,7 +129,8 @@ async fn no_auth_mode_allows_all() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let resp = reqwest::get(format!("http://{addr}/v1/health"))
@@ -144,7 +145,8 @@ async fn cf_access_rejects_missing_jwt() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let resp = reqwest::get(format!("http://{addr}/v1/workers"))
@@ -159,7 +161,8 @@ async fn cf_access_accepts_valid_jwt() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let jwt = make_jwt("my-aud-123", unix_now() + 3600, Some("user@example.com"));
@@ -178,7 +181,8 @@ async fn cf_access_rejects_expired_jwt() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let jwt = make_jwt("my-aud-123", unix_now() - 100, Some("user@example.com"));
@@ -197,7 +201,8 @@ async fn cf_access_rejects_wrong_audience() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let jwt = make_jwt("wrong-aud", unix_now() + 3600, Some("user@example.com"));
@@ -216,7 +221,8 @@ async fn cf_access_allows_health_without_jwt() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     // /v1/health는 CF 인증 없이 허용.
@@ -234,7 +240,8 @@ async fn cf_access_rejects_malformed_jwt() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let resp = reqwest::Client::new()
@@ -252,7 +259,8 @@ async fn cf_access_case_insensitive_header() {
     let app = build_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { let _ = axum::serve(listener, app).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
     });
 
     let jwt = make_jwt("aud", unix_now() + 3600, None);

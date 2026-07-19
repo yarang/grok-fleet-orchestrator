@@ -75,14 +75,11 @@ impl Store for MemStore {
                 (TaskStatusFilter::Cancelled, TaskStatus::Cancelled { .. }) => true,
                 (TaskStatusFilter::Terminal, terminal) => matches!(
                     terminal,
-                    TaskStatus::Completed(_)
-                        | TaskStatus::Failed(_)
-                        | TaskStatus::Cancelled { .. }
+                    TaskStatus::Completed(_) | TaskStatus::Failed(_) | TaskStatus::Cancelled { .. }
                 ),
-                (TaskStatusFilter::Active, active) => matches!(
-                    active,
-                    TaskStatus::Pending | TaskStatus::Dispatched { .. }
-                ),
+                (TaskStatusFilter::Active, active) => {
+                    matches!(active, TaskStatus::Pending | TaskStatus::Dispatched { .. })
+                }
                 _ => false,
             });
         }
@@ -115,11 +112,7 @@ impl Store for MemStore {
         if let Some(status) = f.status {
             all.retain(|w| w.status == status);
         }
-        all.retain(|w| {
-            f.labels
-                .iter()
-                .all(|(k, v)| w.labels.get(k) == Some(v))
-        });
+        all.retain(|w| f.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)));
         all.sort_by_key(|w| w.registered_at);
         all.truncate(f.limit);
         Ok(all)
@@ -171,7 +164,11 @@ impl Store for MemStore {
         Ok(entry.len() as u64)
     }
 
-    async fn get_output(&self, task_id: TaskId, from_offset: u64) -> Result<TaskOutput, StoreError> {
+    async fn get_output(
+        &self,
+        task_id: TaskId,
+        from_offset: u64,
+    ) -> Result<TaskOutput, StoreError> {
         let outputs = self.outputs.lock().unwrap();
         let chunks: Vec<_> = outputs
             .get(&task_id)
@@ -200,10 +197,7 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn create_bootstrap_token(
-        &self,
-        token: &BootstrapToken,
-    ) -> Result<(), StoreError> {
+    async fn create_bootstrap_token(&self, token: &BootstrapToken) -> Result<(), StoreError> {
         let mut tokens = self.bootstrap_tokens.lock().unwrap();
         if tokens.contains_key(&token.token) {
             return Err(StoreError::Conflict(format!(
@@ -215,15 +209,11 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn consume_bootstrap_token(
-        &self,
-        token: &str,
-        used_by: &str,
-    ) -> Result<(), StoreError> {
+    async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError> {
         let mut tokens = self.bootstrap_tokens.lock().unwrap();
-        let entry = tokens
-            .get_mut(token)
-            .ok_or_else(|| StoreError::BootstrapTokenInvalid(format!("token not found: {token}")))?;
+        let entry = tokens.get_mut(token).ok_or_else(|| {
+            StoreError::BootstrapTokenInvalid(format!("token not found: {token}"))
+        })?;
         if !entry.is_usable() {
             let reason = if entry.use_count >= entry.max_uses {
                 "exhausted"
@@ -241,8 +231,13 @@ impl Store for MemStore {
     }
 
     async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-        let mut all: Vec<BootstrapToken> =
-            self.bootstrap_tokens.lock().unwrap().values().cloned().collect();
+        let mut all: Vec<BootstrapToken> = self
+            .bootstrap_tokens
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
         all.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(all)
     }

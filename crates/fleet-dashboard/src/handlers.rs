@@ -100,14 +100,10 @@ pub async fn list_workers(
     }
     filter.limit = q.limit;
 
-    let workers = state
-        .store
-        .list_workers(&filter)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "list_workers failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let workers = state.store.list_workers(&filter).await.map_err(|e| {
+        tracing::error!(error = %e, "list_workers failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let summaries = workers.iter().map(worker_to_summary).collect();
     Ok(Json(summaries))
@@ -128,14 +124,10 @@ pub async fn list_tasks(
         limit: q.limit,
         ..Default::default()
     };
-    let tasks = state
-        .store
-        .list_tasks(&filter)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "list_tasks failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let tasks = state.store.list_tasks(&filter).await.map_err(|e| {
+        tracing::error!(error = %e, "list_tasks failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let summaries: Vec<TaskSummary> = tasks.iter().map(task_to_summary).collect();
     debug!(count = summaries.len(), "list_tasks");
@@ -190,9 +182,7 @@ pub async fn index() -> Response {
 }
 
 /// `/static/*path` — 정적 자산.
-pub async fn static_asset(
-    axum::extract::Path(path): axum::extract::Path<String>,
-) -> Response {
+pub async fn static_asset(axum::extract::Path(path): axum::extract::Path<String>) -> Response {
     let cleaned = path.trim_start_matches('/');
     let full = if cleaned.is_empty() {
         "index.html"
@@ -202,11 +192,7 @@ pub async fn static_asset(
     match crate::assets::Asset::get(full) {
         Some(file) => {
             let mime = file.metadata.mimetype();
-            (
-                [(axum::http::header::CONTENT_TYPE, mime)],
-                file.data,
-            )
-                .into_response()
+            ([(axum::http::header::CONTENT_TYPE, mime)], file.data).into_response()
         }
         None => (StatusCode::NOT_FOUND, "asset not found").into_response(),
     }

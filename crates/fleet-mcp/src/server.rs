@@ -67,8 +67,7 @@ impl McpServer {
             };
 
             if let Some(resp) = response {
-                let json = serde_json::to_string(&resp)
-                    .map_err(std::io::Error::other)?;
+                let json = serde_json::to_string(&resp).map_err(std::io::Error::other)?;
                 stdout.write_all(json.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
@@ -92,8 +91,7 @@ impl McpServer {
                     JsonRpcError::invalid_request(format!(
                         "unsupported jsonrpc version: '{}' (expected '2.0')",
                         req.jsonrpc
-                    ),
-                    ),
+                    )),
                 ));
             }
             return None;
@@ -140,9 +138,9 @@ impl McpServer {
 
     /// `tools/call` 파라미터 검증 + 핸들러 호출.
     async fn handle_tools_call(&self, params: &Value) -> Result<Value, JsonRpcError> {
-        let obj = params.as_object().ok_or_else(|| {
-            JsonRpcError::invalid_params("tools/call params must be an object")
-        })?;
+        let obj = params
+            .as_object()
+            .ok_or_else(|| JsonRpcError::invalid_params("tools/call params must be an object"))?;
 
         let name = obj
             .get("name")

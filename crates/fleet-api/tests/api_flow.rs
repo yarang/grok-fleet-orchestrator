@@ -72,11 +72,7 @@ impl Store for MemStore {
             .unwrap()
             .values()
             .filter(|w| f.status.map_or(true, |s| w.status == s))
-            .filter(|w| {
-                f.labels
-                    .iter()
-                    .all(|(k, v)| w.labels.get(k) == Some(v))
-            })
+            .filter(|w| f.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)))
             .cloned()
             .collect())
     }
@@ -148,13 +144,14 @@ async fn spawn_server() -> Server {
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    Server { addr, _handle: handle }
+    Server {
+        addr,
+        _handle: handle,
+    }
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .build()
-        .expect("reqwest client")
+    reqwest::Client::builder().build().expect("reqwest client")
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────
@@ -273,7 +270,10 @@ async fn heartbeat_unknown_worker_returns_not_found() {
         .unwrap();
     assert_eq!(resp.status(), 404);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"].as_str().unwrap().contains("worker"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("worker"));
 }
 
 #[tokio::test]

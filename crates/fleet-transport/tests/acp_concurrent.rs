@@ -109,7 +109,11 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                state.received_prompts.lock().await.push(prompt_text.clone());
+                state
+                    .received_prompts
+                    .lock()
+                    .await
+                    .push(prompt_text.clone());
 
                 // promptId-tagged Output notification 전송.
                 let update = json!({
@@ -238,10 +242,7 @@ async fn concurrent_dispatches_within_capacity_all_complete() {
 
     // 각 task_id가 dispatch한 것과 일치.
     for tid in &task_ids {
-        assert!(
-            completed.contains(tid),
-            "task {tid} should have completed"
-        );
+        assert!(completed.contains(tid), "task {tid} should have completed");
     }
 
     transport.unregister(worker).await.unwrap();
@@ -328,7 +329,10 @@ async fn output_events_routed_to_correct_task_by_prompt_id() {
     while completed.len() < 2 && std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
             Ok(Some(WorkerEvent::Output { task_id, chunk, .. })) => {
-                outputs.entry(task_id).and_modify(|s| s.push_str(&chunk)).or_insert_with(|| chunk.clone());
+                outputs
+                    .entry(task_id)
+                    .and_modify(|s| s.push_str(&chunk))
+                    .or_insert_with(|| chunk.clone());
             }
             Ok(Some(WorkerEvent::Completed { task_id, .. })) => {
                 completed.insert(task_id);

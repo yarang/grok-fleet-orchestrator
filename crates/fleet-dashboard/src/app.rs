@@ -107,7 +107,11 @@ mod tests {
         async fn delete_worker(&self, _: WorkerId) -> Result<(), StoreError> {
             unimplemented!()
         }
-        async fn update_worker_heartbeat(&self, _: WorkerId, _: &WorkerHeartbeat) -> Result<(), StoreError> {
+        async fn update_worker_heartbeat(
+            &self,
+            _: WorkerId,
+            _: &WorkerHeartbeat,
+        ) -> Result<(), StoreError> {
             unimplemented!()
         }
         async fn append_event(&self, _: &FleetEvent) -> Result<u64, StoreError> {

@@ -65,7 +65,10 @@ async fn start_mock_orchestrator(state: MockOrchestratorState) -> String {
                 let s = hb_state.clone();
                 async move {
                     s.heartbeats.lock().await.push(body);
-                    (axum::http::StatusCode::OK, Json(serde_json::json!({"ok": true})))
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(serde_json::json!({"ok": true})),
+                    )
                 }
             }),
         )

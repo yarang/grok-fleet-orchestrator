@@ -218,11 +218,7 @@ impl WorkerSession {
     /// `prompt()` 응답 도착 후 prompt_id 등록.
     /// in_flight와 prompt_index 양쪽을 갱신하고, prompt_id가 알려지기 전에
     /// 버퍼링된 이벤트를 drain하여 반환 — 호출자(dispatch)가 emit.
-    async fn set_prompt_id(
-        &self,
-        task_id: TaskId,
-        prompt_id: PromptId,
-    ) -> Vec<BufferedEvent> {
+    async fn set_prompt_id(&self, task_id: TaskId, prompt_id: PromptId) -> Vec<BufferedEvent> {
         let mut in_flight = self.in_flight.lock().await;
         if let Some(task) = in_flight.get_mut(&task_id) {
             task.prompt_id = Some(prompt_id);
@@ -440,12 +436,7 @@ impl WorkerTransport for AcpTransport {
         let (first_result_tx, first_result_rx) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
 
-        let session = WorkerSession::new(
-            worker_id,
-            endpoint.to_string(),
-            cap,
-            cmd_tx.clone(),
-        );
+        let session = WorkerSession::new(worker_id, endpoint.to_string(), cap, cmd_tx.clone());
 
         // supervisor spawn.
         let supervisor_handle = spawn_supervisor(
@@ -552,9 +543,7 @@ impl WorkerTransport for AcpTransport {
                     // prompt_id를 in_flight와 prompt_index에 등록.
                     // 동시에, prompt_id가 알려지기 전에 도착해 버퍼링된
                     // 이벤트들을 drain하여 emit.
-                    let buffered = session_clone
-                        .set_prompt_id(task_id, prompt_id)
-                        .await;
+                    let buffered = session_clone.set_prompt_id(task_id, prompt_id).await;
                     for event in buffered {
                         match event {
                             BufferedEvent::Output { seq, chunk } => {
@@ -565,10 +554,7 @@ impl WorkerTransport for AcpTransport {
                                 });
                             }
                             BufferedEvent::Failed { error } => {
-                                let _ = broadcaster.send(WorkerEvent::Failed {
-                                    task_id,
-                                    error,
-                                });
+                                let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
                             }
                         }
                     }
@@ -594,10 +580,7 @@ impl WorkerTransport for AcpTransport {
                         // in_flight에 그대로 두어 supervisor가 emit.
                     } else if session_clone.complete(task_id).await.is_some() {
                         warn!(%task_id, %worker_id, error = %e, "acp prompt failed");
-                        let _ = broadcaster.send(WorkerEvent::Failed {
-                            task_id,
-                            error: e,
-                        });
+                        let _ = broadcaster.send(WorkerEvent::Failed { task_id, error: e });
                     } else {
                         // 다른 스레드가 이미 complete — 중복 emit 방지.
                         debug!(
@@ -757,7 +740,7 @@ fn spawn_supervisor(
             info!(%worker_id, session = %session_id, "ACP session established");
             *session.state.write().await = ConnState::Connected;
             backoff = reconnect.initial; // 성공 시 백오프 리셋.
-            // 첫 연결 성공 시 register() 호출자에게 Ok 전달.
+                                         // 첫 연결 성공 시 register() 호출자에게 Ok 전달.
             if let Some(tx) = first_result.take() {
                 let _ = tx.send(Ok(()));
             }
@@ -841,14 +824,7 @@ enum ReaderExit {
 async fn establish_session(
     endpoint: &str,
     #[cfg(feature = "mtls")] client_tls: Option<&crate::tls::ClientTlsConfig>,
-) -> Result<
-    (
-        AcpClient,
-        SessionId,
-        mpsc::UnboundedReceiver<AcpEvent>,
-    ),
-    String,
-> {
+) -> Result<(AcpClient, SessionId, mpsc::UnboundedReceiver<AcpEvent>), String> {
     #[cfg(feature = "mtls")]
     let use_mtls = client_tls.is_some() && endpoint.starts_with("wss://");
     #[cfg(not(feature = "mtls"))]
@@ -931,7 +907,11 @@ async fn run_reader_loop(
     let worker_id = session.worker_id;
     while let Some(event) = event_rx.recv().await {
         match event {
-            AcpEvent::Output { prompt_id, seq, chunk } => {
+            AcpEvent::Output {
+                prompt_id,
+                seq,
+                chunk,
+            } => {
                 // prompt_id로 task_id 역조회. None인 경우 (드문 레이스)
                 // 출력을 drop — Phase 8.4 동시성 모델에서는 단일 active_task
                 // 가정이 더 이상 유효하지 않음.
@@ -1151,7 +1131,10 @@ mod tests {
     async fn unregister_unknown_returns_error() {
         let t = AcpTransport::new();
         let result = t.unregister(WorkerId::new()).await;
-        assert!(matches!(result, Err(TransportError::WorkerNotRegistered(_))));
+        assert!(matches!(
+            result,
+            Err(TransportError::WorkerNotRegistered(_))
+        ));
     }
 
     #[tokio::test]
@@ -1170,7 +1153,10 @@ mod tests {
     async fn ping_unknown_worker_errors() {
         let t = AcpTransport::new();
         let result = t.ping(WorkerId::new()).await;
-        assert!(matches!(result, Err(TransportError::WorkerNotRegistered(_))));
+        assert!(matches!(
+            result,
+            Err(TransportError::WorkerNotRegistered(_))
+        ));
     }
 
     #[tokio::test]

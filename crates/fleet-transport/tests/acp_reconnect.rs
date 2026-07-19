@@ -103,7 +103,11 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let method = req
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let id = req.get("id").cloned();
         state.received.lock().await.push(req);
 
@@ -211,9 +215,7 @@ async fn wait_for_state(
             return;
         }
         if std::time::Instant::now() > deadline {
-            panic!(
-                "wait_for_state({label}): expected {target:?}, got {state:?} within 10s"
-            );
+            panic!("wait_for_state({label}): expected {target:?}, got {state:?} within 10s");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -239,7 +241,9 @@ async fn connection_failure_during_register_returns_error() {
 #[tokio::test]
 async fn close_frame_marks_disconnected() {
     let state = MockState::default();
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _server = tokio::spawn(async move {
@@ -251,18 +255,33 @@ async fn close_frame_marks_disconnected() {
         max: Duration::from_millis(100),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
-    assert_eq!(transport.conn_state(worker).await, Some(ConnState::Connected));
+    transport
+        .register(worker, &endpoint(&addr), 1)
+        .await
+        .expect("register");
+    assert_eq!(
+        transport.conn_state(worker).await,
+        Some(ConnState::Connected)
+    );
 
     // close_after_next 설정 → 다음 요청 후 Close 전송.
     state.close_after_next.store(true, Ordering::SeqCst);
 
     // dispatch로 prompt 전송 → mock이 응답 후 close.
     let task = TaskId::new();
-    transport.dispatch(dispatch_req(task, worker, "x")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(task, worker, "x"))
+        .await
+        .unwrap();
 
     // Disconnected로 전환 대기.
-    wait_for_state(&transport, worker, ConnState::Disconnected, "after close frame").await;
+    wait_for_state(
+        &transport,
+        worker,
+        ConnState::Disconnected,
+        "after close frame",
+    )
+    .await;
 
     // dispatch 실패해야 함.
     let task2 = TaskId::new();
@@ -275,7 +294,9 @@ async fn close_frame_marks_disconnected() {
 #[tokio::test]
 async fn reconnect_after_close_frame() {
     let state = MockState::default();
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _server = tokio::spawn(async move {
@@ -287,13 +308,22 @@ async fn reconnect_after_close_frame() {
         max: Duration::from_millis(200),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
-    assert_eq!(transport.conn_state(worker).await, Some(ConnState::Connected));
+    transport
+        .register(worker, &endpoint(&addr), 1)
+        .await
+        .expect("register");
+    assert_eq!(
+        transport.conn_state(worker).await,
+        Some(ConnState::Connected)
+    );
 
     // close 트리거.
     state.close_after_next.store(true, Ordering::SeqCst);
     let t1 = TaskId::new();
-    transport.dispatch(dispatch_req(t1, worker, "trigger")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(t1, worker, "trigger"))
+        .await
+        .unwrap();
     wait_for_state(&transport, worker, ConnState::Disconnected, "after close").await;
 
     // 플래그 리셋 — 재연결 후에는 close하지 않아야 함.
@@ -304,7 +334,10 @@ async fn reconnect_after_close_frame() {
 
     // dispatch 동작 확인.
     let task = TaskId::new();
-    transport.dispatch(dispatch_req(task, worker, "post-reconnect")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(task, worker, "post-reconnect"))
+        .await
+        .unwrap();
 
     let mut rx = transport.subscribe().await.unwrap();
     let mut got_completed = false;
@@ -326,7 +359,9 @@ async fn reconnect_after_close_frame() {
 #[tokio::test]
 async fn failed_event_emitted_for_in_flight_task_on_close() {
     let state = MockState::default();
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _server = tokio::spawn(async move {
@@ -352,8 +387,14 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
 
     let task1 = TaskId::new();
     let task2 = TaskId::new();
-    transport.dispatch(dispatch_req(task1, worker, "blocked-1")).await.unwrap();
-    transport.dispatch(dispatch_req(task2, worker, "blocked-2")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(task1, worker, "blocked-1"))
+        .await
+        .unwrap();
+    transport
+        .dispatch(dispatch_req(task2, worker, "blocked-2"))
+        .await
+        .unwrap();
 
     // 두 prompt 도달 대기.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -363,7 +404,10 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
             .iter()
             .filter(|r| r.get("method").and_then(|v| v.as_str()) == Some("session/prompt"))
             .count();
-        assert_eq!(prompt_count, 2, "expected both prompts to be received by mock");
+        assert_eq!(
+            prompt_count, 2,
+            "expected both prompts to be received by mock"
+        );
     }
 
     // close_now로 WebSocket 즉시 종료 — 디스패치 추가 없이 close 트리거.
@@ -404,7 +448,9 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
 #[tokio::test]
 async fn unregister_during_backoff_exits_cleanly() {
     let state = MockState::default();
-    let app = Router::new().route("/ws", get(ws_handler)).with_state(state.clone());
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _server = tokio::spawn(async move {
@@ -416,13 +462,25 @@ async fn unregister_during_backoff_exits_cleanly() {
         max: Duration::from_secs(120),
     });
     let worker = WorkerId::new();
-    transport.register(worker, &endpoint(&addr), 1).await.expect("register");
+    transport
+        .register(worker, &endpoint(&addr), 1)
+        .await
+        .expect("register");
 
     // close 트리거.
     state.close_after_next.store(true, Ordering::SeqCst);
     let t = TaskId::new();
-    transport.dispatch(dispatch_req(t, worker, "trigger")).await.unwrap();
-    wait_for_state(&transport, worker, ConnState::Disconnected, "during backoff").await;
+    transport
+        .dispatch(dispatch_req(t, worker, "trigger"))
+        .await
+        .unwrap();
+    wait_for_state(
+        &transport,
+        worker,
+        ConnState::Disconnected,
+        "during backoff",
+    )
+    .await;
 
     // unregister가 빠르게 반환되어야 함.
     let start = std::time::Instant::now();
@@ -441,14 +499,22 @@ async fn unregister_during_backoff_exits_cleanly() {
 async fn multiple_workers_reconnect_independently() {
     let state1 = MockState::default();
     let state2 = MockState::default();
-    let app1 = Router::new().route("/ws", get(ws_handler)).with_state(state1.clone());
-    let app2 = Router::new().route("/ws", get(ws_handler)).with_state(state2.clone());
+    let app1 = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state1.clone());
+    let app2 = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(state2.clone());
     let l1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let l2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr1 = l1.local_addr().unwrap();
     let addr2 = l2.local_addr().unwrap();
-    let _s1 = tokio::spawn(async move { let _ = axum::serve(l1, app1).await; });
-    let _s2 = tokio::spawn(async move { let _ = axum::serve(l2, app2).await; });
+    let _s1 = tokio::spawn(async move {
+        let _ = axum::serve(l1, app1).await;
+    });
+    let _s2 = tokio::spawn(async move {
+        let _ = axum::serve(l2, app2).await;
+    });
 
     let transport = AcpTransport::with_reconnect(ReconnectConfig {
         initial: Duration::from_millis(30),
@@ -464,7 +530,10 @@ async fn multiple_workers_reconnect_independently() {
     // w1만 close.
     state1.close_after_next.store(true, Ordering::SeqCst);
     let t = TaskId::new();
-    transport.dispatch(dispatch_req(t, w1, "trigger")).await.unwrap();
+    transport
+        .dispatch(dispatch_req(t, w1, "trigger"))
+        .await
+        .unwrap();
     wait_for_state(&transport, w1, ConnState::Disconnected, "w1 after close").await;
 
     // w2는 여전히 Connected.
@@ -497,5 +566,8 @@ async fn exponential_backoff_increases_between_failures() {
 
     // worker_id가 clients 맵에 없으므로 Err 반환 — 정상.
     let result = transport.unregister(worker).await;
-    assert!(result.is_err(), "worker should not be in map after failed register");
+    assert!(
+        result.is_err(),
+        "worker should not be in map after failed register"
+    );
 }

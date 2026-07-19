@@ -43,21 +43,23 @@ pub async fn run_token(action: TokenAction) -> Result<()> {
             })
             .await
         }
-        TokenAction::List { api_url, api_token, json } => {
-            run_token_list(&api_url, &api_token, json).await
-        }
-        TokenAction::Revoke { api_url, api_token, token } => {
-            run_token_revoke(&api_url, &api_token, &token).await
-        }
+        TokenAction::List {
+            api_url,
+            api_token,
+            json,
+        } => run_token_list(&api_url, &api_token, json).await,
+        TokenAction::Revoke {
+            api_url,
+            api_token,
+            token,
+        } => run_token_revoke(&api_url, &api_token, &token).await,
     }
 }
 
 /// `token new` — 무작위 토큰 생성 후 stdout 출력.
 async fn run_token_new(prefix: &str, bytes: usize) -> Result<()> {
     if !(8..=256).contains(&bytes) {
-        return Err(anyhow!(
-            "--bytes must be between 8 and 256 (got {bytes})"
-        ));
+        return Err(anyhow!("--bytes must be between 8 and 256 (got {bytes})"));
     }
     let raw = generate_random_bytes(bytes)?;
     let encoded = base64url(&raw);
@@ -154,7 +156,11 @@ async fn run_token_issue(args: IssueArgs) -> Result<()> {
 async fn run_token_list(api_url: &str, api_token: &str, json: bool) -> Result<()> {
     let http = build_http_client()?;
     let url = format!("{}/v1/bootstrap-tokens", api_url.trim_end_matches('/'));
-    let resp = http.get(&url).bearer_auth(api_token).send().await
+    let resp = http
+        .get(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
         .context("token list request failed")?;
     let status = resp.status();
     if !status.is_success() {
@@ -205,7 +211,11 @@ async fn run_token_revoke(api_url: &str, api_token: &str, token: &str) -> Result
         api_url.trim_end_matches('/'),
         urlencoding::encode_or_self(token)
     );
-    let resp = http.delete(&url).bearer_auth(api_token).send().await
+    let resp = http
+        .delete(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
         .context("token revoke request failed")?;
     let status = resp.status();
     if !status.is_success() {
@@ -228,7 +238,9 @@ mod urlencoding {
     pub fn encode_or_self(s: &str) -> String {
         // 부트스트랩 토큰은 알파벳/숫자/-/_ 만 포함하므로 인코딩이 불필요.
         // 혹시 몰라 percent-encoding을 적용.
-        if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        if s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
             s.to_string()
         } else {
             percent_encode(s)
@@ -254,8 +266,7 @@ fn generate_random_bytes(n: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; n];
     #[cfg(unix)]
     {
-        let mut f = std::fs::File::open("/dev/urandom")
-            .context("failed to open /dev/urandom")?;
+        let mut f = std::fs::File::open("/dev/urandom").context("failed to open /dev/urandom")?;
         f.read_exact(&mut buf).context("/dev/urandom read failed")?;
     }
     #[cfg(not(unix))]
@@ -275,8 +286,7 @@ fn generate_random_bytes(n: usize) -> Result<Vec<u8>> {
 
 /// base64url-no-pad 인코딩 (의존성 추가 없이 직접 구현).
 fn base64url(input: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut chunks = input.chunks_exact(3);
     for c in &mut chunks {
@@ -341,7 +351,10 @@ mod tests {
         // 매우 드물지만 CSPRNG가 고장나지 않은 이상 0이 아닌 값이 있어야 함.
         let v = generate_random_bytes(32).unwrap();
         let nonzero = v.iter().filter(|b| **b != 0).count();
-        assert!(nonzero > 20, "expected mostly non-zero bytes, got {nonzero}/32");
+        assert!(
+            nonzero > 20,
+            "expected mostly non-zero bytes, got {nonzero}/32"
+        );
     }
 
     #[tokio::test]
@@ -377,8 +390,8 @@ mod tests {
             #[command(subcommand)]
             cmd: TokenAction,
         }
-        let t: T = Parser::try_parse_from(["token", "new", "--prefix", "p", "--bytes", "24"])
-            .unwrap();
+        let t: T =
+            Parser::try_parse_from(["token", "new", "--prefix", "p", "--bytes", "24"]).unwrap();
         match t.cmd {
             TokenAction::New { prefix, bytes } => {
                 assert_eq!(prefix, "p");

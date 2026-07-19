@@ -192,9 +192,7 @@ impl Store for MemStore {
 }
 
 /// ephemeral port에 HTTP API 서버 시작. base URL 반환.
-async fn spawn_server(
-    transport: Arc<dyn WorkerTransport>,
-) -> String {
+async fn spawn_server(transport: Arc<dyn WorkerTransport>) -> String {
     let store: Arc<dyn Store> = Arc::new(MemStore::new());
     let state = Arc::new(
         AppState::new(store)

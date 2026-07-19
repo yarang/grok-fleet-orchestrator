@@ -64,7 +64,10 @@ impl Step for StartServices {
         if status.trim() != "active" {
             return Err(StepError::RemoteExit {
                 code: 1,
-                stderr: format!("fleet-worker not active after start (state: {})", status.trim()),
+                stderr: format!(
+                    "fleet-worker not active after start (state: {})",
+                    status.trim()
+                ),
             });
         }
 

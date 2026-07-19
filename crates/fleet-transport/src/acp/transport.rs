@@ -15,18 +15,16 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
+#[cfg(feature = "mtls")]
+use tokio_tungstenite::Connector;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
-        client::IntoClientRequest,
-        handshake::client::generate_key,
-        http::Request,
+        client::IntoClientRequest, handshake::client::generate_key, http::Request,
         protocol::Message,
     },
     MaybeTlsStream, WebSocketStream,
 };
-#[cfg(feature = "mtls")]
-use tokio_tungstenite::Connector;
 
 use super::error::AcpError;
 
@@ -34,8 +32,10 @@ use super::error::AcpError;
 use crate::tls::ClientTlsConfig;
 
 /// WebSocket writer (SplitSink).
-pub type WsSink =
-    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>;
+pub type WsSink = futures_util::stream::SplitSink<
+    WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
 /// WebSocket reader (SplitStream).
 pub type WsStream =
     futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>;
@@ -75,7 +75,10 @@ impl WsConn {
     /// `tls` 구성이 제공하는 CA만 신뢰하며, 클라이언트 인증서로 자신을 증명.
     /// orchestrator→worker ACP 트래픽이 중간자 공격이나 스니핑으로부터 보호됨.
     #[cfg(feature = "mtls")]
-    pub async fn connect_mtls(url: &str, tls: &ClientTlsConfig) -> Result<(Self, WsStream), AcpError> {
+    pub async fn connect_mtls(
+        url: &str,
+        tls: &ClientTlsConfig,
+    ) -> Result<(Self, WsStream), AcpError> {
         if !url.starts_with("wss://") {
             return Err(AcpError::InvalidEndpoint(format!(
                 "connect_mtls requires wss:// URL: {url}"
@@ -193,7 +196,10 @@ mod tests {
 
     #[test]
     fn host_of_extracts_authority() {
-        assert_eq!(host_of("ws://localhost:2419/ws").as_deref(), Some("localhost:2419"));
+        assert_eq!(
+            host_of("ws://localhost:2419/ws").as_deref(),
+            Some("localhost:2419")
+        );
         assert_eq!(
             host_of("wss://worker.example.com/path?x=1").as_deref(),
             Some("worker.example.com")

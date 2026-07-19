@@ -154,7 +154,11 @@ impl FleetEvent {
             | Self::WorkerCircuitChanged { worker_id, .. }
             | Self::WorkerHeartbeat { worker_id, .. } => Some(*worker_id),
             Self::TaskFailed {
-                failure: TaskFailure { worker_id: Some(wid), .. },
+                failure:
+                    TaskFailure {
+                        worker_id: Some(wid),
+                        ..
+                    },
                 ..
             } => Some(*wid),
             _ => None,
@@ -162,7 +166,11 @@ impl FleetEvent {
     }
 
     /// 현재 시각로 이벤트를 생성하는 편의 메서드들.
-    pub fn task_created(task_id: TaskId, server_hint: Option<String>, created_by: impl Into<String>) -> Self {
+    pub fn task_created(
+        task_id: TaskId,
+        server_hint: Option<String>,
+        created_by: impl Into<String>,
+    ) -> Self {
         Self::TaskCreated {
             task_id,
             server_hint,
@@ -172,22 +180,43 @@ impl FleetEvent {
     }
 
     pub fn task_dispatched(task_id: TaskId, worker_id: WorkerId) -> Self {
-        Self::TaskDispatched { task_id, worker_id, at: Utc::now() }
+        Self::TaskDispatched {
+            task_id,
+            worker_id,
+            at: Utc::now(),
+        }
     }
 
     pub fn task_completed(task_id: TaskId, worker_id: WorkerId, result: TaskResult) -> Self {
-        Self::TaskCompleted { task_id, worker_id, result, at: Utc::now() }
+        Self::TaskCompleted {
+            task_id,
+            worker_id,
+            result,
+            at: Utc::now(),
+        }
     }
 
     pub fn task_failed(task_id: TaskId, failure: TaskFailure) -> Self {
-        Self::TaskFailed { task_id, failure, at: Utc::now() }
+        Self::TaskFailed {
+            task_id,
+            failure,
+            at: Utc::now(),
+        }
     }
 
     pub fn task_cancelled(task_id: TaskId, reason: impl Into<String>) -> Self {
-        Self::TaskCancelled { task_id, reason: reason.into(), at: Utc::now() }
+        Self::TaskCancelled {
+            task_id,
+            reason: reason.into(),
+            at: Utc::now(),
+        }
     }
 
-    pub fn worker_joined(worker_id: WorkerId, name: impl Into<String>, endpoint: impl Into<String>) -> Self {
+    pub fn worker_joined(
+        worker_id: WorkerId,
+        name: impl Into<String>,
+        endpoint: impl Into<String>,
+    ) -> Self {
         Self::WorkerJoined {
             worker_id,
             name: name.into(),
@@ -197,11 +226,24 @@ impl FleetEvent {
     }
 
     pub fn worker_left(worker_id: WorkerId, reason: impl Into<String>) -> Self {
-        Self::WorkerLeft { worker_id, reason: reason.into(), at: Utc::now() }
+        Self::WorkerLeft {
+            worker_id,
+            reason: reason.into(),
+            at: Utc::now(),
+        }
     }
 
-    pub fn worker_circuit_changed(worker_id: WorkerId, from: CircuitState, to: CircuitState) -> Self {
-        Self::WorkerCircuitChanged { worker_id, from, to, at: Utc::now() }
+    pub fn worker_circuit_changed(
+        worker_id: WorkerId,
+        from: CircuitState,
+        to: CircuitState,
+    ) -> Self {
+        Self::WorkerCircuitChanged {
+            worker_id,
+            from,
+            to,
+            at: Utc::now(),
+        }
     }
 }
 
@@ -244,7 +286,11 @@ mod tests {
     #[test]
     fn worker_id_extraction() {
         let wid = WorkerId::new();
-        let e = FleetEvent::TaskDispatched { task_id: TaskId::new(), worker_id: wid, at: Utc::now() };
+        let e = FleetEvent::TaskDispatched {
+            task_id: TaskId::new(),
+            worker_id: wid,
+            at: Utc::now(),
+        };
         assert_eq!(e.worker_id(), Some(wid));
 
         let e2 = FleetEvent::task_created(TaskId::new(), None, "x");

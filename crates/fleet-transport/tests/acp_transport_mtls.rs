@@ -14,9 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-};
+use rcgen::{CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -54,9 +52,7 @@ fn write_pem(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
 
 fn pem_to_certs(pem: &str) -> Vec<CertificateDer<'static>> {
     let mut reader = BufReader::new(pem.as_bytes());
-    certs(&mut reader)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    certs(&mut reader).collect::<Result<Vec<_>, _>>().unwrap()
 }
 
 fn pem_to_key(pem: &str) -> PrivateKeyDer<'static> {
@@ -88,8 +84,7 @@ fn generate_material() -> TestMaterial {
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
     let ca_pem = ca_cert.pem();
 
-    let mut server_params =
-        CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
     let mut sdn = DistinguishedName::new();
     sdn.push(DnType::CommonName, "localhost");
     server_params.distinguished_name = sdn;
@@ -103,8 +98,7 @@ fn generate_material() -> TestMaterial {
     let server_cert_pem = server_cert.pem();
     let server_key_pem = server_key.serialize_pem();
 
-    let mut client_params =
-        CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
+    let mut client_params = CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
     let mut cdn = DistinguishedName::new();
     cdn.push(DnType::CommonName, "orchestrator");
     client_params.distinguished_name = cdn;
@@ -144,12 +138,10 @@ async fn start_acp_mtls_server(
         client_roots.add(c.clone()).unwrap();
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let client_verifier = WebPkiClientVerifier::builder_with_provider(
-        Arc::new(client_roots),
-        provider.clone(),
-    )
-    .build()
-    .unwrap();
+    let client_verifier =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider.clone())
+            .build()
+            .unwrap();
 
     let server_config = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()

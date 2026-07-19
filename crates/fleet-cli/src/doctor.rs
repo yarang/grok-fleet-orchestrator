@@ -26,10 +26,7 @@ pub async fn run_doctor(
     // 1. DATABASE_URL 환경변수
     let db_url = match std::env::var("DATABASE_URL") {
         Ok(u) => {
-            report.ok(
-                "DATABASE_URL",
-                "environment variable is set",
-            );
+            report.ok("DATABASE_URL", "environment variable is set");
             u
         }
         Err(_) => {
@@ -49,10 +46,7 @@ pub async fn run_doctor(
             s
         }
         Err(e) => {
-            report.fail(
-                "postgres_connect",
-                &format!("failed to connect: {e}"),
-            );
+            report.fail("postgres_connect", &format!("failed to connect: {e}"));
             report.print();
             return Err(anyhow::anyhow!("Postgres connection failed"));
         }
@@ -80,7 +74,12 @@ pub async fn run_doctor(
                 .count();
             report.ok(
                 "workers",
-                &format!("{} total (online={}, offline={})", workers.len(), online, offline),
+                &format!(
+                    "{} total (online={}, offline={})",
+                    workers.len(),
+                    online,
+                    offline
+                ),
             );
             if !workers.is_empty() && online == 0 {
                 report.warn(
@@ -116,14 +115,13 @@ pub async fn run_doctor(
     // 6. HTTP API 헬스 (옵션)
     if let Some(url) = api_url {
         let endpoint = format!("{}/v1/health", url.trim_end_matches('/'));
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            reqwest::get(&endpoint),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(5), reqwest::get(&endpoint)).await;
         match result {
             Ok(Ok(resp)) if resp.status().is_success() => {
-                report.ok("api_health", &format!("{endpoint} returned {}", resp.status()));
+                report.ok(
+                    "api_health",
+                    &format!("{endpoint} returned {}", resp.status()),
+                );
             }
             Ok(Ok(resp)) => {
                 report.warn(
@@ -143,11 +141,7 @@ pub async fn run_doctor(
     // 7. 대시보드 헬스 (옵션)
     if let Some(url) = dashboard_url {
         let endpoint = format!("{}/health", url.trim_end_matches('/'));
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            reqwest::get(&endpoint),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(5), reqwest::get(&endpoint)).await;
         match result {
             Ok(Ok(resp)) if resp.status().is_success() => {
                 report.ok(
@@ -241,8 +235,16 @@ impl Report {
         }
         println!("{}", "=".repeat(78));
         let ok = self.rows.iter().filter(|r| r.status == Status::Ok).count();
-        let warn = self.rows.iter().filter(|r| r.status == Status::Warn).count();
-        let fail = self.rows.iter().filter(|r| r.status == Status::Fail).count();
+        let warn = self
+            .rows
+            .iter()
+            .filter(|r| r.status == Status::Warn)
+            .count();
+        let fail = self
+            .rows
+            .iter()
+            .filter(|r| r.status == Status::Fail)
+            .count();
         println!(
             "summary: {ok} OK, {warn} WARN, {fail} FAIL (total {})",
             self.rows.len()

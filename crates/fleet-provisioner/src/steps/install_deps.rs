@@ -71,10 +71,7 @@ impl Step for InstallDeps {
     }
 }
 
-async fn run_with_streaming(
-    exec: &dyn RemoteExecutor,
-    command: &str,
-) -> Result<(), StepError> {
+async fn run_with_streaming(exec: &dyn RemoteExecutor, command: &str) -> Result<(), StepError> {
     let code = exec
         .exec_streaming(
             command,
@@ -155,9 +152,7 @@ mod tests {
                 has_systemd: true,
             },
         };
-        step.apply(&exec, &StepContext::default())
-            .await
-            .unwrap();
+        step.apply(&exec, &StepContext::default()).await.unwrap();
         let calls = exec.recorded_calls();
         assert!(calls.iter().any(|c| c.contains("dnf install")));
     }

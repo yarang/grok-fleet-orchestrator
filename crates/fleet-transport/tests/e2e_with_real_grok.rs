@@ -52,7 +52,10 @@ async fn spawn_grok_agent(port: u16) -> Option<tokio::process::Child> {
     tracing::info!(port, "spawned grok agent serve, waiting for it to start");
     // 서버가 listen할 때까지 대기 (10초).
     for _ in 0..100 {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")).await.is_ok() {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .is_ok()
+        {
             return Some(child);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

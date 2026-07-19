@@ -109,11 +109,11 @@ impl InventoryWorker {
             .unwrap()
     }
 
-    pub fn effective_ssh_key(&self, defaults: &InventoryDefaults) -> Result<String, InventoryError> {
-        let key = self
-            .ssh_key
-            .clone()
-            .or_else(|| defaults.ssh_key.clone());
+    pub fn effective_ssh_key(
+        &self,
+        defaults: &InventoryDefaults,
+    ) -> Result<String, InventoryError> {
+        let key = self.ssh_key.clone().or_else(|| defaults.ssh_key.clone());
         key.ok_or(InventoryError::MissingSshKey)
     }
 

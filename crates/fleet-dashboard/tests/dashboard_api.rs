@@ -160,10 +160,7 @@ async fn spawn_server(store: MemStore) -> TestServer {
         .connect_lazy("postgres://__test_unused__@localhost/__none__")
         .expect("connect_lazy must not perform I/O");
 
-    let state = Arc::new(DashboardState::new(
-        Arc::new(store) as Arc<dyn Store>,
-        pool,
-    ));
+    let state = Arc::new(DashboardState::new(Arc::new(store) as Arc<dyn Store>, pool));
     let app = build_dashboard_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -171,7 +168,10 @@ async fn spawn_server(store: MemStore) -> TestServer {
     let handle = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    TestServer { addr, _handle: handle }
+    TestServer {
+        addr,
+        _handle: handle,
+    }
 }
 
 fn sample_worker(name: &str, status: WorkerStatus) -> Worker {
@@ -261,10 +261,7 @@ async fn workers_list_returns_summaries() {
     let arr: serde_json::Value = resp.json().await.unwrap();
     let arr = arr.as_array().unwrap();
     assert_eq!(arr.len(), 2);
-    let names: Vec<&str> = arr
-        .iter()
-        .map(|v| v["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = arr.iter().map(|v| v["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"alpha"));
     assert!(names.contains(&"beta"));
 }
@@ -276,12 +273,9 @@ async fn workers_list_status_filter() {
         .with_worker(sample_worker("offline-w", WorkerStatus::Offline));
     let server = spawn_server(store).await;
 
-    let resp = reqwest::get(format!(
-        "http://{}/api/workers?status=online",
-        server.addr
-    ))
-    .await
-    .unwrap();
+    let resp = reqwest::get(format!("http://{}/api/workers?status=online", server.addr))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let arr: serde_json::Value = resp.json().await.unwrap();
     let arr = arr.as_array().unwrap();

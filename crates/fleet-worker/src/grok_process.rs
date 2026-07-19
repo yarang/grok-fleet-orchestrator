@@ -247,9 +247,7 @@ mod tests {
     #[tokio::test]
     async fn runner_starts_subprocess_and_shuts_down() {
         // grok.bin = /bin/sleep, shutdown 신호로 종료.
-        let mut config = WorkerConfig::for_test()
-            .grok_bin("/bin/sleep")
-            .build();
+        let mut config = WorkerConfig::for_test().grok_bin("/bin/sleep").build();
         config.grok.restart_delay_secs = 1;
         let config = Arc::new(config);
 

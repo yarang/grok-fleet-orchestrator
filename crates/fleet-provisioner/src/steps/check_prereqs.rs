@@ -43,7 +43,9 @@ impl Step for CheckPrereqs {
         exec: &dyn RemoteExecutor,
         _ctx: &StepContext,
     ) -> Result<StepOutput, StepError> {
-        let os_raw = exec.exec("cat /etc/os-release | grep '^ID=' | cut -d= -f2").await?;
+        let os_raw = exec
+            .exec("cat /etc/os-release | grep '^ID=' | cut -d= -f2")
+            .await?;
         let os = os_raw.trim().trim_matches('"').to_lowercase();
 
         let arch = exec.exec("uname -m").await?;
@@ -138,8 +140,7 @@ mod tests {
         let out = step.apply(&exec, &ctx).await.unwrap();
         assert!(out.message.contains("ubuntu"));
         assert!(out.message.contains("x86_64"));
-        let report: PrereqReport =
-            serde_json::from_value(out.payload.unwrap()).unwrap();
+        let report: PrereqReport = serde_json::from_value(out.payload.unwrap()).unwrap();
         assert_eq!(report.os, "ubuntu");
         assert_eq!(report.arch, "x86_64");
         assert_eq!(report.mem_mb, 16384);

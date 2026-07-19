@@ -26,7 +26,10 @@ fn examples_workers_yaml_parses() {
     assert!(inv.defaults.ssh_port > 0);
 
     // 각 워커 엔트리의 필수 필드.
-    assert!(!inv.workers.is_empty(), "example should include at least 1 worker");
+    assert!(
+        !inv.workers.is_empty(),
+        "example should include at least 1 worker"
+    );
     for w in &inv.workers {
         assert!(!w.host.is_empty(), "worker.host must be set");
         assert!(!w.name.is_empty(), "worker.name must be set");

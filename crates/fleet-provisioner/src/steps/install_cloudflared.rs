@@ -39,8 +39,12 @@ impl Step for InstallCloudflared {
 
     async fn is_applied(&self, exec: &dyn RemoteExecutor) -> Result<bool, StepError> {
         // /etc/cloudflared/config.yml이 있고 cloudflared가 동작 중이면 적용됨.
-        let config = exec.exec("test -f /etc/cloudflared/config.yml && echo yes").await?;
-        let running = exec.exec("systemctl is-active cloudflared 2>/dev/null").await?;
+        let config = exec
+            .exec("test -f /etc/cloudflared/config.yml && echo yes")
+            .await?;
+        let running = exec
+            .exec("systemctl is-active cloudflared 2>/dev/null")
+            .await?;
         Ok(config.trim() == "yes" && running.trim() == "active")
     }
 
@@ -49,9 +53,7 @@ impl Step for InstallCloudflared {
         exec: &dyn RemoteExecutor,
         ctx: &StepContext,
     ) -> Result<StepOutput, StepError> {
-        let hostname = self
-            .hostname_pattern
-            .replace("{worker}", &ctx.worker_name);
+        let hostname = self.hostname_pattern.replace("{worker}", &ctx.worker_name);
         let tunnel_name = format!("fleet-{}", ctx.worker_name);
 
         if ctx.dry_run {
@@ -80,10 +82,9 @@ impl Step for InstallCloudflared {
         }
 
         // 2. 터널 자격증명 생성 (cf_token 필요).
-        let cf_token = ctx
-            .cf_token
-            .as_ref()
-            .ok_or_else(|| StepError::PrereqFailed("cf_token is required for tunnel creation".into()))?;
+        let cf_token = ctx.cf_token.as_ref().ok_or_else(|| {
+            StepError::PrereqFailed("cf_token is required for tunnel creation".into())
+        })?;
 
         // 토큰 인증 (cloudflared tunnel login은 대화형이라 토큰 방식 선호).
         let _ = exec
@@ -117,9 +118,14 @@ impl Step for InstallCloudflared {
             )
             .await?;
         if install_code != 0 {
-            tracing::warn!(code = install_code, "cloudflared service install returned non-zero (may already be installed)");
+            tracing::warn!(
+                code = install_code,
+                "cloudflared service install returned non-zero (may already be installed)"
+            );
         }
-        let _ = exec.exec("sudo systemctl restart cloudflared 2>&1 || true").await;
+        let _ = exec
+            .exec("sudo systemctl restart cloudflared 2>&1 || true")
+            .await;
 
         let info = TunnelInfo {
             tunnel_name,
@@ -182,7 +188,9 @@ mod tests {
         let out = step.apply(&exec, &ctx).await.unwrap();
         assert!(out.message.contains("fleet-build-1"));
         let calls = exec.recorded_calls();
-        assert!(calls.iter().any(|c| c.contains("write /tmp/cloudflared-config.yml")));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("write /tmp/cloudflared-config.yml")));
         assert!(calls.iter().any(|c| c.contains("cloudflared-linux-amd64")));
     }
 

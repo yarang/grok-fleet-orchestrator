@@ -47,7 +47,9 @@ async fn api_call(
     };
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -117,13 +119,8 @@ async fn list_tokens_returns_all() {
     seed_token(&store, "alpha-1", 1).await;
     seed_token(&store, "beta-2", 5).await;
 
-    let (status, json) = api_call(
-        store,
-        axum::http::Method::GET,
-        "/v1/bootstrap-tokens",
-        None,
-    )
-    .await;
+    let (status, json) =
+        api_call(store, axum::http::Method::GET, "/v1/bootstrap-tokens", None).await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 2);
@@ -218,10 +215,7 @@ async fn join_with_invalid_token_returns_401() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("token"));
+    assert!(json["error"]["message"].as_str().unwrap().contains("token"));
 }
 
 #[tokio::test]
@@ -359,7 +353,11 @@ async fn multi_use_token_supports_multiple_joins() {
             Some(body),
         )
         .await;
-        assert_eq!(status, axum::http::StatusCode::OK, "join {i} should succeed");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::OK,
+            "join {i} should succeed"
+        );
     }
 
     // 4번째는 거부.
@@ -481,11 +479,7 @@ impl Store for BsStore {
         tokens.insert(t.token.clone(), t.clone());
         Ok(())
     }
-    async fn consume_bootstrap_token(
-        &self,
-        token: &str,
-        used_by: &str,
-    ) -> Result<(), StoreError> {
+    async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError> {
         let mut tokens = self.tokens.lock().unwrap();
         let entry = tokens.get_mut(token).ok_or_else(|| {
             StoreError::BootstrapTokenInvalid(format!("token not found: {token}"))
@@ -501,13 +495,7 @@ impl Store for BsStore {
         Ok(())
     }
     async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-        Ok(self
-            .tokens
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect())
+        Ok(self.tokens.lock().unwrap().values().cloned().collect())
     }
     async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
         Ok(self.tokens.lock().unwrap().remove(token).is_some())

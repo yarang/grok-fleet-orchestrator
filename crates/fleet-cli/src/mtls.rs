@@ -81,8 +81,14 @@ pub fn run_init_ca(out_dir: &Path, common_name: &str, validity_days: u64) -> Res
     println!("  subject: CN={common_name}");
     println!();
     println!("Next: issue server/client certs signed by this CA:");
-    println!("  fleet mtls issue-server --ca {} --dns worker-1.fleet --out /etc/fleet/worker-1/", out_dir.display());
-    println!("  fleet mtls issue-client --ca {} --out /etc/fleet/orchestrator/", out_dir.display());
+    println!(
+        "  fleet mtls issue-server --ca {} --dns worker-1.fleet --out /etc/fleet/worker-1/",
+        out_dir.display()
+    );
+    println!(
+        "  fleet mtls issue-client --ca {} --out /etc/fleet/orchestrator/",
+        out_dir.display()
+    );
     Ok(())
 }
 
@@ -161,7 +167,10 @@ pub fn run_issue_client(
     println!();
     println!("Distribute to the orchestrator and pass via:");
     println!("  fleet serve --mtls-ca {}/ca.pem \\", ca_dir.display());
-    println!("             --mtls-cert {}/client.pem \\", out_dir.display());
+    println!(
+        "             --mtls-cert {}/client.pem \\",
+        out_dir.display()
+    );
     println!("             --mtls-key {}/client.key", out_dir.display());
     Ok(())
 }
@@ -193,8 +202,7 @@ fn write_pair(dir: &Path, stem: &str, cert_pem: &str, key_pem: &str) -> Result<(
     let key_path = dir.join(format!("{stem}.key"));
     std::fs::write(&cert_path, cert_pem)
         .with_context(|| format!("write {}", cert_path.display()))?;
-    std::fs::write(&key_path, key_pem)
-        .with_context(|| format!("write {}", key_path.display()))?;
+    std::fs::write(&key_path, key_pem).with_context(|| format!("write {}", key_path.display()))?;
 
     // 유닉스 권한 0600 (오직 소유자만 읽기/쓰기).
     #[cfg(unix)]
@@ -253,7 +261,10 @@ mod tests {
         run_init_ca(&ca_dir, "Fleet Test CA", 30).expect("init-ca");
         let ca_pem = std::fs::read_to_string(ca_dir.join("ca.pem")).unwrap();
         let ca_key_pem = std::fs::read_to_string(ca_dir.join("ca.key")).unwrap();
-        assert!(!parse_certs(&ca_pem).is_empty(), "ca.pem must contain certs");
+        assert!(
+            !parse_certs(&ca_pem).is_empty(),
+            "ca.pem must contain certs"
+        );
         parse_key(&ca_key_pem);
 
         // 2. issue-server
@@ -267,14 +278,20 @@ mod tests {
         .expect("issue-server");
         let server_pem = std::fs::read_to_string(server_dir.join("server.pem")).unwrap();
         let server_key_pem = std::fs::read_to_string(server_dir.join("server.key")).unwrap();
-        assert!(!parse_certs(&server_pem).is_empty(), "server.pem must contain certs");
+        assert!(
+            !parse_certs(&server_pem).is_empty(),
+            "server.pem must contain certs"
+        );
         parse_key(&server_key_pem);
 
         // 3. issue-client
         run_issue_client(&ca_dir, &client_dir, "orchestrator", 30).expect("issue-client");
         let client_pem = std::fs::read_to_string(client_dir.join("client.pem")).unwrap();
         let client_key_pem = std::fs::read_to_string(client_dir.join("client.key")).unwrap();
-        assert!(!parse_certs(&client_pem).is_empty(), "client.pem must contain certs");
+        assert!(
+            !parse_certs(&client_pem).is_empty(),
+            "client.pem must contain certs"
+        );
         parse_key(&client_key_pem);
     }
 
@@ -315,6 +332,9 @@ mod tests {
         };
         // anyhow 의 display 에는 원본 context 가 포함됨.
         let msg = format!("{err:#}");
-        assert!(msg.contains("ca.pem"), "expected ca.pem mention, got: {msg}");
+        assert!(
+            msg.contains("ca.pem"),
+            "expected ca.pem mention, got: {msg}"
+        );
     }
 }

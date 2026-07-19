@@ -13,9 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-};
+use rcgen::{CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair};
 use rustls::ServerConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -68,8 +66,7 @@ fn generate_material() -> TestMaterial {
     let ca_pem = ca_cert.pem();
 
     // Server cert.
-    let mut server_params =
-        CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
     let mut sdn = DistinguishedName::new();
     sdn.push(DnType::CommonName, "localhost");
     server_params.distinguished_name = sdn;
@@ -84,8 +81,7 @@ fn generate_material() -> TestMaterial {
     let server_key_pem = server_key.serialize_pem();
 
     // Client cert.
-    let mut client_params =
-        CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
+    let mut client_params = CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
     let mut cdn = DistinguishedName::new();
     cdn.push(DnType::CommonName, "orchestrator");
     client_params.distinguished_name = cdn;
@@ -177,8 +173,7 @@ async fn mtls_proxy_forwards_plain_tcp_roundtrip() {
         write_pem(&material.dir, "server.pem", &material.server_cert_pem),
         write_pem(&material.dir, "server.key", &material.server_key_pem),
     );
-    let server_config: Arc<ServerConfig> =
-        Arc::new(server_tls.build_server_config().unwrap());
+    let server_config: Arc<ServerConfig> = Arc::new(server_tls.build_server_config().unwrap());
 
     let proxy_addr_unused: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let proxy = MtlsProxy::bind(proxy_addr_unused, upstream, server_config)
@@ -203,7 +198,10 @@ async fn mtls_proxy_forwards_plain_tcp_roundtrip() {
         .expect("connect proxy");
     use rustls::pki_types::ServerName;
     let server_name = ServerName::try_from("localhost").unwrap();
-    let mut tls = connector.connect(server_name, tcp).await.expect("TLS connect");
+    let mut tls = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("TLS connect");
 
     tls.write_all(b"hello mtls").await.unwrap();
     let mut buf = [0u8; 32];
@@ -298,8 +296,7 @@ async fn mtls_proxy_rejects_client_with_untrusted_cert() {
     let rogue_ca = rogue_params.self_signed(&rogue_key).unwrap();
     let rogue_ca_pem = rogue_ca.pem();
 
-    let mut client_params =
-        CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
+    let mut client_params = CertificateParams::new(vec!["orchestrator".to_string()]).unwrap();
     let mut cdn = DistinguishedName::new();
     cdn.push(DnType::CommonName, "orchestrator");
     client_params.distinguished_name = cdn;
@@ -314,7 +311,11 @@ async fn mtls_proxy_rejects_client_with_untrusted_cert() {
     let client_tls = ClientTlsConfig::from_paths(
         write_pem(&material.dir, "rogue-ca.pem", &rogue_ca_pem),
         write_pem(&material.dir, "rogue-client.pem", &client_cert.pem()),
-        write_pem(&material.dir, "rogue-client.key", &client_key.serialize_pem()),
+        write_pem(
+            &material.dir,
+            "rogue-client.key",
+            &client_key.serialize_pem(),
+        ),
     );
 
     let connector = client_tls.build_connector().unwrap();

@@ -134,14 +134,14 @@ impl Playbook {
             tracing::info!(step = name, host = %host, "running step");
 
             // 멱등성 검사
-            let already_applied = step
-                .is_applied(exec)
-                .await
-                .map_err(|e| PlaybookError::StepFailed {
-                    step: name.into(),
-                    host: host.clone(),
-                    source: e,
-                })?;
+            let already_applied =
+                step.is_applied(exec)
+                    .await
+                    .map_err(|e| PlaybookError::StepFailed {
+                        step: name.into(),
+                        host: host.clone(),
+                        source: e,
+                    })?;
 
             if already_applied {
                 tracing::info!(step = name, "already applied, skipping");
@@ -275,10 +275,7 @@ mod tests {
             .run(&exec, &PlaybookContext::new(StepContext::default()))
             .await
             .unwrap();
-        assert!(matches!(
-            report.steps[0].status,
-            StepStatus::Applied { .. }
-        ));
+        assert!(matches!(report.steps[0].status, StepStatus::Applied { .. }));
     }
 
     #[tokio::test]
@@ -291,7 +288,11 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
-            PlaybookError::StepFailed { step, host: _, source } => {
+            PlaybookError::StepFailed {
+                step,
+                host: _,
+                source,
+            } => {
                 assert_eq!(step, "failing");
                 assert!(matches!(source, StepError::UnsupportedOs(_)));
             }

@@ -32,7 +32,10 @@ use crate::app::AppState;
 pub async fn metrics_handler(state: Arc<AppState>) -> Response {
     match metrics_text(state.store.as_ref()).await {
         Ok(body) => (
-            [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            )],
             body,
         )
             .into_response(),
@@ -104,16 +107,36 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     // fleet_workers_total{status}
     out.push_str("# HELP fleet_workers_total Number of workers by status.\n");
     out.push_str("# TYPE fleet_workers_total gauge\n");
-    push_gauge(&mut out, "fleet_workers_total", &[("status", "online")], w_counts.online);
-    push_gauge(&mut out, "fleet_workers_total", &[("status", "degraded")], w_counts.degraded);
-    push_gauge(&mut out, "fleet_workers_total", &[("status", "offline")], w_counts.offline);
+    push_gauge(
+        &mut out,
+        "fleet_workers_total",
+        &[("status", "online")],
+        w_counts.online,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_workers_total",
+        &[("status", "degraded")],
+        w_counts.degraded,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_workers_total",
+        &[("status", "offline")],
+        w_counts.offline,
+    );
     push_gauge(
         &mut out,
         "fleet_workers_total",
         &[("status", "circuit_open")],
         w_counts.circuit_open,
     );
-    push_gauge(&mut out, "fleet_workers_total", &[("status", "total")], w_counts.total);
+    push_gauge(
+        &mut out,
+        "fleet_workers_total",
+        &[("status", "total")],
+        w_counts.total,
+    );
     out.push('\n');
 
     // fleet_workers_capacity_total
@@ -133,22 +156,54 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     // fleet_tasks_total{phase}
     out.push_str("# HELP fleet_tasks_total Number of tasks by lifecycle phase.\n");
     out.push_str("# TYPE fleet_tasks_total gauge\n");
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "pending")], t_counts.pending);
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "dispatched")], t_counts.dispatched);
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "completed")], t_counts.completed);
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "failed")], t_counts.failed);
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "cancelled")], t_counts.cancelled);
-    push_gauge(&mut out, "fleet_tasks_total", &[("phase", "total")], t_counts.total);
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "pending")],
+        t_counts.pending,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "dispatched")],
+        t_counts.dispatched,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "completed")],
+        t_counts.completed,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "failed")],
+        t_counts.failed,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "cancelled")],
+        t_counts.cancelled,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_tasks_total",
+        &[("phase", "total")],
+        t_counts.total,
+    );
     out.push('\n');
 
     // fleet_events_written_total
-    out.push_str(
-        "# HELP fleet_events_written_total Highest event sequence number observed.\n",
-    );
+    out.push_str("# HELP fleet_events_written_total Highest event sequence number observed.\n");
     out.push_str("# TYPE fleet_events_written_total gauge\n");
     push_gauge(&mut out, "fleet_events_written_total", &[], last_seq);
 
-    debug!(workers = workers.len(), tasks = tasks.len(), "metrics rendered");
+    debug!(
+        workers = workers.len(),
+        tasks = tasks.len(),
+        "metrics rendered"
+    );
     Ok(out)
 }
 

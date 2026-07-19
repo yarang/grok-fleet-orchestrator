@@ -64,7 +64,10 @@ impl Store for InMemoryStore {
     async fn insert_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.lock().await;
         if tasks.contains_key(&task.id) {
-            return Err(StoreError::Conflict(format!("task {} already exists", task.id)));
+            return Err(StoreError::Conflict(format!(
+                "task {} already exists",
+                task.id
+            )));
         }
         tasks.insert(task.id, task.clone());
         Ok(())
@@ -250,7 +253,9 @@ async fn setup(
     for mw in mock_workers {
         transport.add_worker(mw).await;
     }
-    let event_rx = fleet_transport::WorkerTransport::subscribe(&transport).await.unwrap();
+    let event_rx = fleet_transport::WorkerTransport::subscribe(&transport)
+        .await
+        .unwrap();
     let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
 
     let state = Arc::new(FleetState::new(
@@ -279,10 +284,7 @@ async fn setup(
 
 /// 작업이 종료 상태(Completed/Failed/Cancelled)가 될 때까지 폴링.
 /// 타임아웃 2초.
-async fn wait_until_terminal(
-    state: &FleetState,
-    task_id: TaskId,
-) -> Task {
+async fn wait_until_terminal(state: &FleetState, task_id: TaskId) -> Task {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         if let Ok(Some(task)) = state.store.get_task(task_id).await {
@@ -326,7 +328,11 @@ async fn dispatch_completes_successfully() {
         TaskStatus::Completed(result) => {
             assert_eq!(result.worker_id, worker_id);
             assert_eq!(result.exit_code, 0);
-            assert!(result.output.contains("echo hello"), "output: {}", result.output);
+            assert!(
+                result.output.contains("echo hello"),
+                "output: {}",
+                result.output
+            );
         }
         other => panic!("expected Completed, got {:?}", other),
     }
@@ -353,10 +359,7 @@ async fn dispatch_records_completed_event() {
 
     // 이벤트 로그 검사
     let events = state.store.list_events(0, 100).await.unwrap();
-    let types: Vec<&str> = events
-        .iter()
-        .map(|e| e.event.event_type())
-        .collect();
+    let types: Vec<&str> = events.iter().map(|e| e.event.event_type()).collect();
     assert!(types.contains(&"task_created"), "events: {types:?}");
     assert!(types.contains(&"task_dispatched"), "events: {types:?}");
     assert!(types.contains(&"task_completed"), "events: {types:?}");
@@ -418,7 +421,10 @@ async fn dispatch_with_unavailable_hint_fails() {
     let task_id = task.id;
 
     let result = dispatcher.submit(task).await;
-    assert!(result.is_err(), "should fail since hinted worker is offline");
+    assert!(
+        result.is_err(),
+        "should fail since hinted worker is offline"
+    );
 
     // Store에는 Failed로 기록되어야 함
     let stored = state.store.get_task(task_id).await.unwrap().unwrap();
@@ -497,7 +503,10 @@ async fn multiple_failures_trip_circuit_breaker() {
         ..Default::default()
     });
     let result = dispatcher.submit(task).await;
-    assert!(result.is_err(), "should refuse dispatch when circuit is open");
+    assert!(
+        result.is_err(),
+        "should refuse dispatch when circuit is open"
+    );
 }
 
 #[tokio::test]

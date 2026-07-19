@@ -211,7 +211,10 @@ async fn metrics_does_not_require_auth() {
 #[tokio::test]
 async fn metrics_reflects_state_changes() {
     let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-    store.upsert_worker(&Worker::new("w1", "wss://1")).await.unwrap();
+    store
+        .upsert_worker(&Worker::new("w1", "wss://1"))
+        .await
+        .unwrap();
     store
         .insert_task(&Task::from_request(TaskRequest {
             prompt: "p".into(),

@@ -96,15 +96,30 @@ enum Command {
 
         /// mTLS: 사설 CA PEM 파일 경로. orchestrator↔worker ACP 트래픽을
         /// TLS로 보호 (`--features mtls` 필요). `--mtls-cert`, `--mtls-key` 도 함께 필요.
-        #[arg(long, env = "FLEET_MTLS_CA", requires = "mtls_cert", requires = "mtls_key")]
+        #[arg(
+            long,
+            env = "FLEET_MTLS_CA",
+            requires = "mtls_cert",
+            requires = "mtls_key"
+        )]
         mtls_ca: Option<String>,
 
         /// mTLS: orchestrator 클라이언트 인증서 PEM.
-        #[arg(long, env = "FLEET_MTLS_CERT", requires = "mtls_ca", requires = "mtls_key")]
+        #[arg(
+            long,
+            env = "FLEET_MTLS_CERT",
+            requires = "mtls_ca",
+            requires = "mtls_key"
+        )]
         mtls_cert: Option<String>,
 
         /// mTLS: orchestrator 클라이언트 비밀키 PEM.
-        #[arg(long, env = "FLEET_MTLS_KEY", requires = "mtls_ca", requires = "mtls_cert")]
+        #[arg(
+            long,
+            env = "FLEET_MTLS_KEY",
+            requires = "mtls_ca",
+            requires = "mtls_cert"
+        )]
         mtls_key: Option<String>,
     },
 

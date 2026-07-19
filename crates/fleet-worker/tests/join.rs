@@ -130,8 +130,8 @@ async fn join_auto_generates_grok_secret_when_absent() {
         token: "tok".into(),
         name: "auto".into(),
         labels: HashMap::new(),
-        agent_endpoint: None,           // 자동 생성 경로.
-        grok_secret: None,              // 자동 생성.
+        agent_endpoint: None, // 자동 생성 경로.
+        grok_secret: None,    // 자동 생성.
         config_out: tmp.path().join("worker.toml"),
         start: false,
         max_concurrent_tasks: None,
@@ -144,7 +144,9 @@ async fn join_auto_generates_grok_secret_when_absent() {
     let host = url.strip_prefix("http://").unwrap();
     assert!(endpoint.starts_with(&format!("ws://{host}/ws?server-key=")));
     // secret이 32바이트 base64url → 43 chars.
-    let secret_part = endpoint.strip_prefix(&format!("ws://{host}/ws?server-key=")).unwrap();
+    let secret_part = endpoint
+        .strip_prefix(&format!("ws://{host}/ws?server-key="))
+        .unwrap();
     assert_eq!(secret_part.len(), 43);
 }
 

@@ -36,16 +36,14 @@ pub mod worker;
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
 pub use bootstrap_token::BootstrapToken;
 pub use config::{
-    ApiConfig, CircuitBreakerConfig, OrchestratorConfig, OidcConfig, SchedulerConfig,
+    ApiConfig, CircuitBreakerConfig, OidcConfig, OrchestratorConfig, SchedulerConfig,
     StaticWorkerConfig, StoreConfig, WorkerSidecarConfig,
 };
 pub use error::{FleetError, Result, SelectionError};
 pub use events::{EventEntry, FleetEvent};
 pub use ids::{TaskId, WorkerId};
 pub use task::{
-    FailureKind, Labels, Task, TaskFilter, TaskFailure, TaskOutput, TaskOutputChunk, TaskPriority,
+    FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,
     TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,
 };
-pub use worker::{
-    CircuitState, Worker, WorkerFilter, WorkerHeartbeat, WorkerStatus,
-};
+pub use worker::{CircuitState, Worker, WorkerFilter, WorkerHeartbeat, WorkerStatus};

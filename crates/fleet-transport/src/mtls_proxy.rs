@@ -85,10 +85,7 @@ impl MtlsProxy {
     }
 
     /// accept 루프 실행. `shutdown` 이 true가 되면 listener를 닫고 반환.
-    pub async fn run(
-        self,
-        mut shutdown: watch::Receiver<bool>,
-    ) -> Result<(), ProxyError> {
+    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), ProxyError> {
         let listen_addr = self
             .listener
             .local_addr()

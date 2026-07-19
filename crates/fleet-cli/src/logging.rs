@@ -4,8 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 /// 로깅 초기화. `log_level`은 기본 필터이나 `RUST_LOG`가 있으면 덮어씀.
 pub fn init(log_level: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(log_level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

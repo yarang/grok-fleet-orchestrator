@@ -253,9 +253,7 @@ impl WorkerTransport for MockTransport {
         Ok(Duration::from_millis(1))
     }
 
-    async fn subscribe(
-        &self,
-    ) -> Result<mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
+    async fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
         // broadcast receiver를 mpsc receiver로 브리지.
         // 이렇게 하면 trait 시그니처(`mpsc::UnboundedReceiver`)를 그대로 유지하면서
         // 멀티 구독자를 지원할 수 있음.
