@@ -2,6 +2,7 @@
 
 기준 일자: 2026-07-20
 릴리스: v0.1.0 + 커밋 `f5205ab` (mcpServers 호환성 패치, 미태깅)
+**ACP 인증 해결됨 (2026-07-20):** API 키 기반, OAuth 불필요
 
 ## 인프라 토폴로지
 
@@ -53,95 +54,105 @@
 | Caddy TLS (arm2) | ✅ | Let's Encrypt 자동 갱신, ws+HTTP 모두 라우팅 |
 | Postgres → fleet DB | ✅ | 마이그레이션 적용 |
 | fleet.service (arm2) | ✅ | HTTP API 127.0.0.1:8081, dashboard 127.0.0.1:8082 |
-| worker-arm1 등록 | ✅ | id `4129f848...` (최초), 재등록 후 `4dc8fbf6...`. heartbeat 15s |
+| worker-arm1 등록 | ✅ | id `62a7e01d-...` (재등록). heartbeat 15s |
 | 역방향 SSH 터널 | ✅ | autossh systemd, 자동 재접속 |
 | ACP `initialize` | ✅ | protocolVersion=1 교환 성공 |
 | ACP `session/new` 파라미터 | ✅ | `f5205ab` 패치로 mcpServers/cwd 해결 |
-| **ACP `authenticate`** | ❌ | **블로커 — 아래 참조** |
+| ACP authenticate | ✅ | **해결됨** — config API 키로 자동 통과 (아래 섹션 참조) |
+| ACP `session/prompt` (LLM 호출) | ✅ | GLM-5.1로 응답 스트리밍 확인 (`pong` 등) |
 
-## 블로커: ACP `authenticate` 인증 플로우 미구현
+## ✅ 해결됨: ACP 인증 — API 키 기반 (OAuth 불필요)
 
-### 원인
+### 처음 가설 (틀림)
 
-grok 0.2.103 ACP 서버는 `initialize` 응답에 `authMethods`를 포함하며,
-`session/new` 전에 클라이언트가 반드시 `authenticate` RPC를 호출해야 함.
+grok 0.2.103 ACP 서버가 `initialize` 응답에 `authMethods`를 포함하고,
+`defaultAuthMethodId: null`이면 클라이언트가 반드시 `authenticate` RPC를
+OAuth로 호출해야 한다고 추정함.
 
-```json
-// initialize 응답 (arm1 직접 probe)
-{
-  "protocolVersion": 1,
-  "authMethods": [
-    {"id": "grok.com", "name": "Grok", "description": "Sign in with Grok"}
-  ],
-  "_meta": {
-    "defaultAuthMethodId": null,    // ← null = 자동 인증 불가
-    "agentVersion": "0.2.103",
-    "currentWorkingDirectory": "/"
-  }
-}
+→ **틀렸음. 실제로는 워커의 grok이 config의 API 키로 사전 인증되면
+ACP 서버가 `defaultAuthMethodId`를 자동 설정하여 클라이언트 코드 변경이 불필요.**
+
+### 실제 메커니즘 (검증됨)
+
+1. **grok CLI의 진짜 인증 수단 = `~/.grok/config.toml`의 API 키**
+   - Mac의 `active_sessions.json`은 OAuth 세션이 아니라 실행 중인 인스턴스
+     목록(pid/cwd)일 뿐. 인증 토큰이 아님.
+   - Mac config:
+     ```toml
+     [model.gllm-5]
+     base_url = "https://api.z.ai/api/coding/paas/v4"
+     api_key = "99c75377ac...dsWDmPNyYrecaQ4D"
+     model = "GLM-5.1"
+     api_backend = "chat_completions"
+     ```
+
+2. **ACP 서버(grok agent serve)는 config의 API 키를 자동으로 사용**
+   - API 키 있으면 `defaultAuthMethodId`가 자동으로 설정됨
+   - 클라이언트가 `authenticate` RPC를 명시적으로 호출할 필요 없음
+   - `session/new` 바로 통과
+
+3. **fleet-transport 코드 수정 불필요** — `initialize` → `session/new` 기존 흐름 그대로 작동
+
+### 워커 측 구성 (검증 완료)
+
+`/root/.grok/config.toml` (fleet-worker.service가 `User=root`로 실행되므로 root 홈):
+```toml
+[cli]
+auto_update = true
+
+[model.grok-build]
+base_url = "https://api.z.ai/api/coding/paas/v4"
+api_key = "<API 키>"
+model = "GLM-5.1"
+api_backend = "chat_completions"
+context_window = 200000
 ```
 
-`session/new`는 `Authentication required: no auth method id provided` 로 거절.
+### 함정: `User=root`와 홈 디렉토리
 
-### `authenticate` 메서드 시그니처 (probe로 추출)
+fleet-worker.service의 `User=root`로 인해 `/root/.grok/config.toml`을 봄.
+최초 검증 시 `/home/ubuntu/.grok/config.toml`에만 config를 넣어서 실패했었음.
+
+**Provisioner는 worker 실행 계정의 홈 디렉토리를 인식해서 올바른 위치에 배포해야 함.**
+(또는 fleet-worker를 `User=ubuntu`로 변경하는 것도 검토 필요)
+
+### 검증 결과 (LLM 호출 성공)
 
 ```
-method: "authenticate"
-params: { methodId: "grok.com", ... }
+worker 로그:
+  default model resolved model_id=GLM-5.1 source=default
+  event="client_new" base_url=https://api.z.ai/api/coding/paas/v4
+            model=GLM-5.1 has_api_key=true has_authorization_header=true
+  sampling_request{model="GLM-5.1" auth_type="bearer" auth_prefix="99c75377acfb"}
+  event="sse_chunk" data={...content:"pong"}   ← 정확한 응답
+  ttft_ms=1
+
+orchestrator 로그:
+  ACP session established worker_id=62a7e01d-... session=019f7bdf-6b02-...
+  ACP session established worker_id=4dc8fbf6-... session=019f7bdf-86b0-...
 ```
 
-응답 케이스:
-- `methodId` 없음 → `-32602 Invalid params: missing field methodId`
-- `methodId: "grok.com"` + 추가 필드 없음 → 무한 대기 (OAuth 콜백 대기)
-- `methodId: "grok.com"` + 임의 필드 → `-32000 Authentication cancelled`
+### 보안 노트
 
-### 동작 시나리오
+- 현재 Mac의 API 키(`99c75377ac...`)가 arm1의 `/root/.grok/config.toml`에 복사됨.
+- 동일 사용자 소유의 서버이므로 즉각적 위험은 낮으나, **키 회전 권장**.
+- 회전 시: xAI 콘솔에서 신규 키 발급 → Mac config 업데이트 → arm1 config 업데이트 → fleet-worker 재시작.
+- 회전을 자동화하려면 orchestrator의 credentials 관리 기능 필요 (아래 "다음 단계" 참조).
 
-워커의 grok이 로그인된 경우 (`~/.grok/active_sessions.json`에 세션 키 있음):
-- 아마도 `authenticate(methodId="grok.com")`가 캐시된 세션으로 자동 완료될 것으로 추정
-- **테스트 필요** — 아직 grok login을 완료하지 못함
+### 다음 단계: orchestrator credentials 중앙 관리
 
-워커의 grok이 로그인되지 않은 경우 (현재 상태):
-- `authenticate` 호출 시 OAuth 대기 → 클라이언트 타임아웃
-- `--secret` 플래그는 WebSocket handshake 보호용일 뿐 ACP 레벨 인증은 아님
+사용자 제안: "다른 컴퓨터에서 접근하여 작업하기 위해서는 서버에서 키를 관리해야하지 않을까?"
+→ **맞음. 이제 코드로 구현 필요.**
 
-### 필요 코드 변경 (fleet-transport)
+필요 기능:
+1. Postgres에 `worker_credentials` 테이블 (AES-GCM 암호화)
+2. 마스터 키 로딩: `FLEET_MASTER_KEY` 환경변수 또는 `/etc/fleet/master.key` 파일
+3. CLI: `fleet credentials set <worker-name> --api-key <key> [--base-url <url>] [--model <id>]`
+4. API: `POST /v1/workers/:id/credentials` (관리자 전용)
+5. provisioner playbook: 워커 생성 시 자동으로 config.toml 작성
+6. 회전: `fleet credentials rotate <worker-name>` → 새 키 배포 + worker 재시작
 
-1. `AcpClient::open_session` 흐름 수정:
-   ```rust
-   // 1. initialize (현재와 동일)
-   let init_resp = send_request(build_initialize(...)).await?;
-
-   // 2. NEW: authMethods 파싱
-   let auth_methods: Vec<AuthMethod> = parse(init_resp.result.authMethods);
-   let default_method = init_resp.result._meta.defaultAuthMethodId;
-
-   // 3. NEW: defaultAuthMethodId가 있으면 authenticate 호출
-   if let Some(method_id) = default_method.or_else(|| auth_methods.first().map(|m| m.id.clone())) {
-       send_request(build_authenticate(id, &method_id)).await?;
-   }
-
-   // 4. session/new (현재와 동일)
-   let resp = send_request(build_session_new(...)).await?;
-   ```
-
-2. `messages.rs`에 `AuthMethod`, `AuthenticateParams`, `InitializeResult._meta` 추가.
-
-3. **워커 배포 단계에 `grok login --device-auth` 추가** — provisioner playbook 또는 런북.
-
-### 디바이스 인증 시도 이력
-
-- 시도 1: `7BPF-8ASR` — 15초 타임아웃, 사용자 인증 지연
-- 시도 2: `76TN-K2XT` — 5분 타임아웃, 사용자 미인증 (세션 비활성으로 추정)
-
-다음 세션에서 재시도 시:
-```bash
-ssh oci-yarangdev-arm1 'timeout 600 grok login --device-auth'
-# 안내된 URL과 코드를 Mac 브라우저에서 열고 인증
-# 완료 후 ~/.grok/active_sessions.json 확인 ({} → 세션 객체로 변경)
-ssh oci-yarangdev-arm1 'sudo systemctl restart fleet-worker'
-ssh oci-yarangdev-arm2 'sudo journalctl -u fleet -f | grep acp_transport'
-```
+상세 구현은 v0.1.1 패치 스프린트에서 진행.
 
 ## 배포된 바이너리 메타데이터
 
