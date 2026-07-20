@@ -180,8 +180,99 @@ target/aarch64-unknown-linux-gnu/release/fleet  (ELF 64-bit ARM aarch64)
 ## 커밋 / 배포 이력
 
 - `32bb1d2` v0.1.0 install infrastructure
-- `f5205ab` fix(acp): mcpServers 호환성 + systemd stdin workaround (현재)
-- (다음) ACP authenticate 플로우 구현 → v0.1.1 태깅
+- `f5205ab` fix(acp): mcpServers 호환성 + systemd stdin workaround
+- `18be151` docs: ACP authenticate 블로커 해결 — API 키 기반 인증 (OAuth 불필요)
+- `f1e7e73` feat(credentials): Phase 8.6 — 워커 API 키 중앙 관리 (AES-256-GCM)
+- `2462f52` feat(provisioner): Phase 8.7 — PushCredentials 스텝 (credentials 자동 배포)
+- (다음) PR 오픈 → v0.1.1 태깅
+
+## Phase 8.6 + 8.7 검증 결과 (2026-07-20)
+
+### Phase 8.6 — credentials 중앙 관리
+
+orchestrator (arm2) 가 모든 워커의 API 키를 Postgres 에 AES-256-GCM 암호화하여
+저장. 복호화는 orchestrator 의 관리 API 로만 가능.
+
+**마스터 키 로딩**:
+```
+INFO fleet::runtime: master key loaded — worker credentials API enabled
+                    (FLEET_MASTER_KEY env or /etc/fleet/master.key file)
+```
+
+- `/etc/fleet/master.key`: `fleet:fleet` 소유, 0400 권한.
+- `fleet.service` 가 `User=fleet` 으로 실행되므로 root 소유면 읽기 실패.
+
+**저장 예시** (DB row, api_key 는 암호화됨):
+```
+worker_name | model_id   | base_url                             | model_name | blob_len | rotated_at
+worker-arm1 | grok-build | https://api.z.ai/api/coding/paas/v4  | GLM-5.1    |     103  | 2026-07-19 23:28:27
+```
+
+- `encrypted_blob`: AES-256-GCM 으로 암호화된 api_key + nonce + tag.
+- `list` API 는 api_key 를 절대 반환하지 않음. `export` API 만 복호화.
+
+### Phase 8.7 — PushCredentials 자동 배포
+
+프로비저너에 `push_credentials` 스텝 추가. credentials 회전 시 수동
+scp/awk 병합이 필요 없이 `fleet provision --tags credentials` 한 방으로 동기화.
+
+**3가지 시나리오로 end-to-end 검증 완료** (arm2 → arm1 jump host):
+
+1. **신규 설치** (빈 config.toml):
+   ```
+   $ fleet provision --host arm1 --tags credentials ...
+   → pushed 1 credential section(s) → /root/.grok/config.toml
+   ```
+   결과: 빈 파일에 `[model.grok-build]` 섹션 자동 작성.
+
+2. **회전** (키 + 모델 교체):
+   ```
+   $ fleet credentials set --model-name GLM-5.2 --api-key ROTATED_KEY_9999 ...
+   → rotated: worker=worker-arm1 model=grok-build rotated_at=...
+   $ fleet provision --tags credentials ...
+   → pushed 1 credential section(s) → /root/.grok/config.toml
+   ```
+   결과: `[model.grok-build]` 섹션의 `api_key`, `model` 이 새 값으로 교체.
+
+3. **섹션 보존** (회전 후 기존 섹션 유지):
+   - 회전 전 config.toml 에 `[cli]`, `[ui]` 섹션 존재.
+   - provision 실행 후: `[cli]`/`[ui]` 보존 + `[model.*]` 만 정확히 교체.
+   ```toml
+   [cli]
+   auto_update = true
+
+   [ui]
+   max_thoughts_width = 120
+   fork_secondary_model = "grok-build"
+   yolo = false
+
+   [model.grok-build]
+   base_url = "https://api.z.ai/api/coding/paas/v4"
+   api_key = "99c75377acfb4889854f95d9cbb7c24c.dsWDmPNyYrecaQ4D"
+   model = "GLM-5.1"
+   api_backend = "chat_completions"
+   context_window = 200000
+   ```
+
+**회전 자동화 플로우** (단일 명령):
+```bash
+# 1. orchestrator 에서 키 갱신
+fleet credentials set --worker worker-arm1 --model-id grok-build \
+  --base-url https://api.z.ai/api/coding/paas/v4 \
+  --api-key NEW_KEY --model-name GLM-5.2
+
+# 2. 워커에 자동 배포
+fleet provision --host arm1.fcoinfup.com --ssh-key ~/.ssh/id_ed25519 \
+  --name worker-arm1 --orchestrator-url http://127.0.0.1:8081 \
+  --api-token $FLEET_API_TOKEN --tags credentials
+```
+
+**설계 결정**:
+- `is_applied() == false` 강제 → 재실행만으로 동기화 보장.
+- TOML 파서 의존성 없이 line-based 병합 → `[model.*]` 섹션만 교체,
+  나머지 섹션은 라인 단위로 보존.
+- dry_run 모드는 `api_token` 검증 생략 → 전체 playbook 시뮬레이션 허용.
+- PushCredentials 는 항상 sudo 사용 (`/root/.grok/config.toml` 이 root 소유 0600).
 
 ## 롤백 절차
 

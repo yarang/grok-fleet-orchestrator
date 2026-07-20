@@ -6,6 +6,132 @@
 
 ## [Unreleased]
 
+### Added — Phase 8.7: PushCredentials 스텝 (credentials 자동 배포)
+
+프로비저너 플레이북에 PushCredentials 스텝을 추가하여 credentials 회전 시
+수동 scp/awk 병합이 필요 없도록 자동화.
+
+- **`PushCredentials` 신규 스텝** (`fleet-provisioner/src/steps/push_credentials.rs`):
+  `install_fleet_worker` 다음, `start_services` 이전에 실행.
+  - 흐름: orchestrator `/v1/workers/:name/credentials` 에서 모델 목록 조회 →
+    각 모델의 `/:model/export` 로 복호화된 TOML 섹션 획득 →
+    원격 `/root/.grok/config.toml` 기존 내용을 `sudo cat` 으로 읽어와
+    `[model.*]` 섹션만 교체 (line-based parser), `[cli]`/`[ui]` 등 다른
+    섹션은 보존 → `/tmp` 경유 atomic move + `chmod 600`.
+  - `is_applied()` 는 항상 `false` — 재실행만으로 회전 동기화 보장.
+  - dry_run 모드에서는 `api_token`/`url` 검증 생략하여 전체 playbook 시뮬레이션 허용.
+  - TOML 파서 의존성 없이 line-based 병합 → 의존성 최소화 원칙 유지.
+- **`StepContext.orchestrator_api_token`** (`fleet-provisioner/src/steps.rs`):
+  PushCredentials 가 orchestrator 관리 API 호출 시 사용하는 bearer 토큰.
+  `bootstrap_token` 과 별개 스코프 — `/v1/workers/:name/credentials` 권한 필요.
+- **`ProvisionOptions.api_token`** (`fleet-provisioner/src/inventory.rs`):
+  inventory 모드에서 per-worker override. CLI `--api-token` 이 있으면 inventory
+  options 보다 우선.
+- **CLI `--api-token`** (`fleet-cli/src/main.rs`): env `FLEET_API_TOKEN`.
+  bootstrap_token (`--bootstrap-token`) 과 별개.
+- **`Playbook::standard`**: 6 스텝 → 7 스텝. `push_credentials` 추가.
+  `fleet provision --tags credentials` 로 회전 단독 실행 가능.
+
+### Tests — Phase 8.7
+
+- **`fleet-provisioner` 신규 10개 단위 테스트** (`steps/push_credentials.rs`):
+  - `merge_replaces_model_section_preserving_cli_ui` — 핵심 보존 로직.
+  - `merge_handles_empty_existing`, `merge_handles_multiple_model_sections`,
+    `merge_preserves_comments_outside_model_sections`,
+    `merge_preserves_table_arrays` — 병합 경계 케이스.
+  - `urlencode_passes_safe_chars`, `urlencode_escapes_unsafe`.
+  - `apply_requires_orchestrator_url`, `apply_requires_api_token`,
+    `dry_run_skips_api_calls`, `is_applied_always_false`,
+    `step_has_credentials_tag`.
+- **기존 테스트 수정**: `playbook_dry_run.rs` 의 `standard_playbook_has_six_steps`
+  → `standard_playbook_has_seven_steps_in_order` (이름 + 7스텝 순서 검증).
+- **mock Store 7곳 noop 추가**: 통합 테스트 Store 구현들에 credential 4개
+  메서드 noop 추가 (api_flow, cloudflare_access, metrics_endpoint,
+  transport_integration, bootstrap_tokens, dispatch_e2e, dashboard_api).
+- **`fleet-store::Store::upsert_worker_credential`**: `#[allow(clippy::too_many_arguments)]`.
+- 총 **cargo test --workspace 161개 통과**, clippy `-D warnings` 통과.
+
+### Deploy Notes — Phase 8.7
+
+- arm2 → arm1 (jump host) 경로로 end-to-end 검증 완료.
+  - 신규 설치: 빈 config.toml → `[model.grok-build]` 자셕 작성.
+  - 회전: GLM-5.1 → GLM-5.2 → GLM-5.1 — provision 재실행으로 자동 반영.
+  - 보존: 기존 `[cli]`/`[ui]` 섹션 유지 + `[model.*]`만 정확히 교체.
+- 사용법:
+  ```bash
+  # 회전 단독 실행
+  fleet provision --host arm1 --ssh-key ~/.ssh/id_ed25519 \
+    --name worker-arm1 --orchestrator-url http://127.0.0.1:8081 \
+    --api-token $FLEET_API_TOKEN --tags credentials
+  ```
+
+### Added — Phase 8.6: 워커 API 키 중앙 관리 (AES-256-GCM)
+
+사용자 제안 "다른 컴퓨터에서 접근하여 작업하기 위해서는 서버에서 키를
+관리해야하지 않을까?"에 대한 구현. 오케스트레이터가 모든 워커의 API 키를
+Postgres에 암호화하여 저장하고, 프로비저닝/회전 시 복호화하여 배포.
+
+- **새 크레이트 `fleet-credentials`** (11번째 크레이트):
+  - AES-256-GCM 암호화 (96-bit nonce, 128-bit tag).
+  - 마스터 키: `FLEET_MASTER_KEY` env 또는 `/etc/fleet/master.key` 파일
+    (hex 64 chars 또는 base64url 43 chars, 32 bytes).
+  - 매 암호화마다 새 nonce → 동일 plaintext도 다른 ciphertext.
+  - `MasterKey`에 `#[zeroize(drop)]` 적용 — 메모리에서 자동 제로화.
+  - `WorkerCredentials::render_grok_config_section()` — 워커의
+    `~/.grok/config.toml` 용 TOML 생성.
+- **`fleet-store` 확장**:
+  - 마이그레이션 `004_worker_credentials.sql` — `(worker_name, model_id)` 복합 PK.
+    `worker_name REFERENCES workers(name) ON DELETE CASCADE`.
+  - `api_key`만 암호화, `base_url`/`api_backend`/`context_window`/`model_name`/`rotated_at`
+    은 평문 (디버깅/프로비저닝용).
+  - `ON CONFLICT` 시 `rotated_at = NOW()` 자동 갱신 (회전 시간 추적).
+  - `Store` trait에 4개 메서드: `upsert_worker_credential`,
+    `get_worker_credential`, `list_worker_credentials`, `delete_worker_credential`.
+- **`fleet-api` 엔드포인트**:
+  - `PUT    /v1/workers/:name/credentials` — set/rotate (복수 model 지원).
+  - `GET    /v1/workers/:name/credentials` — list (api_key 절대 노출 안 함).
+  - `GET    /v1/workers/:name/credentials/:model_id/export` — 복호화 (admin only).
+  - `DELETE /v1/workers/:name/credentials/:model_id` — 제거.
+- **`fleet credentials` CLI** (`fleet-cli/src/credentials.rs`):
+  - `init-key`, `set`, `list`, `export`, `delete` 서브커맨드.
+  - `set` 은 `--api-key`, `FLEET_CRED_API_KEY` env, 또는 stdin 으로 키 입력.
+  - `export` 는 TOML 섹션만 stdout (파이프 친화적) 또는 `--json`.
+- **`fleet serve` (orchestrator)**:
+  - 시작 시 `MasterKey::load()` 자동 호출 — env 우선, 없으면 파일 폴백.
+  - 키가 없으면 warn 로그 + credentials API는 503 (다른 API는 정상 동작).
+- **Postgres `worker_credentials` 테이블** (migration 004):
+  ```sql
+  CREATE TABLE worker_credentials (
+      worker_name     TEXT NOT NULL REFERENCES workers(name) ON DELETE CASCADE,
+      model_id        TEXT NOT NULL,
+      encrypted_blob  TEXT NOT NULL,
+      base_url        TEXT NOT NULL,
+      api_backend     TEXT NOT NULL DEFAULT 'chat_completions',
+      context_window  INTEGER NOT NULL DEFAULT 200000,
+      model_name      TEXT,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      rotated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (worker_name, model_id)
+  );
+  ```
+
+### Tests — Phase 8.6
+
+- **`fleet-credentials` 12개 단위 테스트**: round-trip, nonce uniqueness,
+  parse (hex/base64url), zeroize drop, master key load, 등.
+- **`fleet-cli` credentials 3개 테스트**: truncate, urlencoding.
+- **mock Store 5곳 구현**: `MemStore` (fleet-api/test_support) 은 실제 동작하는
+  in-memory 구현, 나머지 4곳 (scheduler/{sync, health, selector}, dashboard/app) 은 noop.
+- 총 Phase 8.5.3 대비 +37개 테스트.
+
+### Deploy Notes — Phase 8.6
+
+- arm2 `/etc/fleet/master.key`: `fleet:fleet` 소유 0400 권한 필요
+  (`fleet.service` 가 `User=fleet` 으로 실행되므로).
+- 마스터 키 분실 시 모든 저장된 credentials 복호화 불가 — 키 백업 권장.
+- 회전 정책: `fleet credentials set` → `fleet provision --tags credentials`
+  (Phase 8.7 로 자동화됨).
+
 ### Added — Phase 8.5.3: fleet mtls CLI + AcpTransport mTLS 통합
 
 - **`fleet mtls` 서브커맨드** (`fleet-cli/src/mtls.rs`): 사설 CA + 서버/클라이언트
