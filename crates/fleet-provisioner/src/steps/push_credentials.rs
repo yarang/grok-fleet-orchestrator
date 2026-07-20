@@ -110,7 +110,9 @@ impl Step for PushCredentials {
         // 3. 기존 원격 config.toml 읽기 (없으면 빈 문자열).
         // sudo 사용 — config.toml 은 root 소유 0600 이므로 일반 사용자는 읽기 불가.
         let existing = exec
-            .exec(&format!("sudo cat {REMOTE_CONFIG_PATH} 2>/dev/null || true"))
+            .exec(&format!(
+                "sudo cat {REMOTE_CONFIG_PATH} 2>/dev/null || true"
+            ))
             .await?;
 
         // 4. 병합 — [model.*] 섹션만 교체.

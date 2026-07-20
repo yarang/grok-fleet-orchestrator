@@ -95,6 +95,13 @@ enum Command {
         #[arg(long, env = "FLEET_DASHBOARD_BIND")]
         dashboard_bind: Option<String>,
 
+        /// 대시보드 접근용 bearer token (쉼표로 다중 지정 가능).
+        /// 비어 있으면 대시보드 인증 비활성 (로컬 전용 권장).
+        /// 외부 노출 시 반드시 설정 — `/health`만 제외하고 인증 필수.
+        /// 미설정 시 `--tokens` 와 동일한 값 사용 (단일 토큰 운영 시 편의).
+        #[arg(long, env = "FLEET_DASHBOARD_TOKEN")]
+        dashboard_tokens: Option<String>,
+
         /// mTLS: 사설 CA PEM 파일 경로. orchestrator↔worker ACP 트래픽을
         /// TLS로 보호 (`--features mtls` 필요). `--mtls-cert`, `--mtls-key` 도 함께 필요.
         #[arg(
@@ -643,6 +650,7 @@ async fn main() -> Result<()> {
             api_tokens,
             cf_audience,
             dashboard_bind,
+            dashboard_tokens,
             mtls_ca,
             mtls_cert,
             mtls_key,
@@ -657,6 +665,7 @@ async fn main() -> Result<()> {
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
                 dashboard_bind.as_deref(),
+                dashboard_tokens.as_deref(),
                 None, // master_key_env: 현재 사용 안 함 (FLEET_MASTER_KEY env 또는 파일에서 자동 로드)
                 runtime::MtlsFlags {
                     ca: mtls_ca.as_deref(),

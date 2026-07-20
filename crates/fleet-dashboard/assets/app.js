@@ -1,6 +1,35 @@
 // Fleet Orchestrator Dashboard — 순수 JS + htmx 없이 직접 fetch.
 // 모든 데이터는 5초마다 폴링, 이벤트는 SSE로 실시간 수신.
 
+// ── 인증 token 관리 ───────────────────────────────────────────────────
+// 1. localStorage 우선 (이전 방문 시 저장된 token)
+// 2. URL ?token=... 파라미터 fallback (북마크/공유 링크용)
+// 3. 그 외에는 사용자에게 prompt 입력 요청
+// 모든 fetch 에 Authorization: Bearer <token> 헤더 추가.
+function getDashboardToken() {
+  const LS_KEY = 'fleet_dashboard_token';
+  let tok = localStorage.getItem(LS_KEY);
+  if (!tok) {
+    const urlTok = new URLSearchParams(window.location.search).get('token');
+    if (urlTok) {
+      tok = urlTok;
+      localStorage.setItem(LS_KEY, tok);
+      // URL 의 token 은 히스토리에서 제거 (북마크/공유 흔적 방지).
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }
+  if (!tok) {
+    tok = prompt('Fleet Orchestrator\n\nDashboard 접근용 bearer token 을 입력하세요:') || '';
+    if (tok) localStorage.setItem(LS_KEY, tok);
+  }
+  return tok;
+}
+
+function authHeaders() {
+  const tok = getDashboardToken();
+  return tok ? { Authorization: `Bearer ${tok}` } : {};
+}
+
 const API = {
   overview: '/api/overview',
   workers: '/api/workers?limit=50',
@@ -22,8 +51,15 @@ function setStatusPill(online) {
 }
 
 async function fetchJSON(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  const r = await fetch(url, { headers: authHeaders() });
+  if (!r.ok) {
+    // 401 시 token 이 틀렸을 가능성 → localStorage 정리 후 재입력 유도.
+    if (r.status === 401) {
+      localStorage.removeItem('fleet_dashboard_token');
+      throw new Error(`Unauthorized (401) — token 이 만료되었거나 잘못되었습니다. 페이지를 새로고침하세요.`);
+    }
+    throw new Error(`${url}: ${r.status}`);
+  }
   return r.json();
 }
 
@@ -100,7 +136,12 @@ function escapeHtml(s) {
 let eventCount = 0;
 
 function startEventStream() {
-  const source = new EventSource(API.eventsStream);
+  // EventSource 는 커스텀 헤더를 지원하지 않으므로 ?token= 쿼리 파라미터 사용.
+  const tok = getDashboardToken();
+  const streamUrl = tok
+    ? `${API.eventsStream}&token=${encodeURIComponent(tok)}`
+    : API.eventsStream;
+  const source = new EventSource(streamUrl);
   const log = document.getElementById('event-log');
   const counter = document.getElementById('event-counter');
 

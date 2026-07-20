@@ -154,6 +154,7 @@ pub async fn run_serve(
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
     dashboard_bind: Option<&str>,
+    dashboard_tokens: Option<&str>,
     master_key_env: Option<&str>,
     mtls_flags: MtlsFlags<'_>,
 ) -> Result<()> {
@@ -306,10 +307,29 @@ pub async fn run_serve(
         let bind: SocketAddr = bind_str
             .parse()
             .with_context(|| format!("invalid --dashboard-bind address: {bind_str}"))?;
-        let dashboard_state = Arc::new(fleet_dashboard::DashboardState::new(
-            store.clone(),
-            store.pool().clone(),
-        ));
+
+        // dashboard_tokens 가 명시적으로 비어 있으면 api_tokens 재사용 (단일 토큰 운영 시 편의).
+        let effective_dash_tokens: Option<&str> = dashboard_tokens.or(api_tokens);
+
+        let mut dashboard_state =
+            fleet_dashboard::DashboardState::new(store.clone(), store.pool().clone());
+        if let Some(tokens) = effective_dash_tokens {
+            let token_list: Vec<String> = tokens
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !token_list.is_empty() {
+                dashboard_state = dashboard_state.with_tokens(token_list);
+                tracing::info!(bind = %bind, "dashboard server with bearer auth");
+            } else {
+                tracing::warn!(bind = %bind, "dashboard server in NO-AUTH mode (empty token list) — external exposure is unsafe");
+            }
+        } else {
+            tracing::warn!(bind = %bind, "dashboard server in NO-AUTH mode (no token configured) — external exposure is unsafe");
+        }
+
+        let dashboard_state = Arc::new(dashboard_state);
         tracing::info!(bind = %bind, "dashboard server starting");
         let dash_join = tokio::spawn(async move {
             if let Err(e) = fleet_dashboard::run_dashboard_server(dashboard_state, bind).await {
