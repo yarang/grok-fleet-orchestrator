@@ -139,6 +139,7 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 - [`docs/architecture.md`](docs/architecture.md) — 시스템 아키텍처, 데이터 흐름, 핵심 추상화
 - [`docs/api-reference.md`](docs/api-reference.md) — HTTP API + MCP 도구 레퍼런스
 - [`docs/deployment.md`](docs/deployment.md) — 단일 서버 및 분산 배포 가이드 (Cloudflare Tunnel 포함)
+- [`docs/ui-design.md`](docs/ui-design.md) — 웹 대시보드 화면 설계서 (8개 페이지, 사용자 흐름, 디자인 시스템)
 - [`examples/`](examples/) — 운영용 샘플 설정 (`worker.toml`, `workers.yaml`, systemd units, MCP 클라이언트 예시)
 
 ## 라이선스
