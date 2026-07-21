@@ -49,17 +49,29 @@ async function refreshWorkers() {
     const header = list.querySelector('.row.header');
     list.innerHTML = '';
     list.appendChild(header);
-    for (const w of workers) {
-      const row = document.createElement('div');
-      row.className = 'row';
-      row.innerHTML = `
-        <div>${escapeHtml(w.name)}</div>
-        <div><span class="status-pill ${w.status}">${w.status}</span></div>
-        <div>${w.active_tasks}/${w.max_concurrent}</div>
-        <div>${w.circuit_state}</div>
-        <div>${fmtTime(w.last_seen)}</div>
-      `;
-      list.appendChild(row);
+
+    if (workers.length === 0) {
+      const emptyRow = document.createElement('div');
+      emptyRow.className = 'row';
+      emptyRow.style.gridTemplateColumns = '1fr';
+      emptyRow.style.textAlign = 'center';
+      emptyRow.style.color = 'var(--muted)';
+      emptyRow.style.padding = '24px';
+      emptyRow.textContent = 'No workers online';
+      list.appendChild(emptyRow);
+    } else {
+      for (const w of workers) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `
+          <div>${escapeHtml(w.name)}</div>
+          <div><span class="status-pill ${w.status}">${w.status}</span></div>
+          <div>${w.active_tasks}/${w.max_concurrent}</div>
+          <div>${w.circuit_state}</div>
+          <div>${fmtTime(w.last_seen)}</div>
+        `;
+        list.appendChild(row);
+      }
     }
   } catch (e) {
     console.error('workers', e);
@@ -73,18 +85,30 @@ async function refreshTasks() {
     const header = list.querySelector('.row.header');
     list.innerHTML = '';
     list.appendChild(header);
-    for (const t of tasks) {
-      const row = document.createElement('div');
-      row.className = 'row';
-      const idShort = t.id.slice(0, 8);
-      row.innerHTML = `
-        <div title="${t.id}">${idShort}</div>
-        <div><span class="phase ${t.phase}">${t.phase}</span></div>
-        <div>${escapeHtml(t.prompt.slice(0, 80))}</div>
-        <div>${t.worker_id ? t.worker_id.slice(0, 8) : '—'}</div>
-        <div>${fmtTime(t.created_at)}</div>
-      `;
-      list.appendChild(row);
+
+    if (tasks.length === 0) {
+      const emptyRow = document.createElement('div');
+      emptyRow.className = 'row';
+      emptyRow.style.gridTemplateColumns = '1fr';
+      emptyRow.style.textAlign = 'center';
+      emptyRow.style.color = 'var(--muted)';
+      emptyRow.style.padding = '24px';
+      emptyRow.textContent = 'No recent tasks';
+      list.appendChild(emptyRow);
+    } else {
+      for (const t of tasks) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        const idShort = t.id.slice(0, 8);
+        row.innerHTML = `
+          <div title="${t.id}">${idShort}</div>
+          <div><span class="phase ${t.phase}">${t.phase}</span></div>
+          <div>${escapeHtml(t.prompt.slice(0, 80))}</div>
+          <div>${t.worker_id ? t.worker_id.slice(0, 8) : '—'}</div>
+          <div>${fmtTime(t.created_at)}</div>
+        `;
+        list.appendChild(row);
+      }
     }
   } catch (e) {
     console.error('tasks', e);
