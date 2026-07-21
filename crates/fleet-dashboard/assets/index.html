@@ -5,12 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Orchestrator</title>
   <link rel="stylesheet" href="/static/styles.css" />
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
 </head>
 <body>
   <header>
-    <h1>Fleet Orchestrator</h1>
-    <div id="status-pill">connecting…</div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <h1 style="margin:0;">Fleet Orchestrator</h1>
+      <div id="status-pill">connecting…</div>
+    </div>
+    <!-- 사용자 메뉴는 app.js가 동적 삽입 -->
   </header>
 
   <main>

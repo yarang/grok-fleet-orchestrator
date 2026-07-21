@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fleet Orchestrator — Setup</title>
+  <link rel="stylesheet" href="/static/login.css" />
+</head>
+<body class="bootstrap-page">
+  <section class="bootstrap-hero">
+    <p class="bootstrap-eyebrow">// first run</p>
+    <h1>FLEET</h1>
+    <p class="tagline">Activate your control plane</p>
+  </section>
+
+  <main class="bootstrap-main">
+    <div class="bootstrap-card">
+      <h2>Bootstrap token</h2>
+      <p class="section-desc">6 segments from <code>fleet admin bootstrap</code> output</p>
+
+      <form method="POST" action="/bootstrap" autocomplete="off">
+        <div class="otp-grid" id="otp-grid">
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_0" required autofocus />
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_1" required />
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_2" required />
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_3" required />
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_4" required />
+          <input type="text" maxlength="1" pattern="[A-Za-z0-9]" name="otp_5" required />
+        </div>
+        <input type="hidden" name="otp_full" id="otp_full" />
+
+        <div class="bootstrap-divider">then</div>
+
+        <h2>Admin account</h2>
+        <p class="section-desc">This becomes your login credential</p>
+
+        <label style="margin-bottom: 12px;">
+          <span>Username</span>
+          <input type="text" name="username" required
+                 minlength="3" maxlength="64"
+                 pattern="[a-zA-Z][a-zA-Z0-9_-]{2,63}"
+                 autocomplete="username" />
+        </label>
+
+        <label style="margin-bottom: 12px;">
+          <span>Email (optional)</span>
+          <input type="email" name="email"
+                 autocomplete="email" />
+        </label>
+
+        <label style="margin-bottom: 8px;">
+          <span>Password</span>
+          <input type="password" name="password" required
+                 minlength="12" id="password-field"
+                 autocomplete="new-password" />
+          <div class="strength-gauge" id="strength">
+            <div class="seg"></div>
+            <div class="seg"></div>
+            <div class="seg"></div>
+            <div class="seg"></div>
+          </div>
+        </label>
+
+        <button type="submit" class="auth-button">Activate control plane →</button>
+
+        <div class="role-preview">
+          <strong>Role:</strong> administrator<br />
+          <strong>Permissions:</strong> 22 granted
+          <div class="perm-chips">
+            <span class="perm-chip">users:*</span>
+            <span class="perm-chip">tasks:*</span>
+            <span class="perm-chip">workers:*</span>
+            <span class="perm-chip">tokens:*</span>
+          </div>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <script>
+    // OTP 자동 포커스 이동 + 붙여넣기 분산.
+    (function() {
+      const boxes = document.querySelectorAll('.otp-grid input');
+      const full = document.getElementById('otp_full');
+
+      function sync() {
+        full.value = Array.from(boxes).map(b => b.value).join('');
+      }
+
+      boxes.forEach((box, i) => {
+        box.addEventListener('input', (e) => {
+          sync();
+          if (e.target.value && i < boxes.length - 1) {
+            boxes[i + 1].focus();
+          }
+        });
+        box.addEventListener('keydown', (e) => {
+          if (e.key === 'Backspace' && !e.target.value && i > 0) {
+            boxes[i - 1].focus();
+          }
+        });
+        box.addEventListener('paste', (e) => {
+          e.preventDefault();
+          const text = (e.clipboardData || window.clipboardData).getData('text').replace(/[^A-Za-z0-9]/g, '');
+          for (let k = 0; k < text.length && i + k < boxes.length; k++) {
+            boxes[i + k].value = text[k];
+          }
+          sync();
+          const next = Math.min(i + text.length, boxes.length - 1);
+          boxes[next].focus();
+        });
+      });
+
+      // 비밀번호 강도 (간단 버전 — zxcvbn은 서버에서 검증).
+      const pw = document.getElementById('password-field');
+      const gauge = document.getElementById('strength');
+      pw.addEventListener('input', () => {
+        const v = pw.value;
+        let score = 0;
+        if (v.length >= 12) score++;
+        if (/[A-Z]/.test(v) && /[a-z]/.test(v)) score++;
+        if (/\d/.test(v)) score++;
+        if (/[^A-Za-z0-9]/.test(v)) score++;
+        gauge.className = 'strength-gauge ' + ['', 'weak', 'fair', 'strong', 'very-strong'][score];
+      });
+    })();
+  </script>
+</body>
+</html>

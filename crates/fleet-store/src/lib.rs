@@ -20,15 +20,22 @@
 pub mod error;
 pub mod listener;
 pub mod postgres;
+pub mod rbac;
 
 pub use error::StoreError;
 pub use listener::listen_events;
 pub use postgres::PgStore;
+pub use rbac::{
+    consume_bootstrap_and_create_admin, seed_builtin_roles, seed_permissions,
+    seed_rbac_and_maybe_issue_bootstrap, BootstrapAdminError,
+};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission, PermissionId, Role, RoleId,
+    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
@@ -116,4 +123,177 @@ pub trait Store: Send + Sync {
 
     /// 부트스트랩 토큰 삭제 (revocation). 존재하지 않으면 false 반환.
     async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError>;
+
+    // ── RBAC: Users (Phase 9.1) ───────────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — mock store (테스트용)는 RBAC가 필요 없으므로
+    // trait impl 시 이 메서드들을 재정의하지 않아도 됨. PgStore만 실제 구현.
+
+    /// 신규 사용자 생성. username 충돌 시 `StoreError::Conflict`.
+    async fn create_user(&self, _user: &User) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_user"))
+    }
+
+    /// ID로 사용자 조회.
+    async fn get_user_by_id(&self, _id: UserId) -> Result<Option<User>, StoreError> {
+        Err(StoreError::Unsupported("get_user_by_id"))
+    }
+
+    /// username으로 사용자 조회 (로그인 경로).
+    async fn get_user_by_username(&self, _username: &str) -> Result<Option<User>, StoreError> {
+        Err(StoreError::Unsupported("get_user_by_username"))
+    }
+
+    /// 모든 사용자 조회 (사용자 관리 페이지용).
+    async fn list_users(&self) -> Result<Vec<User>, StoreError> {
+        Err(StoreError::Unsupported("list_users"))
+    }
+
+    /// 사용자 수 반환 (bootstrap 필요 여부 판정용).
+    async fn count_users(&self) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("count_users"))
+    }
+
+    /// 비밀번호 해시 업데이트 (재설정).
+    async fn update_user_password(&self, _id: UserId, _hash: &str) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("update_user_password"))
+    }
+
+    /// 마지막 로그인 시각 갱신.
+    async fn update_user_last_login(
+        &self,
+        _id: UserId,
+        _at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("update_user_last_login"))
+    }
+
+    /// 활성/비활성 토글. 비활성화 시 기존 세션도 별도 삭제 필요.
+    async fn set_user_enabled(&self, _id: UserId, _enabled: bool) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("set_user_enabled"))
+    }
+
+    /// 사용자 삭제. user_roles / sessions는 CASCADE로 함께 삭제됨.
+    async fn delete_user(&self, _id: UserId) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("delete_user"))
+    }
+
+    // ── RBAC: Roles & Permissions ─────────────────────────────────
+
+    /// 역할 생성. name 충돌 시 에러.
+    async fn create_role(&self, _role: &Role) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_role"))
+    }
+
+    /// 역할을 name으로 조회 (builtin 시드용).
+    async fn get_role_by_name(&self, _name: &str) -> Result<Option<Role>, StoreError> {
+        Err(StoreError::Unsupported("get_role_by_name"))
+    }
+
+    /// 모든 역할 조회.
+    async fn list_roles(&self) -> Result<Vec<Role>, StoreError> {
+        Err(StoreError::Unsupported("list_roles"))
+    }
+
+    /// 권한 생성 (idempotent — name 충돌 시 무시).
+    async fn create_permission(&self, _perm: &Permission) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_permission"))
+    }
+
+    /// 권한을 name으로 조회.
+    async fn get_permission_by_name(&self, _name: &str) -> Result<Option<Permission>, StoreError> {
+        Err(StoreError::Unsupported("get_permission_by_name"))
+    }
+
+    /// 모든 권한 조회.
+    async fn list_permissions(&self) -> Result<Vec<Permission>, StoreError> {
+        Err(StoreError::Unsupported("list_permissions"))
+    }
+
+    /// 사용자에게 역할 부여.
+    async fn assign_user_role(
+        &self,
+        _user_id: UserId,
+        _role_id: RoleId,
+        _granted_by: Option<UserId>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("assign_user_role"))
+    }
+
+    /// 사용자의 역할 회수.
+    async fn revoke_user_role(&self, _user_id: UserId, _role_id: RoleId) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("revoke_user_role"))
+    }
+
+    /// 사용자의 모든 역할 조회.
+    async fn list_user_roles(&self, _user_id: UserId) -> Result<Vec<Role>, StoreError> {
+        Err(StoreError::Unsupported("list_user_roles"))
+    }
+
+    /// 사용자의 유효 권한 조회 (역할 → 권한 조인).
+    async fn list_user_permissions(&self, _user_id: UserId) -> Result<Vec<Permission>, StoreError> {
+        Err(StoreError::Unsupported("list_user_permissions"))
+    }
+
+    /// 역할에 권한 부여 (idempotent).
+    async fn grant_role_permission(
+        &self,
+        _role_id: RoleId,
+        _permission_id: PermissionId,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("grant_role_permission"))
+    }
+
+    // ── Sessions (쿠키 기반 로그인) ──────────────────────────────
+
+    /// 세션 생성 (token_hash는 SHA-256 hex).
+    async fn create_session(&self, _session: &Session) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_session"))
+    }
+
+    /// token_hash로 세션 조회 (만료된 세션도 반환 — 호출자가 만료 판정).
+    async fn get_session_by_token_hash(&self, _hash: &str) -> Result<Option<Session>, StoreError> {
+        Err(StoreError::Unsupported("get_session_by_token_hash"))
+    }
+
+    /// 세션 삭제 (로그아웃).
+    async fn delete_session(&self, _id: SessionId) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("delete_session"))
+    }
+
+    /// 만료된 세션 일괄 삭제 (정기 정리용).
+    async fn delete_expired_sessions(&self) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("delete_expired_sessions"))
+    }
+
+    /// 사용자의 모든 세션 삭제 (비활성화/패스워드 변경 시).
+    async fn delete_user_sessions(&self, _user_id: UserId) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("delete_user_sessions"))
+    }
+
+    // ── Login attempts (rate limiting + 감사) ────────────────────
+
+    /// 로그인 시도 기록.
+    async fn record_login_attempt(&self, _attempt: &LoginAttempt) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("record_login_attempt"))
+    }
+
+    /// `(identifier, ip)` 기준 최근 `window_secs`초 내 실패 횟수.
+    async fn count_recent_failed_attempts(
+        &self,
+        _identifier: &str,
+        _ip: Option<&str>,
+        _window_secs: i64,
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("count_recent_failed_attempts"))
+    }
+
+    /// identifier의 과거 시도 기록 삭제 (성공 시 초기화).
+    async fn clear_login_attempts(
+        &self,
+        _identifier: &str,
+        _ip: Option<&str>,
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("clear_login_attempts"))
+    }
 }

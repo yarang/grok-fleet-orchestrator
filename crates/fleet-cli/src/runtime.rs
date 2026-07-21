@@ -271,10 +271,30 @@ pub async fn run_serve(
     };
 
     // 웹 대시보드 서버 (옵션). --dashboard-bind가 지정된 경우에만 실행.
+    // 부트 시 RBAC 시드 + admin bootstrap OTP 자동 발급.
     let _dashboard_handle = if let Some(bind_str) = dashboard_bind {
         let bind: SocketAddr = bind_str
             .parse()
             .with_context(|| format!("invalid --dashboard-bind address: {bind_str}"))?;
+
+        // RBAC 시드 (idempotent) + 부트스트랩 OTP 자동 발급 (users 테이블 비어있을 때).
+        match fleet_store::seed_rbac_and_maybe_issue_bootstrap(&*store).await {
+            Ok(Some(token)) => {
+                tracing::info!("═══════════════════════════════════════════════════════");
+                tracing::info!(
+                    "  ADMIN BOOTSTRAP TOKEN (use at https://fleet.agentthread.dev/bootstrap):"
+                );
+                tracing::info!("  {}", token);
+                tracing::info!("═══════════════════════════════════════════════════════");
+            }
+            Ok(None) => {
+                tracing::debug!("RBAC seeded; existing bootstrap token or users present");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "RBAC seed/bootstrap issue failed (continuing)");
+            }
+        }
+
         let dashboard_state = Arc::new(fleet_dashboard::DashboardState::new(
             store.clone(),
             store.pool().clone(),

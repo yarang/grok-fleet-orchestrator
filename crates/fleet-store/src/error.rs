@@ -37,6 +37,11 @@ pub enum StoreError {
     /// 부트스트랩 토큰이 존재하지 않거나 소진/만료됨 (Phase 8.3).
     #[error("bootstrap token invalid or exhausted: {0}")]
     BootstrapTokenInvalid(String),
+
+    /// 백엔드가 지원하지 않는 연산 (RBAC 미지원 mock store 등).
+    /// Phase 9.1: 기본 Store trait 메서드에 대한 mock 구현체 회피용.
+    #[error("operation not supported by this store backend: {0}")]
+    Unsupported(&'static str),
 }
 
 /// Result alias.

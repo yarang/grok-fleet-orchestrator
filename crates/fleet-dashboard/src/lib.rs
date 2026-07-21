@@ -21,9 +21,12 @@
 
 pub mod app;
 pub mod assets;
+pub mod auth;
+pub mod auth_util;
 pub mod handlers;
 pub mod schema;
 pub mod sse;
 
 pub use app::{build_dashboard_app, run_dashboard_server, DashboardState};
+pub use auth::{AuthPrincipal, SESSION_COOKIE, SESSION_DURATION_SECS};
 pub use schema::{OverviewResponse, TaskSummary, WorkerSummary};

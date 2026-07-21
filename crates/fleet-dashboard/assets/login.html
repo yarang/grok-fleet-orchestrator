@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fleet Orchestrator — Login</title>
+  <link rel="stylesheet" href="/static/login.css" />
+</head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">F</div>
+    <h1>Sign in to Fleet</h1>
+    <p class="auth-subtitle">Use your administrator account</p>
+    <form method="POST" action="/login" autocomplete="on">
+      <label>
+        <span>Username</span>
+        <input type="text" name="username" required autofocus
+               autocomplete="username" minlength="3" maxlength="64"
+               pattern="[a-zA-Z][a-zA-Z0-9_-]{2,63}" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input type="password" name="password" required
+               autocomplete="current-password" minlength="8" />
+      </label>
+      <button type="submit" class="auth-button">Sign in</button>
+    </form>
+    <p class="auth-footer">Fleet Orchestrator • RBAC + cookie session</p>
+  </div>
+</body>
+</html>

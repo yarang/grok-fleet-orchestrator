@@ -16,15 +16,16 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    BootstrapToken, CircuitState, EventEntry, FleetEvent, Labels, Task, TaskFilter, TaskId,
-    TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId, WorkerStatus,
+    BootstrapToken, CircuitState, EventEntry, FleetEvent, Labels, LoginAttempt, Permission, Role,
+    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPriority,
+    TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -515,6 +516,513 @@ impl Store for PgStore {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // ── RBAC: Users ───────────────────────────────────────────────────
+
+    async fn create_user(&self, user: &User) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, username, email, password_hash, enabled, created_at, last_login_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(user.id.as_uuid())
+        .bind(&user.username)
+        .bind(&user.email)
+        .bind(&user.password_hash)
+        .bind(user.enabled)
+        .bind(user.created_at)
+        .bind(user.last_login_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!("username already exists: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn get_user_by_id(&self, id: UserId) -> Result<Option<User>, StoreError> {
+        let row: Option<(
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
+                  FROM users WHERE id = $1
+                "#,
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| User {
+            id: UserId::from(r.0),
+            username: r.1,
+            email: r.2,
+            password_hash: r.3,
+            enabled: r.4,
+            created_at: r.5,
+            last_login_at: r.6,
+        }))
+    }
+
+    async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
+        let row: Option<(
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
+                  FROM users WHERE username = $1
+                "#,
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| User {
+            id: UserId::from(r.0),
+            username: r.1,
+            email: r.2,
+            password_hash: r.3,
+            enabled: r.4,
+            created_at: r.5,
+            last_login_at: r.6,
+        }))
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>, StoreError> {
+        let rows: Vec<(
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(
+            r#"
+                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
+                  FROM users ORDER BY created_at ASC
+                "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| User {
+                id: UserId::from(r.0),
+                username: r.1,
+                email: r.2,
+                password_hash: r.3,
+                enabled: r.4,
+                created_at: r.5,
+                last_login_at: r.6,
+            })
+            .collect())
+    }
+
+    async fn count_users(&self) -> Result<u64, StoreError> {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count as u64)
+    }
+
+    async fn update_user_password(&self, id: UserId, hash: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_user_last_login(
+        &self,
+        id: UserId,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE users SET last_login_at = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_user_enabled(&self, id: UserId, enabled: bool) -> Result<(), StoreError> {
+        sqlx::query("UPDATE users SET enabled = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(enabled)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_user(&self, id: UserId) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── RBAC: Roles & Permissions ─────────────────────────────────────
+
+    async fn create_role(&self, role: &Role) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO roles (id, name, description, builtin, created_at)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(role.id.as_uuid())
+        .bind(&role.name)
+        .bind(&role.description)
+        .bind(role.builtin)
+        .bind(role.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                // idempotent for builtin roles — 재시도 시 무시
+                StoreError::Conflict(format!("role already exists: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn get_role_by_name(&self, name: &str) -> Result<Option<Role>, StoreError> {
+        let row: Option<(Uuid, String, Option<String>, bool, chrono::DateTime<Utc>)> =
+            sqlx::query_as(
+                "SELECT id, name, description, builtin, created_at FROM roles WHERE name = $1",
+            )
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| Role {
+            id: fleet_core::RoleId::from(r.0),
+            name: r.1,
+            description: r.2,
+            builtin: r.3,
+            created_at: r.4,
+        }))
+    }
+
+    async fn list_roles(&self) -> Result<Vec<Role>, StoreError> {
+        let rows: Vec<(Uuid, String, Option<String>, bool, chrono::DateTime<Utc>)> =
+            sqlx::query_as(
+                "SELECT id, name, description, builtin, created_at FROM roles ORDER BY name",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Role {
+                id: fleet_core::RoleId::from(r.0),
+                name: r.1,
+                description: r.2,
+                builtin: r.3,
+                created_at: r.4,
+            })
+            .collect())
+    }
+
+    async fn create_permission(&self, perm: &Permission) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO permissions (id, name, description)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO NOTHING
+            "#,
+        )
+        .bind(perm.id.as_uuid())
+        .bind(&perm.name)
+        .bind(&perm.description)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_permission_by_name(&self, name: &str) -> Result<Option<Permission>, StoreError> {
+        let row: Option<(Uuid, String, Option<String>)> =
+            sqlx::query_as("SELECT id, name, description FROM permissions WHERE name = $1")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| Permission {
+            id: fleet_core::PermissionId::from(r.0),
+            name: r.1,
+            description: r.2,
+        }))
+    }
+
+    async fn list_permissions(&self) -> Result<Vec<Permission>, StoreError> {
+        let rows: Vec<(Uuid, String, Option<String>)> =
+            sqlx::query_as("SELECT id, name, description FROM permissions ORDER BY name")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Permission {
+                id: fleet_core::PermissionId::from(r.0),
+                name: r.1,
+                description: r.2,
+            })
+            .collect())
+    }
+
+    async fn assign_user_role(
+        &self,
+        user_id: UserId,
+        role_id: fleet_core::RoleId,
+        granted_by: Option<UserId>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_roles (user_id, role_id, granted_at, granted_by)
+            VALUES ($1, $2, NOW(), $3)
+            ON CONFLICT (user_id, role_id) DO NOTHING
+            "#,
+        )
+        .bind(user_id.as_uuid())
+        .bind(role_id.as_uuid())
+        .bind(granted_by.map(|u| u.as_uuid()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn revoke_user_role(
+        &self,
+        user_id: UserId,
+        role_id: fleet_core::RoleId,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
+            .bind(user_id.as_uuid())
+            .bind(role_id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_user_roles(&self, user_id: UserId) -> Result<Vec<Role>, StoreError> {
+        let rows: Vec<(Uuid, String, Option<String>, bool, chrono::DateTime<Utc>)> =
+            sqlx::query_as(
+                r#"
+                SELECT r.id, r.name, r.description, r.builtin, r.created_at
+                  FROM roles r
+                  JOIN user_roles ur ON ur.role_id = r.id
+                 WHERE ur.user_id = $1
+                 ORDER BY r.name
+                "#,
+            )
+            .bind(user_id.as_uuid())
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Role {
+                id: fleet_core::RoleId::from(r.0),
+                name: r.1,
+                description: r.2,
+                builtin: r.3,
+                created_at: r.4,
+            })
+            .collect())
+    }
+
+    async fn list_user_permissions(&self, user_id: UserId) -> Result<Vec<Permission>, StoreError> {
+        let rows: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT DISTINCT p.id, p.name, p.description
+              FROM permissions p
+              JOIN role_permissions rp ON rp.permission_id = p.id
+              JOIN user_roles ur ON ur.role_id = rp.role_id
+             WHERE ur.user_id = $1
+             ORDER BY p.name
+            "#,
+        )
+        .bind(user_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| Permission {
+                id: fleet_core::PermissionId::from(r.0),
+                name: r.1,
+                description: r.2,
+            })
+            .collect())
+    }
+
+    async fn grant_role_permission(
+        &self,
+        role_id: fleet_core::RoleId,
+        permission_id: fleet_core::PermissionId,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO role_permissions (role_id, permission_id)
+            VALUES ($1, $2)
+            ON CONFLICT (role_id, permission_id) DO NOTHING
+            "#,
+        )
+        .bind(role_id.as_uuid())
+        .bind(permission_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Sessions ──────────────────────────────────────────────────────
+
+    async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, ip_address, user_agent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(session.id.as_uuid())
+        .bind(session.user_id.as_uuid())
+        .bind(&session.token_hash)
+        .bind(session.created_at)
+        .bind(session.expires_at)
+        .bind(session.ip_address.as_deref())
+        .bind(session.user_agent.as_ref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_session_by_token_hash(&self, hash: &str) -> Result<Option<Session>, StoreError> {
+        let row: Option<(
+            Uuid,
+            Uuid,
+            String,
+            chrono::DateTime<Utc>,
+            chrono::DateTime<Utc>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, token_hash, created_at, expires_at,
+                   host(ip_address)::text AS ip_address, user_agent
+              FROM sessions WHERE token_hash = $1
+            "#,
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Session {
+            id: SessionId::from(r.0),
+            user_id: UserId::from(r.1),
+            token_hash: r.2,
+            created_at: r.3,
+            expires_at: r.4,
+            ip_address: r.5,
+            user_agent: r.6,
+        }))
+    }
+
+    async fn delete_session(&self, id: SessionId) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM sessions WHERE id = $1")
+            .bind(id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_expired_sessions(&self) -> Result<u64, StoreError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE expires_at <= NOW()")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn delete_user_sessions(&self, user_id: UserId) -> Result<u64, StoreError> {
+        let result = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
+            .bind(user_id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
+
+    // ── Login attempts ────────────────────────────────────────────────
+
+    async fn record_login_attempt(&self, attempt: &LoginAttempt) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO login_attempts (id, identifier, ip_address, success, failure_reason, attempted_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(attempt.id)
+        .bind(&attempt.identifier)
+        .bind(attempt.ip_address.as_ref())
+        .bind(attempt.success)
+        .bind(attempt.failure_reason.as_ref())
+        .bind(attempt.attempted_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn count_recent_failed_attempts(
+        &self,
+        identifier: &str,
+        ip: Option<&str>,
+        window_secs: i64,
+    ) -> Result<u64, StoreError> {
+        let (count,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM login_attempts
+             WHERE identifier = $1
+               AND (ip_address IS NOT DISTINCT FROM $2)
+               AND success = FALSE
+               AND attempted_at >= NOW() - make_interval(secs => $3)
+            "#,
+        )
+        .bind(identifier)
+        .bind(ip)
+        .bind(window_secs as f64)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as u64)
+    }
+
+    async fn clear_login_attempts(
+        &self,
+        identifier: &str,
+        ip: Option<&str>,
+    ) -> Result<u64, StoreError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM login_attempts
+             WHERE identifier = $1
+               AND (ip_address IS NOT DISTINCT FROM $2)
+            "#,
+        )
+        .bind(identifier)
+        .bind(ip)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 
