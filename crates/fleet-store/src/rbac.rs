@@ -172,6 +172,46 @@ pub async fn issue_admin_bootstrap_if_needed(
     Ok(Some(prefixed))
 }
 
+/// 명시적 admin 부트스트랩 토큰 발급 (CLI `fleet users bootstrap-token`).
+///
+/// `issue_admin_bootstrap_if_needed`와 달리 중복 검사 없이 항상 발급.
+/// 만료 시간을 사용자 지정 가능 (기본 24시간). 일회용 (`max_uses = 1`).
+pub async fn issue_admin_bootstrap_token(
+    store: &dyn Store,
+    expires_in_hours: i64,
+) -> Result<String, StoreError> {
+    let (token_value, _hash) = generate_session_token();
+    let prefixed = format!("fleet_boot_{}", token_value);
+
+    let expires_at = if expires_in_hours > 0 {
+        Some(Utc::now() + Duration::hours(expires_in_hours))
+    } else {
+        None
+    };
+
+    let token = BootstrapToken {
+        token: prefixed.clone(),
+        created_at: Utc::now(),
+        created_by: Some("cli".to_string()),
+        expires_at,
+        max_uses: 1,
+        use_count: 0,
+        notes: Some(
+            "Manually issued admin bootstrap token (fleet users bootstrap-token).".to_string(),
+        ),
+        last_used_by: None,
+        last_used_at: None,
+    };
+    store.create_bootstrap_token(&token).await?;
+
+    info!(
+        token_prefix = %&prefixed[..12],
+        expires_in_hours,
+        "manually issued admin bootstrap token"
+    );
+    Ok(prefixed)
+}
+
 /// 웹 `/bootstrap` 페이지에서 사용자가 OTP + 신규 관리자 정보 제출 시 호출.
 ///
 /// 1. 토큰 검증 + 소비 (atomic)

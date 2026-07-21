@@ -26,6 +26,7 @@ mod logging;
 mod mtls;
 mod runtime;
 mod token;
+mod users;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -142,6 +143,13 @@ enum Command {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+    },
+
+    /// 대시보드 사용자 관리 (RBAC). 서버와 동일한 `DATABASE_URL`로
+    /// Postgres에 직접 접근하여 사용자/역할/권한을 관리합니다.
+    Users {
+        #[command(subcommand)]
+        action: UsersAction,
     },
 
     /// 감사 로그 (이벤트 히스토리) 조회.
@@ -416,6 +424,112 @@ enum TokenAction {
 }
 
 #[derive(Debug, Subcommand)]
+enum UsersAction {
+    /// 등록된 사용자 목록을 테이블 형태로 출력.
+    List {
+        /// JSON 형식 출력 (스크립트용).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 사용자 상세 조회 (역할, 권한 포함).
+    Show {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 신규 사용자 생성. 비밀번호는 안전하게 프롬프트로 입력받습니다.
+    Create {
+        /// 사용자 이름 (`^[a-zA-Z][a-zA-Z0-9_-]{2,63}$`).
+        username: String,
+
+        /// 이메일 (선택).
+        #[arg(long)]
+        email: Option<String>,
+
+        /// 역할 (기본값: viewer). 여러 번 지정 가능.
+        /// builtin: admin, operator, viewer.
+        #[arg(long, value_delimiter = ',')]
+        roles: Option<Vec<String>>,
+
+        /// 비밀번호를 프롬프트 대신 직접 지정 (비권장 — 셸 히스토리에 남음).
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// 비밀번호 변경. 프롬프트로 새 비밀번호를 두 번 입력받습니다.
+    Passwd {
+        /// 사용자 이름.
+        username: String,
+
+        /// 비밀번호를 프롬프트 대신 직접 지정 (비권장).
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// 사용자 계정 활성화.
+    Enable {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 사용자 계정 비활성화 (로그인 차단, 데이터는 유지).
+    Disable {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 사용자 삭제 (복구 불가).
+    Delete {
+        /// 사용자 이름.
+        username: String,
+
+        /// 확인 프롬프트 생략.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
+    /// 역할 관리 하위 명령.
+    Role {
+        #[command(subcommand)]
+        action: UserRoleAction,
+    },
+
+    /// 최초 관리자 등록용 OTP 부트스트랩 토큰 수동 발급.
+    /// (자동 발급 외에 추가/재발급이 필요한 경우.)
+    BootstrapToken {
+        /// 토큰 만료까지 시간 (시간 단위, 기본 24시간).
+        #[arg(long, default_value_t = 24)]
+        expires_in_hours: i64,
+
+        /// 현재 활성 토큰이 있어도 강제 재발급.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UserRoleAction {
+    /// 사용자에게 역할 부여.
+    Assign {
+        /// 사용자 이름.
+        username: String,
+
+        /// 역할 이름 (admin / operator / viewer 또는 custom).
+        role: String,
+    },
+
+    /// 사용자의 역할 회수.
+    Revoke {
+        /// 사용자 이름.
+        username: String,
+
+        /// 역할 이름.
+        role: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum EventsAction {
     /// 최근 이벤트를 시간 역순으로 출력.
     List {
@@ -543,6 +657,7 @@ async fn main() -> Result<()> {
         Command::Workers { action } => runtime::run_workers(action).await,
         Command::Tasks { action } => runtime::run_tasks(action).await,
         Command::Token { action } => token::run_token(action).await,
+        Command::Users { action } => users::run(action).await,
         Command::Events { action } => runtime::run_events(action).await,
         #[cfg(feature = "mtls")]
         Command::Mtls { action } => mtls::run_mtls(action).await,

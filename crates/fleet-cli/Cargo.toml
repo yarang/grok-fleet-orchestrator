@@ -55,6 +55,10 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
+# users 하위 명령 — 비밀번호 안전 입력 + 강도 검증 (Phase 9.1.6)
+rpassword = "7"
+zxcvbn = { workspace = true }
+
 # mTLS-only (optional; Phase 8.5)
 rcgen = { workspace = true, optional = true, features = ["pem", "x509-parser"] }
 time = "0.3"
