@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Task Detail — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks" class="active">Tasks</a>
+      <a href="/hosts">Hosts</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/audit">Audit</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <a href="/tasks" class="back-link">← Back to Tasks</a>
+    <h1 class="page-title" id="task-id">Loading…</h1>
+    <p class="page-subtitle" id="task-phase"></p>
+
+    <div class="detail-grid" id="task-details"></div>
+
+    <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Prompt</h2>
+    <pre class="json-view" id="task-prompt"></pre>
+
+    <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Output</h2>
+    <pre class="json-view" id="task-output" style="min-height:100px;">No output available.</pre>
+  </main>
+
+  <script>
+    function getTaskId() {
+      const path = window.location.pathname;
+      const parts = path.split('/');
+      return parts[parts.length - 1];
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleString();
+    }
+
+    function fmtDuration(secs) {
+      if (!secs) return '—';
+      if (secs < 60) return secs.toFixed(1)+'s';
+      if (secs < 3600) return (secs/60).toFixed(1)+'m';
+      return (secs/3600).toFixed(1)+'h';
+    }
+
+    function fmtTokens(t) {
+      if (!t) return '—';
+      return (t.total_tokens||0).toLocaleString();
+    }
+
+    async function loadTask() {
+      const id = getTaskId();
+      try {
+        const resp = await fetch('/api/tasks/' + encodeURIComponent(id));
+        if (!resp.ok) throw new Error('not found');
+        const data = await resp.json();
+        const t = data.task;
+        const output = data.output;
+
+        document.getElementById('task-id').textContent = 'Task ' + id.substring(0,8);
+        document.getElementById('task-phase').textContent = 'Phase: ' + t.phase;
+
+        const grid = document.getElementById('task-details');
+        const details = [
+          ['Status', t.phase],
+          ['Created By', t.created_by],
+          ['Worker', t.worker_id ? t.worker_id.substring(0,8) : '—'],
+          ['Model', t.model || '—'],
+          ['Duration', fmtDuration(t.duration_secs)],
+          ['Exit Code', t.exit_code !== null && t.exit_code !== undefined ? t.exit_code : '—'],
+          ['Tokens', fmtTokens(t.token_usage)],
+          ['Created', fmtTime(t.created_at)],
+        ];
+
+        grid.innerHTML = details.map(([label, value]) => `
+          <div class="detail-item">
+            <div class="label">${label}</div>
+            <div class="value">${escapeHtml(String(value))}</div>
+          </div>
+        `).join('');
+
+        document.getElementById('task-prompt').textContent = t.prompt || '';
+
+        if (output && output.chunks && output.chunks.length > 0) {
+          document.getElementById('task-output').textContent = output.chunks.join('');
+        } else if (t.phase === 'completed') {
+          document.getElementById('task-output').textContent = '(task completed with no stdout/stderr output)';
+        } else if (t.phase === 'failed') {
+          document.getElementById('task-output').textContent = '(task failed — see audit log for details)';
+        } else {
+          document.getElementById('task-output').textContent = '(task is ' + t.phase + ' — output will appear here when available)';
+        }
+      } catch(e) {
+        document.getElementById('task-id').textContent = 'Task not found';
+        document.getElementById('task-output').textContent = '';
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    loadTask();
+
+    // 사용자 메뉴
+    fetch('/api/me').then(r=>r.json()).then(u=>{
+      document.getElementById('user-menu').innerHTML =
+        `<span>${u.username}</span> <button onclick="fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':getCookie('fleet_csrf')}}).then(()=>location='/login')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>`;
+    }).catch(()=>{});
+    function getCookie(n){const v=document.cookie.match('(^|;)\\s*'+n+'\\s*=\\s*([^;]+)');return v?v.pop():'';}
+  </script>
+</body>
+</html>

@@ -105,6 +105,7 @@
         const row = document.createElement('div');
         row.className = 'row';
         row.style.cursor = 'pointer';
+        row.onclick = () => window.location.href = '/tasks/' + encodeURIComponent(t.id);
         const prompt = t.prompt.length > 60 ? t.prompt.substring(0,60)+'…' : t.prompt;
         row.innerHTML = `
           <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${t.id.substring(0,8)}</div>

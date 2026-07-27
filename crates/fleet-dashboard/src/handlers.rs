@@ -14,8 +14,10 @@ use chrono::Utc;
 use tracing::debug;
 
 use fleet_core::{TaskFilter, TaskStatus, WorkerFilter};
+use fleet_core::PermissionKind;
 
 use crate::app::DashboardState;
+use crate::auth::{require_permission, AuthPrincipal};
 use crate::schema::{OverviewResponse, TaskCounts, TaskSummary, TokenStats, WorkerCounts, WorkerSummary};
 
 /// `/health` — 헬스체크.
@@ -26,7 +28,9 @@ pub async fn health() -> &'static str {
 /// `/api/overview` — 요약 통계.
 pub async fn overview(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<OverviewResponse>, StatusCode> {
+    require_permission(&principal, PermissionKind::DashboardView)?;
     let workers = state
         .store
         .list_workers(&WorkerFilter::default())
@@ -108,9 +112,10 @@ fn default_limit() -> usize {
 /// `/api/workers` — 워커 목록.
 pub async fn list_workers(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, StatusCode> {
-    let mut filter = WorkerFilter::default();
+    require_permission(&principal, PermissionKind::WorkerList)?;    let mut filter = WorkerFilter::default();
     if let Some(s) = &q.status {
         filter.status = parse_worker_status(s);
     }
@@ -134,8 +139,10 @@ pub struct ListTasksQuery {
 /// `/api/tasks` — 작업 목록.
 pub async fn list_tasks(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<Vec<TaskSummary>>, StatusCode> {
+    require_permission(&principal, PermissionKind::TaskList)?;
     let filter = TaskFilter {
         limit: q.limit,
         ..Default::default()
@@ -165,8 +172,10 @@ fn default_event_limit() -> u32 {
 /// `/api/events` — 이벤트 로그 (페이지네이션).
 pub async fn list_events(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListEventsQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_permission(&principal, PermissionKind::EventsList)?;
     let events = state
         .store
         .list_events(q.after_seq, q.limit)
@@ -305,6 +314,51 @@ pub async fn task_queue_page() -> Response {
     serve_page("tasks.html")
 }
 
+/// GET /tasks/:id — 태스크 상세 HTML 페이지.
+pub async fn task_detail_page(Path(_id): Path<String>) -> Response {
+    serve_page("task-detail.html")
+}
+
+/// GET /api/tasks/:id — 태스크 상세 JSON API (출력 포함).
+pub async fn get_task_detail_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_permission(&principal, PermissionKind::TaskRead)?;
+
+    let task_id: fleet_core::TaskId = id
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let task = state
+        .store
+        .get_task(task_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_task_detail: failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let summary = task_to_summary(&task);
+
+    // stdout/stderr 출력 조회 (task:output 권한 필요).
+    let output = if principal.has(PermissionKind::TaskOutput) {
+        match state.store.get_output(task_id, 0).await {
+            Ok(o) => Some(o),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Json(serde_json::json!({
+        "task": summary,
+        "output": output,
+    })))
+}
+
 // ── P1: Worker Detail ────────────────────────────────────────────────
 
 /// GET /workers/:id — 워커 상세 HTML 페이지.
@@ -315,8 +369,10 @@ pub async fn worker_detail_page(Path(_id): Path<String>) -> Response {
 /// GET /api/workers/:id — 워커 상세 JSON API.
 pub async fn get_worker_detail(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkerDetail>, StatusCode> {
+    require_permission(&principal, PermissionKind::WorkerList)?;
     let worker_id: fleet_core::WorkerId = id
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -374,7 +430,9 @@ pub async fn admin_users_page() -> Response {
 /// GET /api/users — 사용자 목록 JSON API.
 pub async fn list_users_api(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<UserSummary>>, StatusCode> {
+    require_permission(&principal, PermissionKind::UserRead)?;
     let users = state.store.list_users().await.map_err(|e| {
         tracing::error!(error = %e, "list_users failed");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -396,6 +454,151 @@ pub async fn list_users_api(
     Ok(Json(summaries))
 }
 
+/// POST /api/users — 사용자 생성 (admin only).
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateUserForm {
+    pub username: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub password: String,
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+pub async fn create_user_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    Form(form): Form<CreateUserForm>,
+) -> Result<(StatusCode, CookieJar), (StatusCode, String)> {
+    require_permission(&principal, PermissionKind::UserCreate)
+        .map_err(|_| (StatusCode::FORBIDDEN, "Permission denied".to_string()))?;
+
+    // CSRF 검증.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err((StatusCode::FORBIDDEN, "CSRF token invalid".to_string()));
+    }
+
+    // username 검증.
+    if let Err(e) = fleet_core::User::validate_username(&form.username) {
+        return Err((StatusCode::BAD_REQUEST, e.to_string()));
+    }
+
+    // 비밀번호 강도 검증.
+    if fleet_core::auth::password::validate_password(&form.password, &[&form.username]).is_err() {
+        return Err((StatusCode::BAD_REQUEST, "Password too weak".to_string()));
+    }
+
+    let hash = fleet_core::auth::password::hash_password(&form.password)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Hash failed".to_string()))?;
+
+    let user = fleet_core::User {
+        id: fleet_core::UserId::new(),
+        username: form.username.clone(),
+        email: form.email,
+        password_hash: hash,
+        enabled: true,
+        created_at: Utc::now(),
+        last_login_at: None,
+    };
+
+    state.store.create_user(&user).await.map_err(|e| {
+        let msg = e.to_string();
+        if msg.contains("already exists") {
+            (StatusCode::CONFLICT, "Username already exists".to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    })?;
+
+    // viewer 역할 부여 (기본).
+    if let Some(viewer_role) = state.store.get_role_by_name("viewer").await.ok().flatten() {
+        let _ = state.store.assign_user_role(user.id, viewer_role.id, Some(principal.user.id)).await;
+    }
+
+    tracing::info!(username = %form.username, created_by = %principal.user.username, "user created");
+    Ok((StatusCode::CREATED, jar))
+}
+
+/// POST /api/users/:id/toggle — 활성/비활성 토글 (admin only).
+#[derive(Debug, serde::Deserialize)]
+pub struct ToggleUserForm {
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+pub async fn toggle_user_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    Path(id): Path<String>,
+    Form(form): Form<ToggleUserForm>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_permission(&principal, PermissionKind::UserCreate)
+        .map_err(|_| (StatusCode::FORBIDDEN, "Permission denied".to_string()))?;
+
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err((StatusCode::FORBIDDEN, "CSRF token invalid".to_string()));
+    }
+
+    let user_id: fleet_core::UserId = uuid::Uuid::parse_str(&id)
+        .map(fleet_core::UserId::from)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    let user = state.store.get_user_by_id(user_id).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let new_enabled = !user.enabled;
+    state.store.set_user_enabled(user_id, new_enabled).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?;
+
+    if !new_enabled {
+        let _ = state.store.delete_user_sessions(user_id).await;
+    }
+
+    tracing::info!(username = %user.username, enabled = new_enabled, by = %principal.user.username, "user toggled");
+    Ok(StatusCode::OK)
+}
+
+/// POST /api/users/:id/delete — 사용자 삭제 (admin only).
+pub async fn delete_user_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    Path(id): Path<String>,
+    Form(form): Form<ToggleUserForm>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_permission(&principal, PermissionKind::UserDelete)
+        .map_err(|_| (StatusCode::FORBIDDEN, "Permission denied".to_string()))?;
+
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err((StatusCode::FORBIDDEN, "CSRF token invalid".to_string()));
+    }
+
+    let user_id: fleet_core::UserId = uuid::Uuid::parse_str(&id)
+        .map(fleet_core::UserId::from)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
+
+    // 자기 자신 삭제 방지.
+    if user_id == principal.user.id {
+        return Err((StatusCode::BAD_REQUEST, "Cannot delete yourself".to_string()));
+    }
+
+    let user = state.store.get_user_by_id(user_id).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    state.store.delete_user(user_id).await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?;
+
+    tracing::info!(username = %user.username, by = %principal.user.username, "user deleted");
+    Ok(StatusCode::OK)
+}
+
 // ── P1.5: Host Inventory ─────────────────────────────────────────────
 
 /// GET /hosts — 호스트 인벤토리 HTML 페이지.
@@ -411,7 +614,9 @@ pub async fn host_detail_page(Path(_hostname): Path<String>) -> Response {
 /// GET /api/hosts — 호스트 목록 JSON API.
 pub async fn list_hosts_api(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<HostSummary>>, StatusCode> {
+    require_permission(&principal, PermissionKind::DashboardView)?;
     let hosts = state.store.list_hosts().await.map_err(|e| {
         tracing::error!(error = %e, "list_hosts failed");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -443,8 +648,10 @@ pub async fn list_hosts_api(
 /// GET /api/hosts/:hostname — 호스트 상세 JSON API.
 pub async fn get_host_detail_api(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Path(hostname): Path<String>,
 ) -> Result<Json<HostDetail>, StatusCode> {
+    require_permission(&principal, PermissionKind::DashboardView)?;
     let host = state
         .store
         .get_host_by_hostname(&hostname)
@@ -532,8 +739,10 @@ pub async fn admin_audit_page() -> Response {
 /// GET /api/audit — 감사 로그 JSON API.
 pub async fn list_audit_api(
     State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListEventsQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    require_permission(&principal, PermissionKind::AuditRead)?;
     let events = state
         .store
         .list_events(q.after_seq, q.limit)
@@ -566,19 +775,22 @@ pub async fn admin_tools_page() -> Response {
 }
 
 /// GET /api/tools — MCP 도구 목록 JSON API.
-pub async fn list_tools_api() -> Json<serde_json::Value> {
-    // MCP 도구는 정적 카탈로그 (fleet-mcp에서 정의된 7개 도구).
-    Json(serde_json::json!({
+pub async fn list_tools_api(
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    require_permission(&principal, PermissionKind::DashboardView)?;
+    // MCP 도구 카탈로그 — fleet-mcp schema.rs의 실제 도구명과 일치.
+    Ok(Json(serde_json::json!({
         "tools": [
-            {"name": "submit_task", "description": "Submit a new task to the fleet"},
-            {"name": "get_task_status", "description": "Check task status by ID"},
-            {"name": "wait_for_task", "description": "Wait for task completion"},
-            {"name": "cancel_task", "description": "Cancel a running task"},
-            {"name": "list_workers", "description": "List all registered workers"},
-            {"name": "stream_task_output", "description": "Stream task output in real-time"},
-            {"name": "collect_results", "description": "Collect completed task results"},
+            {"name": "fleet_dispatch_task", "description": "Submit a new task to the fleet"},
+            {"name": "fleet_get_task_status", "description": "Check task status by ID"},
+            {"name": "fleet_wait_for_task", "description": "Wait for task completion"},
+            {"name": "fleet_cancel_task", "description": "Cancel a running task"},
+            {"name": "fleet_list_workers", "description": "List all registered workers"},
+            {"name": "fleet_stream_task_output", "description": "Stream task output in real-time"},
+            {"name": "fleet_collect_results", "description": "Collect completed task results"},
         ]
-    }))
+    })))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -600,7 +812,7 @@ use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, record_login_failure, record_login_success, AuthPrincipal, CSRF_COOKIE,
+    check_rate_limit, record_login_failure, record_login_success, CSRF_COOKIE,
     SESSION_COOKIE, SESSION_DURATION_SECS,
 };
 use crate::auth_util::{csrf_tokens_match, generate_csrf_token};

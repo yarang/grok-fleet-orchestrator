@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, Permission, Session, SessionId, Task, TaskFilter,
-    TaskId, TaskOutput, TaskStatus, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-    WorkerStatus,
+    auth::PermissionKind, BootstrapToken, EventEntry, FleetEvent, Permission, PermissionId,
+    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 use fleet_dashboard::{build_dashboard_app, DashboardState};
 use fleet_store::{Store, StoreError};
@@ -91,6 +91,18 @@ impl MemStore {
 
         let uid = user.id;
         self.users.lock().unwrap().insert(uid, user);
+
+        // 테스트 관리자에게 모든 권한 부여.
+        let all_perms: Vec<Permission> = PermissionKind::all()
+            .iter()
+            .map(|pk| Permission {
+                id: PermissionId::new(),
+                name: pk.as_str().to_string(),
+                description: None,
+            })
+            .collect();
+        self.user_permissions.lock().unwrap().insert(uid, all_perms);
+
         self.sessions
             .lock()
             .unwrap()

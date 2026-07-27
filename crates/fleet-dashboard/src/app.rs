@@ -67,8 +67,13 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/", get(handlers::index))
         // ── P1: 페이지 ──
         .route("/tasks", get(handlers::task_queue_page))
+        .route("/tasks/:id", get(handlers::task_detail_page))
         .route("/workers/:id", get(handlers::worker_detail_page))
         .route("/admin/users", get(handlers::admin_users_page))
+        // ── P1: 사용자 CRUD API ──
+        .route("/api/users", get(handlers::list_users_api).post(handlers::create_user_api))
+        .route("/api/users/:id/toggle", post(handlers::toggle_user_api))
+        .route("/api/users/:id/delete", post(handlers::delete_user_api))
         // ── P1.5: 호스트 ──
         .route("/hosts", get(handlers::host_inventory_page))
         .route("/hosts/:hostname", get(handlers::host_detail_page))
@@ -80,10 +85,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/workers", get(handlers::list_workers))
         .route("/api/workers/:id", get(handlers::get_worker_detail))
         .route("/api/tasks", get(handlers::list_tasks))
+        .route("/api/tasks/:id", get(handlers::get_task_detail_api))
         .route("/api/events", get(handlers::list_events))
         .route("/api/events/stream", get(crate::sse::events_stream))
         .route("/api/me", get(handlers::me))
-        .route("/api/users", get(handlers::list_users_api))
         .route("/api/hosts", get(handlers::list_hosts_api))
         .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
         .route("/api/audit", get(handlers::list_audit_api))
