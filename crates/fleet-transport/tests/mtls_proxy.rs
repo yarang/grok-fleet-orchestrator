@@ -25,13 +25,17 @@ use fleet_transport::mtls_proxy::MtlsProxy;
 use fleet_transport::tls::{ClientTlsConfig, ServerTlsConfig};
 
 fn temp_dir() -> PathBuf {
+    // 병렬 테스트 스레드 간 충돌 방지: process id + atomic 카운터 조합.
+    // 이전에는 SystemTime::as_nanos() 만 썼으나, 같은 프로세스의 병렬
+    // 스레드들이 동시에 같은 nano 타임스탬프를 얻어 디렉토리명이 충돌하고,
+    // PEM 파일이 서로 덮어쓰이며 BadSignature 로 이어지는 레이스가 있었다.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
         "fleet-mtls-proxy-test-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        seq
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir

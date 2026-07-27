@@ -32,13 +32,16 @@ use fleet_transport::WorkerTransport;
 // ─── 테스트 인증서 생성 (mtls_handshake.rs 와 동일 패턴) ─────────────
 
 fn temp_dir(tag: &str) -> PathBuf {
+    // 병렬 테스트 스레드 간 충돌 방지: process id + tag + atomic 카운터 조합.
+    // (as_nanos() 는 같은 프로세스의 병렬 스레드에서 동시에 같은 값을 반환할 수 있어
+    // 디렉토리명 충돌 → PEM 덮어쓰기 → BadSignature 로 이어지는 레이스가 있었다.)
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
         "fleet-acp-mtls-{tag}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        seq
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir

@@ -6,6 +6,27 @@
 
 ## [Unreleased]
 
+### Fixed — mTLS 테스트 flaky BadSignature 해결
+
+전체 워크스페이스 병렬 테스트 실행 시 `fleet-transport` 의 mTLS 테스트들이
+간헐적으로 `BadSignature` / `InvalidCertificate(BadSignature)` 로 실패하던 레이스
+해결. 단독 실행 시에는 항상 통과해 디버깅이 어려웠음.
+
+- **근본 원인**: 세 테스트 파일(`mtls_proxy.rs`, `mtls_handshake.rs`,
+  `acp_transport_mtls.rs`)의 `temp_dir()` 이 `std::process::id()` +
+  `SystemTime::now().as_nanos()` 로 임시 디렉토리명을 생성.
+  같은 프로세스의 **병렬 테스트 스레드들은 동일한 `process::id()` 를 공유**하고,
+  동시 실행 시 같은 nano 타임스탬프를 얻어 디렉토리명이 충돌함.
+  충돌한 디렉토리에 CA/서버/클라이언트 PEM 을 쓰면서 키-인증서가 불일치하게
+  매칭되고, TLS 핸드셰이크의 `CertificateVerify` 검증이 실패.
+- **해결**: `temp_dir()` 의 고유성 보장을 `process::id()` + 정적 `AtomicU64`
+  카운터 조합으로 변경. `fetch_add(1, SeqCst)` 로 각 호출마다 단조 증가하는
+  고유 번호 부여 — nano 타이밍에 무관하게 병렬 스레드 간 충돌 불가.
+- 영향받은 파일: `crates/fleet-transport/tests/{mtls_proxy,mtls_handshake,
+  acp_transport_mtls}.rs`.
+- 검증: 병렬 실행 시 수정 전 5/5 실패 → 수정 후 `cargo test -p fleet-transport` **10/10
+  통과**, 전체 워크스페이스 `cargo test --workspace` **470개 2회 연속 전부 통과**.
+
 ### Added — SSH 호스트 키 검증 (known_hosts)
 
 프로비저너의 SSH 연결이 서버 공개키를 무조건 수용(accept-all)하던 기존 동작을
