@@ -307,8 +307,7 @@ pub async fn login_page(
         .map(|a| a.data.to_vec())
         .unwrap_or_else(|| include_bytes!("../assets/login.html").to_vec());
     // 정적 HTML에 CSRF 토큰 주입.
-    let html = String::from_utf8_lossy(&asset)
-        .replace("{{csrf_token}}", &csrf_token);
+    let html = String::from_utf8_lossy(&asset).replace("{{csrf_token}}", &csrf_token);
     (
         jar,
         (
@@ -609,8 +608,7 @@ pub async fn bootstrap_page(
     let asset = Asset::get("bootstrap.html")
         .map(|a| a.data.to_vec())
         .unwrap_or_else(|| include_bytes!("../assets/bootstrap.html").to_vec());
-    let html = String::from_utf8_lossy(&asset)
-        .replace("{{csrf_token}}", &csrf_token);
+    let html = String::from_utf8_lossy(&asset).replace("{{csrf_token}}", &csrf_token);
     Ok((
         jar,
         (
@@ -643,11 +641,13 @@ pub async fn bootstrap(
     }
 
     // users 테이블이 비어있는지 재확인 (TOCTOU 방어).
-    let count = state
-        .store
-        .count_users()
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, jar.clone(), internal_error_page()))?;
+    let count = state.store.count_users().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            jar.clone(),
+            internal_error_page(),
+        )
+    })?;
     if count > 0 {
         return Err((
             StatusCode::CONFLICT,
@@ -671,9 +671,14 @@ pub async fn bootstrap(
             )
         })?;
     if !allowed {
-        crate::auth::record_login_failure(&state, &bootstrap_id, Some(&ip), "bootstrap_rate_limited")
-            .await
-            .ok();
+        crate::auth::record_login_failure(
+            &state,
+            &bootstrap_id,
+            Some(&ip),
+            "bootstrap_rate_limited",
+        )
+        .await
+        .ok();
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             jar,
@@ -691,28 +696,35 @@ pub async fn bootstrap(
         return Err((
             StatusCode::BAD_REQUEST,
             jar,
-            bootstrap_failed_page(
-                "Invalid token format. Copy the full token from the CLI output.",
-            ),
+            bootstrap_failed_page("Invalid token format. Copy the full token from the CLI output."),
         ));
     }
 
     // 활성 토큰 중에서 정확히 일치하는 것을 상수시간으로 검색.
-    let tokens = state
-        .store
-        .list_bootstrap_tokens()
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, jar.clone(), internal_error_page()))?;
+    let tokens = state.store.list_bootstrap_tokens().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            jar.clone(),
+            internal_error_page(),
+        )
+    })?;
 
     let matching_token = tokens
         .iter()
-        .find(|t| t.is_usable() && fleet_core::auth::password::constant_time_eq(&t.token, token_input))
+        .find(|t| {
+            t.is_usable() && fleet_core::auth::password::constant_time_eq(&t.token, token_input)
+        })
         .cloned();
 
     let Some(token) = matching_token else {
-        crate::auth::record_login_failure(&state, &bootstrap_id, Some(&ip), "bootstrap_invalid_token")
-            .await
-            .ok();
+        crate::auth::record_login_failure(
+            &state,
+            &bootstrap_id,
+            Some(&ip),
+            "bootstrap_invalid_token",
+        )
+        .await
+        .ok();
         return Err((
             StatusCode::UNAUTHORIZED,
             jar,
@@ -768,9 +780,10 @@ pub async fn bootstrap(
                         StatusCode::UNAUTHORIZED,
                         "Invalid or expired bootstrap token.",
                     ),
-                    fleet_store::BootstrapAdminError::CreateUser(_) => {
-                        (StatusCode::CONFLICT, "Unable to create account. Please try again.")
-                    }
+                    fleet_store::BootstrapAdminError::CreateUser(_) => (
+                        StatusCode::CONFLICT,
+                        "Unable to create account. Please try again.",
+                    ),
                     fleet_store::BootstrapAdminError::AdminRoleMissing => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "Setup incomplete. Contact your administrator.",

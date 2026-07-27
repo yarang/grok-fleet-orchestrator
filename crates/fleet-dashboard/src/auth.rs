@@ -132,8 +132,9 @@ pub async fn require_session(
     //    정상적인 IP 변경(VPN, 모바일 네트워크 전환 등)을 차단하지 않지만,
     //    세션 공유/도용 탐지를 위한 감사 증거를 남김.
     if let Some(ref session_ip) = session.ip_address {
-        if let Some(axum::extract::ConnectInfo(addr)) =
-            req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        if let Some(axum::extract::ConnectInfo(addr)) = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         {
             let current_ip = addr.ip().to_string();
             if session_ip != &current_ip {
