@@ -988,7 +988,7 @@ impl Store for PgStore {
         sqlx::query(
             r#"
             INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at, ip_address, user_agent)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6::inet, $7)
             "#,
         )
         .bind(session.id.as_uuid())

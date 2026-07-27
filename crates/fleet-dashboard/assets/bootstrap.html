@@ -19,6 +19,7 @@
       <p class="section-desc">Full token from <code>fleet</code> startup output (starts with <code>fleet_boot_</code>)</p>
 
       <form method="POST" action="/bootstrap" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{csrf_token}}" />
         <label style="margin-bottom: 12px;">
           <input type="text" name="otp_full" id="otp_full"
                  placeholder="fleet_boot_…"
