@@ -37,8 +37,9 @@ use fleet_core::{
 use crate::{EventsAction, TasksAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
-    Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookReport,
-    PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo, StepContext,
+    HostKeyConfig, HostKeyPolicy, Inventory, InventoryWorker, MockExecutor, Playbook,
+    PlaybookContext, PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient,
+    SshConnectInfo, StepContext,
 };
 use fleet_scheduler::{Dispatcher, FleetState, HealthChecker, HealthConfig};
 use fleet_store::{PgStore, Store};
@@ -737,6 +738,13 @@ pub struct ProvisionArgs {
     pub tags: Vec<String>,
     pub only: Vec<String>,
     pub dry_run: bool,
+    // ── SSH 호스트 키 검증 ──────────────────────────────────────────────
+    /// 서버 호스트 키 검증 정책 (CLI 명시값). None 이면 inventory defaults,
+    /// 그것도 없으면 기본값(TOFU) 사용. OpenSSH accept-new 에 대응.
+    pub host_key_policy: Option<HostKeyPolicy>,
+    /// known_hosts 파일 경로 (CLI 명시값). None 이면 inventory defaults,
+    /// 그것도 없으면 `~/.ssh/known_hosts`.
+    pub known_hosts: Option<PathBuf>,
     // ── mTLS (Phase 8.5) ────────────────────────────────────────────────
     /// mTLS 종단 proxy 활성화. 다른 mtls_* 필드는 이 값이 true 인 경우에만 사용됨.
     pub mtls_enabled: bool,
@@ -760,6 +768,47 @@ pub async fn run_provision(args: ProvisionArgs) -> Result<()> {
             "either --host or --inventory must be specified. \
              Run `fleet provision --help` for usage."
         ))
+    }
+}
+
+/// CLI / inventory defaults 에서 최종 호스트 키 검증 구성을 결정.
+///
+/// 우선순위 (정책과 경로 각각 독립 적용):
+/// 1. CLI 명시값 (`--host-key-policy`, `--known-hosts`)
+/// 2. inventory defaults (`host_key_policy`, `known_hosts`)
+/// 3. 기본값 — 정책 TOFU, 경로 `~/.ssh/known_hosts`
+fn resolve_host_key_config(
+    args: &ProvisionArgs,
+    defaults: Option<&fleet_provisioner::InventoryDefaults>,
+) -> HostKeyConfig {
+    // 정책: CLI > inventory > 기본(Tofu)
+    let policy = args.host_key_policy.or_else(|| {
+        defaults
+            .and_then(|d| d.host_key_policy.as_deref())
+            .and_then(|s| match HostKeyPolicy::parse(s) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "invalid host_key_policy in inventory defaults; using default"
+                    );
+                    None
+                }
+            })
+    });
+
+    // 경로: CLI > inventory > 기본(HostKeyConfig::effective_known_hosts 가 처리)
+    let explicit_path = args.known_hosts.clone().or_else(|| {
+        defaults
+            .and_then(|d| d.known_hosts.clone())
+            .map(PathBuf::from)
+    });
+
+    match (policy, explicit_path) {
+        (Some(p), Some(path)) => HostKeyConfig::new(p).with_known_hosts(path),
+        (Some(p), None) => HostKeyConfig::new(p),
+        (None, Some(path)) => HostKeyConfig::default().with_known_hosts(path),
+        (None, None) => HostKeyConfig::default(),
     }
 }
 
@@ -796,7 +845,8 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
     } else {
         let connect_info =
             SshConnectInfo::new(host, &args.user, PathBuf::from(&ssh_key)).with_port(args.ssh_port);
-        let ssh = SshClient::connect(connect_info)
+        let host_key = resolve_host_key_config(args, None);
+        let ssh = SshClient::connect(connect_info, host_key)
             .await
             .context("SSH connection failed")?;
         run_playbook(&ssh, &ctx, &args.tags).await?
@@ -880,13 +930,14 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
             let user = w.effective_user(&inv.defaults);
             let port = w.effective_ssh_port(&inv.defaults);
             let host = w.host.clone();
+            let host_key = resolve_host_key_config(args, Some(&inv.defaults));
 
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.expect("semaphore closed");
                 tracing::info!(%worker_name, %host, "starting provisioning");
                 let connect_info =
                     SshConnectInfo::new(&host, &user, PathBuf::from(&ssh_key)).with_port(port);
-                match SshClient::connect(connect_info).await {
+                match SshClient::connect(connect_info, host_key).await {
                     Ok(ssh) => match run_playbook(&ssh, &ctx, &tags).await {
                         Ok(r) => r,
                         Err(e) => {

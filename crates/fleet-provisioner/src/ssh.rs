@@ -73,6 +73,110 @@ impl SshConnectInfo {
     }
 }
 
+/// 서버 호스트 키 검증 정책.
+///
+/// SSH 연결 시 원격 서버가 제시한 공개키를 어떻게 검증할지 결정.
+/// MITM(중간자 공격) 방어의 핵심 — OpenSSH의 `StrictHostKeyChecking` 설정과 대응.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyPolicy {
+    /// 서버 키를 검증 없이 무조건 수용. **보안상 위험** — MITM에 취약.
+    /// 개발/테스트 환경이나 일회성 연결에서만 사용.
+    /// OpenSSH `StrictHostKeyChecking=no` 에 대응.
+    AcceptAll,
+    /// Trust On First use. 첫 연결에서 서버 키를 `known_hosts`에 자동 추가,
+    /// 이후 연결에서는 저장된 키와 일치해야 통과. OpenSSH 기본 동작에 대응.
+    /// (`StrictHostKeyChecking=accept-new`)
+    Tofu,
+    /// Strict. `known_hosts`에 호스트가 **반드시** 있어야 하고 키가 일치해야 함.
+    /// 자동 추가 없음. 알려진 인프라에만 연결하는 운영 환경 권장.
+    /// OpenSSH `StrictHostKeyChecking=yes` 에 대응.
+    Strict,
+}
+
+impl HostKeyPolicy {
+    /// CLI/인벤토리에서 받은 문자열 값을 정책으로 파싱.
+    /// 대소문자 무관, `-`/`_`/공백 구분 무시.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let norm = s.to_ascii_lowercase();
+        let norm = norm.replace(['_', ' ', '-'], "");
+        match norm.as_str() {
+            "acceptall" | "no" | "insecure" => Ok(Self::AcceptAll),
+            "tofu" | "acceptnew" | "auto" => Ok(Self::Tofu),
+            "strict" | "yes" => Ok(Self::Strict),
+            _ => Err(format!(
+                "unknown host key policy '{s}' (expected: accept-all | tofu | strict)"
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AcceptAll => "accept-all",
+            Self::Tofu => "tofu",
+            Self::Strict => "strict",
+        }
+    }
+}
+
+impl Default for HostKeyPolicy {
+    /// 기본값은 TOFU — OpenSSH 표준 동작.
+    /// AcceptAll 은 보안상 위험하므로 명시적 opt-in으로만 사용.
+    fn default() -> Self {
+        Self::Tofu
+    }
+}
+
+impl std::fmt::Display for HostKeyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 호스트 키 검증 구성. 정책 + known_hosts 파일 경로.
+#[derive(Debug, Clone)]
+pub struct HostKeyConfig {
+    /// 검증 정책.
+    pub policy: HostKeyPolicy,
+    /// `known_hosts` 파일 경로. `None` 이면 기본값(`~/.ssh/known_hosts`) 사용.
+    /// `AcceptAll` 정책에서는 무시됨.
+    pub known_hosts_path: Option<PathBuf>,
+}
+
+impl HostKeyConfig {
+    /// 지정된 정책과 기본 known_hosts 경로로 구성.
+    pub fn new(policy: HostKeyPolicy) -> Self {
+        Self {
+            policy,
+            known_hosts_path: None,
+        }
+    }
+
+    /// known_hosts 파일 경로 오버라이드.
+    pub fn with_known_hosts(mut self, path: impl Into<PathBuf>) -> Self {
+        self.known_hosts_path = Some(path.into());
+        self
+    }
+
+    /// 실제 사용할 known_hosts 경로. 명시값 우선, 없으면 `~/.ssh/known_hosts`.
+    /// `HOME` 환경변수가 없으면 `None`.
+    pub fn effective_known_hosts(&self) -> Option<PathBuf> {
+        self.known_hosts_path
+            .clone()
+            .or_else(default_known_hosts_path)
+    }
+}
+
+impl Default for HostKeyConfig {
+    fn default() -> Self {
+        Self::new(HostKeyPolicy::default())
+    }
+}
+
+/// 기본 known_hosts 경로 (`~/.ssh/known_hosts`). HOME 이 없으면 `None`.
+pub fn default_known_hosts_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh").join("known_hosts"))
+}
+
 // ── russh 기반 실제 SSH 클라이언트 ─────────────────────────────────────
 
 #[cfg(feature = "ssh")]
@@ -83,18 +187,24 @@ mod russh_impl {
     use std::sync::Arc as StdArc;
     use tokio::sync::Mutex as TokioMutex;
 
-    /// russh 인증 핸들러. 서버 공개키 검증 정책은 여기서 결정.
+    /// russh 클라이언트 인증 핸들러. `check_server_key`에서 호스트 키 검증 정책을 적용.
     ///
-    /// 기본 정책은 `accept_all`(known_hosts 미검증)이지만 프로덕션에서는
-    /// `Strict` 모드를 활성화해야 합니다. TODO: `~/.ssh/known_hosts` 연동.
+    /// 검증 정책(`HostKeyPolicy`)에 따라 `~/.ssh/known_hosts` 파일을 읽고
+    /// 서버가 제시한 공개키를 비교한다. 검증에 실패하면 거부 사유를
+    /// `reject_reason`에 기록하여 `SshClient::connect` 호출자에게 전달한다.
     pub struct SshClient {
         info: SshConnectInfo,
         session: TokioMutex<Option<client::Handle<SshHandler>>>,
     }
 
-    /// russh 핸들러 상태. 현재는 서버키 무조건 수용 (TODO: known_hosts).
+    /// russh 핸들러 상태. 호스트 키 검증은 `HostKeyPolicy` + known_hosts 경로로 결정.
     pub struct SshHandler {
-        pub strict_host_key: bool,
+        policy: HostKeyPolicy,
+        host: String,
+        port: u16,
+        known_hosts_path: PathBuf,
+        /// 검증 실패 사유를 connect 호출자에게 전달하기 위한 공유 슬롯.
+        reject_reason: StdArc<std::sync::Mutex<Option<String>>>,
     }
 
     #[async_trait]
@@ -103,33 +213,127 @@ mod russh_impl {
 
         async fn check_server_key(
             &mut self,
-            _server_public_key: &key::PublicKey,
+            server_public_key: &key::PublicKey,
         ) -> Result<bool, Self::Error> {
-            if self.strict_host_key {
-                // TODO: known_hosts와 비교
-                tracing::warn!(
-                    "strict_host_key=true but known_hosts check not yet implemented; accepting key"
-                );
+            match self.policy {
+                HostKeyPolicy::AcceptAll => {
+                    tracing::warn!(
+                        host = %self.host,
+                        "accepting server host key WITHOUT verification (accept-all policy; insecure)"
+                    );
+                    return Ok(true);
+                }
+                HostKeyPolicy::Strict | HostKeyPolicy::Tofu => {}
             }
-            Ok(true)
+
+            let path = &self.known_hosts_path;
+            match russh_keys::check_known_hosts_path(&self.host, self.port, server_public_key, path)
+            {
+                Ok(true) => Ok(true), // 호스트가 known_hosts에 있고 키 일치
+                Ok(false) => {
+                    // 호스트가 known_hosts에 없음
+                    if self.policy == HostKeyPolicy::Tofu {
+                        tracing::info!(
+                            host = %self.host,
+                            known_hosts = %path.display(),
+                            "first connection — learning host key (TOFU)"
+                        );
+                        match russh_keys::known_hosts::learn_known_hosts_path(
+                            &self.host,
+                            self.port,
+                            server_public_key,
+                            path,
+                        ) {
+                            Ok(()) => Ok(true),
+                            Err(e) => {
+                                self.set_reject(format!(
+                                    "failed to write host key for '{host}' to {path}: {e}",
+                                    host = self.host,
+                                    path = path.display()
+                                ));
+                                Ok(false)
+                            }
+                        }
+                    } else {
+                        // Strict: 호스트가 없으면 거부
+                        self.set_reject(format!(
+                            "host '{host}' not found in known_hosts ({path}); \
+                             use --host-key-policy tofu to auto-add on first connection",
+                            host = self.host,
+                            path = path.display()
+                        ));
+                        Ok(false)
+                    }
+                }
+                Err(e) => {
+                    // 키 불일치 (또는 파일 읽기 에러) — MITM 의심
+                    self.set_reject(format!(
+                        "host key mismatch for '{host}' (possible MITM): {e}",
+                        host = self.host
+                    ));
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    impl SshHandler {
+        fn set_reject(&self, reason: String) {
+            tracing::error!(%reason);
+            *self.reject_reason.lock().unwrap() = Some(reason);
         }
     }
 
     impl SshClient {
-        /// SSH 서버에 접속. `key_path`는 개인키 파일 경로.
-        pub async fn connect(info: SshConnectInfo) -> Result<Self, SshError> {
+        /// SSH 서버에 접속.
+        ///
+        /// `host_key` 구성에 따라 서버 호스트 키를 검증한다:
+        /// - `AcceptAll`: 검증 생략 (위험, 자동화/테스트 전용)
+        /// - `Tofu`: 첫 연결 시 known_hosts에 키 추가, 이후 일치 검사 (기본값)
+        /// - `Strict`: known_hosts에 반드시 있어야 함
+        pub async fn connect(
+            info: SshConnectInfo,
+            host_key: HostKeyConfig,
+        ) -> Result<Self, SshError> {
             let config = StdArc::new(client::Config::default());
+            let reject_reason = StdArc::new(std::sync::Mutex::new(None));
+
+            let known_hosts_path =
+                host_key
+                    .effective_known_hosts()
+                    .ok_or_else(|| SshError::HostKeyVerification {
+                        host: info.host.clone(),
+                        reason:
+                            "HOME environment variable not set; cannot resolve known_hosts path. \
+                             Pass --known-hosts explicitly or use --host-key-policy accept-all."
+                                .into(),
+                    })?;
+
             let handler = SshHandler {
-                strict_host_key: false,
+                policy: host_key.policy,
+                host: info.host.clone(),
+                port: info.port,
+                known_hosts_path,
+                reject_reason: reject_reason.clone(),
             };
 
             let key_pair = russh_keys::load_secret_key(&info.key_path, None)
                 .map_err(|e| SshError::KeyLoad(format!("{e}")))?;
 
             let addr = (info.host.as_str(), info.port);
-            let mut session = client::connect(config.clone(), addr, handler)
-                .await
-                .map_err(|e| SshError::Protocol(format!("connect: {e}")))?;
+            let mut session = match client::connect(config.clone(), addr, handler).await {
+                Ok(s) => s,
+                Err(e) => {
+                    // 호스트 키 검증 거부인지 확인
+                    if let Some(reason) = reject_reason.lock().unwrap().take() {
+                        return Err(SshError::HostKeyVerification {
+                            host: info.host.clone(),
+                            reason,
+                        });
+                    }
+                    return Err(SshError::Protocol(format!("connect: {e}")));
+                }
+            };
 
             let auth_ok = session
                 .authenticate_publickey(&info.user, StdArc::new(key_pair))
@@ -142,8 +346,9 @@ mod russh_impl {
 
             tracing::info!(
                 host = %info.host,
-                port = info.port,
+                port = %info.port,
                 user = %info.user,
+                policy = %host_key.policy,
                 "SSH connected"
             );
 
@@ -298,7 +503,10 @@ mod stub {
     pub struct SshClient;
 
     impl SshClient {
-        pub async fn connect(_info: SshConnectInfo) -> Result<Self, SshError> {
+        pub async fn connect(
+            _info: SshConnectInfo,
+            _host_key: HostKeyConfig,
+        ) -> Result<Self, SshError> {
             Err(SshError::Protocol(
                 "SSH support is disabled. Rebuild with `--features ssh`.".into(),
             ))
@@ -498,5 +706,114 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 42);
+    }
+
+    // ── HostKeyPolicy / HostKeyConfig 단위 테스트 ──────────────────────
+
+    #[test]
+    fn host_key_policy_default_is_tofu() {
+        assert_eq!(HostKeyPolicy::default(), HostKeyPolicy::Tofu);
+    }
+
+    #[test]
+    fn host_key_policy_parses_aliases() {
+        // accept-all 별칭
+        assert_eq!(
+            HostKeyPolicy::parse("accept-all").unwrap(),
+            HostKeyPolicy::AcceptAll
+        );
+        assert_eq!(
+            HostKeyPolicy::parse("ACCEPT_ALL").unwrap(),
+            HostKeyPolicy::AcceptAll
+        );
+        assert_eq!(
+            HostKeyPolicy::parse("no").unwrap(),
+            HostKeyPolicy::AcceptAll
+        );
+        assert_eq!(
+            HostKeyPolicy::parse("insecure").unwrap(),
+            HostKeyPolicy::AcceptAll
+        );
+
+        // tofu 별칭
+        assert_eq!(HostKeyPolicy::parse("tofu").unwrap(), HostKeyPolicy::Tofu);
+        assert_eq!(
+            HostKeyPolicy::parse("accept-new").unwrap(),
+            HostKeyPolicy::Tofu
+        );
+        assert_eq!(HostKeyPolicy::parse("auto").unwrap(), HostKeyPolicy::Tofu);
+
+        // strict 별칭
+        assert_eq!(
+            HostKeyPolicy::parse("strict").unwrap(),
+            HostKeyPolicy::Strict
+        );
+        assert_eq!(HostKeyPolicy::parse("yes").unwrap(), HostKeyPolicy::Strict);
+    }
+
+    #[test]
+    fn host_key_policy_rejects_unknown() {
+        assert!(HostKeyPolicy::parse("bogus").is_err());
+        let err = HostKeyPolicy::parse("lax").unwrap_err();
+        assert!(err.contains("unknown host key policy"));
+        assert!(err.contains("accept-all"));
+        assert!(err.contains("tofu"));
+        assert!(err.contains("strict"));
+    }
+
+    #[test]
+    fn host_key_policy_display_roundtrips_as_str() {
+        for p in [
+            HostKeyPolicy::AcceptAll,
+            HostKeyPolicy::Tofu,
+            HostKeyPolicy::Strict,
+        ] {
+            let s = p.to_string();
+            assert_eq!(s, p.as_str());
+            // as_str 값은 parse 로 왕복 가능해야 함
+            assert_eq!(HostKeyPolicy::parse(&s).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn host_key_config_default_is_tofu_with_no_explicit_path() {
+        let cfg = HostKeyConfig::default();
+        assert_eq!(cfg.policy, HostKeyPolicy::Tofu);
+        assert!(cfg.known_hosts_path.is_none());
+    }
+
+    #[test]
+    fn host_key_config_builder_sets_known_hosts() {
+        let cfg = HostKeyConfig::new(HostKeyPolicy::Strict).with_known_hosts("/tmp/kh");
+        assert_eq!(cfg.policy, HostKeyPolicy::Strict);
+        assert_eq!(
+            cfg.known_hosts_path.as_deref().unwrap().to_string_lossy(),
+            "/tmp/kh"
+        );
+    }
+
+    #[test]
+    fn effective_known_hosts_prefers_explicit_path() {
+        // 명시 경로가 있으면 HOME 기반 기본 경로보다 우선.
+        let cfg = HostKeyConfig::new(HostKeyPolicy::Strict).with_known_hosts("/explicit/kh");
+        let eff = cfg.effective_known_hosts().unwrap();
+        assert_eq!(eff, PathBuf::from("/explicit/kh"));
+    }
+
+    #[test]
+    fn effective_known_hosts_falls_back_to_home_default() {
+        // HOME 이 설정된 경우 ~/.ssh/known_hosts 로 폴백.
+        // (CI 등 HOME 미설정 환경에서는 이 테스트를 건너뜀.)
+        if std::env::var_os("HOME").is_none() {
+            eprintln!("skipping: HOME not set");
+            return;
+        }
+        let cfg = HostKeyConfig::new(HostKeyPolicy::Tofu);
+        let eff = cfg.effective_known_hosts().expect("HOME set");
+        let s = eff.to_string_lossy();
+        assert!(
+            s.ends_with("/.ssh/known_hosts"),
+            "expected ~/.ssh/known_hosts, got {s}"
+        );
     }
 }

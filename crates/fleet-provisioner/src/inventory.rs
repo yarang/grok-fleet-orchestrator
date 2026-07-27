@@ -51,6 +51,14 @@ pub struct InventoryDefaults {
     /// CF 토큰 (필요시 defaults에 지정).
     #[serde(default)]
     pub cf_token: Option<String>,
+    /// SSH 서버 호스트 키 검증 정책 (`accept-all` | `tofu` | `strict`).
+    /// 미지정 시 CLI 기본값(TOFU)을 따름.
+    /// `StrictHostKeyChecking` OpenSSH 설정과 대응.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key_policy: Option<String>,
+    /// `known_hosts` 파일 경로. 미지정 시 `~/.ssh/known_hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts: Option<String>,
 }
 
 fn default_user() -> String {
@@ -68,6 +76,8 @@ impl Default for InventoryDefaults {
             ssh_key: None,
             ssh_port: default_port(),
             cf_token: None,
+            host_key_policy: None,
+            known_hosts: None,
         }
     }
 }
@@ -321,6 +331,44 @@ defaults:
         assert_eq!(d.user, "ubuntu");
         assert_eq!(d.ssh_port, 22);
         assert!(d.ssh_key.is_none());
+        assert!(d.host_key_policy.is_none());
+        assert!(d.known_hosts.is_none());
+    }
+
+    #[test]
+    fn parses_host_key_policy_and_known_hosts_in_defaults() {
+        let yaml = r#"
+defaults:
+  user: ubuntu
+  ssh_key: ~/.ssh/fleet_workers_ed25519
+  host_key_policy: strict
+  known_hosts: /etc/fleet/known_hosts
+workers:
+  - host: 10.0.0.1
+    name: w1
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert_eq!(inv.defaults.host_key_policy.as_deref(), Some("strict"));
+        assert_eq!(
+            inv.defaults.known_hosts.as_deref(),
+            Some("/etc/fleet/known_hosts")
+        );
+    }
+
+    #[test]
+    fn host_key_policy_optional_and_omittable() {
+        // 생략해도 파싱 성공 (기본 None).
+        let yaml = r#"
+defaults:
+  user: ubuntu
+  ssh_key: /x
+workers:
+  - host: 10.0.0.1
+    name: w1
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert!(inv.defaults.host_key_policy.is_none());
+        assert!(inv.defaults.known_hosts.is_none());
     }
 
     #[test]

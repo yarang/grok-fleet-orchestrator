@@ -190,6 +190,7 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 
 - ~~동시 다중 세션 per worker (현재는 직렬 prompt 처리; Phase 8.4)~~ → **Phase 8.4에서 per-worker 동시 다중 세션 구현** (아래 "동시 다중 세션 (Phase 8.4)" 절 참조)
 - ~~mTLS for orchestrator↔worker ACP 트래픽 (Phase 8.5)~~ → **Phase 8.5.1/8.5.2/8.5.3에서 클라이언트/서버 mTLS + CLI 통합 구현** (아래 "mTLS for Orchestrator↔Worker ACP 트래픽 (Phase 8.5)" 절 참조).
+- ~~SSH 프로비저닝의 호스트 키 검증 (기존 accept-all)~~ → **known_hosts 기반 TOFU/Strict 검증 구현** (아래 "SSH 호스트 키 검증" 절 참조)
 - OIDC/JWKS 검증 (현재는 Cloudflare Access에 위임)
 - 작업 우선순위 큐 +抢占 스케줄링
 - 워커 오토스케일링 (로드 기반)
@@ -795,4 +796,64 @@ supervisor 의 `establish_session` 은 endpoint 스킴에 따라 다음과 같�
   mTLS 통합은 단일 호스트 모드(`--host`)만 지원. 인벤토리 YAML 에
   per-worker mTLS 메타데이터를 추가하려면 `InventoryWorker` 스키마 확장이
   필요 (후속 과제).
+
+## SSH 호스트 키 검증 (프로비저너)
+
+`fleet provision`은 SSH로 원격 워커에 접속한다. 최초 구현(Phase 4)은
+`russh`의 `check_server_key`에서 서버 공개키를 **무조건 수용(accept-all)**했기
+때문에, DNS 스푸핑이나 라우팅 하이재킹 같은 MITM(중간자 공격)에 취약했다.
+이제 `~/.ssh/known_hosts` 기반 검증을 도입해 OpenSSH의 `StrictHostKeyChecking`
+동작과 동등한 보안을 제공한다.
+
+### 정책 (`HostKeyPolicy`)
+
+`fleet-provisioner::ssh::HostKeyPolicy` 세 가지 모드. OpenSSH 설정값과 대응:
+
+| 정책 | 동작 | OpenSSH 대응 |
+|------|------|--------------|
+| `accept-all` | 검증 없이 수용. **위험** — 테스트/일회성 전용 | `StrictHostKeyChecking=no` |
+| `tofu` (기본) | 첫 연결에서 `known_hosts`에 키 자동 추가, 이후 일치 검사 | `StrictHostKeyChecking=accept-new` |
+| `strict` | `known_hosts`에 호스트가 **반드시** 있어야 함. 자동 추가 없음 | `StrictHostKeyChecking=yes` |
+
+검증은 `russh_keys::check_known_hosts_path(host, port, pubkey, path)`로 수행:
+- `Ok(true)` → 호스트가 있고 키 일치 → 통과
+- `Ok(false)` → 호스트가 `known_hosts`에 없음 → `tofu`면 `learn_known_hosts_path`로 추가, `strict`면 거부
+- `Err(_)` → 키 불일치(또는 파일 읽기 실패) → MITM 의심, 즉시 거부
+
+거부 사유는 `SshHandler.reject_reason` 공유 슬롯을 통해 `SshClient::connect`
+호출자에게 `SshError::HostKeyVerification { host, reason }`로 전달되어, 단순
+"connection failed"가 아닌 "host key mismatch (possible MITM)" 같은 명확한
+진단 메시지를 제공한다.
+
+### 설정 경로 (우선순위)
+
+정책과 `known_hosts` 경로는 각각 독립적으로 아래 순서로 결정된다:
+
+1. CLI 플래그 — `--host-key-policy <POLICY>`, `--known-hosts <PATH>`
+   (환경변수 `FLEET_HOST_KEY_POLICY`, `FLEET_KNOWN_HOSTS` 도 지원)
+2. 인벤토리 `defaults:` — `host_key_policy:`, `known_hosts:`
+3. 기본값 — 정책 `tofu`, 경로 `~/.ssh/known_hosts` (`HOME` 기반)
+
+### 사용 예시
+
+```bash
+# 운영 권장: strict 모드 + 사전에 ssh-keyscan 으로 known_hosts 채우기
+ssh-keyscan -H 10.0.1.10 >> ~/.ssh/known_hosts
+fleet provision --host 10.0.1.10 --ssh-key ~/.ssh/id_ed25519 \
+    --name build-arm64-01 --host-key-policy strict
+
+# 신규 인프라 자동화: TOFU 로 첫 키 자동 학습 (기본값)
+fleet provision --inventory workers.yaml --ssh-key ~/.ssh/id_ed25519
+
+# CI/일회성: 검증 생략 (명시적 opt-in)
+fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
+```
+
+### 제한
+
+- `check_known_hosts_path` / `learn_known_hosts_path` 는 동기 파일 I/O.
+  `known_hosts` 파일이 작고(수 KB) 연결당 1회만 읽히므로 블로킹 영향은 미미.
+- 해시된 호스트명(`|1|<salt>|<hash> ...` 형식)은 `russh-keys`가 처리하므로
+  그대로 지원되지만, TOFU `learn` 은 평문 호스트명으로 추가한다.
+
 

@@ -12,6 +12,8 @@ pub enum SshError {
     AuthFailed(String),
     #[error("SSH key load failed: {0}")]
     KeyLoad(String),
+    #[error("host key verification failed for '{host}': {reason}")]
+    HostKeyVerification { host: String, reason: String },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[cfg(feature = "ssh")]
@@ -102,5 +104,17 @@ mod tests {
     fn ssh_protocol_error_constructs() {
         let e = SshError::Protocol("handshake timeout".into());
         assert!(format!("{e}").contains("handshake"));
+    }
+
+    #[test]
+    fn host_key_verification_error_is_descriptive() {
+        let e = SshError::HostKeyVerification {
+            host: "10.0.0.5".into(),
+            reason: "key mismatch".into(),
+        };
+        let msg = format!("{e}");
+        assert!(msg.contains("10.0.0.5"));
+        assert!(msg.contains("key mismatch"));
+        assert!(msg.contains("verification failed"));
     }
 }

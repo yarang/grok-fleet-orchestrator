@@ -31,7 +31,10 @@ pub mod templates;
 pub use error::{InventoryError, PlaybookError, ProvisionError, SshError, StepError};
 pub use inventory::{Inventory, InventoryDefaults, InventoryWorker, ProvisionOptions};
 pub use playbook::{Playbook, PlaybookContext, PlaybookReport, StepStatus};
-pub use ssh::{MockExecutor, RemoteExecutor, SshClient, SshConnectInfo};
+pub use ssh::{
+    arc_executor, default_known_hosts_path, HostKeyConfig, HostKeyPolicy, MockExecutor,
+    RemoteExecutor, SshClient, SshConnectInfo,
+};
 pub use steps::{
     check_prereqs::CheckPrereqs, install_cloudflared::InstallCloudflared,
     install_deps::InstallDeps, install_fleet_worker::InstallFleetWorker, install_grok::InstallGrok,

@@ -6,6 +6,70 @@
 
 ## [Unreleased]
 
+### Added — SSH 호스트 키 검증 (known_hosts)
+
+프로비저너의 SSH 연결이 서버 공개키를 무조건 수용(accept-all)하던 기존 동작을
+`~/.ssh/known_hosts` 기반 검증으로 교체. MITM(중간자 공격) 방어 — OpenSSH의
+`StrictHostKeyChecking` 설정과 동등.
+
+- **`HostKeyPolicy` enum** (`fleet-provisioner::ssh::HostKeyPolicy`):
+  - `AcceptAll` — 검증 없이 수용 (위험, 테스트 전용). OpenSSH `=no` 대응.
+  - `Tofu` (기본값) — 첫 연결에서 `known_hosts`에 키 자동 추가 후 일치 검사.
+    OpenSSH `accept-new` 대응.
+  - `Strict` — `known_hosts`에 호스트가 반드시 있어야 함. 운영 권장.
+    OpenSSH `=yes` 대응.
+  - `HostKeyPolicy::parse()` — CLI/인벤토리 문자열 파싱 (별칭: `no`/`yes`/
+    `accept-new`/`insecure` 등).
+- **`HostKeyConfig`** (`policy` + `known_hosts_path: Option<PathBuf>`).
+  `effective_known_hosts()` 가 명시값 → `~/.ssh/known_hosts`(`HOME` 기반) 순으로
+  경로 해석.
+- **`SshHandler` 재설계** (`ssh.rs`): `check_server_key`에서
+  `russh_keys::check_known_hosts_path` / `learn_known_hosts_path` 로 실제 검증 수행.
+  - `Ok(true)` → 통과, `Ok(false)` → TOFU면 `learn` 으로 추가 / strict면 거부,
+    `Err(_)` → 키 불일치(MITM 의심) 즉시 거부.
+  - 거부 사유를 `SshHandler.reject_reason` 공유 슬롯에 기록하여 `SshClient::connect`
+    가 `SshError::HostKeyVerification { host, reason }` 으로 명확한 진단 전달.
+- **`SshClient::connect` 시그니처 변경** (Breaking): `(info, host_key: HostKeyConfig)`.
+  기존 `(info)`.
+- **`SshError::HostKeyVerification { host, reason }`** 신규 variant.
+- **CLI `--host-key-policy` / `--known-hosts`** (`fleet provision`):
+  환경변수 `FLEET_HOST_KEY_POLICY`, `FLEET_KNOWN_HOSTS` 도 지원.
+- **인벤토리 `defaults:` 필드** — `host_key_policy`, `known_hosts`. CLI 가 있으면
+  CLI 가 우선, 없으면 인벤토리, 그것도 없으면 기본값(TOFU + `~/.ssh/known_hosts`).
+- 기존 코드에 있던 `TODO: known_hosts 연동` 3건 제거 (모두 구현 완료).
+
+### Tests — SSH 호스트 키 검증
+
+- **`fleet-provisioner` 단위 테스트 +7개** (`ssh.rs`):
+  `host_key_policy_default_is_tofu`, `host_key_policy_parses_aliases`,
+  `host_key_policy_rejects_unknown`, `host_key_policy_display_roundtrips_as_str`,
+  `host_key_config_default_is_tofu_with_no_explicit_path`,
+  `host_key_config_builder_sets_known_hosts`, `effective_known_hosts_*` 2종.
+- **`inventory.rs` 테스트 +2개**: `parses_host_key_policy_and_known_hosts_in_defaults`,
+  `host_key_policy_optional_and_omittable`. `defaults_provide_sensible_defaults` 보강.
+- **`error.rs` 테스트 +1개**: `host_key_verification_error_is_descriptive`.
+- 총 **cargo test --workspace 96+개 통과** (기존 대비 +10), clippy `-D warnings` 통과.
+
+### Changed (Breaking) — SSH 호스트 키 검증
+
+- `SshClient::connect(info)` → `SshClient::connect(info, host_key: HostKeyConfig)`.
+  fleet-cli 내부 호출부 2곳만 영향 (라이브러리로 SshClient를 직접 호출하는 외부
+  사용자가 있다면 마이그레이션 필요).
+- **기본 동작 변경**: 이전에는 호스트 키를 항상 수용(accept-all)했지만, 이제 기본값이
+  **TOFU**. 첫 연결 시 `~/.ssh/known_hosts`에 키가 자동 추가된다. 기존 accept-all
+  동작이 필요하면 `--host-key-policy accept-all` 명시.
+
+### Deploy Notes — SSH 호스트 키 검증
+
+- 운영 환경 권장: `strict` 모드 + 사전 `ssh-keyscan` 으로 `known_hosts` 채우기.
+  ```bash
+  ssh-keyscan -H worker-1.example.com >> ~/.ssh/known_hosts
+  fleet provision --host worker-1.example.com --host-key-policy strict ...
+  ```
+- 신규 인프라 자동화: 기본 TOFU 가 첫 키를 자동 학습하므로 별도 작업 불필요.
+- `HOME` 환경변수가 없는 컨테이너 환경에서는 `--known-hosts /path/to/known_hosts`
+  명시 필요 (없으면 `HostKeyVerification` 에러).
+
 ### Added — Phase 8.7: PushCredentials 스텝 (credentials 자동 배포)
 
 프로비저너 플레이북에 PushCredentials 스텝을 추가하여 credentials 회전 시

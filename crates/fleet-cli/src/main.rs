@@ -259,6 +259,22 @@ enum Command {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
 
+        /// SSH 서버 호스트 키 검증 정책.
+        ///
+        /// - `accept-all`: 검증 없이 수용 (위험, 테스트 전용)
+        /// - `tofu`: 첫 연결 시 known_hosts에 키 추가 후 일치 검사 (기본값)
+        /// - `strict`: known_hosts에 반드시 있어야 함
+        ///
+        /// 인벤토리 defaults 의 `host_key_policy` 보다 우선하며,
+        /// 미지정 시 인벤토리 값 → 기본값(tofu) 순으로 적용.
+        #[arg(long, env = "FLEET_HOST_KEY_POLICY", value_name = "POLICY")]
+        host_key_policy: Option<String>,
+
+        /// known_hosts 파일 경로. 미지정 시 `~/.ssh/known_hosts`.
+        /// 인벤토리 defaults 의 `known_hosts` 보다 우선.
+        #[arg(long, env = "FLEET_KNOWN_HOSTS", value_name = "PATH")]
+        known_hosts: Option<String>,
+
         /// mTLS: 프로비저닝하는 워커의 worker.toml 에 `[mtls]` 섹션을 포함.
         /// `--mtls-server-cert`/`--mtls-server-key`/`--mtls-client-ca` 도 함께 필요.
         #[arg(long, default_value_t = false)]
@@ -812,6 +828,8 @@ async fn main() -> Result<()> {
             tags,
             only,
             dry_run,
+            host_key_policy,
+            known_hosts,
             mtls_enabled,
             mtls_listen_addr,
             mtls_server_cert,
@@ -838,6 +856,12 @@ async fn main() -> Result<()> {
                 tags,
                 only,
                 dry_run,
+                host_key_policy: host_key_policy
+                    .as_deref()
+                    .map(fleet_provisioner::HostKeyPolicy::parse)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!(e))?,
+                known_hosts: known_hosts.map(PathBuf::from),
                 mtls_enabled,
                 mtls_listen_addr,
                 mtls_server_cert_path: mtls_server_cert,

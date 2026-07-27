@@ -22,6 +22,14 @@ defaults:
   ssh_port: 22
   # Cloudflare API 토큰 — tunnel 자동 생성에 필요. 미지정 시 tunnel 건너뜀.
   # cf_token: cloudflare-api-token-from-dashboard
+  # SSH 서버 호스트 키 검증 정책: accept-all | tofu | strict
+  #   tofu(기본) — 첫 연결에서 known_hosts 에 키 자동 추가 후 일치 검사
+  #   strict   — known_hosts 에 반드시 있어야 함 (운영 권장)
+  #   accept-all — 검증 생략 (위험, 테스트 전용)
+  # CLI `--host-key-policy` 가 있으면 이 값을 덮어쓴다.
+  host_key_policy: strict
+  # known_hosts 파일 경로. 미지정 시 ~/.ssh/known_hosts.
+  # known_hosts: /etc/fleet/known_hosts
 
 # ─── 프로비저닝 동작 옵션 ──────────────────────────────────────────────
 options:
