@@ -101,6 +101,8 @@ fleet token new      # 부트스트랩 토큰 생성
 fleet doctor         # 인프라 진단 (DB, 마이그레이션, 워커, API, 대시보드)
 fleet provision ...  # SSH 자동 프로비저닝 (단일/인벤토리)
 fleet mtls init-ca/issue-server/issue-client  # 사설 CA + 인증서 발급 (--features mtls)
+fleet credentials issue/revoke/list  # 워커 API 키 관리 (--features push-credentials)
+fleet users create/list/delete/enable/disable/role  # 사용자 + RBAC 관리
 ```
 
 각 명령에 `--help`를 붙여 상세 옵션을 확인하세요.
@@ -109,15 +111,15 @@ fleet mtls init-ca/issue-server/issue-client  # 사설 CA + 인증서 발급 (--
 
 AI 클라이언트에 노출되는 7개 MCP 도구:
 
-| 도구                    | 용도                                            |
-|-------------------------|-------------------------------------------------|
-| `submit_task`           | 프롬프트를 작업으로 큐에 등록                   |
-| `get_task_status`       | 작업 상태 조회                                  |
-| `wait_for_task`         | 작업 완료까지 대기 (타임아웃 옵션)              |
-| `cancel_task`           | 실행 중인 작업 취소                             |
-| `list_workers`          | 등록된 워커 조회                                |
-| `stream_task_output`    | 작업 stdout/stderr 폴링 스트리밍                |
-| `collect_results`       | 다수 작업 결과를 병렬 수집                      |
+| 도구                       | 용도                                            |
+|----------------------------|-------------------------------------------------|
+| `fleet_dispatch_task`      | 프롬프트를 작업으로 큐에 등록                   |
+| `fleet_get_task_status`    | 작업 상태 조회                                  |
+| `fleet_wait_for_task`      | 작업 완료까지 대기 (타임아웃 옵션)              |
+| `fleet_cancel_task`        | 실행 중인 작업 취소                             |
+| `fleet_list_workers`       | 등록된 워커 조회                                |
+| `fleet_stream_task_output` | 작업 stdout/stderr 폴링 스트리밍                |
+| `fleet_collect_results`    | 다수 작업 결과를 병렬 수집                      |
 
 ## 크레이트 구조
 

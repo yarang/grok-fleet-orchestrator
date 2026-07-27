@@ -6,6 +6,42 @@
 
 ## [Unreleased]
 
+### Added — RBAC 권한 강제 + 태스크 상세 페이지 + 사용자 관리 CRUD
+
+모든 보호 API에 RBAC 권한 검사를 적용하고, 대시보드에 태스크 상세 페이지와
+사용자 관리 CRUD UI를 추가.
+
+- **RBAC 권한 강제**: 10개 API 핸들러에 `require_permission()` 호출 추가.
+  `AuthPrincipal` Extension을 통해 세션 사용자의 권한을 확인하고, 권한 부족 시
+  `403 Forbidden` 반환. 이전에는 권한 모델이 정의돼 있었지만 실제 검사가 없었음.
+- **태스크 상세 페이지** (`/tasks/:id`): 태스크 정보 + stdout/stderr 출력 뷰어.
+  `/api/tasks/:id` API 엔드포인트(`get_output`으로 출력 조회) + 클릭 핸들러.
+- **사용자 관리 CRUD UI**: `admin-users.html`에 생성 폼, 활성/비활성 토글,
+  삭제 버튼 추가. `/api/me` 권한 기반으로 버튼 노출 제어 (user:create, user:delete).
+  CSRF 토큰으로 모든 쓰기 작업 보호.
+- **MCP 도구명 정정**: `submit_task`→`fleet_dispatch_task` 등 실제 등록명과 일치.
+- 통합 테스트 수정: RBAC 도입으로 인한 403 실패 해결 — 테스트 관리자에게
+  모든 `PermissionKind` 부여.
+- 영향받은 파일: `crates/fleet-dashboard/src/{handlers.rs,app.rs}`,
+  `crates/fleet-dashboard/assets/{admin-users.html,task-detail.html,tasks.html,styles.css}`,
+  `crates/fleet-dashboard/tests/dashboard_api.rs`.
+
+### Added — RBAC + 쿠키 세션 인증 (Phase 9.1)
+
+대시보드 보안 모델을 API bearer 토큰에서 쿠키 기반 세션 + RBAC로 전면 교체.
+
+- **PermissionKind** (22개 권한): `dashboard:view`, `task:list`, `task:create`,
+  `task:read`, `task:output`, `worker:list`, `user:create`, `user:delete`,
+  `audit:read`, `events:list`, `metrics:view` 등.
+- **BuiltinRole**: `admin`(전체 권한), `operator`(태스크/워커/이벤트),
+  `viewer`(읽기 전용).
+- **세션 인증**: 로그인 시 HttpOnly + Secure 쿠키 발급. `require_session`
+  미들웨어가 쿠키 → 세션 → 사용자 → 권한을 로드하여 `AuthPrincipal` 주입.
+- **CSRF 보호**: 더블 서밋 패턴 — 쿠키 토큰과 폼/헤더 토큰 상수시간 비교.
+- **비밀번호 정책**: zxcvbn 강도 검사(score ≥ 3), Argon2id 해싱.
+- **마이그레이션**: `005_rbac.sql` ~ `007_hosts.sql`.
+- **`fleet users` CLI** (Phase 9.1.6): 사용자 생성/삭제/활성화/역할 부여.
+
 ### Added — 호스트 인벤토리 + 헬스체커 동기화 (Phase P1.5)
 
 호스트(물리/가상 머신) 단위 가시성을 확보하는 기능. 기존 `workers` 테이블은

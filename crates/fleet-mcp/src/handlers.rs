@@ -467,6 +467,14 @@ fn task_summary_with_options(task: &Task, include_output: bool) -> Value {
             summary["exit_code"] = json!(result.exit_code);
             summary["duration_secs"] = json!(result.duration_secs);
             summary["finished_at"] = json!(result.finished_at.to_rfc3339());
+            if let Some(ref usage) = result.token_usage {
+                summary["token_usage"] = json!({
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "total_tokens": usage.total(),
+                });
+            }
         }
         fleet_core::TaskStatus::Failed(failure) => {
             summary["error"] = json!(failure.error);
@@ -634,6 +642,44 @@ mod tests {
         assert_eq!(summary["phase"], "completed");
         assert_eq!(summary["output"], "build finished");
         assert!(summary.get("output_bytes").is_none());
+        // token_usage is None → field omitted.
+        assert!(summary.get("token_usage").is_none());
+    }
+
+    #[test]
+    fn task_summary_includes_token_usage_when_present() {
+        use fleet_core::{TaskResult, TaskStatus, TokenUsage, WorkerId};
+        let result = TaskResult {
+            output: "done".into(),
+            exit_code: 0,
+            duration_secs: 5.0,
+            token_usage: Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 200,
+                cache_read_tokens: 50,
+            }),
+            worker_id: WorkerId::new(),
+            finished_at: chrono::Utc::now(),
+        };
+        let task = Task {
+            id: TaskId::new(),
+            prompt: "test".into(),
+            cwd: None,
+            model: None,
+            server_hint: None,
+            required_labels: vec![],
+            max_turns: None,
+            timeout_secs: None,
+            created_at: chrono::Utc::now(),
+            created_by: "test".into(),
+            priority: fleet_core::TaskPriority::Normal,
+            status: TaskStatus::Completed(result),
+        };
+        let summary = task_summary_with_options(&task, false);
+        assert_eq!(summary["token_usage"]["input_tokens"], 100);
+        assert_eq!(summary["token_usage"]["output_tokens"], 200);
+        assert_eq!(summary["token_usage"]["cache_read_tokens"], 50);
+        assert_eq!(summary["token_usage"]["total_tokens"], 300);
     }
 
     #[test]

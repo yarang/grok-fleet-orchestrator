@@ -25,6 +25,7 @@ use fleet_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  인메모리 Store (실제 DB 없이 테스트용)
@@ -38,6 +39,9 @@ struct MemStore {
     users: Mutex<HashMap<UserId, User>>,
     sessions: Mutex<HashMap<String, Session>>, // token_hash → Session
     user_permissions: Mutex<HashMap<UserId, Vec<Permission>>>,
+    // Host inventory (Phase P1.5 테스트용)
+    hosts: Mutex<Vec<fleet_core::Host>>,
+    host_events: Mutex<Vec<fleet_core::HostEvent>>,
 }
 
 impl MemStore {
@@ -49,6 +53,8 @@ impl MemStore {
             users: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             user_permissions: Mutex::new(HashMap::new()),
+            hosts: Mutex::new(Vec::new()),
+            host_events: Mutex::new(Vec::new()),
         }
     }
 
@@ -59,6 +65,11 @@ impl MemStore {
 
     fn with_task(self, t: Task) -> Self {
         self.tasks.lock().unwrap().insert(t.id, t);
+        self
+    }
+
+    fn with_host(self, h: fleet_core::Host) -> Self {
+        self.hosts.lock().unwrap().push(h);
         self
     }
 
@@ -256,6 +267,43 @@ impl Store for MemStore {
     async fn delete_session(&self, id: SessionId) -> Result<(), StoreError> {
         self.sessions.lock().unwrap().retain(|_, s| s.id != id);
         Ok(())
+    }
+
+    // ── Host inventory (테스트 지원 구현체) ───────────────────────────
+
+    async fn upsert_host(&self, host: &fleet_core::Host) -> Result<(), StoreError> {
+        let mut hosts = self.hosts.lock().unwrap();
+        if let Some(existing) = hosts.iter_mut().find(|h| h.hostname == host.hostname) {
+            *existing = host.clone();
+        } else {
+            hosts.push(host.clone());
+        }
+        Ok(())
+    }
+
+    async fn get_host_by_hostname(&self, hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
+        Ok(self.hosts.lock().unwrap().iter().find(|h| h.hostname == hostname).cloned())
+    }
+
+    async fn get_host_by_worker(&self, worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
+        Ok(self.hosts.lock().unwrap().iter().find(|h| h.worker_id == Some(worker_id)).cloned())
+    }
+
+    async fn list_hosts(&self) -> Result<Vec<fleet_core::Host>, StoreError> {
+        Ok(self.hosts.lock().unwrap().clone())
+    }
+
+    async fn append_host_event(&self, event: &fleet_core::HostEvent) -> Result<(), StoreError> {
+        self.host_events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+
+    async fn list_host_events(&self, host_id: Uuid, limit: u32) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
+        let events = self.host_events.lock().unwrap();
+        let mut filtered: Vec<fleet_core::HostEvent> = events.iter().filter(|e| e.host_id == host_id).cloned().collect();
+        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        filtered.truncate(limit as usize);
+        Ok(filtered)
     }
 }
 
@@ -536,4 +584,121 @@ async fn protected_route_without_cookie_returns_401() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Host inventory API 테스트
+// ═══════════════════════════════════════════════════════════════════════
+
+fn sample_host(hostname: &str, status: fleet_core::HostStatus) -> fleet_core::Host {
+    fleet_core::Host {
+        id: Uuid::new_v4(),
+        hostname: hostname.into(),
+        worker_id: None,
+        status,
+        ssh_host: Some(format!("{hostname}.example")),
+        ssh_port: 22,
+        ssh_user: Some("fleet".into()),
+        grok_version: Some("0.2.112".into()),
+        fleet_worker_version: Some("0.1.0".into()),
+        os_info: None,
+        metrics: fleet_core::HostMetrics::default(),
+        last_heartbeat_at: None,
+        provisioned_at: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn hosts_list_returns_summaries() {
+    let store = MemStore::new()
+        .with_host(sample_host("node-a", fleet_core::HostStatus::Online))
+        .with_host(sample_host("node-b", fleet_core::HostStatus::Offline))
+        .with_host(sample_host("node-c", fleet_core::HostStatus::Provisioned));
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/hosts", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    let hostnames: Vec<&str> = arr.iter().map(|h| h["hostname"].as_str().unwrap()).collect();
+    assert!(hostnames.contains(&"node-a"));
+    assert!(hostnames.contains(&"node-b"));
+    assert!(hostnames.contains(&"node-c"));
+}
+
+#[tokio::test]
+async fn host_detail_returns_info_and_events() {
+    let host = sample_host("web-1", fleet_core::HostStatus::Online);
+    let host_id = host.id;
+
+    // host_events에 몇 개 이벤트 추가.
+    let mut store = MemStore::new().with_host(host);
+    store.host_events.lock().unwrap().push(fleet_core::HostEvent {
+        id: Uuid::new_v4(),
+        host_id,
+        event_type: "heartbeat".into(),
+        severity: fleet_core::EventSeverity::Info,
+        message: Some("heartbeat received".into()),
+        payload: HashMap::new(),
+        created_at: chrono::Utc::now(),
+    });
+    store.host_events.lock().unwrap().push(fleet_core::HostEvent {
+        id: Uuid::new_v4(),
+        host_id,
+        event_type: "provision_ok".into(),
+        severity: fleet_core::EventSeverity::Info,
+        message: Some("provisioned successfully".into()),
+        payload: HashMap::new(),
+        created_at: chrono::Utc::now() - chrono::Duration::minutes(5),
+    });
+
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/hosts/web-1", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    // HostDetail uses #[serde(flatten)] on summary — fields are top-level.
+    assert_eq!(body["hostname"], "web-1");
+    assert_eq!(body["status"], "online");
+    assert_eq!(body["grok_version"], "0.2.112");
+    let events = body["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    // 최신순 정렬 확인 — heartbeat가 provision_ok보다 먼저.
+    assert_eq!(events[0]["event_type"], "heartbeat");
+    assert_eq!(events[1]["event_type"], "provision_ok");
+}
+
+#[tokio::test]
+async fn host_detail_not_found_returns_404() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/hosts/nonexistent", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
 }
