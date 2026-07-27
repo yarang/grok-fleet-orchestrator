@@ -26,6 +26,9 @@ fleet.agentthread.dev/
 ├── /login                     # 로그인                          [P0]
 ├── /bootstrap                 # 최초 관리자 설정                [P0]
 │
+├── /hosts                     # 호스트 인벤토리                 [P1.5]
+├── /hosts/:hostname           # 호스트 상세 (히스토리)          [P1.5]
+│
 ├── /workers                   # 워커 목록 (Overview에 통합)
 ├── /workers/:id               # 워커 상세                       [P1]
 │
@@ -45,6 +48,8 @@ fleet.agentthread.dev/
 | `/login`         | ✗    | -            | 이미 로그인 시 `/`로 리다이렉트 |
 | `/bootstrap`     | ✗    | -            | OTP 토큰 필요, 1회성          |
 | `/`              | ✓    | viewer       | 기본 랜딩                    |
+| `/hosts`         | ✓    | viewer       | 읽기 전용                     |
+| `/hosts/:hostname` | ✓  | viewer       | 읽기 전용                     |
 | `/workers/:id`   | ✓    | viewer       | 읽기 전용                     |
 | `/tasks`         | ✓    | viewer       | 읽기 전용                     |
 | `/admin/users`   | ✓    | administrator| 관리자 전용                   |
@@ -312,6 +317,185 @@ Dark 대시보드). 전환 지점은 **라우트 경계**로 명확히 분리되
 | Circuit state 노드    | 각 상태(closed/open/half-open) 설명 툴팁      |
 | "Force reconnect" 버튼 | operator+ 권한 필요, 확인 다이얼로그         |
 | Recent Events 행 클릭 | Audit Log의 해당 이벤트로 딥링크              |
+
+---
+
+### 3.2.5 페이지 #2.5 — 호스트 인벤토리 (Host Inventory)
+
+**라우트**: `/hosts`  **권한**: viewer+  **테마**: Dark
+
+**목적**: 물리/가상 호스트 전체의 가시성 확보. 워커 등록 상태,
+grok CLI 설치 여부/버전, 프로비저닝 이력을 한눈에.
+
+> **핵심 차이**: `workers` 테이블은 "현재 등록된 워커"만 추적한다.
+> 이 페이지는 `hosts` 테이블(신규)을 기반으로, 등록 여부와 무관하게
+> 인벤토리에 등록된 모든 호스트를 표시한다.
+
+#### 데이터 소스
+
+| 데이터            | 소스                              | 수집 시점                     |
+| ----------------- | --------------------------------- | ----------------------------- |
+| 호스트 목록       | `hosts` 테이블 (신규 마이그레이션) | `fleet provision` 실행 시 UPSERT |
+| grok 버전         | 하트비트 payload 또는 SSH 프로브   | 하트비트(15s) 또는 프로비저닝 |
+| fleet-worker 버전 | 하트비트 payload                   | 하트비트(15s)                 |
+| 워커 등록 상태    | `hosts.worker_id` JOIN `workers`   | 실시간                        |
+| 프로비저닝 이력   | `host_events` 테이블 (append-only) | 프로비저닝/배포/상태변경 시   |
+
+#### 필요 스키마 변경
+
+```sql
+-- 007_hosts.sql — Phase P1.5
+
+CREATE TABLE hosts (
+    id              UUID PRIMARY KEY,
+    hostname        TEXT UNIQUE NOT NULL,       -- IP 또는 호스트명
+    name            TEXT UNIQUE,                -- worker-ec1 등 (표시명)
+    ssh_user        TEXT,
+    ssh_port        INTEGER NOT NULL DEFAULT 22,
+    labels          JSONB NOT NULL DEFAULT '{}',
+    region          TEXT,
+    -- 런타임 정보 (하트비트/프로브로 갱신)
+    grok_version    TEXT,                       -- "0.2.112" 또는 NULL
+    fleet_worker_version TEXT,
+    os_info         TEXT,                       -- "Linux 6.8.0 aarch64"
+    status          TEXT NOT NULL DEFAULT 'unknown',
+    -- 'provisioned' | 'online' | 'offline' | 'failed' | 'unknown'
+    -- 관계
+    worker_id       UUID REFERENCES workers(id) ON DELETE SET NULL,
+    -- 타임스탬프
+    last_provisioned_at TIMESTAMPTZ,
+    last_seen_at   TIMESTAMPTZ,
+    registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_hosts_status ON hosts(status);
+CREATE INDEX idx_hosts_worker ON hosts(worker_id) WHERE worker_id IS NOT NULL;
+
+-- 호스트별 append-only 이벤트 (프로비저닝/배포/상태변경)
+CREATE TABLE host_events (
+    seq         BIGSERIAL PRIMARY KEY,
+    host_id     UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    event_type  TEXT NOT NULL,
+    -- 'provisioned' | 'grok_installed' | 'grok_upgraded'
+    -- | 'worker_started' | 'worker_stopped' | 'health_check'
+    -- | 'deploy_failed' | 'config_changed'
+    payload     JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
+```
+
+#### 레이아웃
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Hosts                                       [↻ Refresh]      │
+│ Infrastructure inventory & agent health                     │
+├─────────────────────────────────────────────────────────────┤
+│ METRIC CARDS                                                │
+│ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐            │
+│ │    4    │ │    3    │ │    1    │ │    0    │            │
+│ │ Total   │ │ Online  │ │ Ready   │ │ Failed  │            │
+│ │ hosts   │ │ workers │ │ to join │ │         │            │
+│ └─────────┘ └─────────┘ └─────────┘ └─────────┘            │
+├─────────────────────────────────────────────────────────────┤
+│ HOST TABLE                                                  │
+│ ┌─────────────────────────────────────────────────────────┐│
+│ │Host      │Grok    │Worker  │Status  │Region │History   ││
+│ │10.0.1.10 │0.2.112 │v0.1.0  │● online│ap-ne-2│[12 ev] → ││
+│ │10.0.1.11 │0.2.112 │v0.1.0  │● online│ap-ne-2│[8 ev]  → ││
+│ │10.0.2.20 │—       │—       │○ ready │us-west│[3 ev]  → ││
+│ │10.0.3.30 │0.2.103 │v0.1.0  │● online│ap-ne-2│[15 ev] → ││
+│ │10.0.4.40 │0.2.112 │—       │⚠ failed│us-east│[5 ev]  → ││
+│ └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 인터랙션
+
+| 요소              | 동작                                                |
+| ----------------- | --------------------------------------------------- |
+| Host 행 클릭      | `/hosts/:hostname` 상세 페이지 이동                 |
+| History [N ev] 클릭 | `/hosts/:hostname#events` 이벤트 섹션으로 스크롤    |
+| ↻ Refresh 버튼    | 즉시 폴링 트리거                                     |
+| Status pill       | online(green) / ready(amber) / failed(red) / unknown(gray) |
+| 데이터 갱신 주기  | 10s 폴링                                             |
+
+#### 빈 상태
+
+- No hosts: "No hosts in inventory. Provision one with `fleet provision`."
+- Grok 버전 없음: "—" (프로비저닝 전 또는 grok 미설치)
+
+---
+
+### 3.2.6 페이지 #2.6 — 호스트 상세 (Host Detail)
+
+**라우트**: `/hosts/:hostname`  **권한**: viewer+  **테마**: Dark
+
+**목적**: 단일 호스트의 전체 히스토리 — 프로비저닝, grok 설치/업그레이드,
+워커 시작/중지, 헬스체크 결과를 타임라인으로 표시.
+
+#### 레이아웃
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ ← Hosts / worker-ec1 (10.0.1.10)            [● online]      │
+├─────────────────────────────────────────────────────────────┤
+│ IDENTITY                                                    │
+│ [(icon)] worker-ec1                                         │
+│ 10.0.1.10 • ubuntu:22 • ap-northeast-2 • aarch64           │
+├─────────────────────────────────────────────────────────────┤
+│ SOFTWARE VERSIONS                                           │
+│ ┌─────────────────────┐ ┌──────────────────────┐            │
+│ │ grok CLI            │ │ fleet-worker         │            │
+│ │ 0.2.112             │ │ v0.1.0               │            │
+│ │ (installed 3d ago)  │ │ (running)            │            │
+│ └─────────────────────┘ └──────────────────────┘            │
+├─────────────────────────────────────────────────────────────┤
+│ WORKER REGISTRATION                                         │
+│ Worker ID: 16c3ab45-0f85-...  •  Circuit: closed           │
+│ Active tasks: 0/4  •  Last heartbeat: 3s ago               │
+├─────────────────────────────────────────────────────────────┤
+│ EVENT HISTORY (timeline)                                    │
+│ ┌─────────────────────────────────────────────────────────┐│
+│ │ 2026-07-27 14:30:12  ● worker_started                  ││
+│ │   fleet-worker systemd unit activated                   ││
+│ │ 2026-07-27 14:28:05  ● grok_upgraded                   ││
+│ │   0.2.103 → 0.2.112                                     ││
+│ │ 2026-07-27 14:15:33  ● provisioned                      ││
+│ │   SSH provisioning completed, worker.toml deployed      ││
+│ │ 2026-07-27 14:10:00  ● config_changed                   ││
+│ │   GLM-5.1 BYOK credentials rotated                     ││
+│ │ 2026-07-19 22:44:58  ● grok_installed                   ││
+│ │   grok CLI 0.2.103 installed via install.sh             ││
+│ └─────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 인터랙션
+
+| 요소              | 동작                                                |
+| ----------------- | --------------------------------------------------- |
+| ← 뒤로 버튼       | `/hosts` 목록으로 복귀                              |
+| Worker ID 링크    | `/workers/:id` 워커 상세로 이동                     |
+| Event 행 클릭     | JSON payload 인라인 확장                             |
+| Event 필터        | 타입별 필터 (provisioned/grok_*/worker_*/health_check) |
+| 데이터 갱신 주기  | 30s 폴링                                            |
+
+#### 데이터 수집 방식
+
+| 데이터            | 방법                              | 트리거                     |
+| ----------------- | --------------------------------- | -------------------------- |
+| grok 버전         | 하트비트에 `grok_version` 필드 추가 | 워커 하트비트 (15s)        |
+| fleet-worker 버전 | 하트비트에 `worker_version` 필드   | 워커 하트비트 (15s)        |
+| OS 정보           | 하트비트에 `os_info` 필드          | 워커 등록 시 1회           |
+| 프로비저닝 이력   | `fleet provision` 실행 시 `host_events` INSERT | 프로비저닝 실행 |
+| grok 설치 이력    | 프로비저닝 스크립트 실행 시 이벤트 기록 | 프로비저닝 시 1회    |
+
+> **하트비트 확장**: 현재 워커 하트비트는 load_avg, mem, disk만 전송.
+> `grok_version`, `fleet_worker_version`, `os_info` 필드를 추가하여
+> 별도 SSH 프로브 없이도 소프트웨어 버전을 추적.
 
 ---
 
@@ -999,7 +1183,24 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 **예상 LOC**: ~800
 
-### 10.3 P2 — 확장 (Phase 9.3+)
+### 10.3 P1.5 — 호스트 인벤토리 (Host Inventory)
+
+| 페이지                    | 이유                                                                 |
+| ------------------------- | -------------------------------------------------------------------- |
+| #2.5 호스트 인벤토리      | grok 설치 여부·버전 일관성, 미등록 호스트 발견                       |
+| #2.6 호스트 상세          | 호스트 단위 히스토리(프로비저닝/하트비트/장애) 타임라인, 일원화 진단 |
+
+**배경**: 기존 `workers` 테이블은 "등록된 워커"만 추적한다. 프로비저닝 직후·하트비트 끊김·grok 미설치 등 **호스트 단위 가시성**이 부족하여, P1.5에서 `hosts` + `host_events` 스키마를 신규 도입한다.
+
+**선행 작업**:
+
+1. 마이그레이션 `007_hosts.sql` (hosts, host_events 테이블 — §3.2.5 참조)
+2. fleet-worker 하트비트 확장: `grok_version` / `fleet_worker_version` / `os_info` 필드 전송
+3. fleet-provisioner 이벤트 훅: 프로비저닝 성공/실패 시 `host_events` INSERT
+
+**예상 LOC**: ~1,000 (스키마 + heartbeat 확장 + 페이지 2종 + API)
+
+### 10.4 P2 — 확장 (Phase 9.3+)
 
 | 페이지                | 이유                                       |
 | --------------------- | ------------------------------------------ |
@@ -1021,6 +1222,8 @@ crates/fleet-dashboard/
 │   ├── worker.html             # P1: Worker Detail (#2)
 │   ├── tasks.html              # P1: Task Queue (#3)
 │   ├── admin-users.html        # P1: User Mgmt (#6)
+│   ├── hosts.html              # P1.5: Host Inventory (#2.5)
+│   ├── host-detail.html        # P1.5: Host Detail (#2.6)
 │   ├── admin-audit.html        # P2: Audit Log (#7)
 │   ├── admin-tools.html        # P2: MCP Tools (#8)
 │   ├── styles/
