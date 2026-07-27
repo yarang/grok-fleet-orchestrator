@@ -359,7 +359,8 @@ fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
 
 /// grok CLI 버전 감지. `grok --version` 출력에서 추출.
 ///
-/// fleet-worker config의 grok 바이너리 경로를 사용. 실패 시 None.
+/// 출력 형식: `grok 0.2.103 (89c3d36fb6)`
+/// 두 번째 토큰(버전 번호)을 추출한다. 실패 시 None.
 fn detect_grok_version(grok_path: &str) -> Option<String> {
     let output = std::process::Command::new(grok_path)
         .arg("--version")
@@ -367,23 +368,23 @@ fn detect_grok_version(grok_path: &str) -> Option<String> {
         .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // grok --version 은 버전을 stdout 또는 stderr 로 출력할 수 있음.
     let combined = format!("{stdout}{stderr}");
-    // 버전 패턴: "grok 0.2.112" 또는 "0.2.112"
+
+    // 첫 번째 줄에서 버전 번호 패턴(x.y.z) 추출.
     let line = combined.lines().next()?;
-    // 첫 번째 토큰 그룹에서 숫자가 포함된 버전 문자열 추출.
-    let version_token = line.split_whitespace().last()?;
-    if version_token.chars().any(|c| c.is_ascii_digit()) {
-        Some(version_token.to_string())
-    } else {
-        // 마지막 토큰이 아니면 전체 라인에서 버전 추출 시도.
-        let v: String = line.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
-        if !v.is_empty() {
-            Some(v)
-        } else {
-            None
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+
+    // "grok 0.2.103 (89c3d36fb6)" → 두 번째 토큰이 버전.
+    for token in &tokens[1..] {
+        let clean = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        // 버전 패턴: 숫자로 시작하고 점을 포함.
+        if clean.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            && clean.contains('.')
+        {
+            return Some(clean.to_string());
         }
     }
+    None
 }
 
 /// OS 정보 수집 (sysinfo 사용).
