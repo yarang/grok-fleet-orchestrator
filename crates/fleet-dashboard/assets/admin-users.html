@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Users — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks">Tasks</a>
+      <a href="/hosts">Hosts</a>
+      <a href="/admin/users" class="active">Users</a>
+      <a href="/admin/audit">Audit</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <h1 class="page-title">User Management</h1>
+    <p class="page-subtitle">Manage dashboard users and their roles.</p>
+
+    <div id="user-table" class="table">
+      <div class="row header">
+        <div>Username</div><div>Email</div><div>Roles</div><div>Enabled</div><div>Last Login</div><div>Created</div>
+      </div>
+    </div>
+    <div id="empty-state" class="empty-state" style="display:none;">
+      <h3>No users found</h3>
+    </div>
+  </main>
+
+  <script>
+    async function fetchUsers() {
+      try {
+        const resp = await fetch('/api/users');
+        const users = await resp.json();
+        render(users);
+      } catch(e) { console.error('fetch users:', e); }
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleString();
+    }
+
+    function render(users) {
+      const table = document.getElementById('user-table');
+      const empty = document.getElementById('empty-state');
+
+      table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
+
+      if (!users || users.length === 0) {
+        empty.style.display = 'block';
+        table.style.display = 'none';
+        return;
+      }
+      empty.style.display = 'none';
+      table.style.display = 'grid';
+
+      for (const u of users) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML = `
+          <div style="font-weight:600;">${escapeHtml(u.username)}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(u.email||'—')}</div>
+          <div>${(u.roles||[]).map(r=>'<span class="badge badge-provisioned">'+escapeHtml(r)+'</span>').join(' ')||'—'}</div>
+          <div>${u.enabled ? '<span class="badge badge-online">enabled</span>' : '<span class="badge badge-failed">disabled</span>'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(u.last_login_at)}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(u.created_at)}</div>
+        `;
+        table.appendChild(row);
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    fetchUsers();
+
+    // SSE
+    const pill = document.getElementById('status-pill');
+    try {
+      const es = new EventSource('/api/events/stream');
+      es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
+      es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
+    } catch(e) {}
+
+    // 사용자 메뉴
+    fetch('/api/me').then(r=>r.json()).then(u=>{
+      document.getElementById('user-menu').innerHTML =
+        `<span>${u.username}</span> <button onclick="fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':getCookie('fleet_csrf')}}).then(()=>location='/login')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>`;
+    }).catch(()=>{});
+    function getCookie(n){const v=document.cookie.match('(^|;)\\s*'+n+'\\s*=\\s*([^;]+)');return v?v.pop():'';}
+  </script>
+</body>
+</html>

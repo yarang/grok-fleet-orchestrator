@@ -30,6 +30,7 @@ pub mod bootstrap_token;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod host;
 pub mod ids;
 pub mod task;
 pub mod worker;
@@ -51,4 +52,5 @@ pub use task::{
     FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,
     TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,
 };
-pub use worker::{CircuitState, Worker, WorkerFilter, WorkerHeartbeat, WorkerStatus};
+pub use worker::{CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat, WorkerStatus};
+pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus};

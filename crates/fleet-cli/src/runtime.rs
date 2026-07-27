@@ -853,7 +853,67 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
     };
 
     print_report(&report);
+
+    // 프로비저닝 결과를 오케스트레이터에 등록 (호스트 인벤토리).
+    if !args.dry_run {
+        if let Some(url) = &args.orchestrator_url {
+            register_host_with_orchestrator(
+                url,
+                &name,
+                host,
+                args.ssh_port.into(),
+                &args.user,
+                report.succeeded,
+                args.api_token.as_deref(),
+            )
+            .await;
+        }
+    }
+
     Ok(())
+}
+
+/// 프로비저닝 완료 후 오케스트레이터에 호스트를 등록 (best-effort).
+async fn register_host_with_orchestrator(
+    orchestrator_url: &str,
+    hostname: &str,
+    ssh_host: &str,
+    ssh_port: i32,
+    ssh_user: &str,
+    succeeded: bool,
+    api_token: Option<&str>,
+) {
+    let url = format!("{}/v1/hosts/register", orchestrator_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "hostname": hostname,
+        "ssh_host": ssh_host,
+        "ssh_port": ssh_port,
+        "ssh_user": ssh_user,
+        "succeeded": succeeded,
+        "message": if succeeded { "provisioning completed" } else { "provisioning failed" },
+    });
+
+    let client = reqwest::Client::new();
+    let mut req = client.post(&url).json(&body);
+    if let Some(token) = api_token {
+        req = req.bearer_auth(token);
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!(%hostname, "host registered with orchestrator");
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                status = %resp.status(),
+                %hostname,
+                "host registration returned non-OK (best-effort)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, %hostname, "host registration failed (best-effort)");
+        }
+    }
 }
 
 /// 인벤토리 파일 기반 일괄 프로비저닝.

@@ -1148,6 +1148,132 @@ impl Store for PgStore {
             .await?;
         Ok(result.rows_affected())
     }
+
+    // ── Host inventory (Phase P1.5) ───────────────────────────────────
+
+    async fn upsert_host(&self, host: &fleet_core::Host) -> Result<(), StoreError> {
+        let os_info_json = host
+            .os_info
+            .as_ref()
+            .map(|oi| serde_json::json!({
+                "os_type": oi.os_type,
+                "distro": oi.distro,
+                "kernel": oi.kernel,
+                "arch": oi.arch,
+                "hostname": oi.hostname,
+            }))
+            .unwrap_or(serde_json::json!({}));
+
+        let load_avg_json = if host.metrics.load_avg.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!(host.metrics.load_avg))
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO hosts (
+                id, hostname, worker_id, status,
+                ssh_host, ssh_port, ssh_user,
+                grok_version, fleet_worker_version, os_info,
+                load_avg, mem_available_mb, disk_free_mb,
+                last_heartbeat_at, provisioned_at, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+            ON CONFLICT (hostname) DO UPDATE SET
+                worker_id = EXCLUDED.worker_id,
+                status = EXCLUDED.status,
+                ssh_host = COALESCE(EXCLUDED.ssh_host, hosts.ssh_host),
+                ssh_port = EXCLUDED.ssh_port,
+                ssh_user = COALESCE(EXCLUDED.ssh_user, hosts.ssh_user),
+                grok_version = COALESCE(EXCLUDED.grok_version, hosts.grok_version),
+                fleet_worker_version = COALESCE(EXCLUDED.fleet_worker_version, hosts.fleet_worker_version),
+                os_info = EXCLUDED.os_info,
+                load_avg = COALESCE(EXCLUDED.load_avg, hosts.load_avg),
+                mem_available_mb = COALESCE(EXCLUDED.mem_available_mb, hosts.mem_available_mb),
+                disk_free_mb = COALESCE(EXCLUDED.disk_free_mb, hosts.disk_free_mb),
+                last_heartbeat_at = COALESCE(EXCLUDED.last_heartbeat_at, hosts.last_heartbeat_at),
+                provisioned_at = COALESCE(EXCLUDED.provisioned_at, hosts.provisioned_at)
+            "#,
+        )
+        .bind(host.id)
+        .bind(&host.hostname)
+        .bind(host.worker_id.map(|w| w.as_uuid()))
+        .bind(host.status.as_str())
+        .bind(&host.ssh_host)
+        .bind(host.ssh_port)
+        .bind(&host.ssh_user)
+        .bind(&host.grok_version)
+        .bind(&host.fleet_worker_version)
+        .bind(&os_info_json)
+        .bind(load_avg_json)
+        .bind(host.metrics.mem_available_mb.map(|v| v as i64))
+        .bind(host.metrics.disk_free_mb.map(|v| v as i64))
+        .bind(host.last_heartbeat_at)
+        .bind(host.provisioned_at)
+        .bind(host.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_host_by_hostname(&self, hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
+        let row = sqlx::query("SELECT * FROM hosts WHERE hostname = $1")
+            .bind(hostname)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| row_to_host(&r)).transpose()
+    }
+
+    async fn get_host_by_worker(&self, worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
+        let row = sqlx::query("SELECT * FROM hosts WHERE worker_id = $1")
+            .bind(worker_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| row_to_host(&r)).transpose()
+    }
+
+    async fn list_hosts(&self) -> Result<Vec<fleet_core::Host>, StoreError> {
+        let rows = sqlx::query("SELECT * FROM hosts ORDER BY created_at ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(|r| row_to_host(r)).collect()
+    }
+
+    async fn append_host_event(&self, event: &fleet_core::HostEvent) -> Result<(), StoreError> {
+        let payload_json = serde_json::to_value(&event.payload).unwrap_or(serde_json::json!({}));
+        sqlx::query(
+            r#"
+            INSERT INTO host_events (id, host_id, event_type, severity, message, payload, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(event.id)
+        .bind(event.host_id)
+        .bind(&event.event_type)
+        .bind(event.severity.as_str())
+        .bind(&event.message)
+        .bind(&payload_json)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_host_events(
+        &self,
+        host_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM host_events WHERE host_id = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(host_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(|r| row_to_host_event(r)).collect()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1343,4 +1469,102 @@ fn str_to_circuit_state(s: &str) -> Result<CircuitState, StoreError> {
             "unknown circuit state: {other}"
         ))),
     }
+}
+
+// ── Host 변환 헬퍼 ────────────────────────────────────────────────────
+
+fn row_to_host(row: &sqlx::postgres::PgRow) -> Result<fleet_core::Host, StoreError> {
+    use fleet_core::{HostMetrics, HostStatus};
+
+    let id: Uuid = row.try_get("id")?;
+    let hostname: String = row.try_get("hostname")?;
+    let worker_id: Option<Uuid> = row.try_get("worker_id")?;
+    let status_str: String = row.try_get("status")?;
+    let status = HostStatus::parse(&status_str)
+        .ok_or_else(|| StoreError::Decode(format!("unknown host status: {status_str}")))?;
+    let ssh_host: Option<String> = row.try_get("ssh_host")?;
+    let ssh_port: i32 = row.try_get("ssh_port").unwrap_or(22);
+    let ssh_user: Option<String> = row.try_get("ssh_user")?;
+    let grok_version: Option<String> = row.try_get("grok_version")?;
+    let fleet_worker_version: Option<String> = row.try_get("fleet_worker_version")?;
+
+    let os_info_json: serde_json::Value = row.try_get("os_info").unwrap_or(serde_json::json!({}));
+    let os_info = if os_info_json.is_null() || os_info_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+        None
+    } else {
+        Some(fleet_core::OsInfo {
+            os_type: os_info_json.get("os_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            distro: os_info_json.get("distro").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            kernel: os_info_json.get("kernel").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            arch: os_info_json.get("arch").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            hostname: os_info_json.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        })
+    };
+
+    let load_avg_json: Option<serde_json::Value> = row.try_get("load_avg").unwrap_or(None);
+    let load_avg: Vec<f32> = load_avg_json
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+        .unwrap_or_default();
+
+    let mem_available_mb: Option<i64> = row.try_get("mem_available_mb").unwrap_or(None);
+    let disk_free_mb: Option<i64> = row.try_get("disk_free_mb").unwrap_or(None);
+
+    let last_heartbeat_at: Option<chrono::DateTime<Utc>> = row.try_get("last_heartbeat_at")?;
+    let provisioned_at: Option<chrono::DateTime<Utc>> = row.try_get("provisioned_at")?;
+    let created_at: chrono::DateTime<Utc> = row.try_get("created_at")?;
+    let updated_at: chrono::DateTime<Utc> = row.try_get("updated_at")?;
+
+    Ok(fleet_core::Host {
+        id,
+        hostname,
+        worker_id: worker_id.map(WorkerId::from),
+        status,
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        grok_version,
+        fleet_worker_version,
+        os_info,
+        metrics: HostMetrics {
+            load_avg,
+            mem_available_mb: mem_available_mb.map(|v| v as u64),
+            disk_free_mb: disk_free_mb.map(|v| v as u64),
+        },
+        last_heartbeat_at,
+        provisioned_at,
+        created_at,
+        updated_at,
+    })
+}
+
+fn row_to_host_event(row: &sqlx::postgres::PgRow) -> Result<fleet_core::HostEvent, StoreError> {
+    use fleet_core::{EventSeverity, HostEvent};
+
+    let id: Uuid = row.try_get("id")?;
+    let host_id: Uuid = row.try_get("host_id")?;
+    let event_type: String = row.try_get("event_type")?;
+    let severity_str: String = row.try_get("severity")?;
+    let severity = match severity_str.as_str() {
+        "info" => EventSeverity::Info,
+        "warn" => EventSeverity::Warn,
+        "error" => EventSeverity::Error,
+        other => return Err(StoreError::Decode(format!("unknown event severity: {other}"))),
+    };
+    let message: Option<String> = row.try_get("message")?;
+    let payload_json: serde_json::Value = row.try_get("payload").unwrap_or(serde_json::json!({}));
+    let payload: std::collections::HashMap<String, serde_json::Value> =
+        serde_json::from_value(payload_json).unwrap_or_default();
+    let created_at: chrono::DateTime<Utc> = row.try_get("created_at")?;
+
+    Ok(HostEvent {
+        id,
+        host_id,
+        event_type,
+        severity,
+        message,
+        payload,
+        created_at,
+    })
 }

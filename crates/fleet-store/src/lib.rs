@@ -371,6 +371,45 @@ pub trait Store: Send + Sync {
     ) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("delete_worker_credential"))
     }
+
+    // ── Host inventory (Phase P1.5) ───────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — mock store (테스트용)는 host 기능이 필요 없음.
+    // PgStore만 실제 구현.
+
+    /// 호스트를 upsert (hostname 기준). 동일 hostname이 존재하면 갱신.
+    async fn upsert_host(&self, _host: &fleet_core::Host) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("upsert_host"))
+    }
+
+    /// hostname으로 호스트 조회.
+    async fn get_host_by_hostname(&self, _hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
+        Err(StoreError::Unsupported("get_host_by_hostname"))
+    }
+
+    /// worker_id로 호스트 조회.
+    async fn get_host_by_worker(&self, _worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
+        Err(StoreError::Unsupported("get_host_by_worker"))
+    }
+
+    /// 모든 호스트 목록 조회 (생성일순).
+    async fn list_hosts(&self) -> Result<Vec<fleet_core::Host>, StoreError> {
+        Err(StoreError::Unsupported("list_hosts"))
+    }
+
+    /// 호스트 이벤트 추가 (타임라인).
+    async fn append_host_event(&self, _event: &fleet_core::HostEvent) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("append_host_event"))
+    }
+
+    /// 특정 호스트의 이벤트 목록 (최신순, limit 제한).
+    async fn list_host_events(
+        &self,
+        _host_id: uuid::Uuid,
+        _limit: u32,
+    ) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
+        Err(StoreError::Unsupported("list_host_events"))
+    }
 }
 
 /// DB에 저장된 자격 증명 행. api_key는 암호화된 상태로 반환됨.

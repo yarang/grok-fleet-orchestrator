@@ -88,3 +88,136 @@ pub struct TaskSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<TokenStats>,
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Host inventory (P1.5)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `/api/hosts` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSummary {
+    pub id: String,
+    pub hostname: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_worker_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provisioned_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `/api/hosts/:hostname` 상세 응답.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostDetail {
+    #[serde(flatten)]
+    pub summary: HostSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host: Option<String>,
+    pub ssh_port: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
+    #[serde(default)]
+    pub os_info: Option<OsInfoSummary>,
+    #[serde(default)]
+    pub metrics: HostMetricsSummary,
+    #[serde(default)]
+    pub events: Vec<HostEventSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OsInfoSummary {
+    #[serde(default)]
+    pub os_type: String,
+    #[serde(default)]
+    pub distro: String,
+    #[serde(default)]
+    pub kernel: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub hostname: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HostMetricsSummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub load_avg: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_available_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_mb: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostEventSummary {
+    pub id: String,
+    pub event_type: String,
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Worker detail (P1)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `/api/workers/:id` 상세 응답.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerDetail {
+    #[serde(flatten)]
+    pub summary: WorkerSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_version: Option<String>,
+    /// 최근 태스크 (limit 20).
+    #[serde(default)]
+    pub recent_tasks: Vec<TaskSummary>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  User management (P1)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `/api/users` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSummary {
+    pub id: String,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub roles: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Audit log (P2)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `/api/audit` 배열 요소 (이벤트 로그 확장).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}

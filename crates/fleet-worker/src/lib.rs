@@ -40,6 +40,10 @@ pub use join::JoinArgs;
 pub use registration::RegistrationClient;
 pub use runner::WorkerRunner;
 
+/// 현재 실행 중인 grok 세션 수. heartbeat의 active_tasks에 사용.
+/// GrokRunner가 세션을 시작/종료할 때 이 값을 증감한다.
+pub static ACTIVE_SESSIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// tracing-subscriber 초기화. 환경변수 `RUST_LOG`가 없으면 `info` 레벨 적용.
 pub fn init_tracing() {
     use tracing_subscriber::EnvFilter;

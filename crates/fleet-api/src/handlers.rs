@@ -19,8 +19,8 @@ use crate::error::ApiError;
 use crate::schema::{
     BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
     CredentialSummary, DeregisterRequest, ExportedCredential, HealthResponse, HeartbeatRequest,
-    HeartbeatResponse, JoinRequest, JoinResponse, PutCredentialRequest, PutCredentialResponse,
-    RegisterRequest, RegisterResponse, WorkerSummary,
+    HeartbeatResponse, HostRegisterRequest, HostRegisterResponse, JoinRequest, JoinResponse,
+    PutCredentialRequest, PutCredentialResponse, RegisterRequest, RegisterResponse, WorkerSummary,
 };
 
 /// `GET /v1/health` — 단순 헬스 프로브.
@@ -145,6 +145,15 @@ pub async fn heartbeat(
         mem_available_mb: req.mem_available_mb,
         disk_free_mb: req.disk_free_mb,
         agent_healthy: req.agent_healthy,
+        grok_version: req.grok_version.clone(),
+        fleet_worker_version: req.fleet_worker_version.clone(),
+        os_info: req.os_info.as_ref().map(|oi| fleet_core::OsInfo {
+            os_type: oi.os_type.clone(),
+            distro: oi.distro.clone(),
+            kernel: oi.kernel.clone(),
+            arch: oi.arch.clone(),
+            hostname: oi.hostname.clone(),
+        }),
     };
     state.store.update_worker_heartbeat(worker_id, &hb).await?;
 
@@ -175,12 +184,103 @@ pub async fn heartbeat(
         })
         .await;
 
+    // 호스트 인벤토리 동기화 — heartbeat로 수신된 버전/OS 정보를 hosts 테이블에 upsert.
+    // 워커 name을 hostname으로 사용.
+    let hostname = hb.os_info.as_ref()
+        .filter(|oi| !oi.hostname.is_empty())
+        .map(|oi| oi.hostname.clone())
+        .unwrap_or_else(|| worker.name.clone());
+    let host = fleet_core::Host {
+        id: uuid::Uuid::new_v4(),
+        hostname,
+        worker_id: Some(worker_id),
+        status: fleet_core::HostStatus::Online,
+        ssh_host: None,
+        ssh_port: 22,
+        ssh_user: None,
+        grok_version: req.grok_version.clone(),
+        fleet_worker_version: req.fleet_worker_version.clone(),
+        os_info: hb.os_info.clone(),
+        metrics: fleet_core::HostMetrics {
+            load_avg: req.load_avg.clone(),
+            mem_available_mb: Some(req.mem_available_mb),
+            disk_free_mb: Some(req.disk_free_mb),
+        },
+        last_heartbeat_at: Some(Utc::now()),
+        provisioned_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let _ = state.store.upsert_host(&host).await;
+
     debug!(%worker_id, active = req.active_tasks, healthy = req.agent_healthy, "heartbeat");
 
     Ok(Json(HeartbeatResponse {
         ok: true,
         desired_state: "running",
         server_time: Utc::now(),
+    }))
+}
+
+/// `POST /v1/hosts/register` — 프로비저닝 완료 후 CLI가 호출하여 호스트를 등록.
+///
+/// 호스트를 upsert하고 프로비저닝 결과를 host_events에 기록한다.
+pub async fn register_host(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HostRegisterRequest>,
+) -> Result<Json<HostRegisterResponse>, ApiError> {
+    let host_id = uuid::Uuid::new_v4();
+    let now = Utc::now();
+
+    let host = fleet_core::Host {
+        id: host_id,
+        hostname: req.hostname.clone(),
+        worker_id: None,
+        status: if req.succeeded {
+            fleet_core::HostStatus::Provisioned
+        } else {
+            fleet_core::HostStatus::Failed
+        },
+        ssh_host: Some(req.ssh_host.clone()),
+        ssh_port: req.ssh_port,
+        ssh_user: Some(req.ssh_user.clone()),
+        grok_version: None,
+        fleet_worker_version: None,
+        os_info: None,
+        metrics: fleet_core::HostMetrics::default(),
+        last_heartbeat_at: None,
+        provisioned_at: if req.succeeded { Some(now) } else { None },
+        created_at: now,
+        updated_at: now,
+    };
+
+    state.store.upsert_host(&host).await?;
+
+    // 프로비저닝 이벤트 기록.
+    let event = fleet_core::HostEvent {
+        id: uuid::Uuid::new_v4(),
+        host_id,
+        event_type: if req.succeeded {
+            "provision_ok".to_string()
+        } else {
+            "provision_fail".to_string()
+        },
+        severity: if req.succeeded {
+            fleet_core::EventSeverity::Info
+        } else {
+            fleet_core::EventSeverity::Error
+        },
+        message: req.message.clone(),
+        payload: std::collections::HashMap::new(),
+        created_at: now,
+    };
+    let _ = state.store.append_host_event(&event).await;
+
+    debug!(hostname = %req.hostname, succeeded = req.succeeded, "host registered");
+
+    Ok(Json(HostRegisterResponse {
+        ok: true,
+        host_id: host_id.to_string(),
     }))
 }
 

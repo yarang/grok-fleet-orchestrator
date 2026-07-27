@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hosts — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks">Tasks</a>
+      <a href="/hosts" class="active">Hosts</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/audit">Audit</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <h1 class="page-title">Host Inventory</h1>
+    <p class="page-subtitle">All hosts in your infrastructure — registered workers, provisioned machines, and their grok status.</p>
+
+    <div id="host-table" class="table">
+      <div class="row header">
+        <div>Hostname</div><div>Status</div><div>Worker</div><div>grok</div><div>Worker Ver</div><div>OS</div><div>Arch</div><div>Last Heartbeat</div>
+      </div>
+    </div>
+    <div id="empty-state" class="empty-state" style="display:none;">
+      <h3>No hosts registered</h3>
+      <p>Hosts appear after provisioning or when a worker registers with heartbeat data.</p>
+    </div>
+  </main>
+
+  <script>
+    async function fetchHosts() {
+      try {
+        const resp = await fetch('/api/hosts');
+        const hosts = await resp.json();
+        render(hosts);
+      } catch(e) { console.error('fetch hosts:', e); }
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      const now = new Date();
+      const diff = (now - d) / 1000;
+      if (diff < 60) return Math.floor(diff)+'s ago';
+      if (diff < 3600) return Math.floor(diff/60)+'m ago';
+      if (diff < 86400) return Math.floor(diff/3600)+'h ago';
+      return d.toLocaleDateString();
+    }
+
+    function grokBadge(version) {
+      if (!version) return '<span style="color:var(--err);font-size:13px;">not installed</span>';
+      return '<span style="color:var(--ok);font-size:13px;">'+version+'</span>';
+    }
+
+    function render(hosts) {
+      const table = document.getElementById('host-table');
+      const empty = document.getElementById('empty-state');
+
+      table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
+
+      if (!hosts || hosts.length === 0) {
+        empty.style.display = 'block';
+        table.style.display = 'none';
+        return;
+      }
+      empty.style.display = 'none';
+      table.style.display = 'grid';
+
+      for (const h of hosts) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.style.cursor = 'pointer';
+        row.onclick = () => window.location.href = '/hosts/' + encodeURIComponent(h.hostname);
+        row.innerHTML = `
+          <div style="font-weight:600;">${escapeHtml(h.hostname)}</div>
+          <div><span class="badge badge-${h.status}">${h.status}</span></div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${h.worker_name||'—'}</div>
+          <div>${grokBadge(h.grok_version)}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${h.fleet_worker_version||'—'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${h.os_type||'—'}</div>
+          <div style="font-size:13px;font-family:var(--font-mono);">${h.arch||'—'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(h.last_heartbeat_at)}</div>
+        `;
+        table.appendChild(row);
+      }
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    fetchHosts();
+    setInterval(fetchHosts, 10000);
+
+    // SSE
+    const pill = document.getElementById('status-pill');
+    try {
+      const es = new EventSource('/api/events/stream');
+      es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
+      es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
+    } catch(e) {}
+
+    // 사용자 메뉴
+    fetch('/api/me').then(r=>r.json()).then(u=>{
+      document.getElementById('user-menu').innerHTML =
+        `<span>${u.username}</span> <button onclick="fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':getCookie('fleet_csrf')}}).then(()=>location='/login')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>`;
+    }).catch(()=>{});
+    function getCookie(n){const v=document.cookie.match('(^|;)\\s*'+n+'\\s*=\\s*([^;]+)');return v?v.pop():'';}
+  </script>
+</body>
+</html>

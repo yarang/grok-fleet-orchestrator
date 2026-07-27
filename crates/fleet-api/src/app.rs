@@ -148,6 +148,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 
     let v1 = Router::new()
         .route("/health", get(handlers::health))
+        .route("/hosts/register", post(handlers::register_host))
         .nest("/workers", api_routes)
         .nest("/bootstrap-tokens", token_routes);
 

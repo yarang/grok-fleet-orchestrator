@@ -60,10 +60,58 @@ pub struct HeartbeatRequest {
     pub disk_free_mb: u64,
     #[serde(default = "default_true")]
     pub agent_healthy: bool,
+    /// grok CLI 버전.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_version: Option<String>,
+    /// fleet-worker 버전.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_worker_version: Option<String>,
+    /// OS 정보.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_info: Option<ApiOsInfo>,
+}
+
+/// heartbeat 요청용 OS 정보.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ApiOsInfo {
+    #[serde(default)]
+    pub os_type: String,
+    #[serde(default)]
+    pub distro: String,
+    #[serde(default)]
+    pub kernel: String,
+    #[serde(default)]
+    pub arch: String,
+    #[serde(default)]
+    pub hostname: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// `POST /v1/hosts/register` 요청 — 프로비저닝 완료 후 CLI가 호출.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HostRegisterRequest {
+    pub hostname: String,
+    pub ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    pub ssh_port: i32,
+    pub ssh_user: String,
+    pub succeeded: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+fn default_ssh_port() -> i32 {
+    22
+}
+
+/// `POST /v1/hosts/register` 응답.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostRegisterResponse {
+    pub ok: bool,
+    pub host_id: String,
 }
 
 /// `POST /v1/workers/heartbeat` 응답.

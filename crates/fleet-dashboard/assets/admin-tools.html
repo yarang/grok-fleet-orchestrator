@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCP Tools — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks">Tasks</a>
+      <a href="/hosts">Hosts</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/audit">Audit</a>
+      <a href="/admin/tools" class="active">Tools</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <h1 class="page-title">MCP Tools Explorer</h1>
+    <p class="page-subtitle">Available MCP tools for AI clients to interact with the fleet.</p>
+
+    <div id="tools-grid" class="detail-grid"></div>
+  </main>
+
+  <script>
+    async function fetchTools() {
+      try {
+        const resp = await fetch('/api/tools');
+        const data = await resp.json();
+        render(data.tools || []);
+      } catch(e) { console.error('fetch tools:', e); }
+    }
+
+    function render(tools) {
+      const grid = document.getElementById('tools-grid');
+      grid.innerHTML = tools.map(t => `
+        <div class="detail-item" style="cursor:default;">
+          <div class="label" style="font-family:var(--font-mono);color:var(--primary);">${escapeHtml(t.name)}</div>
+          <div class="value" style="font-size:14px;font-weight:400;">${escapeHtml(t.description)}</div>
+        </div>
+      `).join('');
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    fetchTools();
+
+    // SSE
+    const pill = document.getElementById('status-pill');
+    try {
+      const es = new EventSource('/api/events/stream');
+      es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
+      es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
+    } catch(e) {}
+
+    // 사용자 메뉴
+    fetch('/api/me').then(r=>r.json()).then(u=>{
+      document.getElementById('user-menu').innerHTML =
+        `<span>${u.username}</span> <button onclick="fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':getCookie('fleet_csrf')}}).then(()=>location='/login')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>`;
+    }).catch(()=>{});
+    function getCookie(n){const v=document.cookie.match('(^|;)\\s*'+n+'\\s*=\\s*([^;]+)');return v?v.pop():'';}
+  </script>
+</body>
+</html>

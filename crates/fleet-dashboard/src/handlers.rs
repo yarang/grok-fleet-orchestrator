@@ -277,6 +277,311 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  P1/P1.5/P2 페이지 + API 핸들러
+// ═══════════════════════════════════════════════════════════════════════
+
+use axum::extract::Path;
+use crate::schema::{
+    HostDetail, HostEventSummary, HostMetricsSummary, HostSummary,
+    OsInfoSummary, UserSummary, WorkerDetail,
+};
+
+/// 임베드된 HTML 페이지를 반환하는 헬퍼.
+fn serve_page(name: &str) -> Response {
+    match crate::assets::Asset::get(name) {
+        Some(file) => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "page not built").into_response(),
+    }
+}
+
+// ── P1: Task Queue ───────────────────────────────────────────────────
+
+/// GET /tasks — 태스크 큐 HTML 페이지.
+pub async fn task_queue_page() -> Response {
+    serve_page("tasks.html")
+}
+
+// ── P1: Worker Detail ────────────────────────────────────────────────
+
+/// GET /workers/:id — 워커 상세 HTML 페이지.
+pub async fn worker_detail_page(Path(_id): Path<String>) -> Response {
+    serve_page("worker-detail.html")
+}
+
+/// GET /api/workers/:id — 워커 상세 JSON API.
+pub async fn get_worker_detail(
+    State(state): State<Arc<DashboardState>>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkerDetail>, StatusCode> {
+    let worker_id: fleet_core::WorkerId = id
+        .parse()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let worker = state
+        .store
+        .get_worker(worker_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_worker_detail: failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let summary = worker_to_summary(&worker);
+
+    // 최근 태스크 조회 (이 워커가 처리한 것).
+    let tasks = state
+        .store
+        .list_tasks(&TaskFilter {
+            limit: 20,
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_worker_detail: list_tasks failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let recent_tasks: Vec<TaskSummary> = tasks
+        .iter()
+        .filter(|t| match &t.status {
+            TaskStatus::Dispatched { worker_id: w, .. } => w.to_string() == id,
+            TaskStatus::Completed(r) => r.worker_id.to_string() == id,
+            TaskStatus::Failed(f) => f.worker_id.map(|w| w.to_string()) == Some(id.clone()),
+            _ => false,
+        })
+        .map(task_to_summary)
+        .collect();
+
+    Ok(Json(WorkerDetail {
+        summary,
+        worker_version: worker.worker_version.clone(),
+        recent_tasks,
+    }))
+}
+
+// ── P1: User Management ──────────────────────────────────────────────
+
+/// GET /admin/users — 사용자 관리 HTML 페이지.
+pub async fn admin_users_page() -> Response {
+    serve_page("admin-users.html")
+}
+
+/// GET /api/users — 사용자 목록 JSON API.
+pub async fn list_users_api(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<Vec<UserSummary>>, StatusCode> {
+    let users = state.store.list_users().await.map_err(|e| {
+        tracing::error!(error = %e, "list_users failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut summaries = Vec::with_capacity(users.len());
+    for u in &users {
+        let roles = state.store.list_user_roles(u.id).await.unwrap_or_default();
+        summaries.push(UserSummary {
+            id: u.id.to_string(),
+            username: u.username.clone(),
+            email: u.email.clone(),
+            enabled: u.enabled,
+            roles: roles.iter().map(|r| r.name.clone()).collect(),
+            created_at: u.created_at,
+            last_login_at: u.last_login_at,
+        });
+    }
+    Ok(Json(summaries))
+}
+
+// ── P1.5: Host Inventory ─────────────────────────────────────────────
+
+/// GET /hosts — 호스트 인벤토리 HTML 페이지.
+pub async fn host_inventory_page() -> Response {
+    serve_page("hosts.html")
+}
+
+/// GET /hosts/:hostname — 호스트 상세 HTML 페이지.
+pub async fn host_detail_page(Path(_hostname): Path<String>) -> Response {
+    serve_page("host-detail.html")
+}
+
+/// GET /api/hosts — 호스트 목록 JSON API.
+pub async fn list_hosts_api(
+    State(state): State<Arc<DashboardState>>,
+) -> Result<Json<Vec<HostSummary>>, StatusCode> {
+    let hosts = state.store.list_hosts().await.map_err(|e| {
+        tracing::error!(error = %e, "list_hosts failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // 워커 이름 해결을 위해 워커 목록 조회.
+    let workers = state
+        .store
+        .list_workers(&WorkerFilter::default())
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_hosts_api: list_workers failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let summaries = hosts
+        .iter()
+        .map(|h| {
+            let worker_name = h
+                .worker_id
+                .and_then(|wid| workers.iter().find(|w| w.id == wid))
+                .map(|w| w.name.clone());
+            host_to_summary(h, worker_name)
+        })
+        .collect();
+    Ok(Json(summaries))
+}
+
+/// GET /api/hosts/:hostname — 호스트 상세 JSON API.
+pub async fn get_host_detail_api(
+    State(state): State<Arc<DashboardState>>,
+    Path(hostname): Path<String>,
+) -> Result<Json<HostDetail>, StatusCode> {
+    let host = state
+        .store
+        .get_host_by_hostname(&hostname)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_host_detail: failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let events = state
+        .store
+        .list_host_events(host.id, 50)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_host_detail: list_events failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let worker_name = if let Some(wid) = host.worker_id {
+        state.store.get_worker(wid).await.ok().flatten().map(|w| w.name)
+    } else {
+        None
+    };
+
+    let summary = host_to_summary(&host, worker_name);
+    let os_info = host.os_info.as_ref().map(|oi| OsInfoSummary {
+        os_type: oi.os_type.clone(),
+        distro: oi.distro.clone(),
+        kernel: oi.kernel.clone(),
+        arch: oi.arch.clone(),
+        hostname: oi.hostname.clone(),
+    });
+
+    let event_summaries: Vec<HostEventSummary> = events
+        .iter()
+        .map(|e| HostEventSummary {
+            id: e.id.to_string(),
+            event_type: e.event_type.clone(),
+            severity: e.severity.as_str().to_string(),
+            message: e.message.clone(),
+            created_at: e.created_at,
+        })
+        .collect();
+
+    Ok(Json(HostDetail {
+        summary,
+        ssh_host: host.ssh_host.clone(),
+        ssh_port: host.ssh_port,
+        ssh_user: host.ssh_user.clone(),
+        os_info,
+        metrics: HostMetricsSummary {
+            load_avg: host.metrics.load_avg.clone(),
+            mem_available_mb: host.metrics.mem_available_mb,
+            disk_free_mb: host.metrics.disk_free_mb,
+        },
+        events: event_summaries,
+    }))
+}
+
+fn host_to_summary(h: &fleet_core::Host, worker_name: Option<String>) -> HostSummary {
+    HostSummary {
+        id: h.id.to_string(),
+        hostname: h.hostname.clone(),
+        status: h.status.as_str().to_string(),
+        worker_id: h.worker_id.map(|w| w.to_string()),
+        worker_name,
+        grok_version: h.grok_version.clone(),
+        fleet_worker_version: h.fleet_worker_version.clone(),
+        os_type: h.os_info.as_ref().map(|oi| oi.os_type.clone()),
+        arch: h.os_info.as_ref().map(|oi| oi.arch.clone()),
+        last_heartbeat_at: h.last_heartbeat_at,
+        provisioned_at: h.provisioned_at,
+        created_at: h.created_at,
+    }
+}
+
+// ── P2: Audit Log ────────────────────────────────────────────────────
+
+/// GET /admin/audit — 감사 로그 HTML 페이지.
+pub async fn admin_audit_page() -> Response {
+    serve_page("admin-audit.html")
+}
+
+/// GET /api/audit — 감사 로그 JSON API.
+pub async fn list_audit_api(
+    State(state): State<Arc<DashboardState>>,
+    Query(q): Query<ListEventsQuery>,
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    let events = state
+        .store
+        .list_events(q.after_seq, q.limit)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_audit failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // EventEntry { seq, event: FleetEvent }를 JSON으로 직렬화.
+    // FleetEvent는 #[serde(tag = "type")]으로 태그되어 있어,
+    // type 필드에서 이벤트 종류를 알 수 있다.
+    let entries = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "seq": e.seq,
+                "event": e.event,
+            })
+        })
+        .collect();
+    Ok(Json(entries))
+}
+
+// ── P2: MCP Tools Explorer ───────────────────────────────────────────
+
+/// GET /admin/tools — MCP 도구 탐색기 HTML 페이지.
+pub async fn admin_tools_page() -> Response {
+    serve_page("admin-tools.html")
+}
+
+/// GET /api/tools — MCP 도구 목록 JSON API.
+pub async fn list_tools_api() -> Json<serde_json::Value> {
+    // MCP 도구는 정적 카탈로그 (fleet-mcp에서 정의된 7개 도구).
+    Json(serde_json::json!({
+        "tools": [
+            {"name": "submit_task", "description": "Submit a new task to the fleet"},
+            {"name": "get_task_status", "description": "Check task status by ID"},
+            {"name": "wait_for_task", "description": "Wait for task completion"},
+            {"name": "cancel_task", "description": "Cancel a running task"},
+            {"name": "list_workers", "description": "List all registered workers"},
+            {"name": "stream_task_output", "description": "Stream task output in real-time"},
+            {"name": "collect_results", "description": "Collect completed task results"},
+        ]
+    }))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  인증 핸들러 (Phase 9.1.2)
 // ═══════════════════════════════════════════════════════════════════════
 

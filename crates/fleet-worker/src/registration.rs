@@ -31,6 +31,8 @@ use crate::config::WorkerConfig;
 use crate::error::WorkerError;
 use crate::grok_process;
 
+use std::sync::OnceLock;
+
 /// orchestrator와 통신하는 HTTP 클라이언트.
 pub struct RegistrationClient {
     config: Arc<WorkerConfig>,
@@ -39,6 +41,10 @@ pub struct RegistrationClient {
     worker_id: tokio::sync::Mutex<Option<String>>,
     /// 디스크 여유 공간 캐시. blocking syscall을 피하기 위해 백그라운드 수집 + TTL 캐싱.
     disk_cache: Arc<DiskCache>,
+    /// grok CLI 버전 (변하지 않으므로 최초 1회만 수집).
+    grok_version: OnceLock<Option<String>>,
+    /// OS 정보 (변하지 않으므로 최초 1회만 수집).
+    os_info: OnceLock<Option<WorkerOsInfo>>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -73,6 +79,22 @@ struct HeartbeatRequest {
     mem_available_mb: Option<u64>,
     disk_free_mb: Option<u64>,
     agent_healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grok_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fleet_worker_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_info: Option<WorkerOsInfo>,
+}
+
+/// heartbeat 요청용 OS 정보 (fleet-core::OsInfo와 동일 구조).
+#[derive(Debug, Clone, Serialize)]
+struct WorkerOsInfo {
+    os_type: String,
+    distro: String,
+    kernel: String,
+    arch: String,
+    hostname: String,
 }
 
 /// `DELETE /v1/workers/:id` 요청.
@@ -93,6 +115,8 @@ impl RegistrationClient {
             http,
             worker_id: tokio::sync::Mutex::new(None),
             disk_cache: Arc::new(DiskCache::new()),
+            grok_version: OnceLock::new(),
+            os_info: OnceLock::new(),
         })
     }
 
@@ -172,6 +196,12 @@ impl RegistrationClient {
         // blocking syscall을 heartbeat 루프에서 분리하여 런타임 블로킹 방지.
         let disk_free_mb = self.disk_cache.get_or_schedule_refresh();
 
+        // grok 버전 — 캐시된 값 사용 (변하지 않으므로 최초 1회만 수집).
+        let grok_version = self.grok_version.get_or_init(|| self.detect_version()).clone();
+
+        // OS 정보 — 캐시된 값 사용 (변하지 않으므로 최초 1회만 수집).
+        let os_info = self.os_info.get_or_init(|| self.collect_system_info()).clone();
+
         let body = HeartbeatRequest {
             worker_id,
             active_tasks,
@@ -179,6 +209,9 @@ impl RegistrationClient {
             mem_available_mb,
             disk_free_mb,
             agent_healthy,
+            grok_version,
+            fleet_worker_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            os_info,
         };
 
         let url = format!(
@@ -280,6 +313,17 @@ impl RegistrationClient {
     pub async fn worker_id(&self) -> Option<String> {
         self.worker_id.lock().await.clone()
     }
+
+    /// grok CLI 버전을 감지하여 반환 (최초 1회만 실행, 이후 캐시).
+    fn detect_version(&self) -> Option<String> {
+        let grok_path = &self.config.grok.bin;
+        detect_grok_version(grok_path)
+    }
+
+    /// OS 정보를 수집하여 반환 (최초 1회만 실행, 이후 캐시).
+    fn collect_system_info(&self) -> Option<WorkerOsInfo> {
+        Some(collect_os_info())
+    }
 }
 
 /// 시스템 메트릭 수집 (sysinfo 사용).
@@ -288,7 +332,7 @@ impl RegistrationClient {
 /// `disk_free_mb`는 blocking syscall이며 환경에 따라 수 초가 소요될 수 있으므로
 /// `DiskCache`를 통해 백그라운드에서 비동기 수집 및 캐싱.
 ///
-/// active_tasks는 현재 0 (grok에게 위임). Phase 8 후반에서 실제 카운트 추가.
+/// active_tasks는 fleet-worker가 관리하는 실행 중인 세션 카운터를 반환.
 fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
     use sysinfo::System;
 
@@ -307,7 +351,58 @@ fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
 
     let mem_available_mb = sys.available_memory() / 1024; // KiB → MiB
 
-    (Some(load_vec), Some(mem_available_mb), 0)
+    // active_tasks: 전역 세션 카운터에서 가져옴.
+    let active_tasks = crate::ACTIVE_SESSIONS.load(std::sync::atomic::Ordering::Relaxed);
+
+    (Some(load_vec), Some(mem_available_mb), active_tasks)
+}
+
+/// grok CLI 버전 감지. `grok --version` 출력에서 추출.
+///
+/// fleet-worker config의 grok 바이너리 경로를 사용. 실패 시 None.
+fn detect_grok_version(grok_path: &str) -> Option<String> {
+    let output = std::process::Command::new(grok_path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // grok --version 은 버전을 stdout 또는 stderr 로 출력할 수 있음.
+    let combined = format!("{stdout}{stderr}");
+    // 버전 패턴: "grok 0.2.112" 또는 "0.2.112"
+    let line = combined.lines().next()?;
+    // 첫 번째 토큰 그룹에서 숫자가 포함된 버전 문자열 추출.
+    let version_token = line.split_whitespace().last()?;
+    if version_token.chars().any(|c| c.is_ascii_digit()) {
+        Some(version_token.to_string())
+    } else {
+        // 마지막 토큰이 아니면 전체 라인에서 버전 추출 시도.
+        let v: String = line.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+        if !v.is_empty() {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+/// OS 정보 수집 (sysinfo 사용).
+fn collect_os_info() -> WorkerOsInfo {
+    use sysinfo::System;
+
+    let os_type = System::name().unwrap_or_default();
+    let distro = System::long_os_version().unwrap_or_default();
+    let kernel = System::kernel_version().unwrap_or_default();
+    let arch = std::env::consts::ARCH.to_string();
+    let hostname = System::host_name().unwrap_or_default();
+
+    WorkerOsInfo {
+        os_type,
+        distro,
+        kernel,
+        arch,
+        hostname,
+    }
 }
 
 /// 디스크 여유 공간 수집 (blocking).

@@ -65,12 +65,29 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
 
     let protected = Router::new()
         .route("/", get(handlers::index))
+        // ── P1: 페이지 ──
+        .route("/tasks", get(handlers::task_queue_page))
+        .route("/workers/:id", get(handlers::worker_detail_page))
+        .route("/admin/users", get(handlers::admin_users_page))
+        // ── P1.5: 호스트 ──
+        .route("/hosts", get(handlers::host_inventory_page))
+        .route("/hosts/:hostname", get(handlers::host_detail_page))
+        // ── P2: 관리 ──
+        .route("/admin/audit", get(handlers::admin_audit_page))
+        .route("/admin/tools", get(handlers::admin_tools_page))
+        // ── API ──
         .route("/api/overview", get(handlers::overview))
         .route("/api/workers", get(handlers::list_workers))
+        .route("/api/workers/:id", get(handlers::get_worker_detail))
         .route("/api/tasks", get(handlers::list_tasks))
         .route("/api/events", get(handlers::list_events))
         .route("/api/events/stream", get(crate::sse::events_stream))
         .route("/api/me", get(handlers::me))
+        .route("/api/users", get(handlers::list_users_api))
+        .route("/api/hosts", get(handlers::list_hosts_api))
+        .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
+        .route("/api/audit", get(handlers::list_audit_api))
+        .route("/api/tools", get(handlers::list_tools_api))
         .route("/logout", post(handlers::logout))
         .route("/static/*path", get(handlers::static_asset))
         .route_layer(middleware::from_fn_with_state(

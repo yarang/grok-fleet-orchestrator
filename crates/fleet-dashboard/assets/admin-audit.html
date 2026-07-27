@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Audit Log — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks">Tasks</a>
+      <a href="/hosts">Hosts</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/audit" class="active">Audit</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <h1 class="page-title">Audit Log</h1>
+    <p class="page-subtitle">Append-only event log for security and compliance.</p>
+
+    <div class="filter-bar">
+      <div class="pill-group">
+        <button class="pill-btn active" data-filter="all">All</button>
+        <button class="pill-btn" data-filter="task_created">Tasks</button>
+        <button class="pill-btn" data-filter="worker">Workers</button>
+        <button class="pill-btn" data-filter="login">Auth</button>
+      </div>
+    </div>
+
+    <div id="audit-table" class="table">
+      <div class="row header">
+        <div>Seq</div><div>Type</div><div>Task</div><div>Worker</div><div>Details</div><div>Time</div>
+      </div>
+    </div>
+    <div id="empty-state" class="empty-state" style="display:none;">
+      <h3>No events</h3>
+      <p>Events will appear here as the system operates.</p>
+    </div>
+  </main>
+
+  <script>
+    let allEvents = [];
+    let currentFilter = 'all';
+
+    async function fetchAudit() {
+      try {
+        const resp = await fetch('/api/audit?limit=200');
+        allEvents = await resp.json();
+        render();
+      } catch(e) { console.error('fetch audit:', e); }
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      const now = new Date();
+      const diff = (now - d) / 1000;
+      if (diff < 60) return Math.floor(diff)+'s ago';
+      if (diff < 3600) return Math.floor(diff/60)+'m ago';
+      return d.toLocaleString();
+    }
+
+    function getEventType(ev) {
+      return ev.event?.type || 'unknown';
+    }
+
+    function getTaskId(ev) {
+      return ev.event?.task_id ? String(ev.event.task_id).substring(0,8) : '—';
+    }
+
+    function getWorkerId(ev) {
+      return ev.event?.worker_id ? String(ev.event.worker_id).substring(0,8) : '—';
+    }
+
+    function getDetails(ev) {
+      const e = ev.event;
+      if (!e) return '—';
+      const parts = [];
+      if (e.created_by) parts.push('by: '+e.created_by);
+      if (e.exit_code !== undefined) parts.push('exit: '+e.exit_code);
+      if (e.error) parts.push('error: '+e.error.substring(0,60));
+      if (e.attempts) parts.push('attempts: '+e.attempts);
+      return parts.join(', ') || '—';
+    }
+
+    function matchesFilter(ev) {
+      if (currentFilter === 'all') return true;
+      const type = getEventType(ev);
+      if (currentFilter === 'task_created') return type.startsWith('task');
+      if (currentFilter === 'worker') return type.startsWith('worker');
+      if (currentFilter === 'login') return type.includes('login') || type.includes('session');
+      return true;
+    }
+
+    function render() {
+      const filtered = allEvents.filter(matchesFilter);
+      const table = document.getElementById('audit-table');
+      const empty = document.getElementById('empty-state');
+
+      table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
+
+      if (filtered.length === 0) {
+        empty.style.display = 'block';
+        table.style.display = 'none';
+        return;
+      }
+      empty.style.display = 'none';
+      table.style.display = 'grid';
+
+      for (const ev of filtered) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        const type = getEventType(ev);
+        row.innerHTML = `
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--ink-muted-48);">${ev.seq}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;font-weight:600;">${escapeHtml(type)}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${getTaskId(ev)}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;">${getWorkerId(ev)}</div>
+          <div style="font-size:13px;color:var(--ink-muted-80);">${escapeHtml(getDetails(ev))}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(ev.event?.at)}</div>
+        `;
+        table.appendChild(row);
+      }
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    document.querySelectorAll('.pill-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.pill-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFilter = btn.dataset.filter;
+        render();
+      });
+    });
+
+    fetchAudit();
+    setInterval(fetchAudit, 10000);
+
+    // SSE
+    const pill = document.getElementById('status-pill');
+    try {
+      const es = new EventSource('/api/events/stream');
+      es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
+      es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
+      es.onmessage = () => fetchAudit();
+    } catch(e) {}
+
+    // 사용자 메뉴
+    fetch('/api/me').then(r=>r.json()).then(u=>{
+      document.getElementById('user-menu').innerHTML =
+        `<span>${u.username}</span> <button onclick="fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':getCookie('fleet_csrf')}}).then(()=>location='/login')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>`;
+    }).catch(()=>{});
+    function getCookie(n){const v=document.cookie.match('(^|;)\\s*'+n+'\\s*=\\s*([^;]+)');return v?v.pop():'';}
+  </script>
+</body>
+</html>

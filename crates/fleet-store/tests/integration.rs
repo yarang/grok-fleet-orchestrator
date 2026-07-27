@@ -310,6 +310,9 @@ async fn worker_heartbeat_updates_last_seen() {
         mem_available_mb: 8192,
         disk_free_mb: 50000,
         agent_healthy: true,
+        grok_version: None,
+        fleet_worker_version: None,
+        os_info: None,
     };
     store.update_worker_heartbeat(worker_id, &hb).await.unwrap();
 

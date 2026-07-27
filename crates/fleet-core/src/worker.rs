@@ -151,6 +151,35 @@ pub struct WorkerHeartbeat {
     pub disk_free_mb: u64,
     #[serde(default = "default_true")]
     pub agent_healthy: bool,
+    /// grok CLI 버전 (예: "0.2.112").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grok_version: Option<String>,
+    /// fleet-worker 바이너리 버전 (예: "0.1.0").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_worker_version: Option<String>,
+    /// OS 정보 (kernel, distro, arch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_info: Option<OsInfo>,
+}
+
+/// 하트비트로 전송되는 OS 식별 정보.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OsInfo {
+    /// OS 종류 (예: "linux", "macos").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub os_type: String,
+    /// 배포판 또는 버전 (예: "Ubuntu 22.04").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub distro: String,
+    /// 커널 버전 (예: "5.15.0-91-generic").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kernel: String,
+    /// CPU 아키텍처 (예: "aarch64", "x86_64").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub arch: String,
+    /// 호스트명 (hostname -s).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hostname: String,
 }
 
 fn default_true() -> bool {
