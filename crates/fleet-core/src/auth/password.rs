@@ -37,12 +37,32 @@ pub fn hash_password(plain: &str) -> Result<String, AuthError> {
     Ok(hash.to_string())
 }
 
+/// 더미 검증용 유효한 Argon2id PHC 문자열.
+///
+/// 사용자가 존재하지 않거나 비활성일 때, 실제 검증과 **동일한 CPU 시간**을
+/// 소모하도록 이 PHC에 대해 Argon2 연산을 수행. 그래야 응답 시간만 측정해서
+/// 사용자 존재 여부를 추론하는 타이밍 공격을 차단할 수 있음.
+///
+/// `hash_password("dummy-timing-equalizer-9f2a")`로 생성한 고정값 —
+/// 이 값 자체는 어떤 실제 비밀번호와도 매칭될 필요가 없으며, 오직
+/// `verify_password`가 PHC 파싱에서 즉시 실패하지 않고 전체 Argon2
+/// 연산(m=19456, t=2)을 실행하도록 보장하는 것이 목적.
+const DUMMY_PASSWORD_PHC: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$E76aMSRpoa8HmBR/GWu6IQ$09lh/eBSSkI+jGTVukwyu428MoJGlLn8TFhAWmcRoXM";
+
+/// 더미 비밀번호 검증 — 사용자가 없을 때 호출하여 타이밍을 평등화.
+///
+/// 반환값은 항상 `false` (실제 인증에 사용하지 않음).
+/// 오직 실제 로그인 경로와 동일한 시간 소모를 만들기 위해 존재.
+pub fn verify_password_dummy(plain: &str) -> bool {
+    verify_password(plain, DUMMY_PASSWORD_PHC).unwrap_or(false)
+}
+
 /// 평문 비밀번호를 PHC 문자열과 상수시간으로 비교.
 ///
 /// 내부적으로 `Argon2::verify_password`가 상수시간 비교를 수행.
-/// PHC 문자열 파싱 실패(잘못된 형식) 시에도 동일한 타이밍이 되도록
-/// 미리 더미 연산을 수행하지는 않음 — PHC 파싱 실패는 DB 손상이므로
-/// 명백한 에러로 처리.
+/// PHC 문자열 파싱 실패(잘못된 형식) 시 에러 반환 — 호출자는
+/// 더미 경로가 필요하면 `verify_password_dummy`를 사용할 것.
 pub fn verify_password(plain: &str, phc: &str) -> Result<bool, AuthError> {
     let parsed = PasswordHash::new(phc).map_err(|e| AuthError::HashParseFailed(e.to_string()))?;
     let argon2 = argon2_instance();

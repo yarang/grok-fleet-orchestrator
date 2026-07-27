@@ -1099,6 +1099,26 @@ impl Store for PgStore {
         Ok(count as u64)
     }
 
+    async fn count_recent_ip_failures(
+        &self,
+        ip: &str,
+        window_secs: i64,
+    ) -> Result<u64, StoreError> {
+        let (count,): (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM login_attempts
+             WHERE ip_address = $1
+               AND success = FALSE
+               AND attempted_at >= NOW() - make_interval(secs => $2)
+            "#,
+        )
+        .bind(ip)
+        .bind(window_secs as f64)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as u64)
+    }
+
     async fn clear_login_attempts(
         &self,
         identifier: &str,

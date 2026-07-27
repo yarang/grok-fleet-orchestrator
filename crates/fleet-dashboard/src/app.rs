@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use axum::middleware;
 use axum::routing::{get, post, Router};
+use axum::http::{HeaderName, HeaderValue};
 use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -48,6 +50,10 @@ impl DashboardState {
 /// 라우트 그룹:
 /// - **public**: `/login`, `/logout`, `/health` (세션 미들웨어 없음)
 /// - **protected**: `/`, `/api/*`, `/static/*` (require_session 적용)
+///
+/// 보안 헤더 (Phase 9.1.7):
+/// - CSP, X-Frame-Options, HSTS, X-Content-Type-Options, Referrer-Policy
+/// - CORS는 동일 출처만 허용 (permissive 제거)
 pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
     let public = Router::new()
         .route("/login", get(handlers::login_page).post(handlers::login))
@@ -72,11 +78,43 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             require_session,
         ));
 
+    // 보안 헤더 상수.
+    let csp = HeaderValue::from_static(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+    );
+    let frame_opts = HeaderValue::from_static("DENY");
+    let nosniff = HeaderValue::from_static("nosniff");
+    let hsts = HeaderValue::from_static("max-age=63072000; includeSubDomains; preload");
+    let referrer = HeaderValue::from_static("strict-origin-when-cross-origin");
+
     Router::new()
         .merge(public)
         .merge(protected)
+        // 보안 헤더 — 모든 응답에 적용 (이미 설정되지 않은 경우만).
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("content-security-policy"),
+            csp,
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-frame-options"),
+            frame_opts,
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("x-content-type-options"),
+            nosniff,
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("strict-transport-security"),
+            hsts,
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("referrer-policy"),
+            referrer,
+        ))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        // CORS — 동일 출처 전용 (permissive 제거).
+        // 외부 API 접근이 필요하면 token 기반 인증을 사용할 것.
+        .layer(CorsLayer::new())
         .with_state(state)
 }
 

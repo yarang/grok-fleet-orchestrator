@@ -288,6 +288,18 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("count_recent_failed_attempts"))
     }
 
+    /// IP 단독 기준 최근 `window_secs`초 내 실패 횟수 (모든 identifier 합산).
+    ///
+    /// IP 회전을 통한 rate limit 우회(credential stuffing)를 방지하기 위해
+    /// `count_recent_failed_attempts`와 별도로 IP-only 카운트를 시행.
+    async fn count_recent_ip_failures(
+        &self,
+        _ip: &str,
+        _window_secs: i64,
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("count_recent_ip_failures"))
+    }
+
     /// identifier의 과거 시도 기록 삭제 (성공 시 초기화).
     async fn clear_login_attempts(
         &self,

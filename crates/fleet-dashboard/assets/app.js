@@ -15,6 +15,14 @@ const API = {
 
 let currentUser = null;
 
+/// CSRF 토큰을 fleet_csrf 쿠키에서 추출 (더블 서밋 패턴).
+function getCsrfToken() {
+  const match = document.cookie
+    .split('; ')
+    .find(c => c.startsWith('fleet_csrf='));
+  return match ? match.split('=').slice(1).join('=') : '';
+}
+
 async function loadCurrentUser() {
   try {
     const r = await fetch(API.me);
@@ -54,7 +62,10 @@ function renderUserMenu() {
   header.appendChild(menu);
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
-    await fetch('/logout', { method: 'POST' });
+    await fetch('/logout', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': getCsrfToken() },
+    });
     window.location.href = '/login';
   });
 }

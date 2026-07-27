@@ -27,11 +27,20 @@ use crate::DashboardState;
 /// 쿠키 이름.
 pub const SESSION_COOKIE: &str = "fleet_session";
 
+/// CSRF 토큰 쿠키 이름 (더블 서밋 패턴).
+pub const CSRF_COOKIE: &str = "fleet_csrf";
+
+/// CSRF 토큰 폼 필드 / 헤더 이름.
+pub const CSRF_FIELD: &str = "csrf_token";
+
 /// 세션 기본 만료 (8시간).
 pub const SESSION_DURATION_SECS: i64 = 8 * 3600;
 
-/// 로그인 시도 실패 허용 한계 (5회).
+/// 로그인 시도 실패 허용 한계 — identifier 단독 (사용자명당 5회).
 pub const MAX_FAILED_ATTEMPTS: u64 = 5;
+
+/// 로그인 시도 실패 허용 한계 — IP 단독 (IP당 20회, 다중 사용자 공유 고려).
+pub const MAX_IP_FAILED_ATTEMPTS: u64 = 20;
 
 /// 실패 잠금 윈도우 (최근 60초).
 pub const FAILED_ATTEMPT_WINDOW_SECS: i64 = 60;
@@ -147,18 +156,38 @@ pub fn require_permission(
 
 /// 로그인 시도 가능 여부 (rate limit 판정).
 ///
-/// 최근 `FAILED_ATTEMPT_WINDOW_SECS`초 내 실패가 `MAX_FAILED_ATTEMPTS` 이상이면 false.
+/// **이중 제한 (Phase 9.1.7 보안 패치):**
+/// - **identifier 단독**: 같은 사용자명에 대해 최근 N회 실패 (IP 무관) → credential stuffing 방어
+/// - **IP 단독**: 같은 IP에서 최근 M회 실패 (사용자 무관) → IP 회전 브루트포스 방어
+///
+/// 어느 하나라도 초과하면 차단.
 pub async fn check_rate_limit(
     state: &DashboardState,
     identifier: &str,
     ip: Option<&str>,
 ) -> Result<bool, StatusCode> {
-    let count = state
+    // 1. identifier 단독 카운트 — 기존 (identifier, ip) 쿼리를 ip=None 없이
+    //    모든 IP의 실패를 합산하도록 변경.
+    let id_count = state
         .store
-        .count_recent_failed_attempts(identifier, ip, FAILED_ATTEMPT_WINDOW_SECS)
+        .count_recent_failed_attempts(identifier, None, FAILED_ATTEMPT_WINDOW_SECS)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(count < MAX_FAILED_ATTEMPTS)
+    if id_count >= MAX_FAILED_ATTEMPTS {
+        return Ok(false);
+    }
+    // 2. IP 단독 카운트 — IP 회전 공격 방어.
+    if let Some(ip) = ip {
+        let ip_count = state
+            .store
+            .count_recent_ip_failures(ip, FAILED_ATTEMPT_WINDOW_SECS)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if ip_count >= MAX_IP_FAILED_ATTEMPTS {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// 로그인 실패 시 기록 + rate limit 도달 여부 반환.

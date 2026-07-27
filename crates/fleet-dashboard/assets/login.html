@@ -12,6 +12,7 @@
     <h1>Sign in to Fleet</h1>
     <p class="auth-subtitle">Use your administrator account</p>
     <form method="POST" action="/login" autocomplete="on">
+      <input type="hidden" name="csrf_token" value="{{csrf_token}}" />
       <label>
         <span>Username</span>
         <input type="text" name="username" required autofocus

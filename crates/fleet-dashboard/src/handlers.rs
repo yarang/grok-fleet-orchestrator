@@ -264,34 +264,60 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
 use chrono::Duration;
-use fleet_core::auth::password::{generate_session_token, verify_password};
+use fleet_core::auth::password::{generate_session_token, verify_password, verify_password_dummy};
 use fleet_core::{Session, SessionId};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, record_login_failure, record_login_success, AuthPrincipal, SESSION_COOKIE,
-    SESSION_DURATION_SECS,
+    check_rate_limit, record_login_failure, record_login_success, AuthPrincipal, CSRF_COOKIE,
+    SESSION_COOKIE, SESSION_DURATION_SECS,
 };
+use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub csrf_token: String,
 }
 
-/// 로그인 페이지 HTML.
-pub async fn login_page(State(_state): State<Arc<DashboardState>>) -> Response {
+/// 로그인 페이지 HTML. CSRF 토큰 쿠키 설정 + 폼에 토큰 주입.
+pub async fn login_page(
+    State(state): State<Arc<DashboardState>>,
+    jar: CookieJar,
+) -> (CookieJar, Response) {
+    // CSRF 토큰 — 더블 서밋 쿠키. 기존 토큰이 있으면 재사용, 없으면 생성.
+    let csrf_token = jar
+        .get(CSRF_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(generate_csrf_token);
+    let csrf_cookie = Cookie::build((CSRF_COOKIE, csrf_token.clone()))
+        .path("/")
+        .http_only(false) // JS에서 읽을 수 있어야 함 (더블 서밋 패턴)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::seconds(3600))
+        .build();
+    let jar = jar.add(csrf_cookie);
+
     let asset = Asset::get("login.html")
         .map(|a| a.data.to_vec())
         .unwrap_or_else(|| include_bytes!("../assets/login.html").to_vec());
+    // 정적 HTML에 CSRF 토큰 주입.
+    let html = String::from_utf8_lossy(&asset)
+        .replace("{{csrf_token}}", &csrf_token);
     (
-        StatusCode::OK,
-        [("content-type", "text/html; charset=utf-8")],
-        asset,
+        jar,
+        (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            html.into_bytes(),
+        )
+            .into_response(),
     )
-        .into_response()
 }
 
 /// POST /login — 폼 제출 처리.
@@ -305,6 +331,15 @@ pub async fn login(
     Form(form): Form<LoginForm>,
 ) -> Result<(CookieJar, Redirect), (CookieJar, Response)> {
     let ip = addr.ip().to_string();
+
+    // CSRF 검증 — 더블 서밋 쿠키 패턴.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err((
+            jar,
+            login_failed_page("Security token expired. Please reload the page."),
+        ));
+    }
 
     // rate limit 검사.
     let allowed = check_rate_limit(&state, &form.username, Some(&ip))
@@ -330,8 +365,9 @@ pub async fn login(
     let valid = match &user {
         Some(u) if u.enabled => verify_password(&form.password, &u.password_hash).unwrap_or(false),
         _ => {
-            // 동일한 시간 소모를 위해 dummy 검증 수행.
-            let _ = verify_password(&form.password, "$argon2id$invalid");
+            // 타이밍 공격 방지: 사용자가 없어도 실제 검증과 동일한 시간 소모.
+            // 유효한 Argon2id PHC에 대해 전체 해싱 연산(m=19456, t=2)을 수행.
+            verify_password_dummy(&form.password);
             false
         }
     };
@@ -340,7 +376,13 @@ pub async fn login(
         record_login_failure(&state, &form.username, Some(&ip), "invalid_credentials")
             .await
             .ok();
-        return Err((jar, login_failed_page("Invalid username or password")));
+        return Err((
+            jar,
+            login_failed_page_csrf(
+                "Invalid username or password",
+                cookie_csrf.as_deref().unwrap_or(""),
+            ),
+        ));
     }
 
     let user = user.expect("checked Some above");
@@ -386,16 +428,37 @@ pub async fn login(
 }
 
 /// POST /logout — 세션 삭제 + 쿠키 제거.
+///
+/// CSRF 보호: JS에서 `X-CSRF-Token` 헤더로 CSRF 토큰을 전송해야 함.
+/// (세션 쿠키는 SameSite::Strict이지만 defense-in-depth로 이중 검증.)
 pub async fn logout(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     jar: CookieJar,
-) -> (CookieJar, Redirect) {
+    headers: axum::http::HeaderMap,
+) -> Result<(CookieJar, Redirect), (StatusCode, CookieJar, Response)> {
+    // CSRF 검증 — 더블 서밋 패턴 (헤더 variant).
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    let header_csrf = headers
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !csrf_valid(cookie_csrf.as_deref(), header_csrf) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            jar,
+            (
+                [("content-type", "text/html; charset=utf-8")],
+                "CSRF token invalid. Please reload the page.",
+            )
+                .into_response(),
+        ));
+    }
     state.store.delete_session(principal.session_id).await.ok();
     tracing::info!(username = %principal.user.username, "logout");
     let removed = Cookie::from(SESSION_COOKIE);
     let new_jar = jar.remove(removed);
-    (new_jar, Redirect::to("/login"))
+    Ok((new_jar, Redirect::to("/login")))
 }
 
 /// GET /api/me — 현재 사용자 정보 (프론트엔드 헤더 표시용).
@@ -409,6 +472,17 @@ pub async fn me(Extension(principal): Extension<AuthPrincipal>) -> Json<serde_js
 
 // ── 에러 페이지 헬퍼 ────────────────────────────────────────────────────
 
+/// CSRF 토큰 검증 (더블 서밋 패턴).
+/// 쿠키 값과 폼/헤더 값이 상수시간으로 일치하는지 확인.
+fn csrf_valid(cookie_token: Option<&str>, submitted_token: &str) -> bool {
+    match cookie_token {
+        Some(cookie) if !cookie.is_empty() && !submitted_token.is_empty() => {
+            csrf_tokens_match(cookie, submitted_token)
+        }
+        _ => false,
+    }
+}
+
 fn internal_error_page() -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -419,6 +493,10 @@ fn internal_error_page() -> Response {
 }
 
 fn login_failed_page(msg: &str) -> Response {
+    login_failed_page_csrf(msg, "")
+}
+
+fn login_failed_page_csrf(msg: &str, csrf_token: &str) -> Response {
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="ko">
@@ -435,6 +513,7 @@ fn login_failed_page(msg: &str) -> Response {
     <p class="auth-subtitle">Use your administrator account</p>
     <div class="auth-error">{msg}</div>
     <form method="POST" action="/login" autocomplete="on">
+      <input type="hidden" name="csrf_token" value="{csrf_token}" />
       <label>
         <span>Username</span>
         <input type="text" name="username" required autofocus
@@ -465,23 +544,28 @@ fn login_failed_page(msg: &str) -> Response {
 //  부트스트랩 핸들러 (Phase 9.1.3)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// OTP 폼 (6박스)에서 전송된 데이터. 박스 값을 하나로 합침.
+/// OTP/토큰 폼 데이터.
+///
+/// 보안: 이전 6자 접미사 매칭(`ends_with`)은 브루트포스에 취약했음.
+/// Phase 9.1.7 보안 패치에서 전체 토큰(`fleet_boot_<43 chars>`) 정확 매칭으로 변경.
 #[derive(Debug, Deserialize)]
 pub struct BootstrapForm {
+    /// 전체 부트스트랩 토큰 (`fleet_boot_...` 형식, 로그/CLI 출력에서 복사).
     #[serde(rename = "otp_full")]
     pub otp_full: String,
     pub username: String,
     #[serde(default)]
     pub email: Option<String>,
     pub password: String,
+    #[serde(default)]
+    pub csrf_token: String,
 }
 
-/// GET /bootstrap — 부트스트랩 페이지.
-///
-/// users 테이블이 비어있을 때만 접근 가능. 이미 활성 사용자가 있으면 /login으로.
+/// GET /bootstrap — 부트스트랩 페이지. CSRF 쿠키 설정 + 토큰 주입.
 pub async fn bootstrap_page(
     State(state): State<Arc<DashboardState>>,
-) -> Result<Response, Result<Redirect, StatusCode>> {
+    jar: CookieJar,
+) -> Result<(CookieJar, Response), Result<Redirect, StatusCode>> {
     let count = state
         .store
         .count_users()
@@ -490,15 +574,35 @@ pub async fn bootstrap_page(
     if count > 0 {
         return Err(Ok(Redirect::to("/login")));
     }
+
+    // CSRF 토큰 설정.
+    let csrf_token = jar
+        .get(CSRF_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(generate_csrf_token);
+    let csrf_cookie = Cookie::build((CSRF_COOKIE, csrf_token.clone()))
+        .path("/")
+        .http_only(false)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::seconds(3600))
+        .build();
+    let jar = jar.add(csrf_cookie);
+
     let asset = Asset::get("bootstrap.html")
         .map(|a| a.data.to_vec())
         .unwrap_or_else(|| include_bytes!("../assets/bootstrap.html").to_vec());
+    let html = String::from_utf8_lossy(&asset)
+        .replace("{{csrf_token}}", &csrf_token);
     Ok((
-        StatusCode::OK,
-        [("content-type", "text/html; charset=utf-8")],
-        asset,
-    )
-        .into_response())
+        jar,
+        (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            html.into_bytes(),
+        )
+            .into_response(),
+    ))
 }
 
 /// POST /bootstrap — OTP 검증 + 첫 관리자 생성 + 자동 로그인.
@@ -507,53 +611,94 @@ pub async fn bootstrap(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
     Form(form): Form<BootstrapForm>,
-) -> Result<(CookieJar, Redirect), (StatusCode, Response)> {
+) -> Result<(CookieJar, Redirect), (StatusCode, CookieJar, Response)> {
     use fleet_core::auth::password::hash_password;
     use fleet_store::consume_bootstrap_and_create_admin;
+
+    // CSRF 검증.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            jar,
+            bootstrap_failed_page("Security token expired. Please reload the page."),
+        ));
+    }
 
     // users 테이블이 비어있는지 재확인 (TOCTOU 방어).
     let count = state
         .store
         .count_users()
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, internal_error_page()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, jar.clone(), internal_error_page()))?;
     if count > 0 {
         return Err((
             StatusCode::CONFLICT,
+            jar,
             bootstrap_failed_page("System already activated."),
         ));
     }
 
-    // OTP 검증 — prefix + _ + token 형식으로 변환.
-    // form.otp_full은 순수 토큰(6자). 실제 토큰은 "fleet_boot_<rand>" 형식.
-    // OTP는 token의 일부로 매칭.
-    let otp_clean: String = form
-        .otp_full
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    if otp_clean.len() < 6 {
+    let ip = addr.ip().to_string();
+
+    // Rate limit — bootstrap 엔드포인트도 무차별 대입 공격에서 보호.
+    // 식별자는 "bootstrap:<ip>" (아직 사용자가 없으므로 IP 기반).
+    let bootstrap_id = format!("bootstrap:{ip}");
+    let allowed = crate::auth::check_rate_limit(&state, &bootstrap_id, Some(&ip))
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                jar.clone(),
+                internal_error_page(),
+            )
+        })?;
+    if !allowed {
+        crate::auth::record_login_failure(&state, &bootstrap_id, Some(&ip), "bootstrap_rate_limited")
+            .await
+            .ok();
         return Err((
-            StatusCode::BAD_REQUEST,
-            bootstrap_failed_page("OTP must be at least 6 characters"),
+            StatusCode::TOO_MANY_REQUESTS,
+            jar,
+            bootstrap_failed_page("Too many bootstrap attempts. Wait 60s and try again."),
         ));
     }
 
-    // 활성 토큰 중에서 OTP 접두사와 매칭되는 것 찾기.
+    // 전체 토큰 검증 — 접미사 매칭이 아닌 정확 일치.
+    // 입력은 `fleet_boot_<43 base64url chars>` 형식이어야 함.
+    let token_input = form.otp_full.trim();
+    if !token_input.starts_with("fleet_boot_") || token_input.len() < 20 {
+        crate::auth::record_login_failure(&state, &bootstrap_id, Some(&ip), "bootstrap_bad_format")
+            .await
+            .ok();
+        return Err((
+            StatusCode::BAD_REQUEST,
+            jar,
+            bootstrap_failed_page(
+                "Invalid token format. Copy the full token from the CLI output.",
+            ),
+        ));
+    }
+
+    // 활성 토큰 중에서 정확히 일치하는 것을 상수시간으로 검색.
     let tokens = state
         .store
         .list_bootstrap_tokens()
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, internal_error_page()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, jar.clone(), internal_error_page()))?;
 
     let matching_token = tokens
         .iter()
-        .find(|t| t.is_usable() && t.token.ends_with(&otp_clean))
+        .find(|t| t.is_usable() && fleet_core::auth::password::constant_time_eq(&t.token, token_input))
         .cloned();
 
     let Some(token) = matching_token else {
+        crate::auth::record_login_failure(&state, &bootstrap_id, Some(&ip), "bootstrap_invalid_token")
+            .await
+            .ok();
         return Err((
             StatusCode::UNAUTHORIZED,
+            jar,
             bootstrap_failed_page("Invalid or expired bootstrap token. Check the CLI output."),
         ));
     };
@@ -562,6 +707,7 @@ pub async fn bootstrap(
     if let Err(e) = fleet_core::User::validate_username(&form.username) {
         return Err((
             StatusCode::BAD_REQUEST,
+            jar,
             bootstrap_failed_page(&format!("{e}")),
         ));
     }
@@ -570,13 +716,19 @@ pub async fn bootstrap(
     if form.password.len() < 12 {
         return Err((
             StatusCode::BAD_REQUEST,
+            jar,
             bootstrap_failed_page("Password must be at least 12 characters"),
         ));
     }
 
     // 해싱.
-    let password_hash = hash_password(&form.password)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, internal_error_page()))?;
+    let password_hash = hash_password(&form.password).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            jar.clone(),
+            internal_error_page(),
+        )
+    })?;
 
     // 도메인 사용자 생성.
     let user = fleet_core::User {
@@ -602,10 +754,9 @@ pub async fn bootstrap(
                     }
                     fleet_store::BootstrapAdminError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 };
-                (status, bootstrap_failed_page(&format!("{e}")))
+                (status, jar.clone(), bootstrap_failed_page(&format!("{e}")))
             })?;
 
-    let ip = addr.ip().to_string();
     record_login_success(&state, &form.username, Some(&ip))
         .await
         .ok();
