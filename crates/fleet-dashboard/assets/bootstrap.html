@@ -21,11 +21,12 @@
       <form method="POST" action="/bootstrap" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{csrf_token}}" />
         <label style="margin-bottom: 12px;">
+          <span>Bootstrap token</span>
           <input type="text" name="otp_full" id="otp_full"
                  placeholder="fleet_boot_…"
                  pattern="fleet_boot_[A-Za-z0-9_-]+"
                  required autofocus
-                 style="width:100%; font-family:monospace; font-size:13px;"
+                 style="font-family:var(--font-mono);"
                  autocomplete="off" />
         </label>
 

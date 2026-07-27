@@ -1,57 +1,44 @@
 /* ─────────────────────────────────────────────────────────────────
- * fleet-dashboard / login.css — Notion 디자인 시스템 적용
+ * fleet-dashboard / login.css — Apple Design System
  *
- * 핵심 원칙 (DESIGN-notion.md):
- *   1. warm paper canvas (#f6f5f4), not pure white
- *   2. single Notion Blue (#0075de) for all structural accent
- *   3. inputs are tight (radius 4px), primary CTA is pill (radius-full)
- *   4. barely-there shadow, hairline borders
- *   5. Inter typography with negative tracking on headings
+ * 핵심 원칙 (DESIGN-apple.md):
+ *   1. Parchment canvas (#f5f5f7), pure white cards
+ *   2. Single Action Blue (#0066cc) — pill CTAs, focus rings
+ *   3. SF Pro Display headlines (600, negative tracking)
+ *   4. 17px body, no weight 500
+ *   5. Hairline borders, no shadows on chrome
+ *   6. Pill-shaped inputs + buttons
  * ───────────────────────────────────────────────────────────────── */
 
-@import url('https://rsms.me/inter/inter.css');
-
 :root {
-  /* Brand */
-  --primary: #0075de;
-  --primary-active: #005bab;
+  --primary: #0066cc;
+  --primary-focus: #0071e3;
   --on-primary: #ffffff;
 
-  /* Surface */
-  --canvas-soft: #f6f5f4;        /* 페이지 배경 (warm paper) */
-  --surface: #ffffff;            /* 카드 */
-  --hairline: #e6e6e6;
+  --canvas: #ffffff;
+  --canvas-parchment: #f5f5f7;
+  --surface-pearl: #fafafc;
+  --surface-black: #000000;
+  --surface-tile-1: #272729;
 
-  /* Text */
-  --ink: #000000;
-  --ink-secondary: #31302e;
-  --ink-muted: #615d59;
-  --ink-faint: #a39e98;
+  --ink: #1d1d1f;
+  --ink-muted-80: #333333;
+  --ink-muted-48: #7a7a7a;
 
-  /* Semantic (sticker palette 파생) */
-  --error-text: #c4382a;
-  --error-bg: #ffe7e4;
+  --divider-soft: #f0f0f0;
+  --hairline: #e0e0e0;
 
-  /* Radius */
-  --radius-xs: 4px;     /* input */
-  --radius-md: 8px;     /* utility */
-  --radius-xl: 16px;    /* card */
-  --radius-full: 9999px;
+  --error-text: #ff3b30;
 
-  /* Spacing */
-  --space-xxs: 4px;
-  --space-xs: 8px;
-  --space-sm: 12px;
-  --space-md: 16px;
-  --space-lg: 24px;
-  --space-xl: 32px;
+  --r-xs: 5px;
+  --r-sm: 8px;
+  --r-md: 11px;
+  --r-lg: 18px;
+  --r-pill: 9999px;
 
-  /* Shadow (barely-there layered) */
-  --shadow-1:
-    0 0.175px 1.041px rgba(0,0,0,0.01),
-    0 0.8px 2.925px rgba(0,0,0,0.02),
-    0 2.025px 7.847px rgba(0,0,0,0.027),
-    0 4px 18px rgba(0,0,0,0.04);
+  --font-display: "SF Pro Display", system-ui, -apple-system, sans-serif;
+  --font-text: "SF Pro Text", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Monaco, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -59,29 +46,31 @@
 html, body {
   margin: 0;
   padding: 0;
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  font-family: var(--font-text);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* ── Login page ──────────────────────────────────────────────────── */
+
 .auth-page {
   min-height: 100vh;
-  background: var(--canvas-soft);
+  background: var(--canvas-parchment);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-md);
+  padding: 17px;
 }
 
-/* ── Auth card ───────────────────────────────────────────────────── */
-
 .auth-card {
-  background: var(--surface);
+  background: var(--canvas);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-xl);
-  padding: var(--space-xl);
-  box-shadow: var(--shadow-1);
+  border-radius: var(--r-lg);
+  padding: var(--r-lg);
   width: 100%;
   max-width: 400px;
 }
@@ -89,33 +78,38 @@ html, body {
 .auth-logo {
   width: 44px;
   height: 44px;
-  border-radius: var(--radius-md);
-  background: var(--primary);
-  color: var(--on-primary);
+  border-radius: var(--r-sm);
+  background: var(--ink);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: 22px;
-  letter-spacing: -0.5px;
-  margin: 0 auto var(--space-md);
+  letter-spacing: -0.225px;
+  margin: 0 auto 17px;
 }
 
 .auth-card h1 {
-  margin: 0 0 var(--space-xxs);
-  font-size: 20px;
+  font-family: var(--font-display);
+  margin: 0 0 4px;
+  font-size: 28px;
   font-weight: 600;
-  letter-spacing: -0.125px;
+  line-height: 1.14;
+  letter-spacing: 0.196px;
   color: var(--ink);
   text-align: center;
 }
 
 .auth-subtitle {
-  margin: 0 0 var(--space-lg);
-  font-size: 14px;
-  color: var(--ink-muted);
+  margin: 0 0 var(--r-lg);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
+  color: var(--ink-muted-48);
   text-align: center;
-  line-height: 1.5;
 }
 
 /* ── Form ────────────────────────────────────────────────────────── */
@@ -123,147 +117,154 @@ html, body {
 .auth-card form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-md);
+  gap: 17px;
 }
 
 .auth-card label {
   display: flex;
   flex-direction: column;
-  gap: var(--space-xxs);
+  gap: 4px;
 }
 
 .auth-card label > span {
-  font-size: 12px;
+  font-family: var(--font-text);
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.125px;
-  color: var(--ink-secondary);
+  line-height: 1.29;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 
 .auth-card input[type="text"],
-.auth-card input[type="password"] {
+.auth-card input[type="password"],
+.auth-card input[type="email"],
+.bootstrap-card input[type="text"],
+.bootstrap-card input[type="password"],
+.bootstrap-card input[type="email"] {
   width: 100%;
-  height: 36px;
-  padding: 0 var(--space-sm);
+  height: 44px;
+  padding: 0 20px;
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-xs);  /* tight, Notion signature */
-  background: var(--surface);
-  font: inherit;
-  font-size: 15px;
+  border-radius: var(--r-pill);
+  background: var(--canvas);
+  font-family: var(--font-text);
+  font-size: 17px;
+  font-weight: 400;
+  letter-spacing: -0.374px;
   color: var(--ink);
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 
-.auth-card input:focus {
+.auth-card input:focus,
+.bootstrap-card input:focus {
   outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(0, 117, 222, 0.2);
+  border-color: var(--primary-focus);
+  box-shadow: 0 0 0 2px var(--primary-focus);
 }
 
-.auth-card input::placeholder {
-  color: var(--ink-faint);
+.auth-card input::placeholder,
+.bootstrap-card input::placeholder {
+  color: var(--ink-muted-48);
 }
 
-/* ── CTA (pill, Notion signature) ────────────────────────────────── */
+/* ── Primary CTA (Action Blue pill) ──────────────────────────────── */
 
 .auth-button {
-  margin-top: var(--space-sm);
-  height: 40px;
+  margin-top: var(--r-xs);
+  height: 44px;
   border: none;
-  border-radius: var(--radius-full);  /* pill */
+  border-radius: var(--r-pill);
   background: var(--primary);
   color: var(--on-primary);
-  font: inherit;
-  font-size: 15px;
-  font-weight: 500;
+  font-family: var(--font-text);
+  font-size: 17px;
+  font-weight: 400;
+  line-height: 1.47;
+  letter-spacing: -0.374px;
   cursor: pointer;
   transition: background-color 0.12s;
 }
 
-.auth-button:hover { background: var(--primary-active); }
-.auth-button:active { transform: translateY(0.5px); }
-.auth-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.auth-button:active {
+  transform: scale(0.95);
+  background: var(--primary-focus);
+}
 
 /* ── Error banner ────────────────────────────────────────────────── */
 
 .auth-error {
-  margin: 0 0 var(--space-md);
-  padding: var(--space-sm) var(--space-md);
-  background: var(--error-bg);
+  margin: 0 0 17px;
+  padding: 12px var(--r-md);
+  background: transparent;
   color: var(--error-text);
-  border-radius: var(--radius-xs);
-  font-size: 13px;
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
   text-align: center;
-  line-height: 1.5;
 }
 
 /* ── Footer ──────────────────────────────────────────────────────── */
 
 .auth-footer {
-  margin: var(--space-lg) 0 0;
-  font-size: 11px;
-  color: var(--ink-faint);
+  margin: var(--r-lg) 0 0;
+  font-family: var(--font-text);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.0;
+  letter-spacing: -0.12px;
+  color: var(--ink-muted-48);
   text-align: center;
-  letter-spacing: 0.04em;
 }
 
-/* ── Bootstrap 페이지 (deep indigo hero) ─────────────────────────── */
+/* ── Bootstrap page (dark hero) ──────────────────────────────────── */
 
 .bootstrap-page {
   min-height: 100vh;
-  background: var(--canvas-soft);
+  background: var(--canvas-parchment);
   display: flex;
   flex-direction: column;
 }
 
 .bootstrap-hero {
-  background: #213183;  /* Notion deep indigo */
+  background: var(--surface-tile-1);
   color: rgba(255, 255, 255, 0.92);
-  padding: var(--space-xl) var(--space-md);
+  padding: var(--r-lg) var(--r-md);
   text-align: center;
   position: relative;
   overflow: hidden;
 }
 
+/* No decorative gradients — Apple uses surface color, not gradients */
 .bootstrap-hero::before,
-.bootstrap-hero::after {
-  content: "";
-  position: absolute;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(217, 115, 13, 0.18) 0%, transparent 70%);
-  pointer-events: none;
-}
-
-.bootstrap-hero::before {
-  width: 200px; height: 200px;
-  top: -50px; left: 10%;
-}
-
-.bootstrap-hero::after {
-  width: 280px; height: 280px;
-  bottom: -100px; right: 5%;
-  background: radial-gradient(circle, rgba(15, 123, 108, 0.15) 0%, transparent 70%);
-}
+.bootstrap-hero::after { display: none; }
 
 .bootstrap-eyebrow {
-  position: relative;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
-  letter-spacing: 0.125px;
+  font-weight: 400;
+  line-height: 1.0;
+  letter-spacing: -0.12px;
   color: rgba(255, 255, 255, 0.6);
-  margin: 0 0 var(--space-md);
+  margin: 0 0 var(--r-md);
 }
 
 .bootstrap-hero h1 {
-  position: relative;
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  margin: 0 0 var(--space-xs);
+  font-family: var(--font-display);
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0;
+  margin: 0 0 var(--r-xs);
 }
 
 .bootstrap-hero .tagline {
-  position: relative;
-  font-size: 16px;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1.19;
+  letter-spacing: 0.231px;
   color: rgba(255, 255, 255, 0.8);
   margin: 0;
 }
@@ -273,74 +274,72 @@ html, body {
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: var(--space-xl) var(--space-md);
+  padding: var(--r-lg) var(--r-md);
 }
 
 .bootstrap-card {
-  background: var(--surface);
+  background: var(--canvas);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius-xl);
-  padding: var(--space-xl);
-  box-shadow: var(--shadow-1);
+  border-radius: var(--r-lg);
+  padding: var(--r-lg);
   width: 100%;
   max-width: 520px;
-  margin-top: calc(-1 * var(--space-xl));
+  margin-top: calc(-1 * var(--r-lg));
   position: relative;
   z-index: 1;
 }
 
 .bootstrap-card h2 {
-  margin: 0 0 var(--space-xs);
-  font-size: 16px;
+  font-family: var(--font-display);
+  margin: 0 0 var(--r-xs);
+  font-size: 21px;
   font-weight: 600;
+  line-height: 1.19;
+  letter-spacing: 0.231px;
   color: var(--ink);
 }
 
 .bootstrap-card .section-desc {
-  margin: 0 0 var(--space-md);
+  margin: 0 0 17px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-48);
+}
+
+.bootstrap-card code {
+  font-family: var(--font-mono);
   font-size: 13px;
-  color: var(--ink-muted);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--primary);
 }
 
-/* OTP 입력: 6 분할 박스 (3+3) */
-.otp-grid {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: var(--space-xs);
-  margin-bottom: var(--space-lg);
+/* Bootstrap form override — pill inputs match Apple grammar */
+.bootstrap-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.otp-grid input {
-  width: 100%;
-  aspect-ratio: 1 / 1.2;
-  text-align: center;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 20px;
+.bootstrap-card label > span {
+  font-family: var(--font-text);
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0;
-  color: var(--ink);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  transition: border-color 0.12s, box-shadow 0.12s;
-}
-
-.otp-grid input:focus {
-  outline: none;
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(0, 117, 222, 0.2);
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 
 .bootstrap-divider {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  margin: var(--space-md) 0;
-  font-size: 11px;
-  letter-spacing: 0.125px;
-  text-transform: uppercase;
-  color: var(--ink-faint);
+  gap: var(--r-sm);
+  margin: 17px 0;
+  font-family: var(--font-text);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: -0.12px;
+  color: var(--ink-muted-48);
 }
 
 .bootstrap-divider::before,
@@ -348,16 +347,20 @@ html, body {
   content: "";
   flex: 1;
   height: 1px;
-  background: var(--hairline);
+  background: var(--divider-soft);
 }
 
 .role-preview {
-  background: var(--canvas-soft);
-  border-radius: var(--radius-md);
-  padding: var(--space-md);
-  margin: var(--space-md) 0;
-  font-size: 13px;
-  line-height: 1.5;
+  background: var(--surface-pearl);
+  border-radius: var(--r-md);
+  padding: 17px;
+  margin: 17px 0;
+  font-family: var(--font-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.43;
+  letter-spacing: -0.224px;
+  color: var(--ink-muted-80);
 }
 
 .role-preview strong {
@@ -368,49 +371,48 @@ html, body {
 .role-preview .perm-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-xxs);
-  margin-top: var(--space-xs);
+  gap: 4px;
+  margin-top: var(--r-xs);
 }
 
 .perm-chip {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  padding: 2px var(--space-xs);
-  border-radius: var(--radius-md);
-  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: -0.12px;
+  padding: 4px var(--r-xs);
+  border-radius: var(--r-pill);
+  background: var(--canvas);
   border: 1px solid var(--hairline);
-  color: var(--ink-secondary);
+  color: var(--ink-muted-80);
 }
 
-/* 비밀번호 강도 게이지 */
+/* Password strength gauge */
 .strength-gauge {
   display: flex;
   gap: 4px;
-  margin-top: var(--space-xxs);
+  margin-top: 4px;
 }
 
 .strength-gauge .seg {
   flex: 1;
   height: 4px;
-  background: var(--hairline);
-  border-radius: var(--radius-xs);
+  background: var(--divider-soft);
+  border-radius: var(--r-pill);
 }
 
-.strength-gauge.weak .seg:nth-child(-n+1)   { background: #c4382a; }
-.strength-gauge.fair .seg:nth-child(-n+2)   { background: #d9730d; }
-.strength-gauge.strong .seg:nth-child(-n+3) { background: #0f7b6c; }
-.strength-gauge.very-strong .seg { background: #1aae39; }
+.strength-gauge.weak .seg:nth-child(-n+1)       { background: var(--error-text); }
+.strength-gauge.fair .seg:nth-child(-n+2)       { background: var(--warn); }
+.strength-gauge.strong .seg:nth-child(-n+3)     { background: #34c759; }
+.strength-gauge.very-strong .seg                 { background: #34c759; }
 
-/* 모바일 대응 */
+/* ── Responsive ──────────────────────────────────────────────────── */
+
 @media (max-width: 480px) {
   .bootstrap-card {
-    padding: var(--space-lg);
+    padding: var(--r-md);
     margin-top: 0;
   }
-  .otp-grid {
-    gap: var(--space-xxs);
-  }
-  .otp-grid input {
-    font-size: 16px;
-  }
+  .bootstrap-hero h1 { font-size: 28px; }
+  .auth-card h1 { font-size: 24px; }
 }
