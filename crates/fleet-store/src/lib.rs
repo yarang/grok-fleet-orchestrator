@@ -309,6 +309,17 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("clear_login_attempts"))
     }
 
+    /// 지정 시각 이전의 모든 로그인 시도 기록 삭제 (테이블 무한 증가 방지).
+    ///
+    /// 정기적 또는 기회적(login 성공 시)으로 호출하여 login_attempts 테이블이
+    /// 제한 없이 커지는 것을 방지.
+    async fn delete_old_login_attempts(
+        &self,
+        _before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("delete_old_login_attempts"))
+    }
+
     // ── Worker credentials (Phase 8.6) ─────────────────────────────
     //
     // 기본 구현은 `Unsupported` — mock store (테스트용)는 credentials가 필요

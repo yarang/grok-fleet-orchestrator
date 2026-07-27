@@ -429,6 +429,18 @@ pub async fn login(
         .build();
     let new_jar = jar.add(cookie);
 
+    // CSRF 토큰 회전 — 로그인 성공 후 새 토큰 발급.
+    // 인증 전 CSRF 쿠키를 재사용하지 않아 세션 고정 공격을 방어.
+    let rotated_csrf = generate_csrf_token();
+    let csrf_cookie = Cookie::build((CSRF_COOKIE, rotated_csrf))
+        .path("/")
+        .http_only(false)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::seconds(3600))
+        .build();
+    let new_jar = new_jar.add(csrf_cookie);
+
     Ok((new_jar, Redirect::to("/")))
 }
 

@@ -1137,6 +1137,17 @@ impl Store for PgStore {
         .await?;
         Ok(result.rows_affected())
     }
+
+    async fn delete_old_login_attempts(
+        &self,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StoreError> {
+        let result = sqlx::query("DELETE FROM login_attempts WHERE attempted_at < $1")
+            .bind(before)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

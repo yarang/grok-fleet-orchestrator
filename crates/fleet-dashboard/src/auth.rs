@@ -260,5 +260,10 @@ pub async fn record_login_success(
         .clear_login_attempts(identifier, ip)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // 기회적 정리 — 7일 이상 된 로그인 시도 기록 삭제 (테이블 무한 증가 방지).
+    let cutoff = Utc::now() - chrono::Duration::days(7);
+    state.store.delete_old_login_attempts(cutoff).await.ok();
+
     Ok(())
 }
