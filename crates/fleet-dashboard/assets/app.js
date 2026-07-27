@@ -78,6 +78,14 @@ function fmtTime(iso) {
   return d.toLocaleTimeString();
 }
 
+/// 토큰 수를 사람이 읽기 쉬운 형태로 포맷 (1234 → "1.2K").
+function fmtTokens(n) {
+  if (!n || n === 0) return '—';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (n / 1000).toFixed(1) + 'K';
+  return (n / 1_000_000).toFixed(1) + 'M';
+}
+
 function setStatusPill(online) {
   const pill = document.getElementById('status-pill');
   if (!pill) return;
@@ -103,6 +111,8 @@ async function refreshOverview() {
     setMetric('metric-tasks-active', data.tasks.pending + data.tasks.dispatched);
     setMetric('metric-tasks-today', data.tasks.total);
     setMetric('metric-failures', data.tasks.failed);
+    const tokens = data.tokens;
+    setMetric('metric-tokens-total', tokens ? fmtTokens(tokens.total_tokens) : '—');
     setStatusPill(true);
   } catch (e) {
     console.error('overview', e);
@@ -152,11 +162,14 @@ async function refreshTasks() {
       const row = document.createElement('div');
       row.className = 'row';
       const idShort = (t.id || '').slice(0, 8);
+      const tokenStr = t.token_usage ? fmtTokens(t.token_usage.total_tokens) : '—';
       row.innerHTML = `
         <div title="${escapeHtml(t.id)}">${idShort}</div>
         <div><span class="phase ${t.phase}">${t.phase}</span></div>
-        <div>${escapeHtml((t.prompt || '').slice(0, 80))}</div>
+        <div>${escapeHtml((t.prompt || '').slice(0, 60))}</div>
+        <div>${escapeHtml(t.model || '—')}</div>
         <div>${t.worker_id ? String(t.worker_id).slice(0, 8) : '—'}</div>
+        <div>${tokenStr}</div>
         <div>${fmtTime(t.created_at)}</div>
       `;
       list.appendChild(row);

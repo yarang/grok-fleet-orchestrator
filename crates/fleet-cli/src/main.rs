@@ -31,7 +31,6 @@ mod users;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-#[cfg(feature = "mtls")]
 use std::path::PathBuf;
 
 /// Grok Fleet Orchestrator CLI.

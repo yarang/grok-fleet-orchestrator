@@ -16,7 +16,7 @@ use tracing::debug;
 use fleet_core::{TaskFilter, TaskStatus, WorkerFilter};
 
 use crate::app::DashboardState;
-use crate::schema::{OverviewResponse, TaskCounts, TaskSummary, WorkerCounts, WorkerSummary};
+use crate::schema::{OverviewResponse, TaskCounts, TaskSummary, TokenStats, WorkerCounts, WorkerSummary};
 
 /// `/health` — 헬스체크.
 pub async fn health() -> &'static str {
@@ -60,20 +60,36 @@ pub async fn overview(
         })?;
 
     let mut task_counts = TaskCounts::default();
+    let mut tok_stats = TokenStats::default();
     for t in &tasks {
         task_counts.total += 1;
         match &t.status {
             TaskStatus::Pending => task_counts.pending += 1,
             TaskStatus::Dispatched { .. } => task_counts.dispatched += 1,
-            TaskStatus::Completed(_) => task_counts.completed += 1,
+            TaskStatus::Completed(result) => {
+                task_counts.completed += 1;
+                if let Some(usage) = &result.token_usage {
+                    tok_stats.input_tokens += usage.input_tokens;
+                    tok_stats.output_tokens += usage.output_tokens;
+                    tok_stats.cache_read_tokens += usage.cache_read_tokens;
+                    tok_stats.total_tokens += usage.total();
+                }
+            }
             TaskStatus::Failed(_) => task_counts.failed += 1,
             TaskStatus::Cancelled { .. } => task_counts.cancelled += 1,
         }
     }
 
+    let tokens = if tok_stats.total_tokens > 0 {
+        Some(tok_stats)
+    } else {
+        None
+    };
+
     Ok(Json(OverviewResponse {
         workers: counts,
         tasks: task_counts,
+        tokens,
         generated_at: Utc::now(),
     }))
 }
@@ -226,19 +242,25 @@ fn worker_to_summary(w: &fleet_core::Worker) -> WorkerSummary {
 }
 
 fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
-    let (phase, worker_id, exit_code, duration_secs) = match &t.status {
-        TaskStatus::Pending => ("pending", None, None, None),
+    let (phase, worker_id, exit_code, duration_secs, token_usage) = match &t.status {
+        TaskStatus::Pending => ("pending", None, None, None, None),
         TaskStatus::Dispatched { worker_id, .. } => {
-            ("dispatched", Some(worker_id.to_string()), None, None)
+            ("dispatched", Some(worker_id.to_string()), None, None, None)
         }
         TaskStatus::Completed(r) => (
             "completed",
             Some(r.worker_id.to_string()),
             Some(r.exit_code),
             Some(r.duration_secs),
+            r.token_usage.map(|u| TokenStats {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_read_tokens: u.cache_read_tokens,
+                total_tokens: u.total(),
+            }),
         ),
-        TaskStatus::Failed(f) => ("failed", f.worker_id.map(|w| w.to_string()), None, None),
-        TaskStatus::Cancelled { .. } => ("cancelled", None, None, None),
+        TaskStatus::Failed(f) => ("failed", f.worker_id.map(|w| w.to_string()), None, None, None),
+        TaskStatus::Cancelled { .. } => ("cancelled", None, None, None, None),
     };
     TaskSummary {
         id: t.id.to_string(),
@@ -249,6 +271,8 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
         worker_id,
         exit_code,
         duration_secs,
+        model: t.model.clone(),
+        token_usage,
     }
 }
 

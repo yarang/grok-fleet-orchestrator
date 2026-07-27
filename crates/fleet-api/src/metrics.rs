@@ -14,6 +14,7 @@
 //! | `fleet_workers_active_tasks_total`    | gauge   | —               | 현재 실행 중인 작업 수 합계       |
 //! | `fleet_tasks_total`                   | gauge   | phase           | 위상별 작업 수                    |
 //! | `fleet_events_written_total`          | gauge   | —               | 가장 최근 이벤트 seq (단조 증가)  |
+//! | `fleet_task_tokens_total`             | counter | type            | 완료된 작업의 누적 토큰 사용량    |
 
 use std::sync::Arc;
 
@@ -84,12 +85,21 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     }
 
     let mut t_counts = TaskCounts::default();
+    let mut tok_counts = TokenCounts::default();
     for t in &tasks {
         t_counts.total += 1;
         match &t.status {
             TaskStatus::Pending => t_counts.pending += 1,
             TaskStatus::Dispatched { .. } => t_counts.dispatched += 1,
-            TaskStatus::Completed(_) => t_counts.completed += 1,
+            TaskStatus::Completed(result) => {
+                t_counts.completed += 1;
+                if let Some(usage) = &result.token_usage {
+                    tok_counts.input += usage.input_tokens;
+                    tok_counts.output += usage.output_tokens;
+                    tok_counts.cache_read += usage.cache_read_tokens;
+                    tok_counts.total += usage.total();
+                }
+            }
             TaskStatus::Failed(_) => t_counts.failed += 1,
             TaskStatus::Cancelled { .. } => t_counts.cancelled += 1,
         }
@@ -198,6 +208,37 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     out.push_str("# HELP fleet_events_written_total Highest event sequence number observed.\n");
     out.push_str("# TYPE fleet_events_written_total gauge\n");
     push_gauge(&mut out, "fleet_events_written_total", &[], last_seq);
+    out.push('\n');
+
+    // fleet_task_tokens_total{type}
+    out.push_str(
+        "# HELP fleet_task_tokens_total Cumulative LLM token usage across completed tasks.\n",
+    );
+    out.push_str("# TYPE fleet_task_tokens_total counter\n");
+    push_gauge(
+        &mut out,
+        "fleet_task_tokens_total",
+        &[("type", "input")],
+        tok_counts.input,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_task_tokens_total",
+        &[("type", "output")],
+        tok_counts.output,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_task_tokens_total",
+        &[("type", "cache_read")],
+        tok_counts.cache_read,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_task_tokens_total",
+        &[("type", "total")],
+        tok_counts.total,
+    );
 
     debug!(
         workers = workers.len(),
@@ -253,11 +294,19 @@ struct TaskCounts {
     cancelled: u64,
 }
 
+#[derive(Default, Debug)]
+struct TokenCounts {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    total: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::MemStore;
-    use fleet_core::{Task, TaskRequest, Worker};
+    use fleet_core::{Task, TaskRequest, TaskResult, TokenUsage, Worker};
 
     #[tokio::test]
     async fn empty_store_renders_skeleton() {
@@ -326,5 +375,94 @@ mod tests {
         let out = metrics_text(store.as_ref()).await.unwrap();
         // 정적 라벨은 모두 `key="value"` 형태.
         assert!(out.contains("status=\"online\""));
+    }
+
+    #[tokio::test]
+    async fn token_metrics_zero_on_empty_store() {
+        let store = MemStore::new_arc();
+        let out = metrics_text(store.as_ref()).await.unwrap();
+        assert!(out.contains("# HELP fleet_task_tokens_total"));
+        assert!(out.contains("# TYPE fleet_task_tokens_total counter"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"input\"} 0"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"output\"} 0"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"cache_read\"} 0"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 0"));
+    }
+
+    #[tokio::test]
+    async fn token_metrics_aggregate_from_completed_tasks() {
+        let store = MemStore::new_arc();
+
+        let w = Worker::new("w1", "wss://1");
+        let worker_id = w.id;
+        store.upsert_worker(&w).await.unwrap();
+
+        let mut t1 = Task::from_request(TaskRequest {
+            prompt: "hello".into(),
+            ..Default::default()
+        });
+        t1.status = TaskStatus::Completed(TaskResult {
+            output: "world".into(),
+            exit_code: 0,
+            duration_secs: 1.0,
+            token_usage: Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 20,
+            }),
+            worker_id,
+            finished_at: chrono::Utc::now(),
+        });
+        store.insert_task(&t1).await.unwrap();
+
+        let mut t2 = Task::from_request(TaskRequest {
+            prompt: "bye".into(),
+            ..Default::default()
+        });
+        t2.status = TaskStatus::Completed(TaskResult {
+            output: "done".into(),
+            exit_code: 0,
+            duration_secs: 2.0,
+            token_usage: Some(TokenUsage {
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_tokens: 0,
+            }),
+            worker_id,
+            finished_at: chrono::Utc::now(),
+        });
+        store.insert_task(&t2).await.unwrap();
+
+        let out = metrics_text(store.as_ref()).await.unwrap();
+        assert!(out.contains("fleet_task_tokens_total{type=\"input\"} 300"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"output\"} 130"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"cache_read\"} 20"));
+        assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 430"));
+    }
+
+    #[tokio::test]
+    async fn token_metrics_ignore_tasks_without_usage() {
+        let store = MemStore::new_arc();
+
+        let w = Worker::new("w1", "wss://1");
+        let worker_id = w.id;
+        store.upsert_worker(&w).await.unwrap();
+
+        let mut t = Task::from_request(TaskRequest {
+            prompt: "x".into(),
+            ..Default::default()
+        });
+        t.status = TaskStatus::Completed(TaskResult {
+            output: "y".into(),
+            exit_code: 0,
+            duration_secs: 0.5,
+            token_usage: None,
+            worker_id,
+            finished_at: chrono::Utc::now(),
+        });
+        store.insert_task(&t).await.unwrap();
+
+        let out = metrics_text(store.as_ref()).await.unwrap();
+        assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 0"));
     }
 }

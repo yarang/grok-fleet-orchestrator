@@ -11,7 +11,18 @@ use fleet_core::WorkerStatus;
 pub struct OverviewResponse {
     pub workers: WorkerCounts,
     pub tasks: TaskCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<TokenStats>,
     pub generated_at: DateTime<Utc>,
+}
+
+/// 완료된 작업에서 집계한 LLM 토큰 사용량.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenStats {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -72,4 +83,8 @@ pub struct TaskSummary {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<TokenStats>,
 }
