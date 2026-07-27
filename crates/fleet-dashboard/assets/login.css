@@ -1,0 +1,416 @@
+/* ─────────────────────────────────────────────────────────────────
+ * fleet-dashboard / login.css — Notion 디자인 시스템 적용
+ *
+ * 핵심 원칙 (DESIGN-notion.md):
+ *   1. warm paper canvas (#f6f5f4), not pure white
+ *   2. single Notion Blue (#0075de) for all structural accent
+ *   3. inputs are tight (radius 4px), primary CTA is pill (radius-full)
+ *   4. barely-there shadow, hairline borders
+ *   5. Inter typography with negative tracking on headings
+ * ───────────────────────────────────────────────────────────────── */
+
+@import url('https://rsms.me/inter/inter.css');
+
+:root {
+  /* Brand */
+  --primary: #0075de;
+  --primary-active: #005bab;
+  --on-primary: #ffffff;
+
+  /* Surface */
+  --canvas-soft: #f6f5f4;        /* 페이지 배경 (warm paper) */
+  --surface: #ffffff;            /* 카드 */
+  --hairline: #e6e6e6;
+
+  /* Text */
+  --ink: #000000;
+  --ink-secondary: #31302e;
+  --ink-muted: #615d59;
+  --ink-faint: #a39e98;
+
+  /* Semantic (sticker palette 파생) */
+  --error-text: #c4382a;
+  --error-bg: #ffe7e4;
+
+  /* Radius */
+  --radius-xs: 4px;     /* input */
+  --radius-md: 8px;     /* utility */
+  --radius-xl: 16px;    /* card */
+  --radius-full: 9999px;
+
+  /* Spacing */
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+
+  /* Shadow (barely-there layered) */
+  --shadow-1:
+    0 0.175px 1.041px rgba(0,0,0,0.01),
+    0 0.8px 2.925px rgba(0,0,0,0.02),
+    0 2.025px 7.847px rgba(0,0,0,0.027),
+    0 4px 18px rgba(0,0,0,0.04);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.auth-page {
+  min-height: 100vh;
+  background: var(--canvas-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+}
+
+/* ── Auth card ───────────────────────────────────────────────────── */
+
+.auth-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
+  padding: var(--space-xl);
+  box-shadow: var(--shadow-1);
+  width: 100%;
+  max-width: 400px;
+}
+
+.auth-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--primary);
+  color: var(--on-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 22px;
+  letter-spacing: -0.5px;
+  margin: 0 auto var(--space-md);
+}
+
+.auth-card h1 {
+  margin: 0 0 var(--space-xxs);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.125px;
+  color: var(--ink);
+  text-align: center;
+}
+
+.auth-subtitle {
+  margin: 0 0 var(--space-lg);
+  font-size: 14px;
+  color: var(--ink-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ── Form ────────────────────────────────────────────────────────── */
+
+.auth-card form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.auth-card label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xxs);
+}
+
+.auth-card label > span {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.125px;
+  color: var(--ink-secondary);
+}
+
+.auth-card input[type="text"],
+.auth-card input[type="password"] {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xs);  /* tight, Notion signature */
+  background: var(--surface);
+  font: inherit;
+  font-size: 15px;
+  color: var(--ink);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.auth-card input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 117, 222, 0.2);
+}
+
+.auth-card input::placeholder {
+  color: var(--ink-faint);
+}
+
+/* ── CTA (pill, Notion signature) ────────────────────────────────── */
+
+.auth-button {
+  margin-top: var(--space-sm);
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-full);  /* pill */
+  background: var(--primary);
+  color: var(--on-primary);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+
+.auth-button:hover { background: var(--primary-active); }
+.auth-button:active { transform: translateY(0.5px); }
+.auth-button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Error banner ────────────────────────────────────────────────── */
+
+.auth-error {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-radius: var(--radius-xs);
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+/* ── Footer ──────────────────────────────────────────────────────── */
+
+.auth-footer {
+  margin: var(--space-lg) 0 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+/* ── Bootstrap 페이지 (deep indigo hero) ─────────────────────────── */
+
+.bootstrap-page {
+  min-height: 100vh;
+  background: var(--canvas-soft);
+  display: flex;
+  flex-direction: column;
+}
+
+.bootstrap-hero {
+  background: #213183;  /* Notion deep indigo */
+  color: rgba(255, 255, 255, 0.92);
+  padding: var(--space-xl) var(--space-md);
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.bootstrap-hero::before,
+.bootstrap-hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(217, 115, 13, 0.18) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.bootstrap-hero::before {
+  width: 200px; height: 200px;
+  top: -50px; left: 10%;
+}
+
+.bootstrap-hero::after {
+  width: 280px; height: 280px;
+  bottom: -100px; right: 5%;
+  background: radial-gradient(circle, rgba(15, 123, 108, 0.15) 0%, transparent 70%);
+}
+
+.bootstrap-eyebrow {
+  position: relative;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  letter-spacing: 0.125px;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0 0 var(--space-md);
+}
+
+.bootstrap-hero h1 {
+  position: relative;
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin: 0 0 var(--space-xs);
+}
+
+.bootstrap-hero .tagline {
+  position: relative;
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.8);
+  margin: 0;
+}
+
+.bootstrap-main {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: var(--space-xl) var(--space-md);
+}
+
+.bootstrap-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
+  padding: var(--space-xl);
+  box-shadow: var(--shadow-1);
+  width: 100%;
+  max-width: 520px;
+  margin-top: calc(-1 * var(--space-xl));
+  position: relative;
+  z-index: 1;
+}
+
+.bootstrap-card h2 {
+  margin: 0 0 var(--space-xs);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bootstrap-card .section-desc {
+  margin: 0 0 var(--space-md);
+  font-size: 13px;
+  color: var(--ink-muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* OTP 입력: 6 분할 박스 (3+3) */
+.otp-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--space-xs);
+  margin-bottom: var(--space-lg);
+}
+
+.otp-grid input {
+  width: 100%;
+  aspect-ratio: 1 / 1.2;
+  text-align: center;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.otp-grid input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 117, 222, 0.2);
+}
+
+.bootstrap-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-md) 0;
+  font-size: 11px;
+  letter-spacing: 0.125px;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.bootstrap-divider::before,
+.bootstrap-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--hairline);
+}
+
+.role-preview {
+  background: var(--canvas-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  margin: var(--space-md) 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.role-preview strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.role-preview .perm-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xxs);
+  margin-top: var(--space-xs);
+}
+
+.perm-chip {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  padding: 2px var(--space-xs);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  color: var(--ink-secondary);
+}
+
+/* 비밀번호 강도 게이지 */
+.strength-gauge {
+  display: flex;
+  gap: 4px;
+  margin-top: var(--space-xxs);
+}
+
+.strength-gauge .seg {
+  flex: 1;
+  height: 4px;
+  background: var(--hairline);
+  border-radius: var(--radius-xs);
+}
+
+.strength-gauge.weak .seg:nth-child(-n+1)   { background: #c4382a; }
+.strength-gauge.fair .seg:nth-child(-n+2)   { background: #d9730d; }
+.strength-gauge.strong .seg:nth-child(-n+3) { background: #0f7b6c; }
+.strength-gauge.very-strong .seg { background: #1aae39; }
+
+/* 모바일 대응 */
+@media (max-width: 480px) {
+  .bootstrap-card {
+    padding: var(--space-lg);
+    margin-top: 0;
+  }
+  .otp-grid {
+    gap: var(--space-xxs);
+  }
+  .otp-grid input {
+    font-size: 16px;
+  }
+}

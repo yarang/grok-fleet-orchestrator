@@ -27,6 +27,7 @@ mod logging;
 mod mtls;
 mod runtime;
 mod token;
+mod users;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -92,15 +93,9 @@ enum Command {
         /// 생략하면 대시보드 서버를 실행하지 않습니다.
         /// 지정하면 `/api/overview`, `/api/workers`, `/api/tasks`,
         /// `/api/events/stream` (SSE) 엔드포인트가 제공됩니다.
+        /// 인증은 Phase 9.1 쿠키 세션(RBAC)을 사용합니다.
         #[arg(long, env = "FLEET_DASHBOARD_BIND")]
         dashboard_bind: Option<String>,
-
-        /// 대시보드 접근용 bearer token (쉼표로 다중 지정 가능).
-        /// 비어 있으면 대시보드 인증 비활성 (로컬 전용 권장).
-        /// 외부 노출 시 반드시 설정 — `/health`만 제외하고 인증 필수.
-        /// 미설정 시 `--tokens` 와 동일한 값 사용 (단일 토큰 운영 시 편의).
-        #[arg(long, env = "FLEET_DASHBOARD_TOKEN")]
-        dashboard_tokens: Option<String>,
 
         /// mTLS: 사설 CA PEM 파일 경로. orchestrator↔worker ACP 트래픽을
         /// TLS로 보호 (`--features mtls` 필요). `--mtls-cert`, `--mtls-key` 도 함께 필요.
@@ -157,6 +152,13 @@ enum Command {
     Credentials {
         #[command(subcommand)]
         action: CredentialsAction,
+    },
+
+    /// 대시보드 사용자 관리 (RBAC). 서버와 동일한 `DATABASE_URL`로
+    /// Postgres에 직접 접근하여 사용자/역할/권한을 관리합니다.
+    Users {
+        #[command(subcommand)]
+        action: UsersAction,
     },
 
     /// 감사 로그 (이벤트 히스토리) 조회.
@@ -437,6 +439,112 @@ enum TokenAction {
 }
 
 #[derive(Debug, Subcommand)]
+enum UsersAction {
+    /// 등록된 사용자 목록을 테이블 형태로 출력.
+    List {
+        /// JSON 형식 출력 (스크립트용).
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// 사용자 상세 조회 (역할, 권한 포함).
+    Show {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 신규 사용자 생성. 비밀번호는 안전하게 프롬프트로 입력받습니다.
+    Create {
+        /// 사용자 이름 (`^[a-zA-Z][a-zA-Z0-9_-]{2,63}$`).
+        username: String,
+
+        /// 이메일 (선택).
+        #[arg(long)]
+        email: Option<String>,
+
+        /// 역할 (기본값: viewer). 여러 번 지정 가능.
+        /// builtin: admin, operator, viewer.
+        #[arg(long, value_delimiter = ',')]
+        roles: Option<Vec<String>>,
+
+        /// 비밀번호를 프롬프트 대신 직접 지정 (비권장 — 셸 히스토리에 남음).
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// 비밀번호 변경. 프롬프트로 새 비밀번호를 두 번 입력받습니다.
+    Passwd {
+        /// 사용자 이름.
+        username: String,
+
+        /// 비밀번호를 프롬프트 대신 직접 지정 (비권장).
+        #[arg(long)]
+        password: Option<String>,
+    },
+
+    /// 사용자 계정 활성화.
+    Enable {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 사용자 계정 비활성화 (로그인 차단, 데이터는 유지).
+    Disable {
+        /// 사용자 이름.
+        username: String,
+    },
+
+    /// 사용자 삭제 (복구 불가).
+    Delete {
+        /// 사용자 이름.
+        username: String,
+
+        /// 확인 프롬프트 생략.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+
+    /// 역할 관리 하위 명령.
+    Role {
+        #[command(subcommand)]
+        action: UserRoleAction,
+    },
+
+    /// 최초 관리자 등록용 OTP 부트스트랩 토큰 수동 발급.
+    /// (자동 발급 외에 추가/재발급이 필요한 경우.)
+    BootstrapToken {
+        /// 토큰 만료까지 시간 (시간 단위, 기본 24시간).
+        #[arg(long, default_value_t = 24)]
+        expires_in_hours: i64,
+
+        /// 현재 활성 토큰이 있어도 강제 재발급.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UserRoleAction {
+    /// 사용자에게 역할 부여.
+    Assign {
+        /// 사용자 이름.
+        username: String,
+
+        /// 역할 이름 (admin / operator / viewer 또는 custom).
+        role: String,
+    },
+
+    /// 사용자의 역할 회수.
+    Revoke {
+        /// 사용자 이름.
+        username: String,
+
+        /// 역할 이름.
+        role: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum EventsAction {
     /// 최근 이벤트를 시간 역순으로 출력.
     List {
@@ -650,7 +758,6 @@ async fn main() -> Result<()> {
             api_tokens,
             cf_audience,
             dashboard_bind,
-            dashboard_tokens,
             mtls_ca,
             mtls_cert,
             mtls_key,
@@ -665,8 +772,6 @@ async fn main() -> Result<()> {
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
                 dashboard_bind.as_deref(),
-                dashboard_tokens.as_deref(),
-                None, // master_key_env: 현재 사용 안 함 (FLEET_MASTER_KEY env 또는 파일에서 자동 로드)
                 runtime::MtlsFlags {
                     ca: mtls_ca.as_deref(),
                     cert: mtls_cert.as_deref(),
@@ -680,6 +785,7 @@ async fn main() -> Result<()> {
         Command::Tasks { action } => runtime::run_tasks(action).await,
         Command::Token { action } => token::run_token(action).await,
         Command::Credentials { action } => credentials::run_credentials(action).await,
+        Command::Users { action } => users::run(action).await,
         Command::Events { action } => runtime::run_events(action).await,
         #[cfg(feature = "mtls")]
         Command::Mtls { action } => mtls::run_mtls(action).await,

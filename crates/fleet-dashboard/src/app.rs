@@ -3,17 +3,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::Request;
-use axum::http::{header, StatusCode};
-use axum::middleware::{self, Next};
-use axum::response::Response;
-use axum::routing::{get, Router};
+use axum::middleware;
+use axum::routing::{get, post, Router};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use fleet_store::Store;
 
+use crate::auth::require_session;
 use crate::handlers;
 
 /// 대시보드 서버의 공유 상태.
@@ -22,10 +20,8 @@ pub struct DashboardState {
     pub store: Arc<dyn Store>,
     /// LISTEN/NOTIFY용 Postgres 풀 (SSE 스트리밍에서 사용).
     pub pool: sqlx::PgPool,
-    /// Bearer token 인증 활성화.
-    /// `None`이면 인증 없이 통과 (로컬 전용, 개발 모드).
-    /// `Some(tokens)`면 `/health`만 제외하고 `Authorization: Bearer <token>` 필수.
-    pub valid_tokens: Option<Arc<Vec<String>>>,
+    /// 쿠키 Secure 플래그 (로컬 개발은 false, 프로덕션은 true).
+    pub secure_cookies: bool,
 }
 
 impl DashboardState {
@@ -33,42 +29,55 @@ impl DashboardState {
         Self {
             store,
             pool,
-            valid_tokens: None,
+            secure_cookies: true,
         }
     }
 
-    /// 인증 활성화. 빈 벡터면 인증 없이 통과 (allow-all 과 동일).
-    pub fn with_tokens(mut self, tokens: Vec<String>) -> Self {
-        if tokens.is_empty() {
-            self.valid_tokens = None;
-        } else {
-            self.valid_tokens = Some(Arc::new(tokens));
+    /// 로컬 개발용 (Secure 쿠키 비활성).
+    pub fn new_insecure(store: Arc<dyn Store>, pool: sqlx::PgPool) -> Self {
+        Self {
+            store,
+            pool,
+            secure_cookies: false,
         }
-        self
     }
 }
 
 /// 전체 라우터 조립.
+///
+/// 라우트 그룹:
+/// - **public**: `/login`, `/logout`, `/health` (세션 미들웨어 없음)
+/// - **protected**: `/`, `/api/*`, `/static/*` (require_session 적용)
 pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
-    // 인증 미들웨어 (가장 바깥). valid_tokens == None 이면 통과.
-    let state_for_auth = state.clone();
-    let app = Router::new()
+    let public = Router::new()
+        .route("/login", get(handlers::login_page).post(handlers::login))
+        .route(
+            "/bootstrap",
+            get(handlers::bootstrap_page).post(handlers::bootstrap),
+        )
+        .route("/health", get(handlers::health));
+
+    let protected = Router::new()
         .route("/", get(handlers::index))
-        .route("/health", get(handlers::health))
         .route("/api/overview", get(handlers::overview))
         .route("/api/workers", get(handlers::list_workers))
         .route("/api/tasks", get(handlers::list_tasks))
         .route("/api/events", get(handlers::list_events))
         .route("/api/events/stream", get(crate::sse::events_stream))
+        .route("/api/me", get(handlers::me))
+        .route("/logout", post(handlers::logout))
         .route("/static/*path", get(handlers::static_asset))
-        .layer(middleware::from_fn(move |req, next| {
-            let state = state_for_auth.clone();
-            async move { auth_middleware(state, req, next).await }
-        }))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_session,
+        ));
+
+    Router::new()
+        .merge(public)
+        .merge(protected)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .with_state(state);
-    app
+        .with_state(state)
 }
 
 /// 대시보드 HTTP 서버 바인딩 + serve.
@@ -79,84 +88,27 @@ pub async fn run_dashboard_server(
     let app = build_dashboard_app(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, "dashboard server listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
-}
-
-/// Bearer token 인증 미들웨어.
-///
-/// - `valid_tokens == None`이면 통과 (로컬/개발 모드).
-/// - `Some(tokens)`면 보호 경로(`/api/*`)에 한해 인증 필수.
-///   `/`, `/static/*`, `/health`는 공개 — 브라우저가 HTML 과 정적 자원을
-///   먼저 로드한 뒤 JS 가 localStorage 의 token 으로 `/api/*` 를 호출.
-async fn auth_middleware(
-    state: Arc<DashboardState>,
-    req: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    let Some(tokens) = &state.valid_tokens else {
-        return Ok(next.run(req).await);
-    };
-
-    let path = req.uri().path();
-
-    // 공개 경로 — 인증 없이 허용.
-    // - /health: LB 프로브
-    // - /: dashboard HTML 페이지 자체 (JS 가 token 을 입력받아 /api/* 호출)
-    // - /static/*: CSS, JS 자원 (민감 정보 없음)
-    if path == "/health" || path == "/" || path.starts_with("/static/") {
-        return Ok(next.run(req).await);
-    }
-
-    // Authorization 헤더 우선, 그 다음 ?token= 쿼리 파라미터 (htmx/SSE 호환).
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let token = auth_header
-        .and_then(|h| {
-            h.strip_prefix("Bearer ")
-                .or_else(|| h.strip_prefix("bearer "))
-        })
-        .or_else(|| req.uri().query().and_then(|q| url_query_token(q)));
-
-    let Some(token) = token else {
-        tracing::warn!(path = %req.uri().path(), "dashboard: missing Authorization header");
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    if !tokens.iter().any(|t| t == token) {
-        tracing::warn!(path = %req.uri().path(), "dashboard: invalid bearer token");
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    Ok(next.run(req).await)
-}
-
-/// URL 쿼리스트링에서 `token=` 파라미터 값 추출.
-fn url_query_token(query: &str) -> Option<&str> {
-    for pair in query.split('&') {
-        let mut parts = pair.splitn(2, '=');
-        if parts.next() == Some("token") {
-            return parts.next();
-        }
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use chrono::Utc;
     use fleet_core::{
-        BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-        Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+        BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission, Role, Session, SessionId,
+        Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker, WorkerFilter,
+        WorkerHeartbeat, WorkerId,
     };
     use fleet_store::{Store, StoreError};
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use tower::util::ServiceExt;
 
     struct MemStore {
         workers: Mutex<HashMap<WorkerId, Worker>>,
@@ -228,231 +180,124 @@ mod tests {
             unimplemented!()
         }
         async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-            unimplemented!()
+            Ok(vec![])
         }
         async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn create_user(&self, _: &User) -> Result<(), StoreError> {
             unimplemented!()
         }
-
-        // Phase 8.6: credentials 메서드 — dashboard 테스트에서 미사용.
-        async fn upsert_worker_credential(
+        async fn get_user_by_id(&self, _: UserId) -> Result<Option<User>, StoreError> {
+            Ok(None)
+        }
+        async fn get_user_by_username(&self, _: &str) -> Result<Option<User>, StoreError> {
+            Ok(None)
+        }
+        async fn list_users(&self) -> Result<Vec<User>, StoreError> {
+            Ok(vec![])
+        }
+        async fn count_users(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+        async fn update_user_password(&self, _: UserId, _: &str) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn update_user_last_login(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: u32,
-            _: Option<&str>,
+            _: UserId,
+            _: chrono::DateTime<Utc>,
         ) -> Result<(), StoreError> {
             unimplemented!()
         }
-        async fn get_worker_credential(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
+        async fn set_user_enabled(&self, _: UserId, _: bool) -> Result<(), StoreError> {
             unimplemented!()
         }
-        async fn list_worker_credentials(
-            &self,
-            _: &str,
-        ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
+        async fn delete_user(&self, _: UserId) -> Result<(), StoreError> {
             unimplemented!()
         }
-        async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
+        async fn create_role(&self, _: &Role) -> Result<(), StoreError> {
             unimplemented!()
+        }
+        async fn get_role_by_name(&self, _: &str) -> Result<Option<Role>, StoreError> {
+            Ok(None)
+        }
+        async fn list_roles(&self) -> Result<Vec<Role>, StoreError> {
+            Ok(vec![])
+        }
+        async fn create_permission(&self, _: &Permission) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn get_permission_by_name(&self, _: &str) -> Result<Option<Permission>, StoreError> {
+            Ok(None)
+        }
+        async fn list_permissions(&self) -> Result<Vec<Permission>, StoreError> {
+            Ok(vec![])
+        }
+        async fn assign_user_role(
+            &self,
+            _: UserId,
+            _: fleet_core::RoleId,
+            _: Option<UserId>,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn revoke_user_role(
+            &self,
+            _: UserId,
+            _: fleet_core::RoleId,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn list_user_roles(&self, _: UserId) -> Result<Vec<Role>, StoreError> {
+            Ok(vec![])
+        }
+        async fn list_user_permissions(&self, _: UserId) -> Result<Vec<Permission>, StoreError> {
+            Ok(vec![])
+        }
+        async fn grant_role_permission(
+            &self,
+            _: fleet_core::RoleId,
+            _: fleet_core::PermissionId,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn create_session(&self, _: &Session) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn get_session_by_token_hash(&self, _: &str) -> Result<Option<Session>, StoreError> {
+            Ok(None)
+        }
+        async fn delete_session(&self, _: SessionId) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn delete_expired_sessions(&self) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+        async fn delete_user_sessions(&self, _: UserId) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+        async fn record_login_attempt(&self, _: &LoginAttempt) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn count_recent_failed_attempts(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: i64,
+        ) -> Result<u64, StoreError> {
+            Ok(0)
+        }
+        async fn clear_login_attempts(&self, _: &str, _: Option<&str>) -> Result<u64, StoreError> {
+            Ok(0)
         }
     }
 
     #[tokio::test]
     async fn dashboard_app_builds() {
         let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        // 실제 PgPool 없이 빌드만 검증. pool은 stub.
-        // NOTE: dashboard_app 빌드에는 state가 필요하지만, pool은 테스트에서 생략.
-        // 대신 라우터 구조만 확인.
+        // dashboard_app 빌드만 검증 (실제 pool은 필요 없음).
+        // pool은 SSE용이므로 stub. 실제 통합 테스트는 PgStore 기반.
         let _ = store;
-        // dashboard_app(state) 호출을 위해 pool 필요 → 이 테스트는 생략.
-    }
-
-    // ── bearer auth 통합 테스트 ─────────────────────────────────────────
-
-    fn pg_pool_stub() -> sqlx::PgPool {
-        // 실제 DB 없이 Pool 타입만 필요한 테스트에서 사용.
-        // PgPool::connect_lazy 가 아니면 빈 Pool 을 만들 방법이 없으므로
-        // 더미 DSN 으로 connect_lazy 시도. 테스트에서는 pool 을 실제로 사용하지 않음.
-        sqlx::PgPool::connect_lazy("postgres://stub:stub@127.0.0.1:1/stub")
-            .expect("connect_lazy should not perform I/O")
-    }
-
-    #[tokio::test]
-    async fn no_auth_when_valid_tokens_none() {
-        // valid_tokens == None 이면 모든 경로 통과 (로컬 개발 모드).
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(DashboardState::new(store, pg_pool_stub()));
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn health_endpoint_bypasses_auth() {
-        // /health 는 LB 프로브용 — valid_tokens 가 있어도 통과.
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(
-            DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret-token".into()]),
-        );
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/health")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn protected_route_rejects_missing_token() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(
-            DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret-token".into()]),
-        );
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/overview")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn protected_route_accepts_valid_token() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(
-            DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret-token".into()]),
-        );
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/overview")
-                    .header("Authorization", "Bearer secret-token")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        // 200 또는 500 (store/pool 문제) — 인증은 통과했는지가 중요.
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn protected_route_rejects_invalid_token() {
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(
-            DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret-token".into()]),
-        );
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/overview")
-                    .header("Authorization", "Bearer wrong-token")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn with_tokens_empty_disables_auth() {
-        // 빈 벡터는 valid_tokens = None 과 동일 (allow all).
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state = Arc::new(DashboardState::new(store, pg_pool_stub()).with_tokens(vec![]));
-        assert!(state.valid_tokens.is_none());
-    }
-
-    #[tokio::test]
-    async fn static_assets_are_public() {
-        // /static/* 는 브라우저가 페이지 로드 시 먼저 가져오는 자원 — 공개.
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state =
-            Arc::new(DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret".into()]));
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/static/styles.css")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn index_page_is_public() {
-        // / (HTML) 자체는 공개 — JS 가 로드된 후 /api/* 호출 시 인증.
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state =
-            Arc::new(DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret".into()]));
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn query_param_token_accepted() {
-        // ?token= 쿼리 파라미터로도 인증 (SSE EventSource 호환).
-        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-        let state =
-            Arc::new(DashboardState::new(store, pg_pool_stub()).with_tokens(vec!["secret".into()]));
-        let app = build_dashboard_app(state);
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/overview?token=secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

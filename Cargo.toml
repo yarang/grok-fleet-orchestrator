@@ -38,6 +38,15 @@ thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 
+# 인증 / 암호화 (Phase 9.1: RBAC + cookie session)
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["alloc"] }
+rand = "0.8"
+sha2 = "0.10"
+subtle = "2"
+hex = "0.4"
+zxcvbn = "3"
+
 # 비동기
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -75,11 +84,9 @@ base64 = "0.22"
 serde_yaml = "0.9"
 
 # Credentials 암호화 (Phase 8.6: 워커 API 키 중앙 관리)
+# (sha2 / rand / hex 는 위 auth 섹션에서 공유 사용)
 aes-gcm = "0.10"
-sha2 = "0.10"
 hkdf = "0.12"
-rand = "0.8"
-hex = "0.4"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # 내부 크레이트
