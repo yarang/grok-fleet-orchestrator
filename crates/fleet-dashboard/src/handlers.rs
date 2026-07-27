@@ -328,6 +328,7 @@ pub async fn login(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<(CookieJar, Redirect), (CookieJar, Response)> {
     let ip = addr.ip().to_string();
@@ -389,6 +390,10 @@ pub async fn login(
 
     // 세션 생성.
     let (token, hash) = generate_session_token();
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let session = Session {
         id: SessionId::new(),
         user_id: user.id,
@@ -396,7 +401,7 @@ pub async fn login(
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::seconds(SESSION_DURATION_SECS),
         ip_address: Some(ip.clone()),
-        user_agent: None,
+        user_agent,
     };
     state
         .store
@@ -712,12 +717,12 @@ pub async fn bootstrap(
         ));
     }
 
-    // 비밀번호 강도 검증 (zxcvbn은 Phase 9.1.6에서 추가. 일단 길이 검증).
-    if form.password.len() < 12 {
+    // 비밀번호 강도 검증 (zxcvbn + 길이 정책 중앙화).
+    if fleet_core::auth::password::validate_password(&form.password, &[&form.username]).is_err() {
         return Err((
             StatusCode::BAD_REQUEST,
             jar,
-            bootstrap_failed_page("Password must be at least 12 characters"),
+            bootstrap_failed_page("Password is too weak. Use at least 12 characters with a mix of letters, numbers, and symbols."),
         ));
     }
 
@@ -746,15 +751,25 @@ pub async fn bootstrap(
         consume_bootstrap_and_create_admin(&*state.store, &token.token, user, password_hash)
             .await
             .map_err(|e| {
-                let status = match &e {
-                    fleet_store::BootstrapAdminError::InvalidToken(_) => StatusCode::UNAUTHORIZED,
-                    fleet_store::BootstrapAdminError::CreateUser(_) => StatusCode::CONFLICT,
-                    fleet_store::BootstrapAdminError::AdminRoleMissing => {
-                        StatusCode::INTERNAL_SERVER_ERROR
+                let (status, msg) = match &e {
+                    fleet_store::BootstrapAdminError::InvalidToken(_) => (
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid or expired bootstrap token.",
+                    ),
+                    fleet_store::BootstrapAdminError::CreateUser(_) => {
+                        (StatusCode::CONFLICT, "Unable to create account. Please try again.")
                     }
-                    fleet_store::BootstrapAdminError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    fleet_store::BootstrapAdminError::AdminRoleMissing => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Setup incomplete. Contact your administrator.",
+                    ),
+                    fleet_store::BootstrapAdminError::Store(_) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "A system error occurred. Please try again.",
+                    ),
                 };
-                (status, jar.clone(), bootstrap_failed_page(&format!("{e}")))
+                tracing::error!(error = %e, "bootstrap admin creation failed");
+                (status, jar.clone(), bootstrap_failed_page(msg))
             })?;
 
     record_login_success(&state, &form.username, Some(&ip))

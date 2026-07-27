@@ -127,6 +127,27 @@ pub async fn require_session(
         permissions,
         session_id: session.id,
     };
+
+    // 8. 세션 IP 검증 (감사 목적 — 차단하지 않음, 경고만 로깅).
+    //    정상적인 IP 변경(VPN, 모바일 네트워크 전환 등)을 차단하지 않지만,
+    //    세션 공유/도용 탐지를 위한 감사 증거를 남김.
+    if let Some(ref session_ip) = session.ip_address {
+        if let Some(axum::extract::ConnectInfo(addr)) =
+            req.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        {
+            let current_ip = addr.ip().to_string();
+            if session_ip != &current_ip {
+                tracing::warn!(
+                    user_id = %principal.user.id,
+                    username = %principal.user.username,
+                    session_ip = %session_ip,
+                    current_ip = %current_ip,
+                    "session IP mismatch (possible session sharing)"
+                );
+            }
+        }
+    }
+
     req.extensions_mut().insert(principal);
 
     Ok(next.run(req).await)

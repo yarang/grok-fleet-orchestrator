@@ -96,6 +96,28 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
     subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).into()
 }
 
+/// 비밀번호 정책 검증 (M7+M8).
+///
+/// - **최소 12자**: OWASP 권장 최소 길이.
+/// - **최대 128자**: Argon2 DoS 방지 (초장문 비밀번호로 메모리/CPU 고갈).
+/// - **zxcvbn 강도 점수 ≥ 3**: 사전 공격에 취약한 비밀번호 차단.
+///
+/// `user_inputs`에는 사용자명, 이메일 등 비밀번호에 포함되면 안 되는
+/// 개인 식별 정보를 전달하면 zxcvbn이 추가로 검사.
+pub fn validate_password(password: &str, user_inputs: &[&str]) -> Result<(), AuthError> {
+    // 길이 검증.
+    if password.len() < 12 || password.len() > 128 {
+        return Err(AuthError::WeakPassword);
+    }
+    // zxcvbn 강도 검증 (score 0-4, 3 이상 요구 = "강력").
+    let estimate = zxcvbn::zxcvbn(password, user_inputs);
+    let score: u8 = estimate.score().into();
+    if score < 3 {
+        return Err(AuthError::WeakPassword);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +178,36 @@ mod tests {
         assert!(constant_time_eq("abc", "abc"));
         assert!(!constant_time_eq("abc", "abd"));
         assert!(!constant_time_eq("abc", "abcd")); // different length
+    }
+
+    #[test]
+    fn validate_password_rejects_short() {
+        // 11자 — 최소 12자 미만.
+        assert!(validate_password("short12345!", &[]).is_err());
+    }
+
+    #[test]
+    fn validate_password_rejects_weak() {
+        // 12자지만 사전 단어 + 숫자 패턴 — zxcvbn score < 3.
+        assert!(validate_password("password12345", &[]).is_err());
+    }
+
+    #[test]
+    fn validate_password_accepts_strong() {
+        // 충분한 엔트로피.
+        assert!(validate_password("K7$mRq!vN2pL#wZx", &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_password_rejects_too_long() {
+        // 129자 — 최대 128자 초과.
+        let long = "a".repeat(129);
+        assert!(validate_password(&long, &[]).is_err());
+    }
+
+    #[test]
+    fn validate_password_checks_user_inputs() {
+        // 비밀번호에 사용자명 포함 → zxcvbn이 user_input으로 감지.
+        assert!(validate_password("admin_admin_99", &["admin"]).is_err());
     }
 }
