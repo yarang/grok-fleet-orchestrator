@@ -6,6 +6,62 @@
 
 ## [Unreleased]
 
+### Added — 호스트 인벤토리 + 헬스체커 동기화 (Phase P1.5)
+
+호스트(물리/가상 머신) 단위 가시성을 확보하는 기능. 기존 `workers` 테이블은
+"현재 등록된 워커"만 추적하여, 프로비저닝 직후·하트비트 끊김·grok 미설치 등
+호스트 단위 상태를 알 수 없었음.
+
+- **새 테이블**: `hosts` (hostname, status, grok_version, os_info, ssh 접속 정보,
+  메트릭 스냅샷) + `host_events` (타임라인 — 프로비저닝/하트비트/장애).
+- **heartbeat 확장**: fleet-worker가 `grok_version`, `fleet_worker_version`,
+  `os_info`(os_type/distro/kernel/arch/hostname) 필드를 heartbeat에 포함.
+  orchestrator가 수신 시 `hosts` 테이블을 자동 upsert.
+- **active_tasks 버그 수정**: heartbeat의 `active_tasks`가 항상 0이던 문제 해결.
+  `ACTIVE_SESSIONS` 전역 카운터로 실제 동시 실행 세션 수를 전송.
+- **프로비저너 이벤트 훅**: `fleet provision` 완료 후 `POST /v1/hosts/register`로
+  프로비저닝 결과를 orchestrator에 전송 → host_events에 `provision_ok`/`provision_fail` 기록.
+- **헬스체커 동기화**: 워커가 하트비트 누락으로 offline 처리될 때, 연결된 호스트의
+  status도 `offline`로 변경하고 `host_events`에 `heartbeat_miss` 이벤트 기록.
+- 영향받은 파일: `crates/fleet-core/src/host.rs` (신규), `007_hosts.sql` (신규 마이그레이션),
+  `fleet-worker/src/registration.rs`, `fleet-api/src/handlers.rs`, `fleet-scheduler/src/health.rs`,
+  `fleet-cli/src/runtime.rs`, `fleet-store/src/{lib.rs,postgres.rs}`.
+
+### Added — 대시보드 P1/P1.5/P2 페이지 전체 구현
+
+대시보드에 7개 페이지를 추가하여, 운영자가 CLI 없이 전체 플릿 상태를 파악할 수 있게 됨.
+모든 페이지는 Apple Design System 적용 + 글로벌 내비게이션 메뉴 통합.
+
+- **태스크 큐** (`/tasks`): 전체 태스크 목록 + 상태 필터(All/Pending/Running/Completed/Failed) +
+  SSE 실시간 갱신.
+- **워커 상세** (`/workers/:id`): 워커 정보, 라벨, 최근 처리 태스크 20건.
+- **사용자 관리** (`/admin/users`): 사용자 목록 + 역할/활성 상태.
+- **호스트 인벤토리** (`/hosts`): 호스트 목록 + grok 버전 + OS/아키텍처 + 상태 배지.
+- **호스트 상세** (`/hosts/:hostname`): 호스트 정보 + 시스템 메트릭 + 이벤트 타임라인.
+- **감사 로그** (`/admin/audit`): 전체 이벤트 로그 + 필터(Tasks/Workers/Auth).
+- **MCP 도구 탐색기** (`/admin/tools`): 7개 MCP 도구 카탈로그.
+- 새 API: `/api/workers/:id`, `/api/users`, `/api/hosts`, `/api/hosts/:hostname`,
+  `/api/audit`, `/api/tools`.
+
+### Added — LLM 토큰 사용량 추적
+
+ACP 프로토콜의 `PromptResult.usage`를 통해 전달되는 토큰 사용량을 end-to-end로 추적.
+
+- `fleet_task_tokens_total{type=input|output|cache_read|total}` Prometheus 카운터.
+- 대시보드 Overview에 "Tokens used" 카드 + 태스크 테이블에 Model/Tokens 컬럼.
+- grok CLI 수정 불필요 — ACP 프로토콜이 이미 usage 데이터를 전달.
+
+### Changed — nginx 마이그레이션 + Apple Design System
+
+- Caddy를 nginx + certbot으로 교체. 자동 TLS 갱신(certbot.timer).
+- 대시보드 전체에 Apple Design System 적용 (parchment 캔버스, Action Blue 액센트,
+  SF Pro 타이포그래피, pill CTA, 글로벌 블랙 내비게이션).
+
+### Fixed — 부트스트랩 페이지 CSRF + INET 캐스트
+
+- `bootstrap.html`에 CSRF hidden input 미주입 → "Security token expired" 에러.
+- `sessions.ip_address` INET 컬럼에 String 바인딩 → 500 에러. `$6::inet` 캐스트로 해결.
+
 ### Fixed — mTLS 테스트 flaky BadSignature 해결
 
 전체 워크스페이스 병렬 테스트 실행 시 `fleet-transport` 의 mTLS 테스트들이

@@ -146,6 +146,38 @@ impl HealthChecker {
                     continue;
                 }
 
+                // 호스트 인벤토리 동기화 — 연결된 호스트의 status를 offline로 변경.
+                if let Some(host) = self
+                    .state
+                    .store
+                    .get_host_by_worker(worker.id)
+                    .await
+                    .ok()
+                    .flatten()
+                {
+                    let mut offline_host = host.clone();
+                    offline_host.status = fleet_core::HostStatus::Offline;
+                    let _ = self.state.store.upsert_host(&offline_host).await;
+
+                    // host_event 기록.
+                    let _ = self
+                        .state
+                        .store
+                        .append_host_event(&fleet_core::HostEvent {
+                            id: uuid::Uuid::new_v4(),
+                            host_id: host.id,
+                            event_type: "heartbeat_miss".to_string(),
+                            severity: fleet_core::EventSeverity::Warn,
+                            message: Some(format!(
+                                "worker {} offline — heartbeat missed for {:?}",
+                                worker.name, self.config.grace_duration()
+                            )),
+                            payload: std::collections::HashMap::new(),
+                            created_at: Utc::now(),
+                        })
+                        .await;
+                }
+
                 let _ = self
                     .state
                     .store

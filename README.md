@@ -7,7 +7,7 @@
 Claude Code, Gemini CLI, Codex, Cursor 등 MCP를 지원하는 모든 AI 코딩 도구에서
 원격 워커 풀을 동일한 인터페이스로 사용할 수 있습니다.
 
-> **상태**: 0.1.0 — Phase 1~8.5 완료. 설치 인프라(install.sh, GitHub Release, cargo-binstall) 갖춰짐.
+> **상태**: 0.1.0 — Phase 1~9(P2) 완료. 호스트 인벤토리, RBAC 대시보드 인증, 토큰 추적 구현됨.
 
 ## 설치
 
@@ -52,7 +52,10 @@ cargo build --release --features "acp mtls"
 - **PostgreSQL 백엔드**: 다중 admin 동시 쓰기 + LISTEN/NOTIFY 실시간 동기화
 - **Cloudflare Zero Trust**: 인터넷 노출 서버도 인바운드 포트 없이 운영
 - **SSH 자동 프로비저닝**: SSH 키만 있으면 grok + cloudflared + fleet-worker 원클릭 설치
-- **웹 대시보드**: 실시간 현황 + SSE 이벤트 스트리밍 (단일 바이너리 임베드)
+- **호스트 인벤토리**: 등록 여부와 무관하게 인프라 전체 호스트 추적 (grok 버전, OS, 상태, 이벤트 타임라인)
+- **웹 대시보드**: 8개 페이지 — Overview, Task Queue, Worker Detail, Hosts, Host Detail, User Management, Audit Log, MCP Tools (Apple Design System, RBAC + 쿠키 세션 인증)
+- **LLM 토큰 추적**: ACP 프로토콜에서 토큰 사용량 수집 → Prometheus 메트릭 + 대시보드 표시
+- **RBAC + 세션 인증**: Argon2id 비밀번호, stateful 쿠키 세션, 역할/권한 기반 접근 제어
 - **감사 로그**: 모든 상태 변화가 append-only 이벤트 로그에 기록
 - **Prometheus 메트릭**: `/metrics` 엔드포인트로 스크랩
 
@@ -120,15 +123,17 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 
 | 크레이트              | 역할                                            |
 |-----------------------|-------------------------------------------------|
-| `fleet-core`          | 도메인 모델 (Task, Worker, FleetEvent) — leaf    |
+| `fleet-core`          | 도메인 모델 (Task, Worker, Host, FleetEvent) — leaf |
 | `fleet-store`         | `Store` trait + PostgreSQL 구현 + LISTEN/NOTIFY |
-| `fleet-transport`     | `WorkerTransport` trait + Mock 구현              |
-| `fleet-scheduler`     | WorkerSelector, CircuitBreaker, Dispatcher       |
+| `fleet-transport`     | `WorkerTransport` trait + ACP 구현 + Mock        |
+| `fleet-scheduler`     | WorkerSelector, CircuitBreaker, Dispatcher, Health |
 | `fleet-mcp`           | MCP JSON-RPC 서버 (7개 도구)                     |
-| `fleet-api`           | HTTP API 서버 (워커 등록, 하트비트, /metrics)    |
+| `fleet-api`           | HTTP API 서버 (워커 등록, 하트비트, 호스트 등록, /metrics) |
 | `fleet-provisioner`   | russh 기반 SSH 자동화 + Playbook                 |
-| `fleet-dashboard`     | 웹 대시보드 (rust-embed 임베드, 순수 HTML)        |
+| `fleet-dashboard`     | 웹 대시보드 (8페이지, rust-embed 임베드, RBAC 인증) |
+| `fleet-credentials`   | 워커 API 키 AES-256-GCM 암호화 저장              |
 | `fleet-cli`           | CLI 바이너리 (`fleet` 명령)                      |
+| `fleet-worker`        | 워커 데몬 (`fleet-worker` 명령)                  |
 
 > **설계 결정**: [Grok Build](https://github.com/xai-org/grok-build)를 포크하지 않고
 > 독립 프로젝트로 구축했습니다. Fleet은 MCP 표준을 통해 어떤 AI 코딩 도구와도
@@ -139,7 +144,8 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 - [`docs/architecture.md`](docs/architecture.md) — 시스템 아키텍처, 데이터 흐름, 핵심 추상화
 - [`docs/api-reference.md`](docs/api-reference.md) — HTTP API + MCP 도구 레퍼런스
 - [`docs/deployment.md`](docs/deployment.md) — 단일 서버 및 분산 배포 가이드 (Cloudflare Tunnel 포함)
-- [`docs/ui-design.md`](docs/ui-design.md) — 웹 대시보드 화면 설계서 (8개 페이지, 사용자 흐름, 디자인 시스템)
+- [`docs/ui-design.md`](docs/ui-design.md) — 웹 대시보드 화면 설계서 (8개 페이지, 사용자 흐름, 디자인 시스템, 구현 우선순위)
+- [`DESIGN-apple.md`](DESIGN-apple.md) — Apple Design System 스펙 (색상, 타이포그래피, 컴포넌트)
 - [`examples/`](examples/) — 운영용 샘플 설정 (`worker.toml`, `workers.yaml`, systemd units, MCP 클라이언트 예시)
 
 ## 라이선스
