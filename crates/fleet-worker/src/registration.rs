@@ -37,6 +37,8 @@ pub struct RegistrationClient {
     http: reqwest::Client,
     /// 등록 후 발급받은 worker_id. None이면 아직 미등록.
     worker_id: tokio::sync::Mutex<Option<String>>,
+    /// 디스크 여유 공간 캐시. blocking syscall을 피하기 위해 백그라운드 수집 + TTL 캐싱.
+    disk_cache: Arc<DiskCache>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -90,6 +92,7 @@ impl RegistrationClient {
             config,
             http,
             worker_id: tokio::sync::Mutex::new(None),
+            disk_cache: Arc::new(DiskCache::new()),
         })
     }
 
@@ -162,8 +165,12 @@ impl RegistrationClient {
             .clone()
             .ok_or_else(|| WorkerError::OrchestratorApi("not registered yet".into()))?;
 
-        // 시스템 메트릭 수집.
-        let (load_avg, mem_available_mb, disk_free_mb, active_tasks) = collect_system_metrics();
+        // 빠른 시스템 메트릭 수집 (load_avg, mem — 마이크로초 단위).
+        let (load_avg, mem_available_mb, active_tasks) = collect_fast_metrics();
+
+        // 디스크 여유 공간: 캐시된 값을 사용하고, 필요하면 백그라운드 새로고침 트리거.
+        // blocking syscall을 heartbeat 루프에서 분리하여 런타임 블로킹 방지.
+        let disk_free_mb = self.disk_cache.get_or_schedule_refresh();
 
         let body = HeartbeatRequest {
             worker_id,
@@ -276,11 +283,14 @@ impl RegistrationClient {
 }
 
 /// 시스템 메트릭 수집 (sysinfo 사용).
-/// 반환: (load_avg, mem_available_mb, disk_free_mb, active_tasks).
+///
+/// `load_avg`, `mem_available_mb`는 매 호출마다 수집 (마이크로초 단위로 빠름).
+/// `disk_free_mb`는 blocking syscall이며 환경에 따라 수 초가 소요될 수 있으므로
+/// `DiskCache`를 통해 백그라운드에서 비동기 수집 및 캐싱.
 ///
 /// active_tasks는 현재 0 (grok에게 위임). Phase 8 후반에서 실제 카운트 추가.
-fn collect_system_metrics() -> (Option<Vec<f32>>, Option<u64>, Option<u64>, u32) {
-    use sysinfo::{Disks, System};
+fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
+    use sysinfo::System;
 
     let mut sys = System::new();
     sys.refresh_cpu_usage();
@@ -297,19 +307,118 @@ fn collect_system_metrics() -> (Option<Vec<f32>>, Option<u64>, Option<u64>, u32)
 
     let mem_available_mb = sys.available_memory() / 1024; // KiB → MiB
 
+    (Some(load_vec), Some(mem_available_mb), 0)
+}
+
+/// 디스크 여유 공간 수집 (blocking).
+///
+/// macOS autofs 마운트 포인트 등 환경에 따라 수 초가 소요될 수 있으므로
+/// `spawn_blocking` 컨텍스트에서만 호출해야 함.
+fn collect_disk_free_mb() -> u64 {
+    use sysinfo::Disks;
+
     let disks = Disks::new_with_refreshed_list();
-    let disk_free_mb: u64 = disks
+    disks
         .list()
         .iter()
         .map(|d| (d.total_space() - d.available_space()) / 1024 / 1024)
-        .sum();
+        .sum()
+}
 
-    (
-        Some(load_vec),
-        Some(mem_available_mb),
-        Some(disk_free_mb),
-        0,
-    )
+/// 디스크 여유 공간 캐시.
+///
+/// `Disks::new_with_refreshed_list()`는 blocking syscall이며 환경에 따라
+/// 수 초가 소요될 수 있음 (예: macOS autofs 마운트 타임아웃).
+/// 이 캐시는:
+/// 1. heartbeat 루프를 블록하지 않도록 백그라운드 수집(`spawn_blocking`)을 트리거
+/// 2. 60초 TTL로 빈도를 크게 낮춤 (디스크 용량은 자주 변하지 않음)
+/// 3. 첫 heartbeat는 캐시가 비어 있으면 `None`을 반환 (orchestrator가 옵션 필드를 허용)
+struct DiskCache {
+    state: std::sync::Mutex<DiskCacheState>,
+    /// 캐시 유효 기간. 테스트에서 짧은 주기를 검증하기 위해 오버라이드 가능.
+    ttl: Duration,
+}
+
+enum DiskCacheState {
+    /// 아직 수집되지 않음. 다음 heartbeat에서 백그라운드 수집 시작.
+    Initial,
+    /// 백그라운드 수집 진행 중. 중복 수집 방지.
+    Refreshing,
+    /// 수집 완료. TTL 만료 시 재수집.
+    Ready {
+        free_mb: u64,
+        refreshed_at: std::time::Instant,
+    },
+}
+
+impl DiskCache {
+    const DEFAULT_TTL: Duration = Duration::from_secs(60);
+
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(DiskCacheState::Initial),
+            ttl: Self::DEFAULT_TTL,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            state: std::sync::Mutex::new(DiskCacheState::Initial),
+            ttl,
+        }
+    }
+
+    /// 캐시된 값을 반환. 만료되었거나 없으면 `None`.
+    fn get(&self) -> Option<u64> {
+        let state = self.state.lock().unwrap();
+        match &*state {
+            DiskCacheState::Ready {
+                free_mb,
+                refreshed_at,
+            } if *refreshed_at + self.ttl > std::time::Instant::now() => Some(*free_mb),
+            _ => None,
+        }
+    }
+
+    /// 백그라운드 새로고침이 필요한지 확인하고, 필요하면 `Refreshing`로 전환.
+    /// 반환값이 `true`이면 호출자가 `spawn_blocking`으로 수집을 시작해야 함.
+    fn begin_refresh(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let needs = match &*state {
+            DiskCacheState::Initial => true,
+            DiskCacheState::Refreshing => false,
+            DiskCacheState::Ready { refreshed_at, .. } => {
+                *refreshed_at + self.ttl <= std::time::Instant::now()
+            }
+        };
+        if needs {
+            *state = DiskCacheState::Refreshing;
+        }
+        needs
+    }
+
+    /// 수집 결과 저장.
+    fn set(&self, free_mb: u64) {
+        *self.state.lock().unwrap() = DiskCacheState::Ready {
+            free_mb,
+            refreshed_at: std::time::Instant::now(),
+        };
+    }
+
+    /// 캐시된 값을 반환하고, 필요하면 백그라운드 새로고침을 트리거.
+    /// 새로고침은 논블로킹으로 진행되므로 이 메서드는 즉시 반환.
+    fn get_or_schedule_refresh(self: &Arc<Self>) -> Option<u64> {
+        let cached = self.get();
+        if self.begin_refresh() {
+            let cache = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let free = collect_disk_free_mb();
+                cache.set(free);
+            });
+        }
+        cached
+    }
 }
 
 #[cfg(test)]
@@ -535,5 +644,66 @@ mod tests {
 
         let deregisters = state.deregisters.lock().await;
         assert_eq!(deregisters.len(), 0, "no deregister should be sent");
+    }
+
+    // ── DiskCache 단위 테스트 ──
+
+    #[test]
+    fn disk_cache_initial_get_returns_none() {
+        let cache = DiskCache::new();
+        assert!(cache.get().is_none());
+    }
+
+    #[test]
+    fn disk_cache_begin_refresh_from_initial() {
+        let cache = DiskCache::new();
+        assert!(cache.begin_refresh());
+        // Refreshing 상태 — 중복 수집 방지.
+        assert!(!cache.begin_refresh());
+    }
+
+    #[test]
+    fn disk_cache_set_then_get() {
+        let cache = DiskCache::new();
+        cache.set(12345);
+        assert_eq!(cache.get(), Some(12345));
+    }
+
+    #[test]
+    fn disk_cache_begin_refresh_after_ttl_expiry() {
+        // TTL 0 → 즉시 만료.
+        let cache = DiskCache::with_ttl(Duration::from_millis(0));
+        cache.set(999);
+        // TTL 0이므로 이미 만료 — begin_refresh는 true.
+        assert!(cache.begin_refresh());
+    }
+
+    #[test]
+    fn disk_cache_no_refresh_within_ttl() {
+        let cache = DiskCache::with_ttl(Duration::from_secs(3600));
+        cache.set(42);
+        // TTL 내 — 새로고침 불필요.
+        assert!(!cache.begin_refresh());
+        assert_eq!(cache.get(), Some(42));
+    }
+
+    #[tokio::test]
+    async fn disk_cache_get_or_schedule_refresh_populates_background() {
+        let cache = Arc::new(DiskCache::new());
+        // 첫 호출 — 캐시 비어 있음, 백그라운드 수집 트리거.
+        assert!(cache.get_or_schedule_refresh().is_none());
+
+        // 백그라운드 spawn_blocking 완료 대기 (최대 10초).
+        for _ in 0..100 {
+            if cache.get().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // 수집 완료 확인.
+        assert!(cache.get().is_some(), "disk cache should be populated");
+
+        // 두 번째 호출 — 캐시 hit, 추가 수집 트리거 안 함.
+        assert!(cache.get_or_schedule_refresh().is_some());
     }
 }
