@@ -30,6 +30,8 @@ pub const TOOL_DISPATCH_TASK: &str = "fleet_dispatch_task";
 pub const TOOL_GET_TASK_STATUS: &str = "fleet_get_task_status";
 /// 워커 목록 조회 도구.
 pub const TOOL_LIST_WORKERS: &str = "fleet_list_workers";
+/// 태스크 목록 조회 도구.
+pub const TOOL_LIST_TASKS: &str = "fleet_list_tasks";
 /// 작업 취소 도구 (Phase 2).
 pub const TOOL_CANCEL_TASK: &str = "fleet_cancel_task";
 /// 작업 종료까지 대기 도구 (Phase 2).
@@ -278,6 +280,33 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "minimum": 1,
                         "maximum": 500,
                         "description": "Maximum workers to return (default 100)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_TASKS,
+            description: "List tasks with optional status filtering and pagination. Returns task summaries with phase, worker assignment, creation time, and (for completed tasks) output and exit code. Useful for monitoring fleet activity or finding task IDs to inspect further.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "dispatched", "completed", "failed", "cancelled", "terminal", "active"],
+                        "description": "Filter by task phase (optional). 'terminal' = completed+failed+cancelled, 'active' = pending+dispatched."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200,
+                        "default": 50,
+                        "description": "Maximum tasks to return (default 50)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Number of tasks to skip for pagination (default 0)."
                     }
                 }
             }),

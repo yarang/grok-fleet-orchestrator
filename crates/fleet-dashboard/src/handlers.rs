@@ -845,6 +845,7 @@ pub async fn list_tools_api(
             {"name": "fleet_wait_for_task", "description": "Wait for task completion"},
             {"name": "fleet_cancel_task", "description": "Cancel a running task"},
             {"name": "fleet_list_workers", "description": "List all registered workers"},
+            {"name": "fleet_list_tasks", "description": "List tasks with optional status filtering and pagination"},
             {"name": "fleet_stream_task_output", "description": "Stream task output in real-time"},
             {"name": "fleet_collect_results", "description": "Collect completed task results"},
         ]

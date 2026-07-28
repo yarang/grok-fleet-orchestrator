@@ -15,13 +15,16 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use fleet_core::{Task, TaskId, TaskRequest, WorkerFilter, WorkerStatus};
+use fleet_core::{
+    Task, TaskFilter, TaskId, TaskRequest, TaskStatusFilter, WorkerFilter, WorkerStatus,
+};
 use fleet_scheduler::{Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
     self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_DISPATCH_TASK,
-    TOOL_GET_TASK_STATUS, TOOL_LIST_WORKERS, TOOL_STREAM_TASK_OUTPUT, TOOL_WAIT_FOR_TASK,
+    TOOL_GET_TASK_STATUS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS, TOOL_STREAM_TASK_OUTPUT,
+    TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -51,6 +54,7 @@ pub async fn dispatch_tool(
         TOOL_DISPATCH_TASK => handle_dispatch_task(ctx, arguments).await,
         TOOL_GET_TASK_STATUS => handle_get_task_status(ctx, arguments).await,
         TOOL_LIST_WORKERS => handle_list_workers(ctx, arguments).await,
+        TOOL_LIST_TASKS => handle_list_tasks(ctx, arguments).await,
         TOOL_CANCEL_TASK => handle_cancel_task(ctx, arguments).await,
         TOOL_WAIT_FOR_TASK => handle_wait_for_task(ctx, arguments).await,
         TOOL_STREAM_TASK_OUTPUT => handle_stream_task_output(ctx, arguments).await,
@@ -579,6 +583,57 @@ fn worker_summary(w: &fleet_core::Worker) -> Value {
     })
 }
 
+// ── fleet_list_tasks ────────────────────────────────────────────────────
+
+async fn handle_list_tasks(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let mut filter = TaskFilter::default();
+
+    if let Some(obj) = args.as_object() {
+        if let Some(status_str) = obj.get("status").and_then(|v| v.as_str()) {
+            filter.status = Some(parse_task_status_filter(status_str)?);
+        }
+        if let Some(limit) = obj.get("limit").and_then(|v| v.as_u64()) {
+            filter.limit = limit as usize;
+        }
+        if let Some(offset) = obj.get("offset").and_then(|v| v.as_u64()) {
+            filter.offset = offset as usize;
+        }
+    }
+
+    let tasks = ctx
+        .state
+        .store
+        .list_tasks(&filter)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let summary: Vec<Value> = tasks
+        .iter()
+        .map(|t| task_summary_with_options(t, false))
+        .collect();
+
+    Ok(schema::tool_json(&json!({
+        "tasks": summary,
+        "count": summary.len(),
+    })))
+}
+
+/// `TaskStatusFilter` 문자열 → enum. snake_case 매칭.
+fn parse_task_status_filter(s: &str) -> Result<TaskStatusFilter, JsonRpcError> {
+    match s {
+        "pending" => Ok(TaskStatusFilter::Pending),
+        "dispatched" => Ok(TaskStatusFilter::Dispatched),
+        "completed" => Ok(TaskStatusFilter::Completed),
+        "failed" => Ok(TaskStatusFilter::Failed),
+        "cancelled" => Ok(TaskStatusFilter::Cancelled),
+        "terminal" => Ok(TaskStatusFilter::Terminal),
+        "active" => Ok(TaskStatusFilter::Active),
+        other => Err(JsonRpcError::invalid_params(format!(
+            "invalid status '{other}': expected one of pending, dispatched, completed, failed, cancelled, terminal, active"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +666,31 @@ mod tests {
         assert!(parse_worker_status("online").is_ok());
         assert!(parse_worker_status("circuit_open").is_ok());
         assert!(parse_worker_status("bogus").is_err());
+    }
+
+    #[test]
+    fn parse_task_status_filter_accepts_all_variants() {
+        assert!(parse_task_status_filter("pending").is_ok());
+        assert!(parse_task_status_filter("dispatched").is_ok());
+        assert!(parse_task_status_filter("completed").is_ok());
+        assert!(parse_task_status_filter("failed").is_ok());
+        assert!(parse_task_status_filter("cancelled").is_ok());
+        assert!(parse_task_status_filter("terminal").is_ok());
+        assert!(parse_task_status_filter("active").is_ok());
+    }
+
+    #[test]
+    fn parse_task_status_filter_rejects_unknown() {
+        assert!(parse_task_status_filter("bogus").is_err());
+        assert!(parse_task_status_filter("").is_err());
+    }
+
+    #[test]
+    fn all_tools_includes_list_tasks() {
+        let tools = schema::all_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+        assert!(names.contains(&"fleet_list_tasks"));
+        assert_eq!(tools.len(), 8);
     }
 
     #[test]
