@@ -36,23 +36,16 @@
         <p class="section-desc">This becomes your login credential</p>
 
         <label style="margin-bottom: 12px;">
-          <span>Username</span>
-          <input type="text" name="username" required
-                 minlength="3" maxlength="64"
-                 pattern="[a-zA-Z][a-zA-Z0-9_-]{2,63}"
-                 autocomplete="username" />
-        </label>
-
-        <label style="margin-bottom: 12px;">
-          <span>Email (optional)</span>
-          <input type="email" name="email"
-                 autocomplete="email" />
+          <span>Email</span>
+          <input type="email" name="email" required
+                 placeholder="admin@example.com"
+                 autocomplete="email" autofocus />
         </label>
 
         <label style="margin-bottom: 8px;">
           <span>Password</span>
           <input type="password" name="password" required
-                 minlength="12" id="password-field"
+                 minlength="8" id="password-field"
                  autocomplete="new-password" />
           <div class="strength-gauge" id="strength">
             <div class="seg"></div>
@@ -85,7 +78,7 @@
     pw.addEventListener('input', () => {
         const v = pw.value;
         let score = 0;
-        if (v.length >= 12) score++;
+        if (v.length >= 8) score++;
         if (/[A-Z]/.test(v) && /[a-z]/.test(v)) score++;
         if (/\d/.test(v)) score++;
         if (/[^A-Za-z0-9]/.test(v)) score++;

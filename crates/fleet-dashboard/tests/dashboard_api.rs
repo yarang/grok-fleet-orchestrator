@@ -79,7 +79,8 @@ impl MemStore {
         let user = User {
             id: UserId::new(),
             username: "test_admin".into(),
-            email: Some("test@example".into()),
+            email: Some("test@example.com".into()),
+            email_verified: true,
             password_hash: String::new(),
             enabled: true,
             created_at: Utc::now(),
@@ -242,6 +243,15 @@ impl Store for MemStore {
             .find(|u| u.username == name)
             .cloned())
     }
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
+        Ok(self
+            .users
+            .lock()
+            .unwrap()
+            .values()
+            .find(|u| u.email.as_deref() == Some(email))
+            .cloned())
+    }
     async fn count_users(&self) -> Result<u64, StoreError> {
         Ok(self.users.lock().unwrap().len() as u64)
     }
@@ -266,6 +276,35 @@ impl Store for MemStore {
     }
     async fn delete_session(&self, id: SessionId) -> Result<(), StoreError> {
         self.sessions.lock().unwrap().retain(|_, s| s.id != id);
+        Ok(())
+    }
+
+    // ── Email verification (테스트 stub) ─────────────────────────────
+
+    async fn create_email_verification_token(
+        &self,
+        _token: &fleet_core::EmailVerificationToken,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn get_email_verification_token(
+        &self,
+        _token_hash: &str,
+    ) -> Result<Option<fleet_core::EmailVerificationToken>, StoreError> {
+        Ok(None)
+    }
+    async fn consume_email_verification_token(
+        &self,
+        _token_id: Uuid,
+        _at: chrono::DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn set_user_email_verified(
+        &self,
+        _user_id: UserId,
+        _verified: bool,
+    ) -> Result<(), StoreError> {
         Ok(())
     }
 

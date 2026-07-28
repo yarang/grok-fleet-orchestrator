@@ -91,9 +91,9 @@ fn read_password(prompt: &str, provided: Option<String>) -> Result<String> {
         rpassword::prompt_password("Confirm: ")?
     };
 
-    if pw.len() < 12 {
+    if pw.len() < 8 {
         return Err(anyhow!(
-            "password must be at least 12 characters (got {})",
+            "password must be at least 8 characters (got {})",
             pw.len()
         ));
     }
@@ -229,6 +229,7 @@ async fn create_user(
         id: UserId::new(),
         username: username.into(),
         email: email.map(|s| s.into()),
+        email_verified: false,
         password_hash: hash,
         enabled: true,
         created_at: chrono::Utc::now(),

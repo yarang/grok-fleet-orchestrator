@@ -457,9 +457,11 @@ pub async fn list_users_api(
 /// POST /api/users — 사용자 생성 (admin only).
 #[derive(Debug, serde::Deserialize)]
 pub struct CreateUserForm {
-    pub username: String,
+    /// 로그인 식별자 (이메일).
+    pub email: String,
+    /// 표시용 이름 (옵션, 미지정 시 email prefix).
     #[serde(default)]
-    pub email: Option<String>,
+    pub username: Option<String>,
     pub password: String,
     #[serde(default)]
     pub csrf_token: String,
@@ -480,23 +482,31 @@ pub async fn create_user_api(
         return Err((StatusCode::FORBIDDEN, "CSRF token invalid".to_string()));
     }
 
-    // username 검증.
-    if let Err(e) = fleet_core::User::validate_username(&form.username) {
+    // email 검증.
+    if let Err(e) = fleet_core::User::validate_email(&form.email) {
         return Err((StatusCode::BAD_REQUEST, e.to_string()));
     }
 
     // 비밀번호 강도 검증.
-    if fleet_core::auth::password::validate_password(&form.password, &[&form.username]).is_err() {
+    if fleet_core::auth::password::validate_password(&form.password, &[&form.email]).is_err() {
         return Err((StatusCode::BAD_REQUEST, "Password too weak".to_string()));
     }
 
     let hash = fleet_core::auth::password::hash_password(&form.password)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Hash failed".to_string()))?;
 
+    // username: 명시값 또는 email prefix.
+    let username = form
+        .username
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| form.email.split('@').next().unwrap_or("user").to_string());
+
     let user = fleet_core::User {
         id: fleet_core::UserId::new(),
-        username: form.username.clone(),
-        email: form.email,
+        username,
+        email: Some(form.email.clone()),
+        email_verified: false,
         password_hash: hash,
         enabled: true,
         created_at: Utc::now(),
@@ -517,7 +527,29 @@ pub async fn create_user_api(
         let _ = state.store.assign_user_role(user.id, viewer_role.id, Some(principal.user.id)).await;
     }
 
-    tracing::info!(username = %form.username, created_by = %principal.user.username, "user created");
+    // 이메일 인증 토큰 생성 + 발송.
+    let (raw_token, token_hash) = generate_session_token();
+    let verification = fleet_core::EmailVerificationToken {
+        id: uuid::Uuid::new_v4(),
+        user_id: user.id,
+        token_hash,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(24),
+        consumed_at: None,
+    };
+    let _ = state.store.create_email_verification_token(&verification).await;
+    let base_url = std::env::var("FLEET_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:8082".into());
+    let verify_url = format!("{base_url}/verify-email?token={raw_token}");
+    if let Err(e) = crate::email::send_verification_email(
+        state.smtp_config.as_ref(),
+        &form.email,
+        &verify_url,
+    ).await {
+        tracing::warn!(error = %e, "failed to send verification email — user created but email not sent");
+    }
+
+    tracing::info!(email = %form.email, created_by = %principal.user.username, "user created — verification email sent");
     Ok((StatusCode::CREATED, jar))
 }
 
@@ -819,7 +851,7 @@ use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
-    pub username: String,
+    pub email: String,
     pub password: String,
     #[serde(default)]
     pub csrf_token: String,
@@ -883,11 +915,11 @@ pub async fn login(
     }
 
     // rate limit 검사.
-    let allowed = check_rate_limit(&state, &form.username, Some(&ip))
+    let allowed = check_rate_limit(&state, &form.email, Some(&ip))
         .await
         .map_err(|_| (jar.clone(), internal_error_page()))?;
     if !allowed {
-        record_login_failure(&state, &form.username, Some(&ip), "rate_limited")
+        record_login_failure(&state, &form.email, Some(&ip), "rate_limited")
             .await
             .ok();
         return Err((
@@ -896,10 +928,10 @@ pub async fn login(
         ));
     }
 
-    // 사용자 조회 (타이밍 공격 방지: 사용자 없어도 동일한 시간 소모).
+    // 사용자 조회 — email 기반 (타이밍 공격 방지: 사용자 없어도 동일한 시간 소모).
     let user = state
         .store
-        .get_user_by_username(&form.username)
+        .get_user_by_email(&form.email)
         .await
         .map_err(|_| (jar.clone(), internal_error_page()))?;
 
@@ -914,19 +946,33 @@ pub async fn login(
     };
 
     if !valid {
-        record_login_failure(&state, &form.username, Some(&ip), "invalid_credentials")
+        record_login_failure(&state, &form.email, Some(&ip), "invalid_credentials")
             .await
             .ok();
         return Err((
             jar,
             login_failed_page_csrf(
-                "Invalid username or password",
+                "Invalid email or password",
                 cookie_csrf.as_deref().unwrap_or(""),
             ),
         ));
     }
 
     let user = user.expect("checked Some above");
+
+    // 이메일 인증 확인.
+    if !user.email_verified {
+        record_login_failure(&state, &form.email, Some(&ip), "email_not_verified")
+            .await
+            .ok();
+        return Err((
+            jar,
+            login_failed_page_csrf(
+                "Email not verified. Please check your inbox for the verification link.",
+                cookie_csrf.as_deref().unwrap_or(""),
+            ),
+        ));
+    }
 
     // 세션 생성.
     let (token, hash) = generate_session_token();
@@ -953,11 +999,11 @@ pub async fn login(
         .update_user_last_login(user.id, Utc::now())
         .await
         .ok();
-    record_login_success(&state, &form.username, Some(&ip))
+    record_login_success(&state, &form.email, Some(&ip))
         .await
         .ok();
 
-    tracing::info!(username = %user.username, "login success");
+    tracing::info!(email = %form.email, username = %user.username, "login success");
 
     // 쿠키 설정.
     let cookie = Cookie::build((SESSION_COOKIE, token))
@@ -1023,8 +1069,161 @@ pub async fn me(Extension(principal): Extension<AuthPrincipal>) -> Json<serde_js
     Json(serde_json::json!({
         "username": principal.user.username,
         "email": principal.user.email,
+        "email_verified": principal.user.email_verified,
         "permissions": principal.permissions.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
     }))
+}
+
+// ── 이메일 인증 ──────────────────────────────────────────────────────────
+
+/// GET /verify-email?token=... — 이메일 인증 링크 처리.
+///
+/// 토큰 검증 후 `email_verified = true` 설정.
+pub async fn verify_email_page(
+    State(state): State<Arc<DashboardState>>,
+    Query(params): Query<VerifyEmailParams>,
+) -> Response {
+    let token = params.token.unwrap_or_default();
+    if token.is_empty() {
+        return verification_result_page(false, "Missing verification token.");
+    }
+
+    // 토큰 해시.
+    let hash = crate::auth_util::sha256_hex(token.as_bytes());
+
+    // DB 조회.
+    let verification = match state.store.get_email_verification_token(&hash).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return verification_result_page(false, "Invalid or unknown verification token.");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "get_email_verification_token failed");
+            return verification_result_page(false, "Server error. Please try again later.");
+        }
+    };
+
+    // 만료 확인.
+    if verification.is_expired() {
+        return verification_result_page(false, "Verification token has expired. Please request a new one.");
+    }
+
+    // 이미 사용됨.
+    if verification.is_consumed() {
+        return verification_result_page(false, "This verification link has already been used.");
+    }
+
+    // 토큰 소비 + 사용자 email_verified 설정.
+    let now = Utc::now();
+    if let Err(e) = state
+        .store
+        .consume_email_verification_token(verification.id, now)
+        .await
+    {
+        tracing::error!(error = %e, "consume_email_verification_token failed");
+        return verification_result_page(false, "Server error. Please try again later.");
+    }
+    if let Err(e) = state
+        .store
+        .set_user_email_verified(verification.user_id, true)
+        .await
+    {
+        tracing::error!(error = %e, "set_user_email_verified failed");
+        return verification_result_page(false, "Server error. Please try again later.");
+    }
+
+    tracing::info!(user_id = %verification.user_id, "email verified successfully");
+    verification_result_page(true, "Your email has been verified. You can now sign in.")
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct VerifyEmailParams {
+    pub token: Option<String>,
+}
+
+/// POST /api/users/resend-verification — 인증 이메일 재발송.
+pub async fn resend_verification_api(
+    State(state): State<Arc<DashboardState>>,
+    Json(req): Json<ResendVerificationRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let user = state
+        .store
+        .get_user_by_email(&req.email)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".into()))?;
+
+    if user.email_verified {
+        return Err((StatusCode::CONFLICT, "Email already verified".into()));
+    }
+
+    // 새 인증 토큰 생성.
+    let (raw_token, token_hash) = generate_session_token();
+    let verification = fleet_core::EmailVerificationToken {
+        id: uuid::Uuid::new_v4(),
+        user_id: user.id,
+        token_hash,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(24),
+        consumed_at: None,
+    };
+    state
+        .store
+        .create_email_verification_token(&verification)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into()))?;
+
+    // 이메일 발송 (SMTP 미설정 시 로그 출력).
+    let base_url = std::env::var("FLEET_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:8082".into());
+    let verify_url = format!("{base_url}/verify-email?token={raw_token}");
+
+    if let Err(e) = crate::email::send_verification_email(
+        state.smtp_config.as_ref(),
+        req.email.as_str(),
+        &verify_url,
+    )
+    .await
+    {
+        tracing::error!(error = %e, "failed to send verification email");
+    }
+
+    Ok(StatusCode::OK)
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResendVerificationRequest {
+    pub email: String,
+}
+
+/// 인증 결과 HTML 페이지.
+fn verification_result_page(success: bool, message: &str) -> Response {
+    let (title, color) = if success {
+        ("✓ Verified", "#1a7d31")
+    } else {
+        ("✗ Verification Failed", "#c61e00")
+    };
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Email Verification — Fleet</title>
+<link rel="stylesheet" href="/static/login.css"></head>
+<body class="auth-page">
+  <div class="auth-card">
+    <h1 style="color:{color};margin:0 0 12px;">{title}</h1>
+    <p style="font-size:15px;line-height:1.6;">{message}</p>
+    <a href="/login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
+  </div>
+</body>
+</html>"#
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html.into_bytes(),
+    )
+        .into_response()
 }
 
 // ── 에러 페이지 헬퍼 ────────────────────────────────────────────────────
@@ -1072,10 +1271,9 @@ fn login_failed_page_csrf(msg: &str, csrf_token: &str) -> Response {
     <form method="POST" action="/login" autocomplete="on">
       <input type="hidden" name="csrf_token" value="{csrf_token}" />
       <label>
-        <span>Username</span>
-        <input type="text" name="username" required autofocus
-               autocomplete="username" minlength="3" maxlength="64"
-               pattern="[a-zA-Z][a-zA-Z0-9_-]{{2,63}}" />
+        <span>Email</span>
+        <input type="email" name="email" required autofocus
+               autocomplete="email" />
       </label>
       <label>
         <span>Password</span>
@@ -1110,9 +1308,8 @@ pub struct BootstrapForm {
     /// 전체 부트스트랩 토큰 (`fleet_boot_...` 형식, 로그/CLI 출력에서 복사).
     #[serde(rename = "otp_full")]
     pub otp_full: String,
-    pub username: String,
-    #[serde(default)]
-    pub email: Option<String>,
+    /// 로그인 식별자 (이메일).
+    pub email: String,
     pub password: String,
     #[serde(default)]
     pub csrf_token: String,
@@ -1274,7 +1471,8 @@ pub async fn bootstrap(
     };
 
     // username 검증.
-    if let Err(e) = fleet_core::User::validate_username(&form.username) {
+    // email 형식 검증.
+    if let Err(e) = fleet_core::User::validate_email(&form.email) {
         return Err((
             StatusCode::BAD_REQUEST,
             jar,
@@ -1283,11 +1481,11 @@ pub async fn bootstrap(
     }
 
     // 비밀번호 강도 검증 (zxcvbn + 길이 정책 중앙화).
-    if fleet_core::auth::password::validate_password(&form.password, &[&form.username]).is_err() {
+    if fleet_core::auth::password::validate_password(&form.password, &[&form.email]).is_err() {
         return Err((
             StatusCode::BAD_REQUEST,
             jar,
-            bootstrap_failed_page("Password is too weak. Use at least 12 characters with a mix of letters, numbers, and symbols."),
+            bootstrap_failed_page("Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols."),
         ));
     }
 
@@ -1303,8 +1501,9 @@ pub async fn bootstrap(
     // 도메인 사용자 생성.
     let user = fleet_core::User {
         id: fleet_core::UserId::new(),
-        username: form.username.clone(),
-        email: form.email.clone(),
+        username: form.email.split('@').next().unwrap_or("admin").to_string(),
+        email: Some(form.email.clone()),
+        email_verified: true, // 부트스트랩 admin은 자동 인증.
         password_hash: password_hash.clone(),
         enabled: true,
         created_at: Utc::now(),
@@ -1338,10 +1537,10 @@ pub async fn bootstrap(
                 (status, jar.clone(), bootstrap_failed_page(msg))
             })?;
 
-    record_login_success(&state, &form.username, Some(&ip))
+    record_login_success(&state, &form.email, Some(&ip))
         .await
         .ok();
-    tracing::info!(username = %form.username, ip = %ip, "bootstrap completed");
+    tracing::info!(email = %form.email, ip = %ip, "bootstrap completed");
 
     // 쿠키 설정.
     let cookie = Cookie::build((SESSION_COOKIE, session_token))

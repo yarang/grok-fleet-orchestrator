@@ -98,7 +98,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// 비밀번호 정책 검증 (M7+M8).
 ///
-/// - **최소 12자**: OWASP 권장 최소 길이.
+/// - **최소 8자**: 기본 보안 요구사항.
 /// - **최대 128자**: Argon2 DoS 방지 (초장문 비밀번호로 메모리/CPU 고갈).
 /// - **zxcvbn 강도 점수 ≥ 3**: 사전 공격에 취약한 비밀번호 차단.
 ///
@@ -106,7 +106,7 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 /// 개인 식별 정보를 전달하면 zxcvbn이 추가로 검사.
 pub fn validate_password(password: &str, user_inputs: &[&str]) -> Result<(), AuthError> {
     // 길이 검증.
-    if password.len() < 12 || password.len() > 128 {
+    if password.len() < 8 || password.len() > 128 {
         return Err(AuthError::WeakPassword);
     }
     // zxcvbn 강도 검증 (score 0-4, 3 이상 요구 = "강력").
@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn validate_password_rejects_short() {
-        // 11자 — 최소 12자 미만.
-        assert!(validate_password("short12345!", &[]).is_err());
+        // 7자 — 최소 8자 미만.
+        assert!(validate_password("Ab1!xyz", &[]).is_err());
     }
 
     #[test]

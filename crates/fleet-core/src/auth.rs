@@ -150,9 +150,12 @@ pub struct User {
     pub id: UserId,
     /// 고유. `^[a-zA-Z][a-zA-Z0-9_-]{2,63}$`.
     pub username: String,
-    /// 알림/감사용 (옵션).
+    /// 고유 로그인 식별자 (이메일).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// 이메일 인증 여부.
+    #[serde(default)]
+    pub email_verified: bool,
     /// Argon2id PHC 문자열.
     #[serde(skip_serializing)]
     pub password_hash: String,
@@ -179,6 +182,31 @@ impl User {
         }
         if name.len() < 3 {
             return Err(AuthError::InvalidUsername);
+        }
+        Ok(())
+    }
+
+    /// 이메일 형식 검증 (간단한 RFC 5322 축소판).
+    pub fn validate_email(addr: &str) -> Result<(), AuthError> {
+        if addr.is_empty() || addr.len() > 254 {
+            return Err(AuthError::InvalidEmail);
+        }
+        // local@domain 형식 확인.
+        let at = addr.find('@').ok_or(AuthError::InvalidEmail)?;
+        let (local, domain) = addr.split_at(at);
+        let domain = &domain[1..]; // '@' 제거
+        if local.is_empty() || local.len() > 64 {
+            return Err(AuthError::InvalidEmail);
+        }
+        if domain.is_empty() || !domain.contains('.') {
+            return Err(AuthError::InvalidEmail);
+        }
+        // 로컬 파트: 알파벳, 숫자, 점, 하이픈, 언더스코어, 플러스 허용.
+        if !local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '+')
+        {
+            return Err(AuthError::InvalidEmail);
         }
         Ok(())
     }
@@ -244,6 +272,27 @@ impl Session {
     /// 현재 시각 기준 만료 여부.
     pub fn is_expired(&self) -> bool {
         self.expires_at <= Utc::now()
+    }
+}
+
+/// 이메일 인증 토큰.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailVerificationToken {
+    pub id: Uuid,
+    pub user_id: UserId,
+    /// SHA-256 hex of the raw token.
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+impl EmailVerificationToken {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at <= Utc::now()
+    }
+    pub fn is_consumed(&self) -> bool {
+        self.consumed_at.is_some()
     }
 }
 
@@ -487,7 +536,9 @@ impl BootstrapPurpose {
 pub enum AuthError {
     #[error("invalid username format")]
     InvalidUsername,
-    #[error("password does not meet policy (min 12 chars, zxcvbn score >= 3)")]
+    #[error("invalid email format")]
+    InvalidEmail,
+    #[error("password does not meet policy (min 8 chars, zxcvbn score >= 3)")]
     WeakPassword,
     #[error("argon2 hashing failed: {0}")]
     HashFailed(String),
@@ -514,6 +565,19 @@ mod tests {
         assert!(User::validate_username("_abc").is_err()); // starts with underscore
         assert!(User::validate_username("a.b").is_err()); // dot not allowed
         assert!(User::validate_username(&"a".repeat(65)).is_err()); // too long
+    }
+
+    #[test]
+    fn email_validation() {
+        assert!(User::validate_email("admin@example.com").is_ok());
+        assert!(User::validate_email("user.name+tag@domain.co.kr").is_ok());
+        assert!(User::validate_email("a@b.c").is_ok());
+        assert!(User::validate_email("").is_err()); // empty
+        assert!(User::validate_email("noatsign.com").is_err()); // no @
+        assert!(User::validate_email("@domain.com").is_err()); // empty local
+        assert!(User::validate_email("user@").is_err()); // empty domain
+        assert!(User::validate_email("user@domain").is_err()); // no dot in domain
+        assert!(User::validate_email("user space@domain.com").is_err()); // space in local
     }
 
     #[test]

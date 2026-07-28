@@ -38,7 +38,8 @@ pub mod worker;
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
 pub use auth::{
     password, AuthError, BootstrapPurpose, BuiltinRole, LoginAttempt, Permission, PermissionId,
-    PermissionKind, Role, RoleId, RolePermission, Session, SessionId, User, UserId, UserRole,
+    EmailVerificationToken, PermissionKind, Role, RoleId, RolePermission, Session, SessionId, User,
+    UserId, UserRole,
 };
 pub use bootstrap_token::BootstrapToken;
 pub use config::{

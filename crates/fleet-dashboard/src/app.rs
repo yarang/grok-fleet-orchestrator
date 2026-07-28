@@ -24,6 +24,8 @@ pub struct DashboardState {
     pub pool: sqlx::PgPool,
     /// 쿠키 Secure 플래그 (로컬 개발은 false, 프로덕션은 true).
     pub secure_cookies: bool,
+    /// SMTP 설정 (이메일 인증 발송용). None이면 이메일 발송 안 함.
+    pub smtp_config: Option<crate::email::SmtpConfig>,
 }
 
 impl DashboardState {
@@ -32,6 +34,7 @@ impl DashboardState {
             store,
             pool,
             secure_cookies: true,
+            smtp_config: crate::email::SmtpConfig::from_env(),
         }
     }
 
@@ -41,6 +44,7 @@ impl DashboardState {
             store,
             pool,
             secure_cookies: false,
+            smtp_config: crate::email::SmtpConfig::from_env(),
         }
     }
 }
@@ -61,7 +65,12 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             "/bootstrap",
             get(handlers::bootstrap_page).post(handlers::bootstrap),
         )
-        .route("/health", get(handlers::health));
+        .route("/health", get(handlers::health))
+        .route("/verify-email", get(handlers::verify_email_page))
+        .route(
+            "/api/users/resend-verification",
+            post(handlers::resend_verification_api),
+        );
 
     let protected = Router::new()
         .route("/", get(handlers::index))

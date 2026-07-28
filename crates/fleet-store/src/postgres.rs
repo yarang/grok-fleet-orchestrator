@@ -55,6 +55,35 @@ impl PgStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+
+    /// User 행을 튜플에서 구조체로 변환하는 공통 헬퍼.
+    fn row_to_user(
+        r: (
+            Uuid,
+            String,
+            Option<String>,
+            bool,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        ),
+    ) -> User {
+        User {
+            id: UserId::from(r.0),
+            username: r.1,
+            email: r.2,
+            email_verified: r.3,
+            password_hash: r.4,
+            enabled: r.5,
+            created_at: r.6,
+            last_login_at: r.7,
+        }
+    }
+
+    /// 공통 SELECT 컬럼 목록.
+    const USER_COLUMNS: &'static str =
+        "id, username, email, email_verified, password_hash, enabled, created_at, last_login_at";
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -616,13 +645,14 @@ impl Store for PgStore {
     async fn create_user(&self, user: &User) -> Result<(), StoreError> {
         sqlx::query(
             r#"
-            INSERT INTO users (id, username, email, password_hash, enabled, created_at, last_login_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO users (id, username, email, email_verified, password_hash, enabled, created_at, last_login_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(user.id.as_uuid())
         .bind(&user.username)
         .bind(&user.email)
+        .bind(user.email_verified)
         .bind(&user.password_hash)
         .bind(user.enabled)
         .bind(user.created_at)
@@ -631,7 +661,7 @@ impl Store for PgStore {
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db) if db.is_unique_violation() => {
-                StoreError::Conflict(format!("username already exists: {}", db.message()))
+                StoreError::Conflict(format!("user already exists: {}", db.message()))
             }
             other => StoreError::Sqlx(other),
         })?;
@@ -639,92 +669,74 @@ impl Store for PgStore {
     }
 
     async fn get_user_by_id(&self, id: UserId) -> Result<Option<User>, StoreError> {
+        let sql = format!("SELECT {} FROM users WHERE id = $1", Self::USER_COLUMNS);
         let row: Option<(
             Uuid,
             String,
             Option<String>,
+            bool,
             String,
             bool,
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(
-            r#"
-                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
-                  FROM users WHERE id = $1
-                "#,
-        )
+        )> = sqlx::query_as(&sql)
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| User {
-            id: UserId::from(r.0),
-            username: r.1,
-            email: r.2,
-            password_hash: r.3,
-            enabled: r.4,
-            created_at: r.5,
-            last_login_at: r.6,
-        }))
+        Ok(row.map(Self::row_to_user))
     }
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
+        let sql = format!("SELECT {} FROM users WHERE username = $1", Self::USER_COLUMNS);
         let row: Option<(
             Uuid,
             String,
             Option<String>,
+            bool,
             String,
             bool,
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(
-            r#"
-                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
-                  FROM users WHERE username = $1
-                "#,
-        )
+        )> = sqlx::query_as(&sql)
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| User {
-            id: UserId::from(r.0),
-            username: r.1,
-            email: r.2,
-            password_hash: r.3,
-            enabled: r.4,
-            created_at: r.5,
-            last_login_at: r.6,
-        }))
+        Ok(row.map(Self::row_to_user))
+    }
+
+    async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
+        let sql = format!("SELECT {} FROM users WHERE email = $1", Self::USER_COLUMNS);
+        let row: Option<(
+            Uuid,
+            String,
+            Option<String>,
+            bool,
+            String,
+            bool,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(&sql)
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(Self::row_to_user))
     }
 
     async fn list_users(&self) -> Result<Vec<User>, StoreError> {
+        let sql = format!("SELECT {} FROM users ORDER BY created_at ASC", Self::USER_COLUMNS);
         let rows: Vec<(
             Uuid,
             String,
             Option<String>,
+            bool,
             String,
             bool,
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(
-            r#"
-                SELECT id, username, email, password_hash, enabled, created_at, last_login_at
-                  FROM users ORDER BY created_at ASC
-                "#,
-        )
+        )> = sqlx::query_as(&sql)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| User {
-                id: UserId::from(r.0),
-                username: r.1,
-                email: r.2,
-                password_hash: r.3,
-                enabled: r.4,
-                created_at: r.5,
-                last_login_at: r.6,
-            })
-            .collect())
+        Ok(rows.into_iter().map(Self::row_to_user).collect())
     }
 
     async fn count_users(&self) -> Result<u64, StoreError> {
@@ -1054,6 +1066,85 @@ impl Store for PgStore {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
+    }
+
+    // ── Email verification ───────────────────────────────────────────
+
+    async fn create_email_verification_token(
+        &self,
+        token: &fleet_core::EmailVerificationToken,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO email_verification_tokens (id, user_id, token_hash, created_at, expires_at, consumed_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(token.id)
+        .bind(token.user_id.as_uuid())
+        .bind(&token.token_hash)
+        .bind(token.created_at)
+        .bind(token.expires_at)
+        .bind(token.consumed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_email_verification_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<fleet_core::EmailVerificationToken>, StoreError> {
+        let row: Option<(
+            Uuid,
+            Uuid,
+            String,
+            chrono::DateTime<Utc>,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, token_hash, created_at, expires_at, consumed_at
+              FROM email_verification_tokens WHERE token_hash = $1
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| fleet_core::EmailVerificationToken {
+            id: r.0,
+            user_id: UserId::from(r.1),
+            token_hash: r.2,
+            created_at: r.3,
+            expires_at: r.4,
+            consumed_at: r.5,
+        }))
+    }
+
+    async fn consume_email_verification_token(
+        &self,
+        token_id: Uuid,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE email_verification_tokens SET consumed_at = $2 WHERE id = $1 AND consumed_at IS NULL")
+            .bind(token_id)
+            .bind(at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_user_email_verified(
+        &self,
+        user_id: UserId,
+        verified: bool,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE users SET email_verified = $2 WHERE id = $1")
+            .bind(user_id.as_uuid())
+            .bind(verified)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     // ── Login attempts ────────────────────────────────────────────────

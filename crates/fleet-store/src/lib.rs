@@ -32,6 +32,7 @@ pub use rbac::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 use fleet_core::{
     BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission, PermissionId, Role, RoleId,
     Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
@@ -142,6 +143,11 @@ pub trait Store: Send + Sync {
     /// username으로 사용자 조회 (로그인 경로).
     async fn get_user_by_username(&self, _username: &str) -> Result<Option<User>, StoreError> {
         Err(StoreError::Unsupported("get_user_by_username"))
+    }
+
+    /// email로 사용자 조회 (이메일 기반 로그인).
+    async fn get_user_by_email(&self, _email: &str) -> Result<Option<User>, StoreError> {
+        Err(StoreError::Unsupported("get_user_by_email"))
     }
 
     /// 모든 사용자 조회 (사용자 관리 페이지용).
@@ -269,6 +275,42 @@ pub trait Store: Send + Sync {
     /// 사용자의 모든 세션 삭제 (비활성화/패스워드 변경 시).
     async fn delete_user_sessions(&self, _user_id: UserId) -> Result<u64, StoreError> {
         Err(StoreError::Unsupported("delete_user_sessions"))
+    }
+
+    // ── Email verification ───────────────────────────────────────
+
+    /// 이메일 인증 토큰 생성.
+    async fn create_email_verification_token(
+        &self,
+        _token: &fleet_core::EmailVerificationToken,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_email_verification_token"))
+    }
+
+    /// 토큰 해시로 인증 토큰 조회.
+    async fn get_email_verification_token(
+        &self,
+        _token_hash: &str,
+    ) -> Result<Option<fleet_core::EmailVerificationToken>, StoreError> {
+        Err(StoreError::Unsupported("get_email_verification_token"))
+    }
+
+    /// 인증 토큰 소비 (consumed_at 설정).
+    async fn consume_email_verification_token(
+        &self,
+        _token_id: Uuid,
+        _at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("consume_email_verification_token"))
+    }
+
+    /// 사용자의 email_verified 플래그 설정.
+    async fn set_user_email_verified(
+        &self,
+        _user_id: UserId,
+        _verified: bool,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("set_user_email_verified"))
     }
 
     // ── Login attempts (rate limiting + 감사) ────────────────────

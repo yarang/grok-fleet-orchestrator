@@ -27,11 +27,11 @@
     <div id="create-panel" class="panel" style="margin-bottom:24px;display:none;">
       <h3 style="margin:0 0 12px;font-size:15px;">Create New User</h3>
       <form id="create-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
-        <label>Username
-          <input name="username" type="text" required minlength="3" placeholder="newuser" style="display:block;margin-top:4px;" />
-        </label>
         <label>Email
-          <input name="email" type="email" placeholder="user@example.com" style="display:block;margin-top:4px;" />
+          <input name="email" type="email" required placeholder="user@example.com" style="display:block;margin-top:4px;" />
+        </label>
+        <label>Display Name (optional)
+          <input name="username" type="text" placeholder="auto from email" style="display:block;margin-top:4px;" />
         </label>
         <label>Password
           <input name="password" type="password" required minlength="8" placeholder="••••••••" style="display:block;margin-top:4px;" />
