@@ -48,7 +48,7 @@ pub use config::{
 };
 pub use error::{FleetError, Result, SelectionError};
 pub use events::{EventEntry, FleetEvent};
-pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus};
+pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus, SshKey, SshKeySummary};
 pub use ids::{TaskId, WorkerId};
 pub use task::{
     FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,

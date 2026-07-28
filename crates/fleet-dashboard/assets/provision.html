@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Provision Host — Fleet</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Fleet</h1>
+    <div id="status-pill">connecting…</div>
+    <nav class="nav-links">
+      <a href="/">Overview</a>
+      <a href="/tasks">Tasks</a>
+      <a href="/hosts">Hosts</a>
+      <a href="/hosts/provision" class="active">Provision</a>
+      <a href="/admin/ssh-keys">SSH Keys</a>
+      <a href="/admin/users">Users</a>
+      <a href="/admin/audit">Audit</a>
+    </nav>
+    <span id="user-menu" style="margin-left:auto;"></span>
+  </header>
+
+  <main>
+    <h1 class="page-title">Provision New Host</h1>
+    <p class="page-subtitle">SSH into a remote server, install Grok, and register it as a fleet worker.</p>
+
+    <div id="provision-panel" class="panel" style="max-width:600px;">
+      <form id="provision-form" style="display:flex;flex-direction:column;gap:12px;">
+        <fieldset style="border:1px solid var(--border,#ddd);padding:12px;border-radius:6px;">
+          <legend style="font-weight:600;font-size:14px;">SSH Connection</legend>
+          <label>Host / IP
+            <input name="host" type="text" required placeholder="10.0.1.10" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+          <div style="display:flex;gap:12px;margin-top:8px;">
+            <label>SSH User
+              <input name="ssh_user" type="text" required placeholder="ubuntu" style="display:block;margin-top:4px;" />
+            </label>
+            <label>SSH Port
+              <input name="ssh_port" type="number" value="22" min="1" max="65535" style="display:block;margin-top:4px;width:80px;" />
+            </label>
+          </div>
+          <label style="display:block;margin-top:8px;">SSH Key
+            <select name="ssh_key_name" id="ssh-key-select" required style="display:block;margin-top:4px;width:100%;">
+              <option value="">Loading keys…</option>
+            </select>
+          </label>
+        </fieldset>
+
+        <fieldset style="border:1px solid var(--border,#ddd);padding:12px;border-radius:6px;">
+          <legend style="font-weight:600;font-size:14px;">Worker Configuration</legend>
+          <label>Worker Name
+            <input name="worker_name" type="text" required placeholder="build-arm64-01" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+          <label>Orchestrator URL
+            <input name="orchestrator_url" type="url" required placeholder="http://127.0.0.1:8081" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+          <label>Labels (comma-separated key=value)
+            <input name="labels_raw" type="text" placeholder="arch=arm64,gpu=false" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+          <label>Bootstrap Token (optional)
+            <input name="bootstrap_token" type="text" placeholder="fleet-xxx" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+          <label>Fleet Worker Binary Path
+            <input name="fleet_worker_bin" type="text" placeholder="/usr/local/bin/fleet-worker" style="display:block;margin-top:4px;width:100%;" />
+          </label>
+        </fieldset>
+
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="submit" class="btn btn-primary" id="submit-btn">Provision Host</button>
+          <label style="font-size:13px;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" name="dry_run" /> Dry run
+          </label>
+        </div>
+      </form>
+      <div id="provision-result" style="margin-top:16px;display:none;"></div>
+    </div>
+  </main>
+
+  <script>
+    function getCsrf() {
+      const m = document.cookie.match('(^|;)\\s*fleet_csrf\\s*=\\s*([^;]+)');
+      return m ? m.pop() : '';
+    }
+
+    async function loadSshKeys() {
+      const select = document.getElementById('ssh-key-select');
+      try {
+        const resp = await fetch('/api/ssh-keys');
+        if (!resp.ok) { select.innerHTML = '<option value="">No keys available</option>'; return; }
+        const keys = await resp.json();
+        if (!keys || keys.length === 0) {
+          select.innerHTML = '<option value="">No keys — upload one first</option>';
+        } else {
+          select.innerHTML = keys.map(k =>
+            '<option value="' + k.name + '">' + k.name + ' (' + k.key_type + ')</option>'
+          ).join('');
+        }
+      } catch(e) {
+        select.innerHTML = '<option value="">Failed to load keys</option>';
+      }
+    }
+
+    document.getElementById('provision-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const fd = new FormData(form);
+
+      // labels 파싱.
+      const labels = {};
+      const labelsRaw = fd.get('labels_raw') || '';
+      for (const pair of labelsRaw.split(',')) {
+        const trimmed = pair.trim();
+        if (!trimmed) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq > 0) {
+          labels[trimmed.substring(0, eq)] = trimmed.substring(eq + 1);
+        }
+      }
+
+      const body = {
+        host: fd.get('host'),
+        ssh_port: parseInt(fd.get('ssh_port') || '22'),
+        ssh_user: fd.get('ssh_user'),
+        ssh_key_name: fd.get('ssh_key_name'),
+        worker_name: fd.get('worker_name'),
+        labels,
+        orchestrator_url: fd.get('orchestrator_url'),
+        bootstrap_token: fd.get('bootstrap_token') || null,
+        fleet_worker_bin: fd.get('fleet_worker_bin') || '',
+        dry_run: fd.get('dry_run') === 'on',
+      };
+
+      const btn = document.getElementById('submit-btn');
+      const result = document.getElementById('provision-result');
+      btn.disabled = true;
+      btn.textContent = 'Provisioning…';
+      result.style.display = 'none';
+
+      try {
+        const resp = await fetch('/api/hosts/provision', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf() },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+          let html = '<div style="padding:12px;border-radius:6px;background:rgba(26,125,49,0.1);border:1px solid #1a7d31;">';
+          html += '<strong style="color:#1a7d31;">✓ Provisioning ' + (data.succeeded ? 'succeeded' : 'completed with errors') + '</strong>';
+          if (data.steps) {
+            html += '<ul style="margin:8px 0 0;padding-left:20px;font-size:13px;">';
+            for (const s of data.steps) {
+              const icon = s.status === 'applied' ? '✓' : s.status === 'skipped' ? '○' : '✗';
+              const color = s.status === 'failed' ? '#c61e00' : '#666';
+              html += '<li style="color:' + color + ';">' + icon + ' ' + s.name + '</li>';
+            }
+            html += '</ul>';
+          }
+          html += '</div>';
+          result.innerHTML = html;
+        } else {
+          result.innerHTML = '<div style="padding:12px;border-radius:6px;background:rgba(198,30,0,0.1);border:1px solid #c61e00;color:#c61e00;"><strong>✗ Failed:</strong> ' + (data.error || 'Unknown error') + '</div>';
+        }
+        result.style.display = 'block';
+      } catch(e) {
+        result.innerHTML = '<div style="padding:12px;color:#c61e00;">Error: ' + e.message + '</div>';
+        result.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Provision Host';
+      }
+    });
+
+    // 권한 확인 + 초기 로드.
+    fetch('/api/me').then(r => r.json()).then(me => {
+      document.getElementById('user-menu').innerHTML =
+        '<span>' + me.username + '</span> <button onclick="fetch(\'/logout\',{method:\'POST\',headers:{\'X-CSRF-Token\':getCsrf()}}).then(()=>location=\'/login\')" style="background:none;border:none;color:var(--body-muted);font-size:12px;cursor:pointer;margin-left:8px;">Logout</button>';
+    }).catch(()=>{});
+
+    loadSshKeys();
+
+    // SSE
+    const pill = document.getElementById('status-pill');
+    try {
+      const es = new EventSource('/api/events/stream');
+      es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
+      es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
+    } catch(e) {}
+  </script>
+</body>
+</html>

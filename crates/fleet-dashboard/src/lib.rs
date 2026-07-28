@@ -25,6 +25,7 @@ pub mod auth;
 pub mod auth_util;
 pub mod email;
 pub mod handlers;
+pub mod provisioning;
 pub mod schema;
 pub mod sse;
 

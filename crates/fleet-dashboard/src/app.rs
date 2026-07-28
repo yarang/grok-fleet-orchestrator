@@ -26,6 +26,8 @@ pub struct DashboardState {
     pub secure_cookies: bool,
     /// SMTP 설정 (이메일 인증 발송용). None이면 이메일 발송 안 함.
     pub smtp_config: Option<crate::email::SmtpConfig>,
+    /// 마스터 키 (SSH 키 암호화/복호화용). None이면 프로비저닝 기능 비활성.
+    pub master_key: Option<Arc<fleet_credentials::MasterKey>>,
 }
 
 impl DashboardState {
@@ -35,6 +37,7 @@ impl DashboardState {
             pool,
             secure_cookies: true,
             smtp_config: crate::email::SmtpConfig::from_env(),
+            master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
         }
     }
 
@@ -45,6 +48,7 @@ impl DashboardState {
             pool,
             secure_cookies: false,
             smtp_config: crate::email::SmtpConfig::from_env(),
+            master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
         }
     }
 }
@@ -101,9 +105,14 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         // ── P1.5: 호스트 ──
         .route("/hosts", get(handlers::host_inventory_page))
         .route("/hosts/:hostname", get(handlers::host_detail_page))
+        .route("/hosts/provision", get(crate::provisioning::provision_page))
         // ── P2: 관리 ──
         .route("/admin/audit", get(handlers::admin_audit_page))
         .route("/admin/tools", get(handlers::admin_tools_page))
+        .route(
+            "/admin/ssh-keys",
+            get(crate::provisioning::admin_ssh_keys_page),
+        )
         // ── API ──
         .route("/api/overview", get(handlers::overview))
         .route("/api/workers", get(handlers::list_workers))
@@ -117,6 +126,21 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
         .route("/api/audit", get(handlers::list_audit_api))
         .route("/api/tools", get(handlers::list_tools_api))
+        // ── SSH 키 관리 API ──
+        .route(
+            "/api/ssh-keys",
+            get(crate::provisioning::list_ssh_keys_api)
+                .post(crate::provisioning::create_ssh_key_api),
+        )
+        .route(
+            "/api/ssh-keys/:name",
+            axum::routing::delete(crate::provisioning::delete_ssh_key_api),
+        )
+        // ── 프로비저닝 API ──
+        .route(
+            "/api/hosts/provision",
+            post(crate::provisioning::provision_host_api),
+        )
         .route("/logout", post(handlers::logout))
         .route("/static/*path", get(handlers::static_asset))
         .route_layer(middleware::from_fn_with_state(

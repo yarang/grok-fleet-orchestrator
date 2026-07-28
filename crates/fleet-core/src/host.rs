@@ -131,3 +131,33 @@ impl HostStatus {
         }
     }
 }
+
+// ── SSH 키 금고 ─────────────────────────────────────────────────────────
+
+/// 암호화 저장된 SSH 비밀키 레코드.
+///
+/// `encrypted_blob`은 `MasterKey` (AES-256-GCM)로 암호화된 OpenSSH 비밀키.
+/// 복호화는 프로비저닝 실행 시에만 수행.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKey {
+    pub id: Uuid,
+    pub name: String,
+    /// AES-256-GCM 암호화된 비밀키 (base64url).
+    #[serde(skip_serializing)]
+    pub encrypted_blob: String,
+    /// 공개키 fingerprint (SHA-256 base64).
+    pub fingerprint: String,
+    /// 키 타입: "ed25519", "rsa", "ecdsa".
+    pub key_type: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// SSH 키 목록 API용 요약 (비밀키 제외).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKeySummary {
+    pub name: String,
+    pub fingerprint: String,
+    pub key_type: String,
+    pub created_at: DateTime<Utc>,
+}

@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 fleet-core = { workspace = true }
 fleet-store = { workspace = true }
+fleet-credentials = { workspace = true }
+fleet-provisioner = { workspace = true, features = ["ssh"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

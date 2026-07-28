@@ -82,6 +82,7 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::RoleCreate => "Create custom roles",
         PermissionKind::RoleDelete => "Delete roles",
         PermissionKind::AuditRead => "Read audit log",
+        PermissionKind::HostProvision => "Provision hosts and manage SSH keys",
         PermissionKind::EventsList => "List events",
         PermissionKind::MetricsView => "View metrics",
     }

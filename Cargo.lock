@@ -1242,6 +1242,8 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "fleet-core",
+ "fleet-credentials",
+ "fleet-provisioner",
  "fleet-store",
  "hex",
  "lettre",

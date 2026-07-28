@@ -485,6 +485,28 @@ pub trait Store: Send + Sync {
     ) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
         Err(StoreError::Unsupported("list_host_events"))
     }
+
+    // ── SSH 키 금고 ───────────────────────────────────────────────
+
+    /// SSH 비밀키 저장 (이미 암호화됨).
+    async fn create_ssh_key(&self, _key: &fleet_core::SshKey) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_ssh_key"))
+    }
+
+    /// 이름으로 SSH 키 조회.
+    async fn get_ssh_key(&self, _name: &str) -> Result<Option<fleet_core::SshKey>, StoreError> {
+        Err(StoreError::Unsupported("get_ssh_key"))
+    }
+
+    /// 전체 SSH 키 목록.
+    async fn list_ssh_keys(&self) -> Result<Vec<fleet_core::SshKey>, StoreError> {
+        Err(StoreError::Unsupported("list_ssh_keys"))
+    }
+
+    /// SSH 키 삭제.
+    async fn delete_ssh_key(&self, _name: &str) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("delete_ssh_key"))
+    }
 }
 
 /// DB에 저장된 자격 증명 행. api_key는 암호화된 상태로 반환됨.

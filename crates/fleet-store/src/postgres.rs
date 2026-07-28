@@ -1479,6 +1479,76 @@ impl Store for PgStore {
         .await?;
         rows.iter().map(|r| row_to_host_event(r)).collect()
     }
+
+    // ── SSH 키 금고 ───────────────────────────────────────────────
+
+    async fn create_ssh_key(&self, key: &fleet_core::SshKey) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"INSERT INTO ssh_keys (id, name, encrypted_blob, fingerprint, key_type)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (name) DO UPDATE
+               SET encrypted_blob = EXCLUDED.encrypted_blob,
+                   fingerprint = EXCLUDED.fingerprint,
+                   key_type = EXCLUDED.key_type,
+                   updated_at = NOW()"#,
+        )
+        .bind(key.id)
+        .bind(&key.name)
+        .bind(&key.encrypted_blob)
+        .bind(&key.fingerprint)
+        .bind(&key.key_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_ssh_key(&self, name: &str) -> Result<Option<fleet_core::SshKey>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, encrypted_blob, fingerprint, key_type, \
+             created_at, updated_at FROM ssh_keys WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| fleet_core::SshKey {
+            id: r.get("id"),
+            name: r.get("name"),
+            encrypted_blob: r.get("encrypted_blob"),
+            fingerprint: r.get("fingerprint"),
+            key_type: r.get("key_type"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    async fn list_ssh_keys(&self) -> Result<Vec<fleet_core::SshKey>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, name, encrypted_blob, fingerprint, key_type, \
+             created_at, updated_at FROM ssh_keys ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| fleet_core::SshKey {
+                id: r.get("id"),
+                name: r.get("name"),
+                encrypted_blob: r.get("encrypted_blob"),
+                fingerprint: r.get("fingerprint"),
+                key_type: r.get("key_type"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+            .collect())
+    }
+
+    async fn delete_ssh_key(&self, name: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM ssh_keys WHERE name = $1")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

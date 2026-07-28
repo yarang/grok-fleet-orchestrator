@@ -365,6 +365,8 @@ pub enum PermissionKind {
     RoleDelete,
     #[serde(rename = "audit:read")]
     AuditRead,
+    #[serde(rename = "host:provision")]
+    HostProvision,
     // 시스템
     #[serde(rename = "events:list")]
     EventsList,
@@ -396,6 +398,7 @@ impl PermissionKind {
             Self::RoleCreate => "role:create",
             Self::RoleDelete => "role:delete",
             Self::AuditRead => "audit:read",
+            Self::HostProvision => "host:provision",
             Self::EventsList => "events:list",
             Self::MetricsView => "metrics:view",
         }
@@ -424,6 +427,7 @@ impl PermissionKind {
             Self::RoleCreate,
             Self::RoleDelete,
             Self::AuditRead,
+            Self::HostProvision,
             Self::EventsList,
             Self::MetricsView,
         ]

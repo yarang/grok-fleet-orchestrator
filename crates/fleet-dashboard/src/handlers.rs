@@ -308,7 +308,7 @@ use crate::schema::{
 use axum::extract::Path;
 
 /// 임베드된 HTML 페이지를 반환하는 헬퍼.
-fn serve_page(name: &str) -> Response {
+pub fn serve_page(name: &str) -> Response {
     match crate::assets::Asset::get(name) {
         Some(file) => (
             [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
