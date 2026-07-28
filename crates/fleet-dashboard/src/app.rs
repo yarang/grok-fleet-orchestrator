@@ -68,6 +68,18 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/health", get(handlers::health))
         .route("/verify-email", get(handlers::verify_email_page))
         .route(
+            "/forgot-password",
+            get(handlers::forgot_password_page).post(handlers::forgot_password),
+        )
+        .route(
+            "/reset-password",
+            get(handlers::reset_password_page).post(handlers::reset_password),
+        )
+        .route(
+            "/resend-verification",
+            get(handlers::resend_verification_page).post(handlers::resend_verification_form),
+        )
+        .route(
             "/api/users/resend-verification",
             post(handlers::resend_verification_api),
         );

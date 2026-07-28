@@ -137,6 +137,8 @@ pub async fn list_workers(
 pub struct ListTasksQuery {
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
 }
 
 /// `/api/tasks` — 작업 목록.
@@ -148,6 +150,7 @@ pub async fn list_tasks(
     require_permission(&principal, PermissionKind::TaskList)?;
     let filter = TaskFilter {
         limit: q.limit,
+        offset: q.offset,
         ..Default::default()
     };
     let tasks = state.store.list_tasks(&filter).await.map_err(|e| {
@@ -394,11 +397,12 @@ pub async fn get_worker_detail(
 
     let summary = worker_to_summary(&worker);
 
-    // 최근 태스크 조회 (이 워커가 처리한 것).
+    // 최근 태스크 조회 (이 워커가 처리한 것 — SQL 레벨에서 worker_id 필터링).
     let tasks = state
         .store
         .list_tasks(&TaskFilter {
             limit: 20,
+            worker_id: Some(worker_id),
             ..Default::default()
         })
         .await
@@ -407,16 +411,7 @@ pub async fn get_worker_detail(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let recent_tasks: Vec<TaskSummary> = tasks
-        .iter()
-        .filter(|t| match &t.status {
-            TaskStatus::Dispatched { worker_id: w, .. } => w.to_string() == id,
-            TaskStatus::Completed(r) => r.worker_id.to_string() == id,
-            TaskStatus::Failed(f) => f.worker_id.map(|w| w.to_string()) == Some(id.clone()),
-            _ => false,
-        })
-        .map(task_to_summary)
-        .collect();
+    let recent_tasks: Vec<TaskSummary> = tasks.iter().map(task_to_summary).collect();
 
     Ok(Json(WorkerDetail {
         summary,
@@ -1242,6 +1237,445 @@ fn verification_result_page(success: bool, message: &str) -> Response {
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Email Verification — Fleet</title>
+<link rel="stylesheet" href="/static/login.css"></head>
+<body class="auth-page">
+  <div class="auth-card">
+    <h1 style="color:{color};margin:0 0 12px;">{title}</h1>
+    <p style="font-size:15px;line-height:1.6;">{message}</p>
+    <a href="/login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
+  </div>
+</body>
+</html>"#
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html.into_bytes(),
+    )
+        .into_response()
+}
+
+// ── 비밀번호 재설정 ──────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResendVerificationForm {
+    pub email: String,
+    #[allow(dead_code)]
+    pub csrf_token: String,
+}
+
+/// GET /resend-verification — 인증 이메일 재발송 요청 페이지.
+pub async fn resend_verification_page(
+    State(state): State<Arc<DashboardState>>,
+    jar: CookieJar,
+) -> (CookieJar, Response) {
+    let csrf_token = jar
+        .get(CSRF_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(generate_csrf_token);
+    let csrf_cookie = Cookie::build((CSRF_COOKIE, csrf_token.clone()))
+        .path("/")
+        .http_only(false)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::seconds(3600))
+        .build();
+    let jar = jar.add(csrf_cookie);
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Resend Verification — Fleet</title>
+<link rel="stylesheet" href="/static/login.css"></head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">F</div>
+    <h1>Resend Verification</h1>
+    <p class="auth-subtitle">Enter your email to receive a new verification link</p>
+    <form method="POST" action="/resend-verification">
+      <input type="hidden" name="csrf_token" value="{csrf_token}" />
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" required autofocus autocomplete="email" />
+      </label>
+      <button type="submit" class="auth-button">Send Verification Link</button>
+    </form>
+    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+  </div>
+</body>
+</html>"#
+    );
+
+    (
+        jar,
+        (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            html.into_bytes(),
+        )
+            .into_response(),
+    )
+}
+
+/// POST /resend-verification — 폼 기반 인증 이메일 재발송.
+pub async fn resend_verification_form(
+    State(state): State<Arc<DashboardState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<ResendVerificationForm>,
+) -> Response {
+    let ip = addr.ip().to_string();
+
+    // CSRF 검증.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return info_page("error", "Security token expired. Please reload the page.");
+    }
+
+    // IP 기반 rate limit — 이메일 폭탄 방지.
+    let allowed = check_rate_limit(&state, &form.email, Some(&ip))
+        .await
+        .unwrap_or(false);
+    if !allowed {
+        record_login_failure(&state, &form.email, Some(&ip), "resend_rate_limited")
+            .await
+            .ok();
+        return info_page("error", "Too many requests. Please try again later.");
+    }
+
+    match state.store.get_user_by_email(&form.email).await {
+        Ok(Some(user)) if !user.email_verified => {
+            let (raw_token, token_hash) = generate_session_token();
+            let verification = fleet_core::EmailVerificationToken {
+                id: uuid::Uuid::new_v4(),
+                user_id: user.id,
+                token_hash,
+                created_at: Utc::now(),
+                expires_at: Utc::now() + Duration::hours(24),
+                consumed_at: None,
+            };
+            if let Err(e) = state
+                .store
+                .create_email_verification_token(&verification)
+                .await
+            {
+                tracing::error!(error = %e, "create_email_verification_token failed");
+            }
+
+            let base_url =
+                std::env::var("FLEET_BASE_URL").unwrap_or_else(|_| "http://localhost:8082".into());
+            let verify_url = format!("{base_url}/verify-email?token={raw_token}");
+
+            if let Err(e) = crate::email::send_verification_email(
+                state.smtp_config.as_ref(),
+                &form.email,
+                &verify_url,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "failed to send verification email");
+            }
+        }
+        Ok(Some(_)) => { /* already verified — silently succeed */ }
+        Ok(None) => { /* user not found — silently succeed (anti-enumeration) */ }
+        Err(e) => tracing::error!(error = %e, "get_user_by_email failed"),
+    }
+
+    info_page(
+        "success",
+        "If the email exists and is unverified, a verification link has been sent.",
+    )
+}
+
+// ── 비밀번호 재설정 ──────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ForgotPasswordForm {
+    pub email: String,
+    #[allow(dead_code)]
+    pub csrf_token: String,
+}
+
+/// GET /forgot-password — 비밀번호 재설정 요청 페이지.
+pub async fn forgot_password_page(
+    State(state): State<Arc<DashboardState>>,
+    jar: CookieJar,
+) -> (CookieJar, Response) {
+    let csrf_token = jar
+        .get(CSRF_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(generate_csrf_token);
+    let csrf_cookie = Cookie::build((CSRF_COOKIE, csrf_token.clone()))
+        .path("/")
+        .http_only(false)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::seconds(3600))
+        .build();
+    let jar = jar.add(csrf_cookie);
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Forgot Password — Fleet</title>
+<link rel="stylesheet" href="/static/login.css"></head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">F</div>
+    <h1>Reset Password</h1>
+    <p class="auth-subtitle">Enter your email to receive a reset link</p>
+    <form method="POST" action="/forgot-password">
+      <input type="hidden" name="csrf_token" value="{csrf_token}" />
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" required autofocus autocomplete="email" />
+      </label>
+      <button type="submit" class="auth-button">Send Reset Link</button>
+    </form>
+    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+  </div>
+</body>
+</html>"#
+    );
+
+    (
+        jar,
+        (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            html.into_bytes(),
+        )
+            .into_response(),
+    )
+}
+
+/// POST /forgot-password — 재설정 링크 이메일 발송.
+pub async fn forgot_password(
+    State(state): State<Arc<DashboardState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<ForgotPasswordForm>,
+) -> Response {
+    let ip = addr.ip().to_string();
+
+    // CSRF 검증.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return info_page("error", "Security token expired. Please reload the page.");
+    }
+
+    // IP 기반 rate limit — 이메일 폭탄 방지.
+    let allowed = check_rate_limit(&state, &form.email, Some(&ip))
+        .await
+        .unwrap_or(false);
+    if !allowed {
+        record_login_failure(&state, &form.email, Some(&ip), "forgot_rate_limited")
+            .await
+            .ok();
+        return info_page("error", "Too many requests. Please try again later.");
+    }
+
+    // 사용자 조회 — 사용자가 없어도 성공 응답 (계정 열거 방지).
+    if let Ok(Some(user)) = state.store.get_user_by_email(&form.email).await {
+        let (raw_token, token_hash) = generate_session_token();
+        let reset_token = fleet_core::PasswordResetToken {
+            id: uuid::Uuid::new_v4(),
+            user_id: user.id,
+            token_hash,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + Duration::hours(1),
+            consumed_at: None,
+        };
+        if let Err(e) = state.store.create_password_reset_token(&reset_token).await {
+            tracing::error!(error = %e, "create_password_reset_token failed");
+        }
+
+        let base_url =
+            std::env::var("FLEET_BASE_URL").unwrap_or_else(|_| "http://localhost:8082".into());
+        let reset_url = format!("{base_url}/reset-password?token={raw_token}");
+
+        if let Err(e) = crate::email::send_password_reset_email(
+            state.smtp_config.as_ref(),
+            &form.email,
+            &reset_url,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to send password reset email");
+        }
+    }
+
+    info_page(
+        "success",
+        "If the email exists in our system, a reset link has been sent. Please check your inbox.",
+    )
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResetPasswordParams {
+    pub token: Option<String>,
+}
+
+/// GET /reset-password?token=... — 비밀번호 재설정 폼.
+pub async fn reset_password_page(Query(params): Query<ResetPasswordParams>) -> Response {
+    let token = params.token.unwrap_or_default();
+
+    if token.is_empty() {
+        return info_page("error", "Missing reset token.");
+    }
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Reset Password — Fleet</title>
+<link rel="stylesheet" href="/static/login.css"></head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="auth-logo">F</div>
+    <h1>Set New Password</h1>
+    <p class="auth-subtitle">Choose a strong password (min 8 characters)</p>
+    <form method="POST" action="/reset-password">
+      <input type="hidden" name="token" value="{token}" />
+      <label>
+        <span>New Password</span>
+        <input type="password" name="password" required autocomplete="new-password" minlength="8" />
+      </label>
+      <label>
+        <span>Confirm Password</span>
+        <input type="password" name="password_confirm" required autocomplete="new-password" minlength="8" />
+      </label>
+      <button type="submit" class="auth-button">Reset Password</button>
+    </form>
+    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+  </div>
+</body>
+</html>"#
+    );
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html.into_bytes(),
+    )
+        .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ResetPasswordForm {
+    pub token: String,
+    pub password: String,
+    pub password_confirm: String,
+    #[allow(dead_code)]
+    pub csrf_token: String,
+}
+
+/// POST /reset-password — 비밀번호 재설정 처리.
+pub async fn reset_password(
+    State(state): State<Arc<DashboardState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    jar: CookieJar,
+    Form(form): Form<ResetPasswordForm>,
+) -> Response {
+    let ip = addr.ip().to_string();
+
+    // CSRF 검증.
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return info_page("error", "Security token expired. Please reload the page.");
+    }
+
+    // IP 기반 rate limit — 토큰 열거 공격 방지.
+    let allowed = check_rate_limit(&state, &form.token, Some(&ip))
+        .await
+        .unwrap_or(false);
+    if !allowed {
+        record_login_failure(&state, &form.token, Some(&ip), "reset_rate_limited")
+            .await
+            .ok();
+        return info_page("error", "Too many requests. Please try again later.");
+    }
+
+    // 비밀번호 일치 확인.
+    if form.password != form.password_confirm {
+        return info_page("error", "Passwords do not match.");
+    }
+
+    // 비밀번호 강도 검증.
+    if fleet_core::auth::password::validate_password(&form.password, &[]).is_err() {
+        return info_page(
+            "error",
+            "Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.",
+        );
+    }
+
+    // 토큰 검증.
+    let hash = crate::auth_util::sha256_hex(form.token.as_bytes());
+    let reset_token = match state.store.get_password_reset_token(&hash).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return info_page("error", "Invalid or unknown reset token."),
+        Err(e) => {
+            tracing::error!(error = %e, "get_password_reset_token failed");
+            return info_page("error", "Server error. Please try again later.");
+        }
+    };
+
+    if reset_token.is_consumed() {
+        return info_page("error", "This reset link has already been used.");
+    }
+    if reset_token.is_expired() {
+        return info_page(
+            "error",
+            "This reset link has expired. Please request a new one.",
+        );
+    }
+
+    // 비밀번호 해싱 + 업데이트.
+    let password_hash = match fleet_core::auth::password::hash_password(&form.password) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "hash_password failed");
+            return info_page("error", "Server error. Please try again later.");
+        }
+    };
+
+    if let Err(e) = state
+        .store
+        .update_user_password(reset_token.user_id, &password_hash)
+        .await
+    {
+        tracing::error!(error = %e, "update_user_password failed");
+        return info_page("error", "Server error. Please try again later.");
+    }
+
+    // 토큰 소비.
+    let _ = state
+        .store
+        .consume_password_reset_token(reset_token.id, Utc::now())
+        .await;
+
+    // 기존 세션 무효화 (보안: 비밀번호 변경 후 모든 세션 로그아웃).
+    let _ = state.store.delete_user_sessions(reset_token.user_id).await;
+
+    info_page(
+        "success",
+        "Your password has been reset. You can now sign in with your new password.",
+    )
+}
+
+/// 정보/에러 페이지 헬퍼.
+fn info_page(kind: &str, message: &str) -> Response {
+    let (title, color) = match kind {
+        "success" => ("✓ Done", "#1a7d31"),
+        _ => ("⚠ Notice", "#c61e00"),
+    };
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Password Reset — Fleet</title>
 <link rel="stylesheet" href="/static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">

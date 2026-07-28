@@ -296,6 +296,9 @@ impl EmailVerificationToken {
     }
 }
 
+/// 비밀번호 재설정 토큰.
+pub type PasswordResetToken = EmailVerificationToken;
+
 /// 로그인 시도 추적 (rate limiting + 감사). 5회 실패 시 60초 잠금.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginAttempt {

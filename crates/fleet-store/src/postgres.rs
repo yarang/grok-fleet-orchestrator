@@ -153,30 +153,67 @@ impl Store for PgStore {
     }
 
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-        // 단순 필터는 SQL로, 복잡한 것(worker_id)은 Rust로 후처리.
+        // 단순 필터는 SQL로, 복잡한 것(status 위상)은 Rust로 후처리.
         let limit = filter.limit.min(1000) as i64;
+        let offset = filter.offset as i64;
+        let worker_id_str = filter.worker_id.map(|w| w.0.to_string());
 
-        let rows = if let Some(ref created_by) = filter.created_by {
-            sqlx::query(
-                r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+        // worker_id를 SQL JSONB 필터로 푸시하여 LIMIT 전에 올바르게 필터링.
+        // status 컬럼은 externallly-tagged enum JSONB:
+        //   {"Dispatched": {"worker_id": "..."}}
+        //   {"Completed": {"worker_id": "..."}}
+        //   {"Failed": {"worker_id": "..."}}
+        const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                           max_turns, timeout_secs, created_at, created_by, priority, status
-                   FROM tasks WHERE created_by = $1
-                   ORDER BY created_at DESC LIMIT $2"#,
-            )
-            .bind(created_by)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
-                          max_turns, timeout_secs, created_at, created_by, priority, status
-                   FROM tasks
-                   ORDER BY created_at DESC LIMIT $1"#,
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
+                   FROM tasks"#;
+        const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
+                       OR status->'Completed'->>'worker_id' = $1
+                       OR status->'Failed'->>'worker_id' = $1)"#;
+
+        let rows = match (&filter.created_by, &worker_id_str) {
+            (Some(created_by), Some(wid)) => {
+                sqlx::query(&format!(
+                    "{SELECT_COLS} WHERE created_by = $1 AND {WORKER_WHERE} \
+                     ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+                ))
+                .bind(created_by)
+                .bind(wid)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (Some(created_by), None) => {
+                sqlx::query(&format!(
+                    "{SELECT_COLS} WHERE created_by = $1 \
+                     ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+                ))
+                .bind(created_by)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, Some(wid)) => {
+                sqlx::query(&format!(
+                    "{SELECT_COLS} WHERE {WORKER_WHERE} \
+                     ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+                ))
+                .bind(wid)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            (None, None) => {
+                sqlx::query(&format!(
+                    "{SELECT_COLS} ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+                ))
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
 
         let mut tasks: Vec<Task> = rows
@@ -189,10 +226,7 @@ impl Store for PgStore {
             tasks.retain(|t| status_matches(&t.status, status_filter));
         }
 
-        // 워커 ID 필터 (status JSONB 내부 필드 — 앱 레벨 처리)
-        if let Some(worker_id) = filter.worker_id {
-            tasks.retain(|t| task_worker_id(&t.status) == Some(worker_id));
-        }
+        // worker_id 필터는 SQL에서 처리했으므로 Rust 단 후처리 불필요.
 
         Ok(tasks)
     }
@@ -1151,6 +1185,74 @@ impl Store for PgStore {
         Ok(())
     }
 
+    // ── Password reset ────────────────────────────────────────────────
+
+    async fn create_password_reset_token(
+        &self,
+        token: &fleet_core::PasswordResetToken,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO password_reset_tokens (id, user_id, token_hash, created_at, expires_at, consumed_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(token.id)
+        .bind(token.user_id.as_uuid())
+        .bind(&token.token_hash)
+        .bind(token.created_at)
+        .bind(token.expires_at)
+        .bind(token.consumed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_password_reset_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<fleet_core::PasswordResetToken>, StoreError> {
+        let row: Option<(
+            Uuid,
+            Uuid,
+            String,
+            chrono::DateTime<Utc>,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, token_hash, created_at, expires_at, consumed_at
+              FROM password_reset_tokens WHERE token_hash = $1
+            "#,
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| fleet_core::PasswordResetToken {
+            id: r.0,
+            user_id: UserId::from(r.1),
+            token_hash: r.2,
+            created_at: r.3,
+            expires_at: r.4,
+            consumed_at: r.5,
+        }))
+    }
+
+    async fn consume_password_reset_token(
+        &self,
+        token_id: Uuid,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE password_reset_tokens SET consumed_at = $2 WHERE id = $1 AND consumed_at IS NULL",
+        )
+        .bind(token_id)
+        .bind(at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── Login attempts ────────────────────────────────────────────────
 
     async fn record_login_attempt(&self, attempt: &LoginAttempt) -> Result<(), StoreError> {
@@ -1487,6 +1589,7 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
 }
 
 /// `TaskStatus`에서 worker_id 추출 (필터링용).
+#[allow(dead_code)]
 fn task_worker_id(status: &TaskStatus) -> Option<WorkerId> {
     match status {
         TaskStatus::Dispatched { worker_id, .. } => Some(*worker_id),

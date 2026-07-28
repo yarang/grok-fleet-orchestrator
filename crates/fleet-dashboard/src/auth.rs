@@ -16,7 +16,7 @@ use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
@@ -75,12 +75,15 @@ pub async fn require_session(
     cookies: CookieJar,
     mut req: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, Response> {
+    // 요청이 브라우저 페이지 네비게이션인지 API/fetch인지 판별.
+    let is_api = is_api_request(&req);
+
     // 1. 쿠키 추출.
     let token = cookies
         .get(SESSION_COOKIE)
         .map(|c| c.value().to_string())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or_else(|| auth_redirect(is_api))?;
 
     // 2. 해시 + DB 조회.
     let hash = crate::auth_util::sha256_hex(token.as_bytes());
@@ -88,13 +91,13 @@ pub async fn require_session(
         .store
         .get_session_by_token_hash(&hash)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map_err(|_| internal_server_error(is_api))?
+        .ok_or_else(|| auth_redirect(is_api))?;
 
     // 3. 만료 확인.
     if session.is_expired() {
         state.store.delete_session(session.id).await.ok();
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(auth_redirect(is_api));
     }
 
     // 4. 사용자 로드.
@@ -102,12 +105,12 @@ pub async fn require_session(
         .store
         .get_user_by_id(session.user_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .map_err(|_| internal_server_error(is_api))?
+        .ok_or_else(|| auth_redirect(is_api))?;
 
     // 5. 활성화 확인.
     if !user.enabled {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(forbidden_response(is_api));
     }
 
     // 6. 권한 로드.
@@ -115,7 +118,7 @@ pub async fn require_session(
         .store
         .list_user_permissions(user.id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| internal_server_error(is_api))?;
     let permissions: Vec<PermissionKind> = perm_rows
         .iter()
         .filter_map(|p| PermissionKind::from_name(&p.name))
@@ -152,6 +155,68 @@ pub async fn require_session(
     req.extensions_mut().insert(principal);
 
     Ok(next.run(req).await)
+}
+
+// ── 인증 에러 응답 헬퍼 ──────────────────────────────────────────────────
+
+/// 요청이 API/fetch인지 브라우저 네비게이션인지 판별.
+fn is_api_request(req: &Request) -> bool {
+    // Accept 헤더가 JSON을 요구하거나 X-Requested-With 헤더가 있으면 API.
+    if let Some(accept) = req.headers().get("accept") {
+        if let Ok(v) = accept.to_str() {
+            if v.contains("application/json") {
+                return true;
+            }
+        }
+    }
+    req.headers().contains_key("x-requested-with")
+}
+
+/// 인증 실패: 브라우저면 /login 리다이렉트, API면 401 JSON.
+fn auth_redirect(is_api: bool) -> Response {
+    if is_api {
+        (
+            StatusCode::UNAUTHORIZED,
+            [("content-type", "application/json")],
+            r#"{"error":"unauthorized","redirect":"/login"}"#,
+        )
+            .into_response()
+    } else {
+        Redirect::to("/login").into_response()
+    }
+}
+
+/// 403: 브라우저면 /login 리다이렉트 (메시지 포함), API면 403 JSON.
+fn forbidden_response(is_api: bool) -> Response {
+    if is_api {
+        (
+            StatusCode::FORBIDDEN,
+            [("content-type", "application/json")],
+            r#"{"error":"forbidden","reason":"account disabled"}"#,
+        )
+            .into_response()
+    } else {
+        Redirect::to("/login?reason=disabled").into_response()
+    }
+}
+
+/// 500: 내부 서버 오류.
+fn internal_server_error(is_api: bool) -> Response {
+    if is_api {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "application/json")],
+            r#"{"error":"internal_server_error"}"#,
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/html; charset=utf-8")],
+            "<html><body><h1>500 Internal Server Error</h1><p>Please try again later.</p></body></html>",
+        )
+            .into_response()
+    }
 }
 
 /// 권한 검사 헬퍼. handler에서 사용.

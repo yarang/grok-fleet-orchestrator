@@ -643,9 +643,12 @@ async fn unknown_route_returns_404() {
 
 #[tokio::test]
 async fn protected_route_without_cookie_returns_401() {
-    // 인증 없이 보호 경로 접근 시 401.
+    // 인증 없이 보호 경로 접근 시 401 (API 요청으로 식별되도록 Accept 헤더 전송).
     let server = spawn_server(MemStore::new()).await;
-    let resp = reqwest::get(format!("http://{}/api/overview", server.addr))
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/api/overview", server.addr))
+        .header("accept", "application/json")
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);

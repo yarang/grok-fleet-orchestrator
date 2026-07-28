@@ -202,6 +202,8 @@ pub struct TaskFilter {
     pub created_by: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
 }
 
 impl Default for TaskFilter {
@@ -211,6 +213,7 @@ impl Default for TaskFilter {
             worker_id: None,
             created_by: None,
             limit: default_limit(),
+            offset: 0,
         }
     }
 }

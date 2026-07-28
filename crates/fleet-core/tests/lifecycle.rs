@@ -173,6 +173,7 @@ fn filter_serialization() {
         worker_id: Some(WorkerId::new()),
         created_by: Some("admin@org".into()),
         limit: 50,
+        offset: 0,
     };
     let json = serde_json::to_string(&tf).unwrap();
     assert!(json.contains("\"limit\":50"));

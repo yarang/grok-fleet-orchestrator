@@ -226,6 +226,11 @@ Group=fleet
 Environment=DATABASE_URL=postgres://fleet@localhost/fleet_prod
 Environment=RUST_LOG=info,fleet=info
 Environment=FLEET_API_TOKENS=<token1>,<token2>
+# ── 이메일 인증 (Gmail SMTP) ──
+# 필수: 사용자 생성 시 인증 이메일 발송. 미설정 시 로그에만 출력.
+Environment=FLEET_GMAIL_USER=your-address@gmail.com
+Environment=FLEET_GMAIL_APP_PASS=xxxx xxxx xxxx xxxx
+Environment=FLEET_BASE_URL=https://fleet.example.com
 ExecStart=/opt/fleet/bin/fleet serve \
   --http-bind 127.0.0.1:8081 \
   --dashboard-bind 127.0.0.1:8082 \
@@ -273,6 +278,29 @@ server {
 ```
 
 > 중요: SSE (`/api/events/stream`)는 버퍼링을 꺼야 합니다 (`proxy_buffering off`).
+
+### 2.4 이메일 인증 (Gmail SMTP)
+
+대시보드는 이메일 기반 로그인을 사용합니다. 새 사용자는 생성 시 인증 이메일을
+수신하고, 링크 클릭 후 로그인할 수 있습니다.
+
+**Gmail App Password 발급**:
+1. Google 계정 → 보안 → **2단계 인증** 활성화
+2. <https://myaccount.google.com/apppasswords> → "메일" 앱 비밀번호 생성
+3. 16자리 비밀번호를 `FLEET_GMAIL_APP_PASS`에 설정 (공백 자동 제거)
+
+**환경변수**:
+
+| 변수 | 필수 | 설명 |
+|------|------|------|
+| `FLEET_GMAIL_USER` | ✅ | 발송용 Gmail 주소 (`xxx@gmail.com`) |
+| `FLEET_GMAIL_APP_PASS` | ✅ | Google App Password (16자리) |
+| `FLEET_BASE_URL` | ✅ | 인증 링크 베이스 URL (`https://fleet.example.com`) |
+| `FLEET_MAIL_FROM_NAME` | ❌ | 발송자 표시명 (기본: `Fleet Orchestrator`) |
+
+> 미설정 시: 사용자 생성은 되지만 인증 이메일이 발송되지 않고, 서버 로그에
+> 인증 URL이 출력됩니다. 개발 환경에서 로그에서 URL을 직접 복사하여 인증할
+> 수 있습니다.
 
 ## 3. 분산 배포 (Cloudflare Zero Trust)
 

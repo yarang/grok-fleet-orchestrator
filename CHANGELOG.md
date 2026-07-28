@@ -6,6 +6,41 @@
 
 ## [Unreleased]
 
+### Added — 비밀번호 재설정 + 페이지네이션 + 워커 쿼리 최적화
+
+셀프서비스 비밀번호 재설정 플로우와 인증 이메일 재발송 UI를 추가하고,
+태스크 API 페이지네이션 및 워커 상세 쿼리 성능을 개선.
+
+- **비밀번호 재설정 플로우**: `GET/POST /forgot-password` (이메일 입력 → 재설정 링크 발송),
+  `GET/POST /reset-password?token=...` (새 비밀번호 설정).
+  1시간 유효 토큰, 계정 열거 방지 (존재하지 않는 이메일도 동일 응답),
+  비밀번호 변경 시 모든 세션 무효화. 마이그레이션 `009_password_reset.sql`.
+- **인증 이메일 재발송 UI**: `GET/POST /resend-verification` 공개 페이지.
+  로그인 페이지에 "Forgot password?" / "Resend verification email" 링크 추가.
+- **태스크 API 페이지네이션**: `TaskFilter`에 `offset` 필드 추가,
+  `/api/tasks?offset=N&limit=M` 지원. PgStore SQL에 `OFFSET` 적용.
+- **워커 상세 쿼리 최적화**: `list_tasks`의 `worker_id` 필터를 Rust 후처리에서
+  SQL JSONB 조건으로 이동 (`status->'Dispatched'->>'worker_id' = $1` 등).
+  이전에는 전역 LIMIT 후 Rust 필터링으로 워커 태스크가 누락될 수 있었음.
+
+### Added — Gmail SMTP 이메일 인증 + 세션 UX 개선
+
+이메일 기반 인증 시스템을 도입하고, Gmail SMTP를 통한 인증 메일 발송을 구현.
+
+- **이메일 기반 로그인**: 로그인 식별자를 `username`에서 `email`로 변경.
+  `LoginForm.email` 필드, `get_user_by_email()` Store 메서드.
+- **비밀번호 정책 완화**: 최소 길이 12자 → 8자 (zxcvbn 강도 검사 유지).
+- **이메일 인증 플로우**: 사용자 생성 시 24시간 유효한 인증 토큰 발급.
+  `GET /verify-email?token=...` (공개 라우트), `POST /api/users/resend-verification`.
+  미인증 사용자는 로그인 차단 (부트스트랩 admin 제외).
+- **Gmail SMTP**: `lettre` crate, STARTTLS `smtp.gmail.com:587`.
+  환경변수 2개 (`FLEET_GMAIL_USER` + `FLEET_GMAIL_APP_PASS`)만으로 설정.
+  App Password 공백 자동 제거. 미설정 시 로그 출력 (개발용).
+- **세션 만료 UX**: 미들웨어가 브라우저 요청은 `/login`으로 302 리다이렉트,
+  API 요청은 401 JSON 반환. 비활성 사용자는 `/login?reason=disabled`.
+- **마이그레이션** `008_email_auth.sql`: `email_verified` 컬럼,
+  `email_verification_tokens` 테이블, `email` NOT NULL + UNIQUE 제약.
+
 ### Added — RBAC 권한 강제 + 태스크 상세 페이지 + 사용자 관리 CRUD
 
 모든 보호 API에 RBAC 권한 검사를 적용하고, 대시보드에 태스크 상세 페이지와

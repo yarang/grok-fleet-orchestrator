@@ -313,6 +313,33 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("set_user_email_verified"))
     }
 
+    // ── Password reset ─────────────────────────────────────────────
+
+    /// 비밀번호 재설정 토큰 생성.
+    async fn create_password_reset_token(
+        &self,
+        _token: &fleet_core::PasswordResetToken,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_password_reset_token"))
+    }
+
+    /// 토큰 해시로 재설정 토큰 조회.
+    async fn get_password_reset_token(
+        &self,
+        _token_hash: &str,
+    ) -> Result<Option<fleet_core::PasswordResetToken>, StoreError> {
+        Err(StoreError::Unsupported("get_password_reset_token"))
+    }
+
+    /// 재설정 토큰 소비.
+    async fn consume_password_reset_token(
+        &self,
+        _token_id: Uuid,
+        _at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("consume_password_reset_token"))
+    }
+
     // ── Login attempts (rate limiting + 감사) ────────────────────
 
     /// 로그인 시도 기록.
