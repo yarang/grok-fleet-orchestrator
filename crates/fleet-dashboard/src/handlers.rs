@@ -13,12 +13,14 @@ use axum::Json;
 use chrono::Utc;
 use tracing::debug;
 
-use fleet_core::{TaskFilter, TaskStatus, WorkerFilter};
 use fleet_core::PermissionKind;
+use fleet_core::{TaskFilter, TaskStatus, WorkerFilter};
 
 use crate::app::DashboardState;
 use crate::auth::{require_permission, AuthPrincipal};
-use crate::schema::{OverviewResponse, TaskCounts, TaskSummary, TokenStats, WorkerCounts, WorkerSummary};
+use crate::schema::{
+    OverviewResponse, TaskCounts, TaskSummary, TokenStats, WorkerCounts, WorkerSummary,
+};
 
 /// `/health` — 헬스체크.
 pub async fn health() -> &'static str {
@@ -115,7 +117,8 @@ pub async fn list_workers(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, StatusCode> {
-    require_permission(&principal, PermissionKind::WorkerList)?;    let mut filter = WorkerFilter::default();
+    require_permission(&principal, PermissionKind::WorkerList)?;
+    let mut filter = WorkerFilter::default();
     if let Some(s) = &q.status {
         filter.status = parse_worker_status(s);
     }
@@ -268,7 +271,13 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
                 total_tokens: u.total(),
             }),
         ),
-        TaskStatus::Failed(f) => ("failed", f.worker_id.map(|w| w.to_string()), None, None, None),
+        TaskStatus::Failed(f) => (
+            "failed",
+            f.worker_id.map(|w| w.to_string()),
+            None,
+            None,
+            None,
+        ),
         TaskStatus::Cancelled { .. } => ("cancelled", None, None, None, None),
     };
     TaskSummary {
@@ -289,11 +298,11 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
 //  P1/P1.5/P2 페이지 + API 핸들러
 // ═══════════════════════════════════════════════════════════════════════
 
-use axum::extract::Path;
 use crate::schema::{
-    HostDetail, HostEventSummary, HostMetricsSummary, HostSummary,
-    OsInfoSummary, UserSummary, WorkerDetail,
+    HostDetail, HostEventSummary, HostMetricsSummary, HostSummary, OsInfoSummary, UserSummary,
+    WorkerDetail,
 };
+use axum::extract::Path;
 
 /// 임베드된 HTML 페이지를 반환하는 헬퍼.
 fn serve_page(name: &str) -> Response {
@@ -327,9 +336,7 @@ pub async fn get_task_detail_api(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_permission(&principal, PermissionKind::TaskRead)?;
 
-    let task_id: fleet_core::TaskId = id
-        .parse()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let task_id: fleet_core::TaskId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let task = state
         .store
@@ -373,9 +380,7 @@ pub async fn get_worker_detail(
     Path(id): Path<String>,
 ) -> Result<Json<WorkerDetail>, StatusCode> {
     require_permission(&principal, PermissionKind::WorkerList)?;
-    let worker_id: fleet_core::WorkerId = id
-        .parse()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let worker_id: fleet_core::WorkerId = id.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let worker = state
         .store
@@ -524,7 +529,10 @@ pub async fn create_user_api(
 
     // viewer 역할 부여 (기본).
     if let Some(viewer_role) = state.store.get_role_by_name("viewer").await.ok().flatten() {
-        let _ = state.store.assign_user_role(user.id, viewer_role.id, Some(principal.user.id)).await;
+        let _ = state
+            .store
+            .assign_user_role(user.id, viewer_role.id, Some(principal.user.id))
+            .await;
     }
 
     // 이메일 인증 토큰 생성 + 발송.
@@ -537,15 +545,17 @@ pub async fn create_user_api(
         expires_at: Utc::now() + Duration::hours(24),
         consumed_at: None,
     };
-    let _ = state.store.create_email_verification_token(&verification).await;
-    let base_url = std::env::var("FLEET_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8082".into());
+    let _ = state
+        .store
+        .create_email_verification_token(&verification)
+        .await;
+    let base_url =
+        std::env::var("FLEET_BASE_URL").unwrap_or_else(|_| "http://localhost:8082".into());
     let verify_url = format!("{base_url}/verify-email?token={raw_token}");
-    if let Err(e) = crate::email::send_verification_email(
-        state.smtp_config.as_ref(),
-        &form.email,
-        &verify_url,
-    ).await {
+    if let Err(e) =
+        crate::email::send_verification_email(state.smtp_config.as_ref(), &form.email, &verify_url)
+            .await
+    {
         tracing::warn!(error = %e, "failed to send verification email — user created but email not sent");
     }
 
@@ -579,12 +589,18 @@ pub async fn toggle_user_api(
         .map(fleet_core::UserId::from)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid user ID".to_string()))?;
 
-    let user = state.store.get_user_by_id(user_id).await
+    let user = state
+        .store
+        .get_user_by_id(user_id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     let new_enabled = !user.enabled;
-    state.store.set_user_enabled(user_id, new_enabled).await
+    state
+        .store
+        .set_user_enabled(user_id, new_enabled)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?;
 
     if !new_enabled {
@@ -617,14 +633,23 @@ pub async fn delete_user_api(
 
     // 자기 자신 삭제 방지.
     if user_id == principal.user.id {
-        return Err((StatusCode::BAD_REQUEST, "Cannot delete yourself".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot delete yourself".to_string(),
+        ));
     }
 
-    let user = state.store.get_user_by_id(user_id).await
+    let user = state
+        .store
+        .get_user_by_id(user_id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    state.store.delete_user(user_id).await
+    state
+        .store
+        .delete_user(user_id)
+        .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?;
 
     tracing::info!(username = %user.username, by = %principal.user.username, "user deleted");
@@ -704,7 +729,13 @@ pub async fn get_host_detail_api(
         })?;
 
     let worker_name = if let Some(wid) = host.worker_id {
-        state.store.get_worker(wid).await.ok().flatten().map(|w| w.name)
+        state
+            .store
+            .get_worker(wid)
+            .await
+            .ok()
+            .flatten()
+            .map(|w| w.name)
     } else {
         None
     };
@@ -844,8 +875,8 @@ use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, record_login_failure, record_login_success, CSRF_COOKIE,
-    SESSION_COOKIE, SESSION_DURATION_SECS,
+    check_rate_limit, record_login_failure, record_login_success, CSRF_COOKIE, SESSION_COOKIE,
+    SESSION_DURATION_SECS,
 };
 use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
@@ -1105,7 +1136,10 @@ pub async fn verify_email_page(
 
     // 만료 확인.
     if verification.is_expired() {
-        return verification_result_page(false, "Verification token has expired. Please request a new one.");
+        return verification_result_page(
+            false,
+            "Verification token has expired. Please request a new one.",
+        );
     }
 
     // 이미 사용됨.
@@ -1174,8 +1208,8 @@ pub async fn resend_verification_api(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into()))?;
 
     // 이메일 발송 (SMTP 미설정 시 로그 출력).
-    let base_url = std::env::var("FLEET_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:8082".into());
+    let base_url =
+        std::env::var("FLEET_BASE_URL").unwrap_or_else(|_| "http://localhost:8082".into());
     let verify_url = format!("{base_url}/verify-email?token={raw_token}");
 
     if let Err(e) = crate::email::send_verification_email(

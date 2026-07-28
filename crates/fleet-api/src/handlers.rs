@@ -186,7 +186,9 @@ pub async fn heartbeat(
 
     // 호스트 인벤토리 동기화 — heartbeat로 수신된 버전/OS 정보를 hosts 테이블에 upsert.
     // 워커 name을 hostname으로 사용.
-    let hostname = hb.os_info.as_ref()
+    let hostname = hb
+        .os_info
+        .as_ref()
         .filter(|oi| !oi.hostname.is_empty())
         .map(|oi| oi.hostname.clone())
         .unwrap_or_else(|| worker.name.clone());

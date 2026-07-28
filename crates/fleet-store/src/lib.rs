@@ -32,12 +32,12 @@ pub use rbac::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use uuid::Uuid;
 use fleet_core::{
     BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission, PermissionId, Role, RoleId,
     Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
     WorkerFilter, WorkerHeartbeat, WorkerId,
 };
+use uuid::Uuid;
 
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
 ///
@@ -425,12 +425,18 @@ pub trait Store: Send + Sync {
     }
 
     /// hostname으로 호스트 조회.
-    async fn get_host_by_hostname(&self, _hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
+    async fn get_host_by_hostname(
+        &self,
+        _hostname: &str,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
         Err(StoreError::Unsupported("get_host_by_hostname"))
     }
 
     /// worker_id로 호스트 조회.
-    async fn get_host_by_worker(&self, _worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
+    async fn get_host_by_worker(
+        &self,
+        _worker_id: WorkerId,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
         Err(StoreError::Unsupported("get_host_by_worker"))
     }
 

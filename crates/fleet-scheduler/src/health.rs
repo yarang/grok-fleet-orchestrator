@@ -170,7 +170,8 @@ impl HealthChecker {
                             severity: fleet_core::EventSeverity::Warn,
                             message: Some(format!(
                                 "worker {} offline — heartbeat missed for {:?}",
-                                worker.name, self.config.grace_duration()
+                                worker.name,
+                                self.config.grace_duration()
                             )),
                             payload: std::collections::HashMap::new(),
                             created_at: Utc::now(),

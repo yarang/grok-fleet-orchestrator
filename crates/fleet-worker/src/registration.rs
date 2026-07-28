@@ -197,10 +197,16 @@ impl RegistrationClient {
         let disk_free_mb = self.disk_cache.get_or_schedule_refresh();
 
         // grok 버전 — 캐시된 값 사용 (변하지 않으므로 최초 1회만 수집).
-        let grok_version = self.grok_version.get_or_init(|| self.detect_version()).clone();
+        let grok_version = self
+            .grok_version
+            .get_or_init(|| self.detect_version())
+            .clone();
 
         // OS 정보 — 캐시된 값 사용 (변하지 않으므로 최초 1회만 수집).
-        let os_info = self.os_info.get_or_init(|| self.collect_system_info()).clone();
+        let os_info = self
+            .os_info
+            .get_or_init(|| self.collect_system_info())
+            .clone();
 
         let body = HeartbeatRequest {
             worker_id,
@@ -378,7 +384,11 @@ fn detect_grok_version(grok_path: &str) -> Option<String> {
     for token in &tokens[1..] {
         let clean = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
         // 버전 패턴: 숫자로 시작하고 점을 포함.
-        if clean.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+        if clean
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
             && clean.contains('.')
         {
             return Some(clean.to_string());

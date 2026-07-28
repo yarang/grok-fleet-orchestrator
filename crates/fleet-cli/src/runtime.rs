@@ -883,7 +883,10 @@ async fn register_host_with_orchestrator(
     succeeded: bool,
     api_token: Option<&str>,
 ) {
-    let url = format!("{}/v1/hosts/register", orchestrator_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/hosts/register",
+        orchestrator_url.trim_end_matches('/')
+    );
     let body = serde_json::json!({
         "hostname": hostname,
         "ssh_host": ssh_host,

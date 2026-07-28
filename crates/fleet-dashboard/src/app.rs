@@ -80,7 +80,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/workers/:id", get(handlers::worker_detail_page))
         .route("/admin/users", get(handlers::admin_users_page))
         // ── P1: 사용자 CRUD API ──
-        .route("/api/users", get(handlers::list_users_api).post(handlers::create_user_api))
+        .route(
+            "/api/users",
+            get(handlers::list_users_api).post(handlers::create_user_api),
+        )
         .route("/api/users/:id/toggle", post(handlers::toggle_user_api))
         .route("/api/users/:id/delete", post(handlers::delete_user_api))
         // ── P1.5: 호스트 ──

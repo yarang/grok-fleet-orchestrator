@@ -48,8 +48,8 @@ impl SmtpConfig {
         if gmail_user.is_empty() || gmail_app_pass.is_empty() {
             return None;
         }
-        let from_name = std::env::var("FLEET_MAIL_FROM_NAME")
-            .unwrap_or_else(|_| "Fleet Orchestrator".into());
+        let from_name =
+            std::env::var("FLEET_MAIL_FROM_NAME").unwrap_or_else(|_| "Fleet Orchestrator".into());
 
         Some(Self {
             gmail_user,
@@ -81,7 +81,10 @@ fn build_email_message(
 ) -> Result<Message, String> {
     let from = format!("{} <{}>", config.from_name, config.gmail_user);
     Message::builder()
-        .from(from.parse().map_err(|e| format!("invalid from address: {e}"))?)
+        .from(
+            from.parse()
+                .map_err(|e| format!("invalid from address: {e}"))?,
+        )
         .to(to_email
             .parse()
             .map_err(|e| format!("invalid to address: {e}"))?)

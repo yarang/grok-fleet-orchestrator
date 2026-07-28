@@ -320,12 +320,30 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn get_host_by_hostname(&self, hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
-        Ok(self.hosts.lock().unwrap().iter().find(|h| h.hostname == hostname).cloned())
+    async fn get_host_by_hostname(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
+        Ok(self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.hostname == hostname)
+            .cloned())
     }
 
-    async fn get_host_by_worker(&self, worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
-        Ok(self.hosts.lock().unwrap().iter().find(|h| h.worker_id == Some(worker_id)).cloned())
+    async fn get_host_by_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
+        Ok(self
+            .hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.worker_id == Some(worker_id))
+            .cloned())
     }
 
     async fn list_hosts(&self) -> Result<Vec<fleet_core::Host>, StoreError> {
@@ -337,9 +355,17 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn list_host_events(&self, host_id: Uuid, limit: u32) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
+    async fn list_host_events(
+        &self,
+        host_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
         let events = self.host_events.lock().unwrap();
-        let mut filtered: Vec<fleet_core::HostEvent> = events.iter().filter(|e| e.host_id == host_id).cloned().collect();
+        let mut filtered: Vec<fleet_core::HostEvent> = events
+            .iter()
+            .filter(|e| e.host_id == host_id)
+            .cloned()
+            .collect();
         filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         filtered.truncate(limit as usize);
         Ok(filtered)
@@ -670,7 +696,10 @@ async fn hosts_list_returns_summaries() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 3);
-    let hostnames: Vec<&str> = arr.iter().map(|h| h["hostname"].as_str().unwrap()).collect();
+    let hostnames: Vec<&str> = arr
+        .iter()
+        .map(|h| h["hostname"].as_str().unwrap())
+        .collect();
     assert!(hostnames.contains(&"node-a"));
     assert!(hostnames.contains(&"node-b"));
     assert!(hostnames.contains(&"node-c"));
@@ -683,24 +712,32 @@ async fn host_detail_returns_info_and_events() {
 
     // host_events에 몇 개 이벤트 추가.
     let mut store = MemStore::new().with_host(host);
-    store.host_events.lock().unwrap().push(fleet_core::HostEvent {
-        id: Uuid::new_v4(),
-        host_id,
-        event_type: "heartbeat".into(),
-        severity: fleet_core::EventSeverity::Info,
-        message: Some("heartbeat received".into()),
-        payload: HashMap::new(),
-        created_at: chrono::Utc::now(),
-    });
-    store.host_events.lock().unwrap().push(fleet_core::HostEvent {
-        id: Uuid::new_v4(),
-        host_id,
-        event_type: "provision_ok".into(),
-        severity: fleet_core::EventSeverity::Info,
-        message: Some("provisioned successfully".into()),
-        payload: HashMap::new(),
-        created_at: chrono::Utc::now() - chrono::Duration::minutes(5),
-    });
+    store
+        .host_events
+        .lock()
+        .unwrap()
+        .push(fleet_core::HostEvent {
+            id: Uuid::new_v4(),
+            host_id,
+            event_type: "heartbeat".into(),
+            severity: fleet_core::EventSeverity::Info,
+            message: Some("heartbeat received".into()),
+            payload: HashMap::new(),
+            created_at: chrono::Utc::now(),
+        });
+    store
+        .host_events
+        .lock()
+        .unwrap()
+        .push(fleet_core::HostEvent {
+            id: Uuid::new_v4(),
+            host_id,
+            event_type: "provision_ok".into(),
+            severity: fleet_core::EventSeverity::Info,
+            message: Some("provisioned successfully".into()),
+            payload: HashMap::new(),
+            created_at: chrono::Utc::now() - chrono::Duration::minutes(5),
+        });
 
     let (server, cookie) = spawn_authed_server(store).await;
     let client = reqwest::Client::new();

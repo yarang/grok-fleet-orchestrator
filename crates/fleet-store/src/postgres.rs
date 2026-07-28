@@ -680,14 +680,17 @@ impl Store for PgStore {
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
         )> = sqlx::query_as(&sql)
-        .bind(id.as_uuid())
-        .fetch_optional(&self.pool)
-        .await?;
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(Self::row_to_user))
     }
 
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>, StoreError> {
-        let sql = format!("SELECT {} FROM users WHERE username = $1", Self::USER_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM users WHERE username = $1",
+            Self::USER_COLUMNS
+        );
         let row: Option<(
             Uuid,
             String,
@@ -698,9 +701,9 @@ impl Store for PgStore {
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
         )> = sqlx::query_as(&sql)
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+            .bind(username)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(Self::row_to_user))
     }
 
@@ -716,14 +719,17 @@ impl Store for PgStore {
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
         )> = sqlx::query_as(&sql)
-        .bind(email)
-        .fetch_optional(&self.pool)
-        .await?;
+            .bind(email)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(Self::row_to_user))
     }
 
     async fn list_users(&self) -> Result<Vec<User>, StoreError> {
-        let sql = format!("SELECT {} FROM users ORDER BY created_at ASC", Self::USER_COLUMNS);
+        let sql = format!(
+            "SELECT {} FROM users ORDER BY created_at ASC",
+            Self::USER_COLUMNS
+        );
         let rows: Vec<(
             Uuid,
             String,
@@ -733,9 +739,7 @@ impl Store for PgStore {
             bool,
             chrono::DateTime<Utc>,
             Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(&sql)
-        .fetch_all(&self.pool)
-        .await?;
+        )> = sqlx::query_as(&sql).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(Self::row_to_user).collect())
     }
 
@@ -1246,13 +1250,15 @@ impl Store for PgStore {
         let os_info_json = host
             .os_info
             .as_ref()
-            .map(|oi| serde_json::json!({
-                "os_type": oi.os_type,
-                "distro": oi.distro,
-                "kernel": oi.kernel,
-                "arch": oi.arch,
-                "hostname": oi.hostname,
-            }))
+            .map(|oi| {
+                serde_json::json!({
+                    "os_type": oi.os_type,
+                    "distro": oi.distro,
+                    "kernel": oi.kernel,
+                    "arch": oi.arch,
+                    "hostname": oi.hostname,
+                })
+            })
             .unwrap_or(serde_json::json!({}));
 
         let load_avg_json = if host.metrics.load_avg.is_empty() {
@@ -1308,7 +1314,10 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn get_host_by_hostname(&self, hostname: &str) -> Result<Option<fleet_core::Host>, StoreError> {
+    async fn get_host_by_hostname(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
         let row = sqlx::query("SELECT * FROM hosts WHERE hostname = $1")
             .bind(hostname)
             .fetch_optional(&self.pool)
@@ -1316,7 +1325,10 @@ impl Store for PgStore {
         row.map(|r| row_to_host(&r)).transpose()
     }
 
-    async fn get_host_by_worker(&self, worker_id: WorkerId) -> Result<Option<fleet_core::Host>, StoreError> {
+    async fn get_host_by_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Option<fleet_core::Host>, StoreError> {
         let row = sqlx::query("SELECT * FROM hosts WHERE worker_id = $1")
             .bind(worker_id.as_uuid())
             .fetch_optional(&self.pool)
@@ -1580,15 +1592,40 @@ fn row_to_host(row: &sqlx::postgres::PgRow) -> Result<fleet_core::Host, StoreErr
     let fleet_worker_version: Option<String> = row.try_get("fleet_worker_version")?;
 
     let os_info_json: serde_json::Value = row.try_get("os_info").unwrap_or(serde_json::json!({}));
-    let os_info = if os_info_json.is_null() || os_info_json.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+    let os_info = if os_info_json.is_null()
+        || os_info_json
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(true)
+    {
         None
     } else {
         Some(fleet_core::OsInfo {
-            os_type: os_info_json.get("os_type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            distro: os_info_json.get("distro").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            kernel: os_info_json.get("kernel").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            arch: os_info_json.get("arch").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            hostname: os_info_json.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            os_type: os_info_json
+                .get("os_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            distro: os_info_json
+                .get("distro")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            kernel: os_info_json
+                .get("kernel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            arch: os_info_json
+                .get("arch")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            hostname: os_info_json
+                .get("hostname")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
     };
 
@@ -1596,7 +1633,11 @@ fn row_to_host(row: &sqlx::postgres::PgRow) -> Result<fleet_core::Host, StoreErr
     let load_avg: Vec<f32> = load_avg_json
         .as_ref()
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect()
+        })
         .unwrap_or_default();
 
     let mem_available_mb: Option<i64> = row.try_get("mem_available_mb").unwrap_or(None);
@@ -1641,7 +1682,11 @@ fn row_to_host_event(row: &sqlx::postgres::PgRow) -> Result<fleet_core::HostEven
         "info" => EventSeverity::Info,
         "warn" => EventSeverity::Warn,
         "error" => EventSeverity::Error,
-        other => return Err(StoreError::Decode(format!("unknown event severity: {other}"))),
+        other => {
+            return Err(StoreError::Decode(format!(
+                "unknown event severity: {other}"
+            )))
+        }
     };
     let message: Option<String> = row.try_get("message")?;
     let payload_json: serde_json::Value = row.try_get("payload").unwrap_or(serde_json::json!({}));
