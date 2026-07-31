@@ -302,6 +302,28 @@ server {
 > 인증 URL이 출력됩니다. 개발 환경에서 로그에서 URL을 직접 복사하여 인증할
 > 수 있습니다.
 
+### 2.x fleet-api CORS (선택)
+
+fleet-api(`--http-bind`)의 정상 소비자는 fleet-cli / fleet-worker / fleet-mcp 같은
+**비브라우저 클라이언트**입니다. 따라서 CORS는 **기본적으로 비활성**이며
+(`Access-Control-*` 응답 헤더를 전혀 내보내지 않음), 브라우저의 교차 출처 요청은
+차단됩니다. 대시보드는 자체 서버에서 동일 출처(`/api/*`)로 동작하므로 영향이 없습니다.
+
+브라우저 기반 외부 콘솔을 붙여야 하는 경우에만 명시적 allow-list를 설정합니다:
+
+```bash
+FLEET_API_CORS_ORIGINS="https://console.example.com,https://ops.example.com"
+```
+
+| 규칙 | 동작 |
+|------|------|
+| 미설정 / 빈 값 | CORS 비활성 (권장 기본값) |
+| `*` | 무시 + 경고 로그 (인증된 API에서 전체 출처 허용 금지) |
+| `https://host/` 처럼 경로·트레일링 슬래시 포함 | 무시 + 경고 로그 (`scheme://host[:port]` 형식만 허용) |
+
+허용되는 메서드는 GET/POST/PUT/DELETE, 헤더는 `Authorization`/`Content-Type`이며
+`Access-Control-Allow-Credentials`는 켜지 않습니다(쿠키가 아닌 bearer 토큰 인증).
+
 ## 3. 분산 배포 (Cloudflare Zero Trust)
 
 이 구성에서는 오케스트레이터와 워커 모두 인바운드 포트를 인터넷에 노출하지 않습니다.

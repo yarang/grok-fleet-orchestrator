@@ -1,0 +1,78 @@
+# Local development / integration-testing stack: orchestrator + Postgres +
+# worker. Not intended for production use (see docs/deployment.md for real
+# deployment topologies — systemd, Cloudflare Zero Trust, etc.).
+#
+# Usage:
+#   docker compose up --build
+#   curl http://localhost:8081/v1/health
+#   open http://localhost:8082/
+#
+# Env var names below match what fleet-cli already reads via clap `env = ...`
+# attributes (crates/fleet-cli/src/main.rs) and examples/fleet.env — nothing
+# invented here.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: fleet_dev
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+    ports:
+      - "5432:5432"
+    volumes:
+      - fleet_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: orchestrator
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
+      # `mock` transport — no real grok agent connections; sufficient for
+      # exercising registration/heartbeat/dispatch plumbing locally. Switch
+      # to `acp` if you need real worker<->grok task execution.
+      FLEET_TRANSPORT: mock
+      FLEET_HTTP_BIND: 0.0.0.0:8081
+      FLEET_DASHBOARD_BIND: 0.0.0.0:8082
+      FLEET_HEALTH_INTERVAL: "15"
+      FLEET_HEALTH_MISSED: "3"
+      RUST_LOG: "info,fleet=debug,fleet_store=info,sqlx=warn,tower_http=info"
+      # Unset by default -> HTTP API runs in NO-AUTH mode, matching
+      # docs/deployment.md section 1 (local dev). Uncomment to test bearer
+      # auth end-to-end (must then also set `worker.bootstrap_token` in
+      # docker/worker.toml to a matching value):
+      # FLEET_API_TOKENS: fleet-dev-token-change-me
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    volumes:
+      - ./docker/worker.toml:/etc/fleet/worker.toml:ro
+    restart: on-failure
+
+volumes:
+  fleet_pg_data:

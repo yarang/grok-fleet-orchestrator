@@ -1,0 +1,27 @@
+# docker/worker.toml
+#
+# fleet-worker config for the local docker-compose stack. Mounted read-only
+# into the `worker` service at /etc/fleet/worker.toml (see docker-compose.yml).
+# Field-for-field, this mirrors `crates/fleet-worker/src/config.rs::WorkerConfig`
+# and the production sample at `examples/worker.toml` — see that file for the
+# full field reference (mTLS section, etc.), omitted here for a minimal
+# local-dev setup.
+
+[worker]
+name = "compose-worker-1"
+# Service name from docker-compose.yml — Docker's embedded DNS resolves this
+# to the orchestrator container on the compose network.
+orchestrator_url = "http://orchestrator:8081"
+heartbeat_interval_secs = 15
+labels = { env = "compose" }
+
+[grok]
+# NOTE: no `grok` binary is bundled in the worker image (see Dockerfile
+# comment) — this path intentionally does not exist in the container.
+# Registration + heartbeat still work; the grok subprocess just won't spawn.
+bin = "/usr/local/bin/grok"
+bind_addr = "127.0.0.1:2419"
+# Dev-only placeholder — never reuse this value outside local compose.
+secret = "dev-only-not-for-production-change-me"
+max_concurrent_tasks = 2
+restart_delay_secs = 5
