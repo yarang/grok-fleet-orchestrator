@@ -112,3 +112,76 @@ jobs:
           severity: warning
         env:
           SHELLCHECK_OPTS: -x -e SC2016
+
+  coverage:
+    # 로드맵 P2 #30 — CI 커버리지 리포팅 부재. 외부 서비스(Codecov 등) 계정/토큰
+    # 없이도 값을 얻을 수 있도록 lcov 산출물을 아티팩트로 남기고, 잡 로그에
+    # 크레이트별 요약을 출력한다.
+    name: Coverage report
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: fleet_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/fleet_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo build -p fleet-cli (fresh `fleet` binary for fleet-mcp subprocess tests)
+        # fleet-mcp의 cross_client 테스트는 `target/debug/fleet` 바이너리를 subprocess로
+        # 띄워서 실행한다. 이건 Cargo 의존성 그래프에 안 잡히는 런타임 전용 참조라서,
+        # `cargo llvm-cov -p fleet-mcp`처럼 패키지 스코프 실행은 fleet-cli를 재빌드하지
+        # 않는다 — 마이그레이션이 바뀐 뒤 이 바이너리가 캐시에서 stale하게 남으면
+        # sqlx가 "임베드된 마이그레이션과 DB 상태 불일치"로 기동을 거부하며
+        # cross_client 테스트가 무더기로 실패한다. `--workspace`로 실행하면 보통
+        # 알아서 다시 빌드되지만, 캐시 restore 타이밍에 따라 stale할 수 있어
+        # 명시적으로 먼저 최신화한다.
+        run: cargo build -p fleet-cli --features "acp mtls"
+
+      - name: cargo llvm-cov (workspace, lcov + summary)
+        # --test-threads=1 필수: fleet-store integration test가 TRUNCATE ... CASCADE로
+        # 매 테스트마다 테이블을 비우므로 병렬 실행하면 race condition 발생.
+        # cf. crates/fleet-store/tests/integration.rs, tests/auth_integration.rs 헤더 주석.
+        #
+        # `try_connect()`가 DATABASE_URL 설정 상태에서 연결/마이그레이션 실패 시
+        # panic하도록 되어 있으므로, 이 스텝이 조용히 초록불로 끝나는 일은 없다
+        # (과거 004_rbac.sql 부분 인덱스 버그가 이 실패 모드를 숨겼던 사례 있음).
+        run: |
+          cargo llvm-cov --workspace --features "acp mtls" --lcov --output-path lcov.info \
+            -- --test-threads=1
+
+      - name: coverage summary (per-crate)
+        run: cargo llvm-cov report --summary-only
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 30
