@@ -111,8 +111,33 @@ fn build_acp_transport(
     Ok(transport)
 }
 
+/// 기동 전 환경변수 검증. 문제가 있으면 전부 모아 한 번에 보고하고 중단한다.
+///
+/// 잘못된 설정으로 기동한 뒤 런타임에 조용히 실패하는 것(깨진 인증 메일 링크,
+/// 반쪽만 설정된 SMTP 자격증명 등)을 막기 위함이다.
+fn validate_env_or_bail() -> Result<()> {
+    let issues = fleet_core::validate_orchestrator_env();
+    if issues.is_empty() {
+        return Ok(());
+    }
+    for issue in &issues {
+        tracing::error!(key = issue.key, problem = %issue.problem, "invalid configuration");
+    }
+    let detail = issues
+        .iter()
+        .map(|i| format!("  - {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(anyhow!(
+        "환경변수 설정에 문제가 {}건 있습니다:\n{}",
+        issues.len(),
+        detail
+    ))
+}
+
 /// PgStore 생성 + 마이그레이션 실행.
 async fn connect_and_migrate(max_conn: u32) -> Result<Arc<PgStore>> {
+    validate_env_or_bail()?;
     let url = database_url()?;
     tracing::info!(url = %sanitize_url(&url), max_conn, "connecting to Postgres");
     let store = PgStore::connect(&url, max_conn)
@@ -263,6 +288,20 @@ pub async fn run_serve(
                     fleet_credentials::ENV_VAR,
                     fleet_credentials::DEFAULT_KEY_FILE
                 );
+            }
+        }
+
+        // CORS allow-list (선택). FLEET_API_CORS_ORIGINS="https://a.example,https://b.example"
+        // 미설정이면 CORS 비활성 — fleet-api의 정상 소비자는 비브라우저 클라이언트.
+        if let Ok(raw) = std::env::var("FLEET_API_CORS_ORIGINS") {
+            let origins: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !origins.is_empty() {
+                tracing::info!(origins = ?origins, "HTTP API CORS allow-list configured");
+                app_state = app_state.with_cors_origins(origins);
             }
         }
 

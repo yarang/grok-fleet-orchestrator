@@ -21,6 +21,7 @@
 
 pub mod app;
 pub mod assets;
+pub mod audit;
 pub mod auth;
 pub mod auth_util;
 pub mod email;

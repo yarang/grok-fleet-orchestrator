@@ -33,9 +33,9 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission, PermissionId, Role, RoleId,
-    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId,
+    AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission,
+    PermissionId, Role, RoleId, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput,
+    TaskStatus, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -267,6 +267,19 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("delete_session"))
     }
 
+    /// 세션 만료 시각 갱신.
+    ///
+    /// 토큰 로테이션 시 구 세션을 즉시 삭제하지 않고 짧은 유예 기간만 남기는 데
+    /// 사용한다. 즉시 삭제하면 이미 전송 중이던 병렬 요청들이 한꺼번에 401을
+    /// 맞고 로그아웃되기 때문이다.
+    async fn update_session_expiry(
+        &self,
+        _id: SessionId,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("update_session_expiry"))
+    }
+
     /// 만료된 세션 일괄 삭제 (정기 정리용).
     async fn delete_expired_sessions(&self) -> Result<u64, StoreError> {
         Err(StoreError::Unsupported("delete_expired_sessions"))
@@ -348,6 +361,9 @@ pub trait Store: Send + Sync {
     }
 
     /// `(identifier, ip)` 기준 최근 `window_secs`초 내 실패 횟수.
+    ///
+    /// `ip`가 `None`이면 IP 필터를 적용하지 않고 해당 identifier의 **모든 IP**
+    /// 실패를 합산한다 (`ip_address IS NULL`인 행만 세지 않는다).
     async fn count_recent_failed_attempts(
         &self,
         _identifier: &str,
@@ -367,6 +383,24 @@ pub trait Store: Send + Sync {
         _window_secs: i64,
     ) -> Result<u64, StoreError> {
         Err(StoreError::Unsupported("count_recent_ip_failures"))
+    }
+
+    // ── Audit log (구조화된 감사 로그) ──────────────────────────
+
+    /// 감사 이벤트 1건 기록.
+    ///
+    /// 감사 기록 실패가 원래 작업을 되돌려서는 안 된다 — 호출부는 오류를
+    /// 로깅만 하고 진행하는 것이 보통이다.
+    async fn record_audit_event(&self, _event: &AuditEvent) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("record_audit_event"))
+    }
+
+    /// 감사 이벤트 조회 (최신순).
+    async fn list_audit_events(
+        &self,
+        _filter: &AuditFilter,
+    ) -> Result<Vec<AuditEvent>, StoreError> {
+        Err(StoreError::Unsupported("list_audit_events"))
     }
 
     /// identifier의 과거 시도 기록 삭제 (성공 시 초기화).

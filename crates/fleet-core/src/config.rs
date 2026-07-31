@@ -1,137 +1,20 @@
-//! 오케스트레이터 및 워커 설정 타입.
+//! 오케스트레이터 설정 타입 + 기동 시 환경변수 검증.
 //!
-//! 이 크레이트는 설정 파일 파싱(toml)을 직접 수행하지 않습니다 — `fleet-cli`가
-//! 파싱한 결과를 이 타입들로 역직렬화합니다. 여기서는 타입 정의만 제공합니다.
+//! ## 설정 모델
+//!
+//! 오케스트레이터는 **환경변수로만** 구성합니다 (`DATABASE_URL`, `FLEET_BASE_URL`,
+//! `FLEET_GMAIL_*` 등). `orchestrator.toml`을 역직렬화하던 타입들
+//! (`OrchestratorConfig`, `StoreConfig`, `OidcConfig`, `ApiConfig`,
+//! `SchedulerConfig`, `StaticWorkerConfig`, `WorkerSidecarConfig` 등)은
+//! 워크스페이스 어디에서도 역직렬화되지 않는 죽은 코드였으므로 제거했습니다.
+//! 설정 파일을 다시 도입한다면 실제 로딩 경로와 함께 추가해야 합니다.
+//!
+//! 워커 사이드카는 예외로 TOML을 사용하며, `fleet-worker` 크레이트가 자체
+//! `WorkerConfig`로 파싱합니다 (이 모듈과 무관).
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-
-use crate::task::Labels;
-
-/// 오케스트레이터 전역 설정 (`orchestrator.toml`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OrchestratorConfig {
-    #[serde(default)]
-    pub store: StoreConfig,
-    #[serde(default)]
-    pub oidc: Option<OidcConfig>,
-    #[serde(default)]
-    pub api: ApiConfig,
-    #[serde(default)]
-    pub scheduler: SchedulerConfig,
-    #[serde(default)]
-    pub circuit_breaker: CircuitBreakerConfig,
-    /// 정적 등록 워커 (선택). 동적 등록이 기본.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workers: Vec<StaticWorkerConfig>,
-}
-
-/// 영속 저장소 설정.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoreConfig {
-    /// PostgreSQL 연결 문자열.
-    /// 환경변수 `${DATABASE_URL}` 치환은 `fleet-cli`가 수행.
-    pub database_url: String,
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-}
-
-fn default_max_connections() -> u32 {
-    10
-}
-
-impl Default for StoreConfig {
-    fn default() -> Self {
-        Self {
-            database_url: "postgres://fleet@localhost/fleet".into(),
-            max_connections: 10,
-        }
-    }
-}
-
-/// OIDC 중앙 집중식 인증 설정.
-///
-/// `OidcAuthProvider`의 생성 인자와 1:1로 대응. `client_secret_env`는
-/// 평문 비밀을 설정 파일에 두지 않기 위한 환경변수명.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OidcConfig {
-    pub issuer: String,
-    pub client_id: String,
-    /// 평문이 아닌 환경변수명 (예: "FLEET_OIDC_SECRET").
-    pub client_secret_env: String,
-    /// 요청할 스코프 (예: ["openid", "profile", "fleet:admin"]).
-    #[serde(default = "default_scopes")]
-    pub scopes: Vec<String>,
-}
-
-fn default_scopes() -> Vec<String> {
-    vec!["openid".into(), "profile".into()]
-}
-
-/// HTTP API 서버 설정.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiConfig {
-    #[serde(default = "default_bind")]
-    pub bind: String,
-    #[serde(default)]
-    pub dashboard_enabled: bool,
-    /// 임베드된 대시보드 자산 경로 (사용되지 않을 수 있음).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dashboard_path: Option<String>,
-}
-
-fn default_bind() -> String {
-    "127.0.0.1:8080".into()
-}
-
-impl Default for ApiConfig {
-    fn default() -> Self {
-        Self {
-            bind: "127.0.0.1:8080".into(),
-            dashboard_enabled: false,
-            dashboard_path: None,
-        }
-    }
-}
-
-/// 스케줄러 설정.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerConfig {
-    #[serde(default = "default_timeout")]
-    pub default_timeout_secs: u64,
-    #[serde(default = "default_max_per_worker")]
-    pub max_concurrent_tasks_per_worker: u32,
-    #[serde(default = "default_health_interval")]
-    pub health_check_interval_secs: u64,
-    /// 하트비트 누락 허용 횟수. 이 횟수를 넘기면 워커를 Offline 처리.
-    #[serde(default = "default_missed_heartbeats")]
-    pub missed_heartbeat_threshold: u32,
-}
-
-fn default_timeout() -> u64 {
-    3600
-}
-fn default_max_per_worker() -> u32 {
-    4
-}
-fn default_health_interval() -> u64 {
-    15
-}
-fn default_missed_heartbeats() -> u32 {
-    3
-}
-
-impl Default for SchedulerConfig {
-    fn default() -> Self {
-        Self {
-            default_timeout_secs: 3600,
-            max_concurrent_tasks_per_worker: 4,
-            health_check_interval_secs: 15,
-            missed_heartbeat_threshold: 3,
-        }
-    }
-}
 
 /// CircuitBreaker 튜닝 파라미터.
 ///
@@ -203,76 +86,97 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-/// 정적 등록 워커 (config.toml의 `[[workers]]`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StaticWorkerConfig {
-    pub name: String,
-    pub endpoint: String,
-    #[serde(default)]
-    pub labels: Labels,
+// ═══════════════════════════════════════════════════════════════════════
+//  기동 시 환경변수 검증
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 설정 항목 하나에 대한 문제.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigIssue {
+    /// 문제가 있는 환경변수 이름.
+    pub key: &'static str,
+    /// 사람이 읽을 수 있는 문제 설명 + 조치 방법.
+    pub problem: String,
 }
 
-/// 워커 사이드카 설정 (`/etc/fleet/worker.toml`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerSidecarConfig {
-    pub orchestrator: WorkerOrchestratorConfig,
-    pub worker: WorkerIdentityConfig,
-    #[serde(default)]
-    pub agent: AgentConfig,
-    #[serde(default)]
-    pub auth: Option<OidcConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerOrchestratorConfig {
-    /// 오케스트레이터 엔드포인트 (예: "wss://orch.fleet.example.com:8443").
-    pub url: String,
-    /// 디스커버리 메커니즘 (예: "dns:_fleet._tcp.internal.example.com").
-    /// `Some`이면 `url` 대신 DNS SRV 조회 결과 사용.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discovery: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerIdentityConfig {
-    pub name: String,
-    #[serde(default)]
-    pub labels: Labels,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default = "default_max_per_worker")]
-    pub max_concurrent_tasks: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
-    /// `managed`면 사이드카가 `grok agent serve`를 관리.
-    /// `external`이면 외부에서 관리되는 에이전트를 참조만.
-    #[serde(default = "default_agent_mode")]
-    pub mode: String,
-    /// 오케스트레이터가 접근할 로컬 에이전트 엔드포인트.
-    #[serde(default = "default_agent_endpoint")]
-    pub endpoint: String,
-    /// 에이전트 인증 비밀을 담은 환경변수명.
-    #[serde(default)]
-    pub secret_env: Option<String>,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            mode: default_agent_mode(),
-            endpoint: default_agent_endpoint(),
-            secret_env: None,
-        }
+impl std::fmt::Display for ConfigIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.key, self.problem)
     }
 }
 
-fn default_agent_mode() -> String {
-    "managed".into()
+/// 오케스트레이터 기동에 필요한 환경변수를 검증한다.
+///
+/// 잘못된 설정으로 기동한 뒤 런타임에 조용히 실패하는 것(예: 이메일 링크가
+/// 잘못된 호스트를 가리키거나, SMTP 자격증명이 반쪽만 설정되어 메일이
+/// 발송되지 않는 상황)을 막기 위해 **기동 시점에** 한 번에 보고한다.
+///
+/// 반환된 `Vec`가 비어 있지 않으면 기동을 중단해야 한다.
+pub fn validate_orchestrator_env() -> Vec<ConfigIssue> {
+    validate_env_with(|k| std::env::var(k).ok())
 }
-fn default_agent_endpoint() -> String {
-    "wss://127.0.0.1:2419/ws".into()
+
+/// [`validate_orchestrator_env`]의 테스트 가능한 형태.
+///
+/// 실제 프로세스 환경을 건드리지 않고 검증 규칙만 시험할 수 있도록
+/// 조회 함수를 주입받는다 (`std::env::set_var`는 테스트 병렬 실행 시 경쟁 발생).
+pub fn validate_env_with(get: impl Fn(&str) -> Option<String>) -> Vec<ConfigIssue> {
+    let mut issues = Vec::new();
+
+    // ── DATABASE_URL — 필수 ──
+    match get("DATABASE_URL") {
+        None => issues.push(ConfigIssue {
+            key: "DATABASE_URL",
+            problem: "설정되지 않았습니다. 예: postgres://user@host/dbname".into(),
+        }),
+        Some(url) if url.trim().is_empty() => issues.push(ConfigIssue {
+            key: "DATABASE_URL",
+            problem: "값이 비어 있습니다.".into(),
+        }),
+        Some(url) if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) => {
+            issues.push(ConfigIssue {
+                key: "DATABASE_URL",
+                problem: "postgres:// 또는 postgresql:// 로 시작해야 합니다.".into(),
+            });
+        }
+        Some(_) => {}
+    }
+
+    // ── FLEET_BASE_URL — 선택이지만, 설정했다면 형식이 맞아야 함 ──
+    // 이메일 인증/비밀번호 재설정 링크의 기준 주소. 잘못되면 사용자가 받는
+    // 링크가 통째로 깨지는데 서버 로그에는 아무 흔적이 남지 않는다.
+    if let Some(base) = get("FLEET_BASE_URL") {
+        if !(base.starts_with("http://") || base.starts_with("https://")) {
+            issues.push(ConfigIssue {
+                key: "FLEET_BASE_URL",
+                problem: "http:// 또는 https:// 로 시작해야 합니다.".into(),
+            });
+        } else if base.ends_with('/') {
+            issues.push(ConfigIssue {
+                key: "FLEET_BASE_URL",
+                problem: "끝의 '/'를 제거하세요. 링크가 '//path' 형태로 생성됩니다.".into(),
+            });
+        }
+    }
+
+    // ── Gmail SMTP — 짝이 맞아야 함 ──
+    // 한쪽만 설정하면 메일 발송이 조용히 비활성화되어, 가입/재설정 플로우가
+    // 오류 없이 중단된다.
+    let gmail_user = get("FLEET_GMAIL_USER").filter(|v| !v.trim().is_empty());
+    let gmail_pass = get("FLEET_GMAIL_APP_PASS").filter(|v| !v.trim().is_empty());
+    match (&gmail_user, &gmail_pass) {
+        (Some(_), None) => issues.push(ConfigIssue {
+            key: "FLEET_GMAIL_APP_PASS",
+            problem: "FLEET_GMAIL_USER만 설정되어 있습니다. 앱 비밀번호도 함께 설정하세요.".into(),
+        }),
+        (None, Some(_)) => issues.push(ConfigIssue {
+            key: "FLEET_GMAIL_USER",
+            problem: "FLEET_GMAIL_APP_PASS만 설정되어 있습니다. 계정도 함께 설정하세요.".into(),
+        }),
+        _ => {}
+    }
+
+    issues
 }
 
 /// 라벨 문자열 (`"k1=v1,k2=v2"`)을 `Labels`로 파싱. CLI 인자 처리용 편의 함수.
@@ -295,17 +199,95 @@ pub fn parse_labels(s: &str) -> Result<HashMap<String, String>, String> {
 mod tests {
     use super::*;
 
+    /// 검증 규칙 시험용 환경 조회 함수 (실제 프로세스 환경 미사용).
+    fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
     #[test]
-    fn orchestrator_config_defaults() {
-        let c = OrchestratorConfig::default();
-        assert_eq!(c.scheduler.default_timeout_secs, 3600);
-        assert_eq!(c.scheduler.max_concurrent_tasks_per_worker, 4);
-        assert_eq!(c.circuit_breaker.min_samples, 10);
-        assert_eq!(c.circuit_breaker.window_duration_secs, 60);
-        assert_eq!(c.circuit_breaker.half_open_max_probes, 1);
-        assert!(c.circuit_breaker.enabled);
-        assert!(c.circuit_breaker.failure_codes.contains(&503));
-        assert!(!c.api.dashboard_enabled);
+    fn circuit_breaker_config_defaults() {
+        let c = CircuitBreakerConfig::default();
+        assert_eq!(c.min_samples, 10);
+        assert_eq!(c.window_duration_secs, 60);
+        assert_eq!(c.half_open_max_probes, 1);
+        assert!(c.enabled);
+        assert!(c.failure_codes.contains(&503));
+    }
+
+    #[test]
+    fn env_validation_accepts_minimal_valid_config() {
+        let issues = validate_env_with(env_of(&[(
+            "DATABASE_URL",
+            "postgres://fleet@localhost/fleet",
+        )]));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+    }
+
+    #[test]
+    fn env_validation_requires_database_url() {
+        let issues = validate_env_with(env_of(&[]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "DATABASE_URL");
+    }
+
+    #[test]
+    fn env_validation_rejects_non_postgres_database_url() {
+        let issues = validate_env_with(env_of(&[("DATABASE_URL", "mysql://host/db")]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "DATABASE_URL");
+    }
+
+    #[test]
+    fn env_validation_rejects_base_url_without_scheme() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_BASE_URL", "fleet.example.com"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_BASE_URL");
+    }
+
+    #[test]
+    fn env_validation_rejects_base_url_trailing_slash() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_BASE_URL", "https://fleet.example.com/"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_BASE_URL");
+    }
+
+    #[test]
+    fn env_validation_rejects_half_configured_smtp() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_GMAIL_USER", "ops@example.com"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_GMAIL_APP_PASS");
+
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_GMAIL_APP_PASS", "secret"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_GMAIL_USER");
+    }
+
+    #[test]
+    fn env_validation_accepts_fully_configured_smtp() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_BASE_URL", "https://fleet.example.com"),
+            ("FLEET_GMAIL_USER", "ops@example.com"),
+            ("FLEET_GMAIL_APP_PASS", "secret"),
+        ]));
+        assert!(issues.is_empty(), "issues: {issues:?}");
     }
 
     #[test]
@@ -325,27 +307,5 @@ mod tests {
     #[test]
     fn parse_labels_rejects_bad_input() {
         assert!(parse_labels("no_equals").is_err());
-    }
-
-    #[test]
-    fn worker_sidecar_config_roundtrip() {
-        let toml_str = r#"
-[orchestrator]
-url = "wss://orch.fleet.example.com:8443"
-
-[worker]
-name = "build-farm-1"
-labels = { arch = "arm64" }
-
-[agent]
-mode = "managed"
-endpoint = "wss://127.0.0.1:2419/ws"
-"#;
-        // toml 파싱 자체는 fleet-cli에서 담당하지만, 역직렬화 결과가
-        // 올바른지 검증.
-        let cfg: WorkerSidecarConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.worker.name, "build-farm-1");
-        assert_eq!(cfg.worker.labels.get("arch").unwrap(), "arm64");
-        assert_eq!(cfg.agent.mode, "managed");
     }
 }

@@ -290,6 +290,10 @@ pub async fn register_host(
 #[derive(Debug, serde::Deserialize)]
 pub struct ListWorkersQuery {
     pub status: Option<String>,
+    /// 페이지 크기 (미지정 시 `WorkerFilter` 기본값).
+    pub limit: Option<usize>,
+    /// 건너뛸 행 수 (페이지네이션).
+    pub offset: Option<usize>,
     /// `labels`는 `key=value` 형태의 반복 파라미터로 받음.
     /// axum Query는 단순한 구조체만 지원하므로 여기서는 label_key/label_value 쌍을 쓰지 않고
     /// 단순화: `?label_arch=arm64` 같은 접두사 폼.
@@ -297,19 +301,28 @@ pub struct ListWorkersQuery {
     pub label_filters: HashMap<String, String>,
 }
 
+/// `#[serde(flatten)]`이 흡수해버리는 예약 키 — 라벨로 취급하면 안 된다.
+const RESERVED_WORKER_QUERY_KEYS: [&str; 3] = ["status", "limit", "offset"];
+
 pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, ApiError> {
-    // label_filters에서 status 키를 빼고 나머지는 라벨로 처리
+    // label_filters에서 예약 키를 빼고 나머지는 라벨로 처리
     let mut filter = WorkerFilter::default();
     let mut labels = HashMap::new();
 
     if let Some(s) = query.status {
         filter.status = Some(parse_status(&s)?);
     }
+    if let Some(limit) = query.limit {
+        filter.limit = limit;
+    }
+    if let Some(offset) = query.offset {
+        filter.offset = offset;
+    }
     for (k, v) in query.label_filters {
-        if k != "status" {
+        if !RESERVED_WORKER_QUERY_KEYS.contains(&k.as_str()) {
             labels.insert(k, v);
         }
     }

@@ -82,7 +82,12 @@ CREATE TABLE sessions (
 );
 
 -- 활성 세션 빠른 조회 (토큰 검증 경로).
-CREATE INDEX idx_sessions_token_hash ON sessions(token_hash) WHERE expires_at > NOW();
+-- 주의: 부분 인덱스 술어에 `WHERE expires_at > NOW()`를 쓸 수 없다. NOW()는
+-- STABLE이라 Postgres가 "functions in index predicate must be marked IMMUTABLE"
+-- 오류로 거부하며, 그 결과 이 마이그레이션 전체(및 이후 005~010)가 적용되지
+-- 않는다. token_hash는 세션당 유일한 조회 키이므로 UNIQUE 인덱스로 대체한다
+-- (만료 필터는 조회 쿼리의 WHERE 절이 담당).
+CREATE UNIQUE INDEX idx_sessions_token_hash ON sessions(token_hash);
 -- 사용자별 세션 목록/폐기.
 CREATE INDEX idx_sessions_user_expires ON sessions(user_id, expires_at);
 

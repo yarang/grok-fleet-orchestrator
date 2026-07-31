@@ -120,6 +120,9 @@ pub struct WorkerFilter {
     pub labels: HashMap<String, String>,
     #[serde(default = "default_worker_limit")]
     pub limit: usize,
+    /// 건너뛸 행 수 (페이지네이션). `TaskFilter`와 동일한 의미.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 impl Default for WorkerFilter {
@@ -128,6 +131,7 @@ impl Default for WorkerFilter {
             status: None,
             labels: HashMap::new(),
             limit: default_worker_limit(),
+            offset: 0,
         }
     }
 }

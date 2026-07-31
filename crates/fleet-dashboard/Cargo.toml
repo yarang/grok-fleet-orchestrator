@@ -11,6 +11,8 @@ repository.workspace = true
 fleet-core = { workspace = true }
 fleet-store = { workspace = true }
 fleet-credentials = { workspace = true }
+# /api/tools가 MCP 도구 카탈로그를 재선언하지 않고 단일 출처를 참조하기 위함.
+fleet-mcp = { workspace = true }
 fleet-provisioner = { workspace = true, features = ["ssh"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

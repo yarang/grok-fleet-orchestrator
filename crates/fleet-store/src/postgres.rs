@@ -22,10 +22,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    BootstrapToken, CircuitState, EventEntry, FleetEvent, Labels, LoginAttempt, Permission, Role,
-    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPriority,
-    TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-    WorkerStatus,
+    AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, EventEntry, FleetEvent,
+    Labels, LoginAttempt, Permission, Role, Session, SessionId, Task, TaskFilter, TaskId,
+    TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -302,47 +302,36 @@ impl Store for PgStore {
 
     async fn list_workers(&self, filter: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
         let limit = filter.limit.min(1000) as i64;
+        let offset = filter.offset as i64;
+        let status_str = filter.status.map(worker_status_to_str);
 
-        let rows = if let Some(status) = filter.status {
-            let status_str = worker_status_to_str(status);
-            sqlx::query(
-                r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                          last_seen, active_tasks, max_concurrent, worker_version, registered_at
-                   FROM workers WHERE status = $1
-                   ORDER BY registered_at DESC LIMIT $2"#,
-            )
-            .bind(status_str)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
+        // 라벨 필터는 SQL의 JSONB containment(`@>`)로 처리한다.
+        // 이전 구현은 LIMIT으로 잘라온 뒤 Rust에서 걸러냈기 때문에,
+        // 라벨 필터가 있으면 limit보다 훨씬 적은 행이 반환되고 페이지네이션이
+        // 성립하지 않았다. `idx_workers_labels_gin`(jsonb_path_ops)이 `@>`를 지원한다.
+        let labels_json = if filter.labels.is_empty() {
+            None
         } else {
-            sqlx::query(
-                r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                          last_seen, active_tasks, max_concurrent, worker_version, registered_at
-                   FROM workers
-                   ORDER BY registered_at DESC LIMIT $1"#,
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
+            Some(serde_json::to_value(&filter.labels)?)
         };
 
-        let mut workers: Vec<Worker> = rows
-            .into_iter()
-            .map(row_to_worker)
-            .collect::<Result<_, _>>()?;
+        let rows = sqlx::query(
+            r#"SELECT id, name, endpoint, labels, status, circuit_state,
+                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+               FROM workers
+              WHERE ($1::text IS NULL OR status = $1)
+                AND ($2::jsonb IS NULL OR labels @> $2)
+              ORDER BY registered_at DESC
+              LIMIT $3 OFFSET $4"#,
+        )
+        .bind(status_str)
+        .bind(labels_json)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
 
-        // 라벨 필터 (GIN 인덱스 활용 가능하지만, 단순 containment로 처리)
-        if !filter.labels.is_empty() {
-            workers.retain(|w| {
-                filter
-                    .labels
-                    .iter()
-                    .all(|(k, v)| w.labels.get(k).is_some_and(|val| val == v))
-            });
-        }
-
-        Ok(workers)
+        rows.into_iter().map(row_to_worker).collect()
     }
 
     async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
@@ -1053,6 +1042,100 @@ impl Store for PgStore {
         Ok(())
     }
 
+    // ── Audit log ─────────────────────────────────────────────────────
+
+    async fn record_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO audit_log
+                (id, actor_user_id, actor_label, action, target_type, target_id,
+                 outcome, ip_address, detail, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(event.id)
+        .bind(event.actor_user_id.map(|id| id.as_uuid()))
+        .bind(&event.actor_label)
+        .bind(&event.action)
+        .bind(event.target_type.as_ref())
+        .bind(event.target_id.as_ref())
+        .bind(event.outcome.as_str())
+        .bind(event.ip_address.as_ref())
+        .bind(&event.detail)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_audit_events(&self, filter: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError> {
+        let limit = filter.limit.min(1000) as i64;
+        let offset = filter.offset as i64;
+
+        let rows: Vec<(
+            Uuid,
+            Option<Uuid>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            serde_json::Value,
+            DateTime<Utc>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, actor_user_id, actor_label, action, target_type, target_id,
+                   outcome, ip_address, detail, created_at
+              FROM audit_log
+             WHERE ($1::uuid IS NULL OR actor_user_id = $1)
+               AND ($2::text IS NULL OR action = $2)
+             ORDER BY created_at DESC
+             LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(filter.actor_user_id.map(|id| id.as_uuid()))
+        .bind(filter.action.as_ref())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| AuditEvent {
+                id: r.0,
+                actor_user_id: r.1.map(UserId::from),
+                actor_label: r.2,
+                action: r.3,
+                target_type: r.4,
+                target_id: r.5,
+                // CHECK 제약이 값을 보증하지만, 방어적으로 실패 취급한다
+                // (알 수 없는 값을 성공으로 표시하면 감사에서 더 위험하다).
+                outcome: AuditOutcome::parse_str(&r.6).unwrap_or(AuditOutcome::Failure),
+                ip_address: r.7,
+                detail: r.8,
+                created_at: r.9,
+            })
+            .collect())
+    }
+
+    async fn update_session_expiry(
+        &self,
+        id: SessionId,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE sessions SET expires_at = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn get_session_by_token_hash(&self, hash: &str) -> Result<Option<Session>, StoreError> {
         let row: Option<(
             Uuid,
@@ -1283,7 +1366,11 @@ impl Store for PgStore {
             r#"
             SELECT COUNT(*) FROM login_attempts
              WHERE identifier = $1
-               AND (ip_address IS NOT DISTINCT FROM $2)
+               -- ip = NULL → 모든 IP 합산 (identifier 단독 카운트).
+               -- ip = Some → 해당 IP로 한정.
+               -- 주의: `IS NOT DISTINCT FROM $2`만 쓰면 $2=NULL일 때
+               -- ip_address IS NULL 행만 세게 되어 카운트가 항상 0이 된다.
+               AND ($2::text IS NULL OR ip_address IS NOT DISTINCT FROM $2)
                AND success = FALSE
                AND attempted_at >= NOW() - make_interval(secs => $3)
             "#,

@@ -105,6 +105,9 @@ pub struct ListWorkersQuery {
     pub status: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// 건너뛸 행 수 (페이지네이션). 태스크 목록과 동일한 계약.
+    #[serde(default)]
+    pub offset: usize,
 }
 
 fn default_limit() -> usize {
@@ -123,6 +126,7 @@ pub async fn list_workers(
         filter.status = parse_worker_status(s);
     }
     filter.limit = q.limit;
+    filter.offset = q.offset;
 
     let workers = state.store.list_workers(&filter).await.map_err(|e| {
         tracing::error!(error = %e, "list_workers failed");
@@ -555,6 +559,17 @@ pub async fn create_user_api(
     }
 
     tracing::info!(email = %form.email, created_by = %principal.user.username, "user created — verification email sent");
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::USER_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("user", user.id.as_uuid().to_string())
+        .detail(serde_json::json!({ "email": form.email })),
+    )
+    .await;
     Ok((StatusCode::CREATED, jar))
 }
 
@@ -603,6 +618,20 @@ pub async fn toggle_user_api(
     }
 
     tracing::info!(username = %user.username, enabled = new_enabled, by = %principal.user.username, "user toggled");
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::USER_TOGGLE,
+        )
+        .actor(principal.user.id)
+        .target("user", user_id.as_uuid().to_string())
+        .detail(serde_json::json!({
+            "target_username": user.username,
+            "enabled": new_enabled,
+        })),
+    )
+    .await;
     Ok(StatusCode::OK)
 }
 
@@ -648,6 +677,19 @@ pub async fn delete_user_api(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "DB error".to_string()))?;
 
     tracing::info!(username = %user.username, by = %principal.user.username, "user deleted");
+    // 감사: 삭제된 사용자의 actor_user_id는 FK ON DELETE SET NULL로 NULL이
+    // 되지만, target_username이 남아 누구를 지웠는지 추적할 수 있다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::USER_DELETE,
+        )
+        .actor(principal.user.id)
+        .target("user", user_id.as_uuid().to_string())
+        .detail(serde_json::json!({ "target_username": user.username })),
+    )
+    .await;
     Ok(StatusCode::OK)
 }
 
@@ -825,6 +867,43 @@ pub async fn list_audit_api(
     Ok(Json(entries))
 }
 
+/// `GET /api/audit/auth` 쿼리 파라미터.
+#[derive(Debug, serde::Deserialize)]
+pub struct ListAuditQuery {
+    /// 액션명으로 필터 (예: `auth.login`).
+    pub action: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+/// GET /api/audit/auth — 인증/권한 감사 로그 JSON API.
+///
+/// 위의 `/api/audit`은 작업·워커 생명주기 이벤트(`events` 테이블)를 반환한다.
+/// 이 엔드포인트는 별개로 `audit_log` 테이블의 인증/권한 이벤트를 반환한다.
+pub async fn list_auth_audit_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(q): Query<ListAuditQuery>,
+) -> Result<Json<Vec<fleet_core::AuditEvent>>, StatusCode> {
+    require_permission(&principal, PermissionKind::AuditRead)?;
+
+    let filter = fleet_core::AuditFilter {
+        actor_user_id: None,
+        action: q.action,
+        limit: q.limit,
+        offset: q.offset,
+    };
+
+    let events = state.store.list_audit_events(&filter).await.map_err(|e| {
+        tracing::error!(error = %e, "list_audit_events failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(events))
+}
+
 // ── P2: MCP Tools Explorer ───────────────────────────────────────────
 
 /// GET /admin/tools — MCP 도구 탐색기 HTML 페이지.
@@ -837,19 +916,19 @@ pub async fn list_tools_api(
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     require_permission(&principal, PermissionKind::DashboardView)?;
-    // MCP 도구 카탈로그 — fleet-mcp schema.rs의 실제 도구명과 일치.
-    Ok(Json(serde_json::json!({
-        "tools": [
-            {"name": "fleet_dispatch_task", "description": "Submit a new task to the fleet"},
-            {"name": "fleet_get_task_status", "description": "Check task status by ID"},
-            {"name": "fleet_wait_for_task", "description": "Wait for task completion"},
-            {"name": "fleet_cancel_task", "description": "Cancel a running task"},
-            {"name": "fleet_list_workers", "description": "List all registered workers"},
-            {"name": "fleet_list_tasks", "description": "List tasks with optional status filtering and pagination"},
-            {"name": "fleet_stream_task_output", "description": "Stream task output in real-time"},
-            {"name": "fleet_collect_results", "description": "Collect completed task results"},
-        ]
-    })))
+    // 단일 출처: fleet-mcp의 실제 도구 카탈로그를 그대로 노출한다.
+    // 하드코딩 목록을 두면 MCP에 도구가 추가/삭제될 때 조용히 어긋난다.
+    let tools: Vec<serde_json::Value> = fleet_mcp::schema::all_tools()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "tools": tools })))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -871,8 +950,8 @@ use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, record_login_failure, record_login_success, CSRF_COOKIE, SESSION_COOKIE,
-    SESSION_DURATION_SECS,
+    check_rate_limit, record_login_failure, record_login_success, record_rate_limited_request,
+    CSRF_COOKIE, SESSION_COOKIE, SESSION_DURATION_SECS,
 };
 use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
@@ -949,6 +1028,14 @@ pub async fn login(
         record_login_failure(&state, &form.email, Some(&ip), "rate_limited")
             .await
             .ok();
+        // 감사: 차단까지 도달했다는 것은 브루트포스 정황이므로 반드시 남긴다.
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::failure(&form.email, fleet_core::audit::action::AUTH_LOGIN)
+                .ip(&ip)
+                .detail(serde_json::json!({ "reason": "rate_limited" })),
+        )
+        .await;
         return Err((
             jar,
             login_failed_page("Too many attempts. Try again in 60s."),
@@ -976,6 +1063,15 @@ pub async fn login(
         record_login_failure(&state, &form.email, Some(&ip), "invalid_credentials")
             .await
             .ok();
+        // 감사: 실패한 시도가 성공한 로그인보다 중요한 신호인 경우가 많다.
+        // 계정 열거를 돕지 않도록 사용자 존재 여부는 detail에 남기지 않는다.
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::failure(&form.email, fleet_core::audit::action::AUTH_LOGIN)
+                .ip(&ip)
+                .detail(serde_json::json!({ "reason": "invalid_credentials" })),
+        )
+        .await;
         return Err((
             jar,
             login_failed_page_csrf(
@@ -992,6 +1088,14 @@ pub async fn login(
         record_login_failure(&state, &form.email, Some(&ip), "email_not_verified")
             .await
             .ok();
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::failure(&user.username, fleet_core::audit::action::AUTH_LOGIN)
+                .actor(user.id)
+                .ip(&ip)
+                .detail(serde_json::json!({ "reason": "email_not_verified" })),
+        )
+        .await;
         return Err((
             jar,
             login_failed_page_csrf(
@@ -1031,6 +1135,14 @@ pub async fn login(
         .ok();
 
     tracing::info!(email = %form.email, username = %user.username, "login success");
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(&user.username, fleet_core::audit::action::AUTH_LOGIN)
+            .actor(user.id)
+            .ip(&ip),
+    )
+    .await;
 
     // 쿠키 설정.
     let cookie = Cookie::build((SESSION_COOKIE, token))
@@ -1086,6 +1198,15 @@ pub async fn logout(
     }
     state.store.delete_session(principal.session_id).await.ok();
     tracing::info!(username = %principal.user.username, "logout");
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AUTH_LOGOUT,
+        )
+        .actor(principal.user.id),
+    )
+    .await;
     let removed = Cookie::from(SESSION_COOKIE);
     let new_jar = jar.remove(removed);
     Ok((new_jar, Redirect::to("/login")))
@@ -1163,6 +1284,16 @@ pub async fn verify_email_page(
     }
 
     tracing::info!(user_id = %verification.user_id, "email verified successfully");
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            verification.user_id.as_uuid().to_string(),
+            fleet_core::audit::action::AUTH_EMAIL_VERIFIED,
+        )
+        .actor(verification.user_id)
+        .target("user", verification.user_id.as_uuid().to_string()),
+    )
+    .await;
     verification_result_page(true, "Your email has been verified. You can now sign in.")
 }
 
@@ -1334,16 +1465,32 @@ pub async fn resend_verification_form(
         return info_page("error", "Security token expired. Please reload the page.");
     }
 
-    // IP 기반 rate limit — 이메일 폭탄 방지.
-    let allowed = check_rate_limit(&state, &form.email, Some(&ip))
+    // rate limit — 이메일 폭탄 방지. (email, IP) 양쪽 카운터.
+    //
+    // 식별자에 엔드포인트 네임스페이스를 붙인다. 순수 email을 쓰면 이 엔드포인트
+    // 스팸이 `/login`의 동일 email 카운터를 소모해 피해자를 로그인 불가로
+    // 만들 수 있다(교차 엔드포인트 락아웃).
+    let rl_identifier = format!("resend:{}", form.email);
+    let allowed = check_rate_limit(&state, &rl_identifier, Some(&ip))
         .await
         .unwrap_or(false);
     if !allowed {
-        record_login_failure(&state, &form.email, Some(&ip), "resend_rate_limited")
-            .await
-            .ok();
+        // 차단된 요청은 기록하지 않는다 — 기록하면 공격자가 요청을 계속
+        // 퍼부어 잠금을 무한 연장할 수 있다(락아웃 증폭).
         return info_page("error", "Too many requests. Please try again later.");
     }
+
+    // 카운터 증가 — 응답이 항상 동일(계정 열거 방지)하므로 실패 경로가 아니라
+    // 통과한 모든 요청을 1건으로 센다. 이 호출이 없으면 카운터가 0에 머물러
+    // 위 차단 분기에 영원히 도달하지 못한다.
+    record_rate_limited_request(
+        &state,
+        &rl_identifier,
+        Some(&ip),
+        "resend_verification_request",
+    )
+    .await
+    .ok();
 
     match state.store.get_user_by_email(&form.email).await {
         Ok(Some(user)) if !user.email_verified => {
@@ -1467,16 +1614,26 @@ pub async fn forgot_password(
         return info_page("error", "Security token expired. Please reload the page.");
     }
 
-    // IP 기반 rate limit — 이메일 폭탄 방지.
-    let allowed = check_rate_limit(&state, &form.email, Some(&ip))
+    // rate limit — 이메일 폭탄 방지. (email, IP) 양쪽 카운터.
+    //
+    // 식별자에 엔드포인트 네임스페이스를 붙인다 — 순수 email을 쓰면 이 엔드포인트
+    // 스팸이 `/login`의 동일 email 카운터를 소모해 피해자를 로그인 불가로
+    // 만들 수 있다(교차 엔드포인트 락아웃).
+    let rl_identifier = format!("forgot:{}", form.email);
+    let allowed = check_rate_limit(&state, &rl_identifier, Some(&ip))
         .await
         .unwrap_or(false);
     if !allowed {
-        record_login_failure(&state, &form.email, Some(&ip), "forgot_rate_limited")
-            .await
-            .ok();
+        // 차단된 요청은 기록하지 않는다 (락아웃 증폭 방지).
         return info_page("error", "Too many requests. Please try again later.");
     }
+
+    // 카운터 증가 — 응답이 항상 동일(계정 열거 방지)하므로 통과한 모든 요청을
+    // 1건으로 센다. 유효한 이메일에 대한 반복 요청이 곧 이메일 폭탄이므로
+    // "실패 경로에서만 기록"하면 방어가 성립하지 않는다.
+    record_rate_limited_request(&state, &rl_identifier, Some(&ip), "forgot_password_request")
+        .await
+        .ok();
 
     // 사용자 조회 — 사용자가 없어도 성공 응답 (계정 열거 방지).
     if let Ok(Some(user)) = state.store.get_user_by_email(&form.email).await {
@@ -1588,14 +1745,18 @@ pub async fn reset_password(
         return info_page("error", "Security token expired. Please reload the page.");
     }
 
-    // IP 기반 rate limit — 토큰 열거 공격 방지.
-    let allowed = check_rate_limit(&state, &form.token, Some(&ip))
+    // rate limit — 토큰 열거 공격 방지.
+    //
+    // 식별자는 반드시 **안정적인 값**이어야 한다. 이전 구현은 `form.token`을
+    // 썼는데, 토큰은 시도마다 달라지므로 identifier별 카운터가 구조적으로
+    // 항상 0이었다(= 차단 불가). 이 엔드포인트의 폼에는 이메일이 없으므로
+    // 요청 출처 IP를 식별자로 사용한다.
+    let rl_identifier = format!("reset:{ip}");
+    let allowed = check_rate_limit(&state, &rl_identifier, Some(&ip))
         .await
         .unwrap_or(false);
     if !allowed {
-        record_login_failure(&state, &form.token, Some(&ip), "reset_rate_limited")
-            .await
-            .ok();
+        // 차단된 요청은 기록하지 않는다 (락아웃 증폭 방지).
         return info_page("error", "Too many requests. Please try again later.");
     }
 
@@ -1616,7 +1777,13 @@ pub async fn reset_password(
     let hash = crate::auth_util::sha256_hex(form.token.as_bytes());
     let reset_token = match state.store.get_password_reset_token(&hash).await {
         Ok(Some(t)) => t,
-        Ok(None) => return info_page("error", "Invalid or unknown reset token."),
+        Ok(None) => {
+            // 실제 실패 지점에서 카운터 증가 — 토큰 브루트포스가 여기로 모인다.
+            record_login_failure(&state, &rl_identifier, Some(&ip), "reset_token_invalid")
+                .await
+                .ok();
+            return info_page("error", "Invalid or unknown reset token.");
+        }
         Err(e) => {
             tracing::error!(error = %e, "get_password_reset_token failed");
             return info_page("error", "Server error. Please try again later.");
@@ -1624,9 +1791,15 @@ pub async fn reset_password(
     };
 
     if reset_token.is_consumed() {
+        record_login_failure(&state, &rl_identifier, Some(&ip), "reset_token_consumed")
+            .await
+            .ok();
         return info_page("error", "This reset link has already been used.");
     }
     if reset_token.is_expired() {
+        record_login_failure(&state, &rl_identifier, Some(&ip), "reset_token_expired")
+            .await
+            .ok();
         return info_page(
             "error",
             "This reset link has expired. Please request a new one.",
@@ -1659,6 +1832,24 @@ pub async fn reset_password(
 
     // 기존 세션 무효화 (보안: 비밀번호 변경 후 모든 세션 로그아웃).
     let _ = state.store.delete_user_sessions(reset_token.user_id).await;
+
+    // 정상 재설정 성공 — 해당 출처의 실패 카운터 초기화 (/login과 동일 패턴).
+    record_login_success(&state, &rl_identifier, Some(&ip))
+        .await
+        .ok();
+
+    // 감사: 비밀번호 변경은 계정 탈취의 핵심 지표다. 토큰 원문은 남기지 않는다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            reset_token.user_id.as_uuid().to_string(),
+            fleet_core::audit::action::AUTH_PASSWORD_RESET,
+        )
+        .actor(reset_token.user_id)
+        .target("user", reset_token.user_id.as_uuid().to_string())
+        .ip(&ip),
+    )
+    .await;
 
     info_page(
         "success",
@@ -2010,6 +2201,14 @@ pub async fn bootstrap(
         .await
         .ok();
     tracing::info!(email = %form.email, ip = %ip, "bootstrap completed");
+    // 감사: 관리자 부트스트랩은 가장 강한 권한이 생성되는 지점이다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(&form.email, fleet_core::audit::action::AUTH_BOOTSTRAP)
+            .ip(&ip)
+            .detail(serde_json::json!({ "email": form.email })),
+    )
+    .await;
 
     // 쿠키 설정.
     let cookie = Cookie::build((SESSION_COOKIE, session_token))

@@ -15,6 +15,7 @@
 //! | `fleet_tasks_total`                   | gauge   | phase           | 위상별 작업 수                    |
 //! | `fleet_events_written_total`          | gauge   | —               | 가장 최근 이벤트 seq (단조 증가)  |
 //! | `fleet_task_tokens_total`             | counter | type            | 완료된 작업의 누적 토큰 사용량    |
+//! | `fleet_task_duration_seconds`         | histogram | —             | 완료된 작업의 실행 시간 분포      |
 
 use std::sync::Arc;
 
@@ -86,6 +87,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
 
     let mut t_counts = TaskCounts::default();
     let mut tok_counts = TokenCounts::default();
+    let mut duration_hist = Histogram::new(TASK_DURATION_BUCKETS);
     for t in &tasks {
         t_counts.total += 1;
         match &t.status {
@@ -93,6 +95,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
             TaskStatus::Dispatched { .. } => t_counts.dispatched += 1,
             TaskStatus::Completed(result) => {
                 t_counts.completed += 1;
+                duration_hist.observe(result.duration_secs);
                 if let Some(usage) = &result.token_usage {
                     tok_counts.input += usage.input_tokens;
                     tok_counts.output += usage.output_tokens;
@@ -240,12 +243,80 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
         tok_counts.total,
     );
 
+    // fleet_task_duration_seconds — 완료된 작업의 실행 시간 분포.
+    out.push_str(
+        "# HELP fleet_task_duration_seconds Execution time of completed tasks in seconds.\n",
+    );
+    out.push_str("# TYPE fleet_task_duration_seconds histogram\n");
+    duration_hist.render(&mut out, "fleet_task_duration_seconds");
+
     debug!(
         workers = workers.len(),
         tasks = tasks.len(),
         "metrics rendered"
     );
     Ok(out)
+}
+
+/// `fleet_task_duration_seconds` 버킷 경계 (초).
+///
+/// 이 플릿의 작업은 수 초짜리 명령부터 수십 분짜리 빌드까지 분포하므로
+/// 초 단위부터 1시간까지 넓게 잡는다. 기본 타임아웃이 3600초라 마지막 유한
+/// 버킷을 3600으로 두어 "타임아웃 근처" 구간이 드러나게 했다.
+const TASK_DURATION_BUCKETS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0];
+
+/// Prometheus 히스토그램 누산기.
+///
+/// 이 크레이트의 메트릭은 별도 레지스트리 없이 스크레이프 시점에 스토어에서
+/// 계산하는 구조다. 히스토그램도 같은 방식으로, 조회한 작업들을 그 자리에서
+/// 버킷에 넣어 렌더링한다 (프로세스 재시작과 무관하게 값이 일관됨).
+struct Histogram {
+    /// 버킷 상한 경계 (오름차순).
+    bounds: &'static [f64],
+    /// 각 버킷의 관측 수 (누적 아님 — 렌더링 시 누적으로 변환).
+    counts: Vec<u64>,
+    /// 상한을 넘는 관측 수 (`+Inf` 버킷에만 포함).
+    overflow: u64,
+    sum: f64,
+    count: u64,
+}
+
+impl Histogram {
+    fn new(bounds: &'static [f64]) -> Self {
+        Self {
+            bounds,
+            counts: vec![0; bounds.len()],
+            overflow: 0,
+            sum: 0.0,
+            count: 0,
+        }
+    }
+
+    fn observe(&mut self, value: f64) {
+        // NaN/음수 같은 비정상 값은 합계를 오염시키므로 버린다.
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+        self.count += 1;
+        self.sum += value;
+        match self.bounds.iter().position(|&b| value <= b) {
+            Some(idx) => self.counts[idx] += 1,
+            None => self.overflow += 1,
+        }
+    }
+
+    /// `_bucket{le=...}` / `_sum` / `_count` 라인을 출력한다.
+    fn render(&self, out: &mut String, name: &str) {
+        let mut cumulative = 0u64;
+        for (i, bound) in self.bounds.iter().enumerate() {
+            cumulative += self.counts[i];
+            out.push_str(&format!("{name}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+        }
+        // `+Inf` 버킷은 전체 관측 수와 같아야 한다 (Prometheus 규약).
+        out.push_str(&format!("{name}_bucket{{le=\"+Inf\"}} {}\n", self.count));
+        out.push_str(&format!("{name}_sum {}\n", self.sum));
+        out.push_str(&format!("{name}_count {}\n", self.count));
+    }
 }
 
 /// 게이지 라인을 버퍼에 추가. 라벨이 있으면 `key="val",...` 형태로 출력.
@@ -464,5 +535,69 @@ mod tests {
 
         let out = metrics_text(store.as_ref()).await.unwrap();
         assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 0"));
+    }
+}
+
+#[cfg(test)]
+mod histogram_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_are_cumulative_and_inf_matches_count() {
+        let mut h = Histogram::new(TASK_DURATION_BUCKETS);
+        for v in [0.5, 3.0, 3.0, 45.0, 7200.0] {
+            h.observe(v);
+        }
+
+        let mut out = String::new();
+        h.render(&mut out, "t");
+
+        // le="1" → 0.5 하나.
+        assert!(out.contains("t_bucket{le=\"1\"} 1"), "{out}");
+        // le="5" → 0.5, 3.0, 3.0 (누적 3).
+        assert!(out.contains("t_bucket{le=\"5\"} 3"), "{out}");
+        // le="60" → 위 3개 + 45.0 (누적 4).
+        assert!(out.contains("t_bucket{le=\"60\"} 4"), "{out}");
+        // 7200은 마지막 유한 버킷(3600)을 넘으므로 +Inf에만 포함.
+        assert!(out.contains("t_bucket{le=\"3600\"} 4"), "{out}");
+        assert!(out.contains("t_bucket{le=\"+Inf\"} 5"), "{out}");
+        assert!(out.contains("t_count 5"), "{out}");
+        assert!(out.contains("t_sum 7251.5"), "{out}");
+    }
+
+    #[test]
+    fn empty_histogram_renders_zeros() {
+        let h = Histogram::new(TASK_DURATION_BUCKETS);
+        let mut out = String::new();
+        h.render(&mut out, "t");
+        assert!(out.contains("t_bucket{le=\"+Inf\"} 0"));
+        assert!(out.contains("t_count 0"));
+        assert!(out.contains("t_sum 0"));
+    }
+
+    /// NaN/음수는 합계를 오염시키므로 관측에서 제외되어야 한다.
+    #[test]
+    fn invalid_observations_are_ignored() {
+        let mut h = Histogram::new(TASK_DURATION_BUCKETS);
+        h.observe(f64::NAN);
+        h.observe(-1.0);
+        h.observe(f64::INFINITY);
+        h.observe(2.0);
+
+        let mut out = String::new();
+        h.render(&mut out, "t");
+        assert!(out.contains("t_count 1"), "{out}");
+        assert!(out.contains("t_sum 2"), "{out}");
+    }
+
+    /// 경계값은 해당 버킷에 포함되어야 한다 (`le` = less-or-equal).
+    #[test]
+    fn boundary_value_falls_into_its_own_bucket() {
+        let mut h = Histogram::new(TASK_DURATION_BUCKETS);
+        h.observe(5.0);
+        let mut out = String::new();
+        h.render(&mut out, "t");
+        assert!(out.contains("t_bucket{le=\"5\"} 1"), "{out}");
+        assert!(out.contains("t_bucket{le=\"1\"} 0"), "{out}");
     }
 }

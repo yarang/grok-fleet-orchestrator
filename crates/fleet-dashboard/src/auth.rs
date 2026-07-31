@@ -20,7 +20,7 @@ use axum::{
 };
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
-use fleet_core::{PermissionKind, User};
+use fleet_core::{PermissionKind, Session, User};
 
 use crate::DashboardState;
 
@@ -35,6 +35,23 @@ pub const CSRF_FIELD: &str = "csrf_token";
 
 /// 세션 기본 만료 (8시간).
 pub const SESSION_DURATION_SECS: i64 = 8 * 3600;
+
+/// 세션 토큰 로테이션 주기 (초). 이 시간이 지난 세션은 다음 요청에서
+/// 새 토큰으로 교체된다.
+///
+/// 고정 토큰은 8시간 내내 동일한 값이 유지되므로, 한 번 유출되면 만료까지
+/// 그대로 사용 가능하다. 주기적으로 교체하면 유출된 토큰의 유효 창이 줄어들고,
+/// 구 토큰이 계속 쓰이는 정황을 탐지할 여지도 생긴다.
+///
+/// **절대 수명은 연장하지 않는다** — 새 세션은 기존 `expires_at`을 그대로
+/// 물려받으므로, 로그인 후 8시간이 지나면 로테이션 여부와 무관하게 만료된다.
+pub const SESSION_ROTATE_AFTER_SECS: i64 = 30 * 60;
+
+/// 로테이션 시 구 세션에 남겨두는 유예 시간 (초).
+///
+/// 구 세션을 즉시 삭제하면, 브라우저가 이미 병렬로 보낸 요청들(대시보드는
+/// 페이지당 여러 API를 동시에 호출한다)이 전부 401을 맞고 로그아웃된다.
+pub const SESSION_ROTATION_GRACE_SECS: i64 = 30;
 
 /// 로그인 시도 실패 허용 한계 — identifier 단독 (사용자명당 5회).
 pub const MAX_FAILED_ATTEMPTS: u64 = 5;
@@ -154,7 +171,100 @@ pub async fn require_session(
 
     req.extensions_mut().insert(principal);
 
-    Ok(next.run(req).await)
+    // 9. 토큰 로테이션 판단은 응답 생성 **전에** 끝낸다 (session은 여기서 소비).
+    let rotation = maybe_rotate_session(&state, &session).await;
+
+    let mut response = next.run(req).await;
+
+    // 10. 새 토큰이 발급되었으면 응답에 쿠키를 심는다.
+    if let Some(new_token) = rotation {
+        match session_cookie_header(&state, &new_token) {
+            Ok(value) => {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, value);
+            }
+            Err(e) => {
+                // 쿠키 헤더 생성 실패는 치명적이지 않다 — 구 토큰이 유예 기간
+                // 동안 유효하므로 사용자는 로그아웃되지 않는다.
+                tracing::error!(error = %e, "failed to build rotated session cookie");
+            }
+        }
+    }
+
+    Ok(response)
+}
+
+/// 로테이션 주기가 지난 세션이면 새 토큰을 발급하고 raw 토큰을 반환한다.
+///
+/// 실패해도 `None`을 반환할 뿐 요청을 막지 않는다 — 로테이션은 보안 강화
+/// 조치이지 인증 자체가 아니므로, 실패로 사용자를 로그아웃시키면 안 된다.
+async fn maybe_rotate_session(state: &DashboardState, session: &Session) -> Option<String> {
+    let now = Utc::now();
+    let grace_deadline = now + chrono::Duration::seconds(SESSION_ROTATION_GRACE_SECS);
+
+    if !should_rotate(session.created_at, session.expires_at, now) {
+        return None;
+    }
+
+    let (raw_token, token_hash) = fleet_core::auth::password::generate_session_token();
+    let rotated = Session {
+        id: fleet_core::SessionId::new(),
+        user_id: session.user_id,
+        token_hash,
+        created_at: now,
+        // 절대 수명 유지 — 로테이션이 세션을 무한 연장하면 안 된다.
+        expires_at: session.expires_at,
+        ip_address: session.ip_address.clone(),
+        user_agent: session.user_agent.clone(),
+    };
+
+    if let Err(e) = state.store.create_session(&rotated).await {
+        tracing::error!(error = %e, "session rotation: create_session failed");
+        return None;
+    }
+
+    // 구 세션은 삭제하지 않고 짧은 유예만 남긴다 (병렬 요청 보호).
+    if let Err(e) = state
+        .store
+        .update_session_expiry(session.id, grace_deadline)
+        .await
+    {
+        tracing::warn!(error = %e, "session rotation: failed to shorten old session");
+    }
+
+    tracing::debug!(user_id = %session.user_id, "session token rotated");
+    Some(raw_token)
+}
+
+/// 로테이션 여부 판단 (순수 함수 — 시간 주입으로 테스트 가능).
+///
+/// 두 조건을 모두 만족해야 로테이션한다:
+/// 1. 세션 생성 후 [`SESSION_ROTATE_AFTER_SECS`]가 지났다.
+/// 2. 남은 수명이 유예 기간보다 길다 — 이미 유예 상태로 들어간 세션은 다른
+///    요청이 방금 로테이션한 구 세션이므로 다시 돌리지 않는다. 만료 직전
+///    세션을 로테이션해봤자 새 토큰도 곧바로 만료되므로 무의미하기도 하다.
+fn should_rotate(
+    created_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if now - created_at < chrono::Duration::seconds(SESSION_ROTATE_AFTER_SECS) {
+        return false;
+    }
+    expires_at > now + chrono::Duration::seconds(SESSION_ROTATION_GRACE_SECS)
+}
+
+/// 로테이션된 세션 쿠키의 `Set-Cookie` 헤더 값 생성.
+fn session_cookie_header(
+    state: &DashboardState,
+    token: &str,
+) -> Result<axum::http::HeaderValue, axum::http::header::InvalidHeaderValue> {
+    // 로그인 시 발급하는 쿠키와 동일한 속성이어야 한다.
+    let secure = if state.secure_cookies { "; Secure" } else { "" };
+    let value =
+        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly{secure}; SameSite=Strict; Max-Age={SESSION_DURATION_SECS}");
+    axum::http::HeaderValue::from_str(&value)
 }
 
 // ── 인증 에러 응답 헬퍼 ──────────────────────────────────────────────────
@@ -248,6 +358,12 @@ pub fn require_permission(
 /// - **IP 단독**: 같은 IP에서 최근 M회 실패 (사용자 무관) → IP 회전 브루트포스 방어
 ///
 /// 어느 하나라도 초과하면 차단.
+///
+/// **호출자 계약:** 이 함수는 카운터를 *읽기만* 한다. 호출하는 핸들러는
+/// 반드시 실제 실패 지점(또는 열거 방지 엔드포인트라면 모든 요청)에서
+/// [`record_login_failure`] / [`record_rate_limited_request`]로 카운터를
+/// 증가시켜야 한다. 기록 지점이 이미 차단된 `if !allowed` 블록 안에만 있으면
+/// 카운터가 영원히 0이라 차단 분기에 도달할 수 없다.
 pub async fn check_rate_limit(
     state: &DashboardState,
     identifier: &str,
@@ -301,6 +417,24 @@ pub async fn record_login_failure(
     Ok(())
 }
 
+/// 남용 방지 카운터에 시도 1건 기록 (로그인 이외 엔드포인트용).
+///
+/// `/forgot-password`, `/resend-verification` 처럼 **성공/실패를 응답으로
+/// 구분하지 않는**(계정 열거 방지) 엔드포인트는 요청 자체가 남용 단위다.
+/// 따라서 실패 경로가 아니라 **모든 요청**에서 호출해야 카운터가 증가하고
+/// [`check_rate_limit`]의 차단 분기가 도달 가능해진다.
+///
+/// 내부적으로는 [`record_login_failure`]와 동일하게 `login_attempts`에
+/// `success = FALSE` 행을 남긴다 — `count_recent_failed_attempts`가 세는 대상.
+pub async fn record_rate_limited_request(
+    state: &DashboardState,
+    identifier: &str,
+    ip: Option<&str>,
+    reason: &str,
+) -> Result<(), StatusCode> {
+    record_login_failure(state, identifier, ip, reason).await
+}
+
 /// 로그인 성공 시 기존 실패 기록 초기화.
 pub async fn record_login_success(
     state: &DashboardState,
@@ -332,4 +466,75 @@ pub async fn record_login_success(
     state.store.delete_old_login_attempts(cutoff).await.ok();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(secs: i64) -> chrono::DateTime<Utc> {
+        chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn fresh_session_is_not_rotated() {
+        let created = t(0);
+        let expires = created + chrono::Duration::seconds(SESSION_DURATION_SECS);
+        // 로테이션 주기 직전.
+        let now = created + chrono::Duration::seconds(SESSION_ROTATE_AFTER_SECS - 1);
+        assert!(!should_rotate(created, expires, now));
+    }
+
+    #[test]
+    fn session_older_than_rotation_interval_is_rotated() {
+        let created = t(0);
+        let expires = created + chrono::Duration::seconds(SESSION_DURATION_SECS);
+        let now = created + chrono::Duration::seconds(SESSION_ROTATE_AFTER_SECS);
+        assert!(should_rotate(created, expires, now));
+    }
+
+    /// 이미 유예 기간으로 단축된 구 세션은 다시 로테이션하지 않는다
+    /// (병렬 요청이 세션 행을 계속 불려나가는 것을 방지).
+    #[test]
+    fn session_already_in_grace_window_is_not_rotated() {
+        let created = t(0);
+        let now = created + chrono::Duration::seconds(SESSION_ROTATE_AFTER_SECS + 10);
+        let expires = now + chrono::Duration::seconds(SESSION_ROTATION_GRACE_SECS);
+        assert!(!should_rotate(created, expires, now));
+    }
+
+    /// 만료가 임박한 세션은 로테이션해도 새 토큰이 곧 죽으므로 건너뛴다.
+    #[test]
+    fn nearly_expired_session_is_not_rotated() {
+        let created = t(0);
+        let now = created + chrono::Duration::seconds(SESSION_DURATION_SECS - 5);
+        let expires = created + chrono::Duration::seconds(SESSION_DURATION_SECS);
+        assert!(!should_rotate(created, expires, now));
+    }
+
+    /// 로테이션은 절대 수명을 연장하지 않는다 — 새 세션은 기존 만료 시각을
+    /// 그대로 물려받으므로, 반복 로테이션해도 최초 로그인 기준 8시간에 끝난다.
+    #[test]
+    fn rotation_preserves_absolute_expiry() {
+        let login = t(0);
+        let absolute_expiry = login + chrono::Duration::seconds(SESSION_DURATION_SECS);
+
+        // 30분 간격으로 계속 로테이션되는 상황을 모사.
+        let mut created = login;
+        let mut rotations = 0;
+        loop {
+            let now = created + chrono::Duration::seconds(SESSION_ROTATE_AFTER_SECS);
+            if !should_rotate(created, absolute_expiry, now) {
+                break;
+            }
+            // 새 세션의 created_at만 갱신되고 expires_at은 유지된다.
+            created = now;
+            rotations += 1;
+            assert!(rotations < 100, "무한 로테이션 — 절대 수명이 연장되고 있다");
+        }
+
+        assert!(rotations > 0, "적어도 한 번은 로테이션되어야 한다");
+        // 마지막 세션도 최초 로그인 기준 만료 시각을 넘기지 못한다.
+        assert!(created < absolute_expiry);
+    }
 }

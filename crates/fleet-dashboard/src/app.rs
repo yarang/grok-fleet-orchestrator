@@ -125,6 +125,9 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/hosts", get(handlers::list_hosts_api))
         .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
         .route("/api/audit", get(handlers::list_audit_api))
+        // 인증/권한 감사 로그 (audit_log 테이블) — 위의 /api/audit은 작업·워커
+        // 생명주기 이벤트(events 테이블)로 대상이 다르다.
+        .route("/api/audit/auth", get(handlers::list_auth_audit_api))
         .route("/api/tools", get(handlers::list_tools_api))
         // ── SSH 키 관리 API ──
         .route(

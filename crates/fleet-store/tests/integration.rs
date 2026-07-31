@@ -33,26 +33,29 @@ fn database_url() -> Option<String> {
     std::env::var("DATABASE_URL").ok()
 }
 
-/// DB 연결 가능 여부 확인. `DATABASE_URL`이 없거나 연결 불가하면 None (테스트 skip).
+/// DB 연결 가능 여부 확인. `DATABASE_URL`이 아예 설정되지 않은 경우에만
+/// `None`(테스트 skip)을 반환한다.
+///
+/// **중요**: `DATABASE_URL`이 설정되어 있는데 연결이나 마이그레이션이
+/// 실패하면 여기서 `panic!`한다 — 절대 `None`을 반환해 조용히 skip시키지
+/// 않는다. 예전에는 두 경우(URL 미설정 vs 연결/마이그레이션 실패)를 구분하지
+/// 않고 둘 다 `None`으로 처리했는데, 그 결과 마이그레이션이 깨져도 이 파일의
+/// 모든 테스트가 실행 없이 `... ok`로 "통과" 표시되는 구조적 위험이 있었다
+/// (실제로 `migrations/004_rbac.sql`의 부분 인덱스 술어 버그로 이 문제가
+/// 발생한 적이 있다 — auth_integration.rs 참고).
 async fn try_connect() -> Option<PgStore> {
     let url = database_url()?;
-    match PgPoolOptions::new().max_connections(2).connect(&url).await {
-        Ok(pool) => {
-            let store = PgStore::from_pool(pool);
-            // 마이그레이션 실행 (실패해도 None 반환)
-            match store.migrate().await {
-                Ok(()) => Some(store),
-                Err(e) => {
-                    eprintln!("⚠ migration failed, skipping tests: {e}");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("⚠ DATABASE_URL={url} connection failed: {e}");
-            None
-        }
-    }
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL={url} set but connection failed: {e}"));
+    let store = PgStore::from_pool(pool);
+    store
+        .migrate()
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL={url} set but migration failed: {e}"));
+    Some(store)
 }
 
 /// 테스트 헬퍼: 스토어 초기화 + 클린업. 연결 불가 시 early return.
@@ -293,6 +296,90 @@ async fn worker_list_with_label_filter() {
     let workers = store.list_workers(&filter).await.unwrap();
     assert_eq!(workers.len(), 1);
     assert_eq!(workers[0].name, "gpu-1");
+}
+
+/// `limit`/`offset` 페이지네이션이 겹침·누락 없이 동작해야 한다.
+#[tokio::test]
+async fn worker_list_pagination_with_offset() {
+    require_db!(store);
+
+    // registered_at DESC 정렬이므로 등록 순서의 역순으로 반환된다.
+    for i in 0..5 {
+        store
+            .upsert_worker(&sample_worker(&format!("page-worker-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let page = |limit: usize, offset: usize| WorkerFilter {
+        limit,
+        offset,
+        ..Default::default()
+    };
+
+    let all = store.list_workers(&page(100, 0)).await.unwrap();
+    assert_eq!(all.len(), 5);
+
+    let first = store.list_workers(&page(2, 0)).await.unwrap();
+    let second = store.list_workers(&page(2, 2)).await.unwrap();
+    let third = store.list_workers(&page(2, 4)).await.unwrap();
+
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    assert_eq!(third.len(), 1, "마지막 페이지는 남은 1건만");
+
+    // 페이지 간 중복이 없어야 하고, 합치면 전체와 같아야 한다.
+    let paged: Vec<String> = first
+        .iter()
+        .chain(second.iter())
+        .chain(third.iter())
+        .map(|w| w.name.clone())
+        .collect();
+    let expected: Vec<String> = all.iter().map(|w| w.name.clone()).collect();
+    assert_eq!(
+        paged, expected,
+        "페이지를 이어붙이면 전체 목록과 같아야 한다"
+    );
+}
+
+/// 라벨 필터가 LIMIT보다 **먼저** 적용되어야 한다.
+///
+/// 회귀: 이전 구현은 LIMIT으로 자른 뒤 Rust에서 라벨을 걸러냈다. 그래서
+/// 조건에 맞는 워커가 충분히 있어도 limit보다 훨씬 적게 반환됐고,
+/// 라벨 필터와 페이지네이션을 함께 쓸 수 없었다.
+#[tokio::test]
+async fn worker_list_label_filter_applied_before_limit() {
+    require_db!(store);
+
+    // 라벨 없는 워커를 먼저 등록 (DESC 정렬에서 뒤로 밀리도록).
+    for i in 0..5 {
+        store
+            .upsert_worker(&sample_worker(&format!("plain-{i}")))
+            .await
+            .unwrap();
+    }
+    // 라벨이 붙은 워커 3대.
+    for i in 0..3 {
+        let mut w = sample_worker(&format!("tagged-{i}"));
+        w.labels.insert("role".into(), "builder".into());
+        store.upsert_worker(&w).await.unwrap();
+    }
+
+    let mut labels = HashMap::new();
+    labels.insert("role".into(), "builder".into());
+    let filter = WorkerFilter {
+        labels,
+        limit: 2,
+        ..Default::default()
+    };
+
+    let workers = store.list_workers(&filter).await.unwrap();
+    assert_eq!(
+        workers.len(),
+        2,
+        "라벨 조건을 만족하는 워커가 3대이므로 limit=2면 정확히 2건이어야 한다"
+    );
+    assert!(workers.iter().all(|w| w.name.starts_with("tagged-")));
 }
 
 #[tokio::test]
