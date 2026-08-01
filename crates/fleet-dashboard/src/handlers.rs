@@ -324,6 +324,47 @@ pub fn serve_page(name: &str) -> Response {
     }
 }
 
+/// 권한 부족 시 403 HTML 응답.
+fn forbidden_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>403</title></head>\
+         <body><h1>403 Forbidden</h1>\
+         <p>You do not have permission to view this page.</p>\
+         <p><a href=\"/\">Back to dashboard</a></p></body></html>",
+    )
+        .into_response()
+}
+
+/// 권한을 검사한 뒤 HTML 페이지를 반환하는 헬퍼.
+///
+/// **왜 페이지에도 게이트가 필요한가**: 각 페이지 HTML은 데이터를 담지 않는
+/// 셸이고 실제 데이터는 `/api/*`가 내려주므로 "API만 막으면 된다"고 보기 쉽다.
+/// 그러나 (1) 권한 없는 사용자에게 관리 UI를 노출하면 어떤 관리 기능이
+/// 존재하는지·어떤 필드를 받는지가 드러나고, (2) API 게이트 하나만 실수로
+/// 빠지면 남는 방어선이 없다. 기능 수준 접근 제어는 계층마다 적용해야 한다
+/// (OWASP A01 Broken Access Control / CWE-862 Missing Authorization).
+///
+/// 각 페이지의 권한은 그 페이지가 호출하는 API의 권한과 일치시킨다 — 어긋나면
+/// 페이지는 열리는데 내용은 비어 있는 혼란스러운 상태가 된다.
+pub fn serve_page_if_permitted(
+    principal: &AuthPrincipal,
+    perm: PermissionKind,
+    name: &str,
+) -> Response {
+    if !principal.has(perm) {
+        tracing::warn!(
+            user = %principal.user.username,
+            page = name,
+            required = perm.as_str(),
+            "page access denied"
+        );
+        return forbidden_page();
+    }
+    serve_page(name)
+}
+
 // ── P1: Task Queue ───────────────────────────────────────────────────
 
 /// GET /tasks — 태스크 큐 HTML 페이지.
@@ -429,8 +470,10 @@ pub async fn get_worker_detail(
 // ── P1: User Management ──────────────────────────────────────────────
 
 /// GET /admin/users — 사용자 관리 HTML 페이지.
-pub async fn admin_users_page() -> Response {
-    serve_page("admin-users.html")
+///
+/// `/api/users`(목록)와 동일하게 `user:read` 권한 필요.
+pub async fn admin_users_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(&principal, PermissionKind::UserRead, "admin-users.html")
 }
 
 /// GET /api/users — 사용자 목록 JSON API.
@@ -831,8 +874,12 @@ fn host_to_summary(h: &fleet_core::Host, worker_name: Option<String>) -> HostSum
 // ── P2: Audit Log ────────────────────────────────────────────────────
 
 /// GET /admin/audit — 활동 로그 HTML 페이지 (작업·워커 이벤트).
-pub async fn admin_audit_page() -> Response {
-    serve_page("admin-audit.html")
+///
+/// 페이지 접근에는 `audit:read`가 필요하다. 표시 데이터는 `/api/events`
+/// (`events:list`)에서 가져온다 — 이 페이지는 `/api/audit`(인증 감사 로그)를
+/// 호출하지 않는다.
+pub async fn admin_audit_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(&principal, PermissionKind::AuditRead, "admin-audit.html")
 }
 
 /// `GET /api/audit` 쿼리 파라미터.
@@ -875,8 +922,14 @@ pub async fn list_auth_audit_api(
 // ── P2: MCP Tools Explorer ───────────────────────────────────────────
 
 /// GET /admin/tools — MCP 도구 탐색기 HTML 페이지.
-pub async fn admin_tools_page() -> Response {
-    serve_page("admin-tools.html")
+///
+/// `/api/tools`와 동일하게 `dashboard:view` 권한 필요.
+pub async fn admin_tools_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::DashboardView,
+        "admin-tools.html",
+    )
 }
 
 /// GET /api/tools — MCP 도구 목록 JSON API.
@@ -2237,5 +2290,86 @@ mod tests {
             Some(fleet_core::WorkerStatus::Online)
         ));
         assert!(parse_worker_status("unknown").is_none());
+    }
+
+    // ── 페이지 수준 인가 ──────────────────────────────────────────────
+
+    /// 지정한 내장 역할의 권한을 가진 principal 생성.
+    fn principal_for(role: fleet_core::BuiltinRole) -> AuthPrincipal {
+        let user = fleet_core::User {
+            id: fleet_core::UserId::new(),
+            username: "tester".into(),
+            email: Some("tester@example.com".into()),
+            email_verified: true,
+            password_hash: String::new(),
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            last_login_at: None,
+        };
+        AuthPrincipal {
+            user,
+            permissions: role.permissions(),
+            session_id: fleet_core::SessionId::new(),
+        }
+    }
+
+    #[test]
+    fn viewer_is_denied_admin_pages() {
+        let viewer = principal_for(fleet_core::BuiltinRole::Viewer);
+        // Viewer는 user:read / audit:read / host:provision 이 없다.
+        for (perm, page) in [
+            (PermissionKind::UserRead, "admin-users.html"),
+            (PermissionKind::AuditRead, "admin-audit.html"),
+            (PermissionKind::HostProvision, "admin-ssh-keys.html"),
+        ] {
+            let resp = serve_page_if_permitted(&viewer, perm, page);
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "viewer should be denied {page}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_is_denied_user_and_audit_pages() {
+        let operator = principal_for(fleet_core::BuiltinRole::Operator);
+        for (perm, page) in [
+            (PermissionKind::UserRead, "admin-users.html"),
+            (PermissionKind::AuditRead, "admin-audit.html"),
+        ] {
+            let resp = serve_page_if_permitted(&operator, perm, page);
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "operator should be denied {page}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_is_allowed_admin_pages() {
+        let admin = principal_for(fleet_core::BuiltinRole::Admin);
+        for (perm, page) in [
+            (PermissionKind::UserRead, "admin-users.html"),
+            (PermissionKind::AuditRead, "admin-audit.html"),
+            (PermissionKind::HostProvision, "admin-ssh-keys.html"),
+        ] {
+            let resp = serve_page_if_permitted(&admin, perm, page);
+            assert_ne!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "admin should be allowed {page}"
+            );
+        }
+    }
+
+    #[test]
+    fn viewer_lacks_task_output_permission() {
+        // sse.rs의 redaction 전제 — Viewer는 task:output이 없다.
+        // 이 전제가 깨지면 SSE redaction 분기가 의미를 잃으므로 여기서 고정한다.
+        let viewer = principal_for(fleet_core::BuiltinRole::Viewer);
+        assert!(viewer.has(PermissionKind::EventsList));
+        assert!(!viewer.has(PermissionKind::TaskOutput));
     }
 }

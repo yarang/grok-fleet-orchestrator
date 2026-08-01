@@ -204,20 +204,3 @@ pub struct UserSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_login_at: Option<DateTime<Utc>>,
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Audit log (P2)
-// ═══════════════════════════════════════════════════════════════════════
-
-/// `/api/audit` 배열 요소 (이벤트 로그 확장).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEntry {
-    pub seq: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_id: Option<String>,
-    pub event_type: String,
-    pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}

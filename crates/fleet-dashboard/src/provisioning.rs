@@ -460,11 +460,27 @@ fn default_ssh_port() -> u16 {
 }
 
 /// GET /admin/ssh-keys — SSH 키 관리 HTML 페이지.
-pub async fn admin_ssh_keys_page() -> axum::response::Response {
-    super::handlers::serve_page("admin-ssh-keys.html")
+///
+/// `/api/ssh-keys`와 동일하게 `host:provision` 권한 필요.
+pub async fn admin_ssh_keys_page(
+    axum::extract::Extension(principal): axum::extract::Extension<AuthPrincipal>,
+) -> axum::response::Response {
+    super::handlers::serve_page_if_permitted(
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+        "admin-ssh-keys.html",
+    )
 }
 
 /// GET /hosts/provision — 프로비저닝 폼 HTML 페이지.
-pub async fn provision_page() -> axum::response::Response {
-    super::handlers::serve_page("provision.html")
+///
+/// `/api/hosts/provision`과 동일하게 `host:provision` 권한 필요.
+pub async fn provision_page(
+    axum::extract::Extension(principal): axum::extract::Extension<AuthPrincipal>,
+) -> axum::response::Response {
+    super::handlers::serve_page_if_permitted(
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+        "provision.html",
+    )
 }
