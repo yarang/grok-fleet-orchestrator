@@ -41,8 +41,10 @@ use fleet_provisioner::{
     PlaybookContext, PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient,
     SshConnectInfo, StepContext,
 };
-use fleet_scheduler::{Dispatcher, FleetState, HealthChecker, HealthConfig};
-use fleet_store::{PgStore, Store};
+use fleet_scheduler::{
+    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, SessionCleanup,
+};
+use fleet_store::{PgStore, PoolConfig, Store};
 use fleet_transport::{MockTransport, WorkerTransport};
 
 /// Postgres 연결 URL 조회 (`DATABASE_URL` 필수).
@@ -135,17 +137,50 @@ fn validate_env_or_bail() -> Result<()> {
     ))
 }
 
-/// PgStore 생성 + 마이그레이션 실행.
+/// PgStore 생성 + 마이그레이션 실행 (기본 풀 옵션, `max_connections`만 지정).
+/// 짧게 실행되고 종료되는 CLI 하위 명령(`fleet tasks list` 등)이 사용.
 async fn connect_and_migrate(max_conn: u32) -> Result<Arc<PgStore>> {
+    connect_and_migrate_with_pool(PoolConfig {
+        max_connections: max_conn,
+        ..PoolConfig::default()
+    })
+    .await
+}
+
+/// PgStore 생성 + 마이그레이션 실행 (커넥션 풀 세부 튜닝까지 지정).
+///
+/// 로드맵 P2 #16 — `serve`처럼 장수명 프로세스는 `acquire_timeout`/
+/// `max_lifetime`/`idle_timeout`을 명시적으로 튜닝해야 한다. 방화벽/로드밸런서의
+/// idle connection kill, DB 재시작 후 stale connection, 풀 고갈 시 무한 대기
+/// 같은 문제를 예방하기 위함. 짧게 실행되고 종료되는 일회성 CLI 명령에는
+/// 중요도가 낮아 [`connect_and_migrate`]가 기본값을 대신 사용한다.
+async fn connect_and_migrate_with_pool(pool_config: PoolConfig) -> Result<Arc<PgStore>> {
     validate_env_or_bail()?;
     let url = database_url()?;
-    tracing::info!(url = %sanitize_url(&url), max_conn, "connecting to Postgres");
-    let store = PgStore::connect(&url, max_conn)
+    tracing::info!(
+        url = %sanitize_url(&url),
+        max_conn = pool_config.max_connections,
+        acquire_timeout = ?pool_config.acquire_timeout,
+        max_lifetime = ?pool_config.max_lifetime,
+        idle_timeout = ?pool_config.idle_timeout,
+        "connecting to Postgres"
+    );
+    let store = PgStore::connect_with_config(&url, pool_config)
         .await
         .context("failed to connect to Postgres")?;
     store.migrate().await.context("migration failed")?;
     tracing::info!("database migrations applied");
     Ok(Arc::new(store))
+}
+
+/// `0`은 "제한 없음"으로 해석해 `None`을 반환 (CLI 플래그에서 max_lifetime/
+/// idle_timeout을 끄고 싶을 때 사용). 그 외 값은 초 단위 `Duration`으로 변환.
+fn secs_to_optional_duration(secs: u64) -> Option<Duration> {
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
 }
 
 /// `postgres://user:PASSWORD@host/db`에서 비밀번호 부분 마스킹.
@@ -173,16 +208,31 @@ fn sanitize_url(url: &str) -> String {
 pub async fn run_serve(
     transport_kind: &str,
     db_max_conn: u32,
+    db_acquire_timeout_secs: u64,
+    db_max_lifetime_secs: u64,
+    db_idle_timeout_secs: u64,
     no_health_check: bool,
     health_interval_secs: u64,
     health_missed: u32,
+    no_cleanup: bool,
+    cleanup_interval_secs: u64,
+    cleanup_retention_days: i64,
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
     dashboard_bind: Option<&str>,
     mtls_flags: MtlsFlags<'_>,
 ) -> Result<()> {
-    let store = connect_and_migrate(db_max_conn).await?;
+    // 로드맵 P2 #16 — `serve`는 장수명 프로세스이므로 풀 세부 옵션을 명시적으로
+    // 튜닝한다 (기본값은 `PoolConfig::default()`와 동일 — CLI에서 오버라이드하지
+    // 않으면 이전과 동일하게 동작).
+    let pool_config = PoolConfig {
+        max_connections: db_max_conn,
+        acquire_timeout: Duration::from_secs(db_acquire_timeout_secs.max(1)),
+        max_lifetime: secs_to_optional_duration(db_max_lifetime_secs),
+        idle_timeout: secs_to_optional_duration(db_idle_timeout_secs),
+    };
+    let store = connect_and_migrate_with_pool(pool_config).await?;
 
     // Transport 선택: `mock` (기본, 테스트/개발) 또는 `acp` (Phase 7 — 실제 grok agent).
     let (transport, event_rx): (
@@ -252,6 +302,26 @@ pub async fn run_serve(
         Some(checker.spawn())
     } else {
         tracing::info!("health checker disabled by --no-health-check");
+        None
+    };
+
+    // 만료 세션/오래된 로그인 시도 정리 루프 (옵션). 로드맵 P1 #18 — 이전에는
+    // `delete_expired_sessions`를 프로덕션 어디서도 호출하지 않아 `sessions`
+    // 테이블이 무한정 쌓였다.
+    let _cleanup_handle = if !no_cleanup {
+        let cfg = CleanupConfig {
+            interval: Duration::from_secs(cleanup_interval_secs.max(1)),
+            login_attempt_retention: chrono::Duration::days(cleanup_retention_days.max(1)),
+        };
+        tracing::info!(
+            interval_secs = cleanup_interval_secs,
+            retention_days = cleanup_retention_days,
+            "session/login-attempt cleanup task enabled"
+        );
+        let cleanup = SessionCleanup::new(store.clone(), cfg);
+        Some(cleanup.spawn())
+    } else {
+        tracing::info!("cleanup task disabled by --no-cleanup");
         None
     };
 
@@ -385,6 +455,9 @@ pub async fn run_serve(
 
     // MCP 서버 종료 시 백그라운드 태스크도 정리.
     if let Some(h) = _health_handle {
+        h.abort().await;
+    }
+    if let Some(h) = _cleanup_handle {
         h.abort().await;
     }
     if let Some(h) = _http_handle {

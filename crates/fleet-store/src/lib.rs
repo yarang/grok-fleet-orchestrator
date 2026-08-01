@@ -24,7 +24,7 @@ pub mod rbac;
 
 pub use error::StoreError;
 pub use listener::listen_events;
-pub use postgres::PgStore;
+pub use postgres::{PgStore, PoolConfig};
 pub use rbac::{
     consume_bootstrap_and_create_admin, issue_admin_bootstrap_token, seed_builtin_roles,
     seed_permissions, seed_rbac_and_maybe_issue_bootstrap, BootstrapAdminError,

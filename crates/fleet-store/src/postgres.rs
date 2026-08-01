@@ -14,6 +14,7 @@
 //! | `payload` (events) | JSONB | `FleetEvent` (serde) |
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,18 +32,92 @@ use fleet_core::{
 use crate::error::StoreError;
 use crate::{Store, StoredCredential};
 
+/// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
+///
+/// 기존에는 `max_connections`만 설정 가능했고, `acquire_timeout`/`max_lifetime`/
+/// `idle_timeout`은 sqlx 기본값을 그대로 썼다 — 장수명 서버 프로세스(`fleet serve`)
+/// 에서는 방화벽/로드밸런서의 idle connection kill, DB 재시작 후 stale connection,
+/// 풀 고갈 시 무한 대기 같은 문제로 이어질 수 있다.
+#[derive(Debug, Clone)]
+pub struct PoolConfig {
+    /// 풀의 최대 연결 수.
+    pub max_connections: u32,
+    /// 연결 획득 타임아웃 — 풀이 고갈된 상태로 이 시간을 넘게 대기하면 에러를
+    /// 반환한다 (무한정 요청이 쌓이는 것을 방지).
+    pub acquire_timeout: Duration,
+    /// 연결의 최대 수명. 이 시간을 넘긴 연결은 반납 시점에 재사용하지 않고
+    /// 닫는다 — 로드밸런서/방화벽의 장기 커넥션 강제 종료, 커넥션 레벨 메모리
+    /// 누수를 예방. `None`이면 수명 제한 없음(sqlx 기본 동작).
+    pub max_lifetime: Option<Duration>,
+    /// 유휴 연결 타임아웃. 이 시간 이상 미사용 연결은 `min_connections`까지
+    /// 줄이며 닫는다 — 트래픽이 적을 때 불필요하게 열린 커넥션을 DB 측에
+    /// 남기지 않는다. `None`이면 유휴 타임아웃 없음(sqlx 기본 동작).
+    pub idle_timeout: Option<Duration>,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 10,
+            // sqlx 기본값(30s)과 동일 — 명시적으로 고정해 향후 sqlx 기본값이
+            // 바뀌어도 우리 동작은 변하지 않도록 함.
+            acquire_timeout: Duration::from_secs(30),
+            max_lifetime: Some(Duration::from_secs(30 * 60)),
+            idle_timeout: Some(Duration::from_secs(10 * 60)),
+        }
+    }
+}
+
+/// `users` 테이블 원시 컬럼 튜플 (`USER_COLUMNS` 순서와 일치).
+/// clippy::type_complexity 회피 + 4곳의 중복 인라인 타입 제거용 별칭.
+type UserRow = (
+    Uuid,
+    String,
+    Option<String>,
+    bool,
+    String,
+    bool,
+    chrono::DateTime<Utc>,
+    Option<chrono::DateTime<Utc>>,
+);
+
 /// PostgreSQL 기반 `Store` 구현.
 pub struct PgStore {
     pool: PgPool,
 }
 
 impl PgStore {
-    /// 연결 풀을 생성하고 반환.
+    /// 연결 풀을 생성하고 반환. `max_connections`만 지정하고 나머지 풀 옵션은
+    /// [`PoolConfig::default`]를 사용 — 짧게 실행되고 종료되는 CLI 하위
+    /// 명령(예: `fleet tasks list`)처럼 풀 튜닝이 중요하지 않은 경로용.
+    /// 장수명 서버 프로세스는 [`PgStore::connect_with_config`]를 사용할 것.
     pub async fn connect(database_url: &str, max_connections: u32) -> Result<Self, StoreError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
-            .connect(database_url)
-            .await?;
+        Self::connect_with_config(
+            database_url,
+            PoolConfig {
+                max_connections,
+                ..PoolConfig::default()
+            },
+        )
+        .await
+    }
+
+    /// 커넥션 풀 세부 옵션(`acquire_timeout`/`max_lifetime`/`idle_timeout`)까지
+    /// 지정해 연결. 장수명 서버 프로세스(`fleet serve`)가 사용해야 하는 경로.
+    pub async fn connect_with_config(
+        database_url: &str,
+        config: PoolConfig,
+    ) -> Result<Self, StoreError> {
+        let mut opts = PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .acquire_timeout(config.acquire_timeout);
+        if let Some(max_lifetime) = config.max_lifetime {
+            opts = opts.max_lifetime(max_lifetime);
+        }
+        if let Some(idle_timeout) = config.idle_timeout {
+            opts = opts.idle_timeout(idle_timeout);
+        }
+        let pool = opts.connect(database_url).await?;
         Ok(Self { pool })
     }
 
@@ -57,18 +132,7 @@ impl PgStore {
     }
 
     /// User 행을 튜플에서 구조체로 변환하는 공통 헬퍼.
-    fn row_to_user(
-        r: (
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            String,
-            bool,
-            chrono::DateTime<Utc>,
-            Option<chrono::DateTime<Utc>>,
-        ),
-    ) -> User {
+    fn row_to_user(r: UserRow) -> User {
         User {
             id: UserId::from(r.0),
             username: r.1,
@@ -693,16 +757,7 @@ impl Store for PgStore {
 
     async fn get_user_by_id(&self, id: UserId) -> Result<Option<User>, StoreError> {
         let sql = format!("SELECT {} FROM users WHERE id = $1", Self::USER_COLUMNS);
-        let row: Option<(
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            String,
-            bool,
-            chrono::DateTime<Utc>,
-            Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(&sql)
+        let row: Option<UserRow> = sqlx::query_as(&sql)
             .bind(id.as_uuid())
             .fetch_optional(&self.pool)
             .await?;
@@ -714,16 +769,7 @@ impl Store for PgStore {
             "SELECT {} FROM users WHERE username = $1",
             Self::USER_COLUMNS
         );
-        let row: Option<(
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            String,
-            bool,
-            chrono::DateTime<Utc>,
-            Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(&sql)
+        let row: Option<UserRow> = sqlx::query_as(&sql)
             .bind(username)
             .fetch_optional(&self.pool)
             .await?;
@@ -732,16 +778,7 @@ impl Store for PgStore {
 
     async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
         let sql = format!("SELECT {} FROM users WHERE email = $1", Self::USER_COLUMNS);
-        let row: Option<(
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            String,
-            bool,
-            chrono::DateTime<Utc>,
-            Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(&sql)
+        let row: Option<UserRow> = sqlx::query_as(&sql)
             .bind(email)
             .fetch_optional(&self.pool)
             .await?;
@@ -753,16 +790,7 @@ impl Store for PgStore {
             "SELECT {} FROM users ORDER BY created_at ASC",
             Self::USER_COLUMNS
         );
-        let rows: Vec<(
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            String,
-            bool,
-            chrono::DateTime<Utc>,
-            Option<chrono::DateTime<Utc>>,
-        )> = sqlx::query_as(&sql).fetch_all(&self.pool).await?;
+        let rows: Vec<UserRow> = sqlx::query_as(&sql).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(Self::row_to_user).collect())
     }
 
@@ -1529,7 +1557,7 @@ impl Store for PgStore {
         let rows = sqlx::query("SELECT * FROM hosts ORDER BY created_at ASC")
             .fetch_all(&self.pool)
             .await?;
-        rows.iter().map(|r| row_to_host(r)).collect()
+        rows.iter().map(row_to_host).collect()
     }
 
     async fn append_host_event(&self, event: &fleet_core::HostEvent) -> Result<(), StoreError> {
@@ -1564,7 +1592,7 @@ impl Store for PgStore {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(|r| row_to_host_event(r)).collect()
+        rows.iter().map(row_to_host_event).collect()
     }
 
     // ── SSH 키 금고 ───────────────────────────────────────────────

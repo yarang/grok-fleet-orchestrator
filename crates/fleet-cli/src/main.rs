@@ -60,6 +60,22 @@ enum Command {
         #[arg(long, env = "FLEET_DB_MAX_CONN", default_value_t = 10)]
         db_max_conn: u32,
 
+        /// Postgres 연결 획득 타임아웃 (초). 풀이 고갈된 채 이 시간을 넘게
+        /// 대기하면 에러를 반환 (로드맵 P2 #16).
+        #[arg(long, env = "FLEET_DB_ACQUIRE_TIMEOUT_SECS", default_value_t = 30)]
+        db_acquire_timeout_secs: u64,
+
+        /// Postgres 연결 최대 수명 (초). 이보다 오래된 연결은 반납 시 재사용하지
+        /// 않고 닫는다 — 로드밸런서/방화벽의 장기 커넥션 강제 종료 예방.
+        /// `0`이면 수명 제한 없음.
+        #[arg(long, env = "FLEET_DB_MAX_LIFETIME_SECS", default_value_t = 1800)]
+        db_max_lifetime_secs: u64,
+
+        /// Postgres 유휴 연결 타임아웃 (초). 이 시간 이상 미사용 연결은 닫는다.
+        /// `0`이면 유휴 타임아웃 없음.
+        #[arg(long, env = "FLEET_DB_IDLE_TIMEOUT_SECS", default_value_t = 600)]
+        db_idle_timeout_secs: u64,
+
         /// 헬스체크 비활성화 (기본값: 활성).
         #[arg(long, default_value_t = false)]
         no_health_check: bool,
@@ -71,6 +87,21 @@ enum Command {
         /// 하트비트 누락 허용 횟수. 이 횟수 × 주기를 초과하면 offline 처리.
         #[arg(long, env = "FLEET_HEALTH_MISSED", default_value_t = 3)]
         health_missed: u32,
+
+        /// 만료 세션/오래된 로그인 시도 정리 루프 비활성화 (기본값: 활성).
+        /// 로드맵 P1 #18 — 비활성화 시 `sessions`/`login_attempts` 테이블이
+        /// 무한정 쌓인다.
+        #[arg(long, default_value_t = false)]
+        no_cleanup: bool,
+
+        /// 정리 루프 폴링 주기 (초).
+        #[arg(long, env = "FLEET_CLEANUP_INTERVAL_SECS", default_value_t = 3600)]
+        cleanup_interval_secs: u64,
+
+        /// 로그인 시도 기록(`login_attempts`) 보존 기간 (일). 이보다 오래된
+        /// 기록은 정리 루프가 삭제한다.
+        #[arg(long, env = "FLEET_CLEANUP_RETENTION_DAYS", default_value_t = 7)]
+        cleanup_retention_days: i64,
 
         /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
         /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
@@ -766,9 +797,15 @@ async fn main() -> Result<()> {
         Command::Serve {
             transport,
             db_max_conn,
+            db_acquire_timeout_secs,
+            db_max_lifetime_secs,
+            db_idle_timeout_secs,
             no_health_check,
             health_interval_secs,
             health_missed,
+            no_cleanup,
+            cleanup_interval_secs,
+            cleanup_retention_days,
             http_bind,
             api_tokens,
             cf_audience,
@@ -780,9 +817,15 @@ async fn main() -> Result<()> {
             runtime::run_serve(
                 &transport,
                 db_max_conn,
+                db_acquire_timeout_secs,
+                db_max_lifetime_secs,
+                db_idle_timeout_secs,
                 no_health_check,
                 health_interval_secs,
                 health_missed,
+                no_cleanup,
+                cleanup_interval_secs,
+                cleanup_retention_days,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),

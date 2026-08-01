@@ -13,6 +13,7 @@
 #![allow(missing_docs)]
 
 pub mod breaker;
+pub mod cleanup;
 pub mod dispatcher;
 pub mod health;
 pub mod selector;
@@ -20,6 +21,7 @@ pub mod state;
 pub mod sync;
 
 pub use breaker::{BreakerRegistry, BreakerState};
+pub use cleanup::{CleanupConfig, CleanupSummary, SessionCleanup, SessionCleanupHandle};
 pub use dispatcher::{CancelError, DispatchError, Dispatcher, WaitError};
 pub use health::{HealthChecker, HealthCheckerHandle, HealthConfig};
 pub use selector::{SelectionError, WorkerSelector};
