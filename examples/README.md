@@ -13,6 +13,8 @@
 | `fleet.service`            | orchestrator 용 systemd 유닛                               | orchestrator    |
 | `fleet-worker.service`     | 워커 데몬용 systemd 유닛                                   | 워커 머신       |
 | `fleet.env`                | orchestrator 환경변수 (systemd `EnvironmentFile`)          | orchestrator    |
+| `fleet-backup.service`     | `scripts/db-backup.sh` 실행용 one-shot systemd 유닛        | orchestrator    |
+| `fleet-backup.timer`       | `fleet-backup.service` 일 단위 자동 실행 타이머            | orchestrator    |
 | `mcp-clients.json`         | grok build / Claude Code / Cursor / Gemini CLI 연결 예시   | MCP 클라이언트  |
 
 ## 전형적인 배포 플로우

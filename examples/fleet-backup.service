@@ -1,0 +1,44 @@
+# examples/fleet-backup.service
+#
+# One-shot unit that runs scripts/db-backup.sh. Paired with
+# examples/fleet-backup.timer for daily automation (roadmap item: "DB 백업
+# 스크립트 부재 — pg_dump 자동화").
+#
+# Usage:
+#   sudo cp examples/fleet-backup.service /etc/systemd/system/fleet-backup.service
+#   sudo cp examples/fleet-backup.timer   /etc/systemd/system/fleet-backup.timer
+#   sudo mkdir -p /opt/fleet/scripts /var/backups/fleet
+#   sudo cp scripts/db-backup.sh /opt/fleet/scripts/db-backup.sh
+#   sudo chown fleet:fleet /var/backups/fleet
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fleet-backup.timer
+#
+# Check status / run once on demand:
+#   systemctl status fleet-backup.timer
+#   sudo systemctl start fleet-backup.service   # runs a backup immediately
+#   journalctl -u fleet-backup -f
+
+[Unit]
+Description=Grok Fleet Orchestrator — Postgres backup (pg_dump)
+Documentation=https://github.com/yarang/grok-fleet-orchestrator
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=fleet
+Group=fleet
+
+# Same DATABASE_URL the orchestrator itself uses.
+EnvironmentFile=-/etc/fleet/fleet.env
+Environment=FLEET_BACKUP_DIR=/var/backups/fleet
+Environment=FLEET_BACKUP_RETENTION_DAYS=14
+
+ExecStart=/opt/fleet/scripts/db-backup.sh
+
+# Hardening (same posture as fleet.service / fleet-worker.service).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/fleet

@@ -661,7 +661,36 @@ JSON 로그가 필요한 경우 `tracing-subscriber`의 `fmt::layer().json()`을
 
 ## 5. 백업 및 복구
 
-### 5.1 Postgres 백업
+### 5.0 자동화된 스크립트 (권장)
+
+수동 `pg_dump`/`pg_restore` 대신 `scripts/db-backup.sh` / `scripts/db-restore.sh`
+사용을 권장합니다 — 타임스탬프 파일명, sha256 체크섬, 보존 기간 기반 정리,
+atomic write(임시 파일 후 rename)까지 포함되어 있습니다.
+
+```bash
+# 백업 (기본 출력 경로 /var/backups/fleet, 보존 14일)
+DATABASE_URL=postgres://fleet@localhost/fleet_prod \
+  scripts/db-backup.sh --out-dir /var/backups/fleet --retention-days 14
+
+# 복구 — 기본은 안전 모드: 새 DB로 복원해서 먼저 검증
+DATABASE_URL=postgres://fleet@localhost/fleet_prod \
+  scripts/db-restore.sh /var/backups/fleet/fleet_20260719T030000Z.dump
+
+# 라이브 DB를 직접 교체(파괴적) — 확인 프롬프트 있음, --yes로 생략 가능
+scripts/db-restore.sh --in-place /var/backups/fleet/fleet_20260719T030000Z.dump
+```
+
+일 단위 자동 실행은 `examples/fleet-backup.service` + `examples/fleet-backup.timer`
+(systemd timer)로 구성할 수 있습니다.
+
+> **범위 참고**: 이 스크립트들은 주기적 전체 덤프이며, 임의 시점(초 단위)까지
+> 복구하는 연속적 WAL 기반 PITR(point-in-time recovery)은 아닙니다. 복구
+> 시점은 가장 가까운 이전 백업 시각으로 제한됩니다. 진짜 연속 PITR이
+> 필요하면 Postgres 서버 자체에 WAL 아카이빙(`archive_mode=on` +
+> `archive_command`, 또는 pgBackRest/WAL-G 같은 도구)을 구성해야 하며, 이는
+> 애플리케이션이 아닌 Postgres 운영 영역이라 이 저장소 범위 밖입니다.
+
+### 5.1 Postgres 백업 (수동)
 
 ```bash
 # 전체 덤프
@@ -671,7 +700,7 @@ pg_dump --format=custom fleet_prod > fleet_$(date +%Y%m%d).dump
 pg_dump -t fleet_workers -t fleet_tasks fleet_prod > fleet_state.sql
 ```
 
-### 5.2 복구
+### 5.2 복구 (수동)
 
 ```bash
 createdb fleet_restored
@@ -706,7 +735,18 @@ LISTEN/NOTIFY가 끊기는 동안의 이벤트는 트랜잭션 커밋 시점에 
 fleet migrate
 ```
 
-다운그레이드는 지원되지 않습니다. 백업에서 복구하세요.
+다운그레이드는 지원되지 않습니다. 백업에서 복구하세요 — `scripts/db-migrate-safe.sh`가
+이 절차를 자동화합니다: 마이그레이션 적용 직전에 스냅샷을 뜨고, 실패 시
+그 스냅샷으로 되돌리는 정확한 `scripts/db-restore.sh` 명령을 출력합니다.
+
+```bash
+DATABASE_URL=postgres://fleet@localhost/fleet_prod scripts/db-migrate-safe.sh
+```
+
+(`FLEET_BIN` 환경변수로 `fleet` 바이너리 경로를 지정할 수 있습니다. 기본값은
+PATH 상의 `fleet`.) `fleet-store`가 마이그레이션을 컴파일 타임에 임베드하는
+`sqlx::migrate!` 방식이라 파일 하나하나에 대응하는 `down.sql`은 없습니다 —
+스키마 전체 스냅샷 복원이 이 프로젝트의 공식 롤백 경로입니다.
 
 ## 7. 문제 해결
 

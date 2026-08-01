@@ -1,0 +1,17 @@
+# examples/fleet-backup.timer
+#
+# Runs fleet-backup.service daily. See examples/fleet-backup.service for
+# install instructions.
+
+[Unit]
+Description=Daily Grok Fleet Orchestrator Postgres backup
+
+[Timer]
+OnCalendar=daily
+# Spread across a random window so it doesn't always land at exactly
+# midnight (avoids herding if you run this pattern across many hosts).
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
