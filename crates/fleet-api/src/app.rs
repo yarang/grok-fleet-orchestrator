@@ -54,6 +54,11 @@ pub struct AppState {
     /// 비브라우저 클라이언트이므로 기본값(빈 목록)이 올바른 배포 형태.
     /// 브라우저 기반 외부 콘솔을 붙이는 경우에만 출처를 명시적으로 추가.
     pub cors_allowed_origins: Vec<String>,
+    /// HTTP 요청 지연 히스토그램 (인프로세스 누산).
+    ///
+    /// 다른 메트릭과 달리 스토어에서 계산할 수 없어 미들웨어가 요청마다
+    /// 기록한다. 프로세스 재시작 시 0으로 돌아간다.
+    pub http_metrics: Arc<crate::metrics::HttpMetrics>,
 }
 
 impl AppState {
@@ -67,6 +72,7 @@ impl AppState {
             cf_audience: None,
             master_key: None,
             cors_allowed_origins: Vec::new(),
+            http_metrics: Arc::new(crate::metrics::HttpMetrics::new()),
         }
     }
 
@@ -206,6 +212,20 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                 }
             }),
         )
+        // HTTP 지연 기록 — 모든 라우트를 감싼다. 인증 미들웨어보다 바깥이라
+        // 인증 실패로 거부된 요청의 지연도 함께 관측된다(부하 판단에 필요).
+        .layer({
+            let metrics = state.http_metrics.clone();
+            middleware::from_fn(move |req, next: middleware::Next| {
+                let metrics = metrics.clone();
+                async move {
+                    let started = std::time::Instant::now();
+                    let response = next.run(req).await;
+                    metrics.observe(started.elapsed());
+                    response
+                }
+            })
+        })
         // 보안 헤더 — 모든 응답에 적용 (이미 설정되지 않은 경우만).
         // fleet-api는 순수 JSON API이므로 CSP는 `default-src 'none'`으로 최소화.
         .layer(SetResponseHeaderLayer::if_not_present(

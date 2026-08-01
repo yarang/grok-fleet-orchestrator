@@ -50,8 +50,11 @@
 
     async function fetchAudit() {
       try {
-        const resp = await fetch('/api/audit?limit=200');
-        allEvents = await resp.json();
+        // 작업·워커 생명주기 이벤트. (인증/권한 감사는 별도로 /api/audit)
+        const resp = await fetch('/api/events?limit=200');
+        const data = await resp.json();
+        // /api/events는 { events, count } 형태로 감싸서 반환한다.
+        allEvents = data.events ?? [];
         render();
       } catch(e) { console.error('fetch audit:', e); }
     }

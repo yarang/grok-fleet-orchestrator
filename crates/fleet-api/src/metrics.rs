@@ -17,6 +17,7 @@
 //! | `fleet_task_tokens_total`             | counter | type            | 완료된 작업의 누적 토큰 사용량    |
 //! | `fleet_task_duration_seconds`         | histogram | —             | 완료된 작업의 실행 시간 분포      |
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::response::{IntoResponse, Response};
@@ -33,14 +34,19 @@ use crate::app::AppState;
 /// 설정을 권장합니다.
 pub async fn metrics_handler(state: Arc<AppState>) -> Response {
     match metrics_text(state.store.as_ref()).await {
-        Ok(body) => (
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; version=0.0.4",
-            )],
-            body,
-        )
-            .into_response(),
+        Ok(mut body) => {
+            // HTTP 지연은 스토어에서 계산할 수 없으므로 인프로세스 누산기에서 붙인다.
+            body.push('\n');
+            state.http_metrics.render(&mut body);
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4",
+                )],
+                body,
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(error = ?e, "metrics scrape failed");
             (
@@ -256,6 +262,83 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
         "metrics rendered"
     );
     Ok(out)
+}
+
+/// `fleet_http_request_duration_seconds` 버킷 경계 (초).
+///
+/// HTTP API는 밀리초 단위 응답이 정상이므로 작업 실행 시간과 달리 촘촘하게
+/// 잡는다. 10초를 넘는 요청은 사실상 장애이므로 마지막 유한 버킷으로 충분하다.
+const HTTP_DURATION_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
+/// 프로세스 내에서 누적되는 HTTP 요청 지연 히스토그램.
+///
+/// 다른 메트릭과 달리 스토어에서 계산할 수 없다 — 요청 처리 시간은 그 순간에만
+/// 관측 가능하므로 미들웨어가 기록해 두어야 한다. 그래서 이것만 인프로세스
+/// 상태이며, **프로세스 재시작 시 0으로 돌아간다**(Prometheus counter의 통상
+/// 동작이므로 `rate()` 계산에는 문제가 없다).
+///
+/// 잠금 없이 원자적 연산만 사용한다 — 모든 요청 경로에서 갱신되므로 뮤텍스를
+/// 두면 고부하에서 그 자체가 병목이 된다. 합계는 f64 원자 타입이 없어
+/// 밀리초 정수로 누적한 뒤 렌더링 시 초로 환산한다.
+#[derive(Debug)]
+pub struct HttpMetrics {
+    buckets: Vec<AtomicU64>,
+    count: AtomicU64,
+    sum_millis: AtomicU64,
+}
+
+impl Default for HttpMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HttpMetrics {
+    pub fn new() -> Self {
+        Self {
+            buckets: HTTP_DURATION_BUCKETS
+                .iter()
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+            count: AtomicU64::new(0),
+            sum_millis: AtomicU64::new(0),
+        }
+    }
+
+    /// 요청 1건의 처리 시간을 기록.
+    pub fn observe(&self, elapsed: std::time::Duration) {
+        let secs = elapsed.as_secs_f64();
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_millis
+            .fetch_add(elapsed.as_millis() as u64, Ordering::Relaxed);
+        if let Some(idx) = HTTP_DURATION_BUCKETS.iter().position(|&b| secs <= b) {
+            self.buckets[idx].fetch_add(1, Ordering::Relaxed);
+        }
+        // 상한 초과 관측은 어떤 유한 버킷에도 넣지 않는다 — `+Inf`는 count로
+        // 렌더링하므로 자동으로 포함된다.
+    }
+
+    /// Prometheus 히스토그램 라인 렌더링.
+    fn render(&self, out: &mut String) {
+        const NAME: &str = "fleet_http_request_duration_seconds";
+        out.push_str(
+            "# HELP fleet_http_request_duration_seconds HTTP request handling time in seconds.\n",
+        );
+        out.push_str("# TYPE fleet_http_request_duration_seconds histogram\n");
+
+        let mut cumulative = 0u64;
+        for (i, bound) in HTTP_DURATION_BUCKETS.iter().enumerate() {
+            cumulative += self.buckets[i].load(Ordering::Relaxed);
+            out.push_str(&format!("{NAME}_bucket{{le=\"{bound}\"}} {cumulative}\n"));
+        }
+        let count = self.count.load(Ordering::Relaxed);
+        out.push_str(&format!("{NAME}_bucket{{le=\"+Inf\"}} {count}\n"));
+        let sum_secs = self.sum_millis.load(Ordering::Relaxed) as f64 / 1000.0;
+        out.push_str(&format!("{NAME}_sum {sum_secs}\n"));
+        out.push_str(&format!("{NAME}_count {count}\n"));
+    }
 }
 
 /// `fleet_task_duration_seconds` 버킷 경계 (초).
@@ -599,5 +682,80 @@ mod histogram_tests {
         h.render(&mut out, "t");
         assert!(out.contains("t_bucket{le=\"5\"} 1"), "{out}");
         assert!(out.contains("t_bucket{le=\"1\"} 0"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod http_metrics_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn observations_land_in_expected_buckets() {
+        let m = HttpMetrics::new();
+        m.observe(Duration::from_millis(3)); // le=0.005
+        m.observe(Duration::from_millis(30)); // le=0.05
+        m.observe(Duration::from_secs(30)); // 상한 초과 → +Inf에만
+
+        let mut out = String::new();
+        m.render(&mut out);
+
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_bucket{le=\"0.005\"} 1"),
+            "{out}"
+        );
+        // 누적이므로 le=0.05에는 3ms + 30ms 두 건.
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_bucket{le=\"0.05\"} 2"),
+            "{out}"
+        );
+        // 30초는 마지막 유한 버킷(10)에 포함되지 않는다.
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_bucket{le=\"10\"} 2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_bucket{le=\"+Inf\"} 3"),
+            "{out}"
+        );
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_count 3"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn empty_http_metrics_render_zeros() {
+        let m = HttpMetrics::new();
+        let mut out = String::new();
+        m.render(&mut out);
+        assert!(out.contains("fleet_http_request_duration_seconds_count 0"));
+        assert!(out.contains("fleet_http_request_duration_seconds_sum 0"));
+        assert!(out.contains("# TYPE fleet_http_request_duration_seconds histogram"));
+    }
+
+    /// 동시 갱신에서 관측이 누락되지 않아야 한다 (원자적 누산 확인).
+    #[test]
+    fn concurrent_observations_are_not_lost() {
+        let m = Arc::new(HttpMetrics::new());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let m = m.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..100 {
+                    m.observe(Duration::from_millis(1));
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let mut out = String::new();
+        m.render(&mut out);
+        assert!(
+            out.contains("fleet_http_request_duration_seconds_count 800"),
+            "{out}"
+        );
     }
 }

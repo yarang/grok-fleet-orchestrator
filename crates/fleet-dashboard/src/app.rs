@@ -124,10 +124,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/me", get(handlers::me))
         .route("/api/hosts", get(handlers::list_hosts_api))
         .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
-        .route("/api/audit", get(handlers::list_audit_api))
-        // 인증/권한 감사 로그 (audit_log 테이블) — 위의 /api/audit은 작업·워커
-        // 생명주기 이벤트(events 테이블)로 대상이 다르다.
-        .route("/api/audit/auth", get(handlers::list_auth_audit_api))
+        // 인증/권한 감사 로그 (audit_log 테이블).
+        // 작업·워커 생명주기 이벤트는 위의 /api/events가 담당한다 — 이전에는
+        // 같은 이벤트 데이터를 /api/audit이 중복 제공해 이름이 혼동됐다.
+        .route("/api/audit", get(handlers::list_auth_audit_api))
         .route("/api/tools", get(handlers::list_tools_api))
         // ── SSH 키 관리 API ──
         .route(

@@ -366,7 +366,7 @@ impl Store for MemStore {
             .filter(|e| e.host_id == host_id)
             .cloned()
             .collect();
-        filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        filtered.sort_by_key(|e| std::cmp::Reverse(e.created_at));
         filtered.truncate(limit as usize);
         Ok(filtered)
     }
@@ -714,7 +714,7 @@ async fn host_detail_returns_info_and_events() {
     let host_id = host.id;
 
     // host_events에 몇 개 이벤트 추가.
-    let mut store = MemStore::new().with_host(host);
+    let store = MemStore::new().with_host(host);
     store
         .host_events
         .lock()

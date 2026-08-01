@@ -61,11 +61,13 @@
    빈 목록이면 `CorsLayer::new()`(교차 출처 차단)로 안전측 기본값.
 8. ✅ fleet-api 보안 헤더 — 해결됨 (`1d4422e`). CSP/HSTS/X-Frame-Options 등 6개 적용
    (dashboard에는 이미 적용돼 있었고 fleet-api만 누락된 상태였다).
-9. ✅ 구조화된 감사 로그 테이블 — 해결됨 (`b501ca5`). `migrations/011_audit_log.sql` + `/api/audit/auth`
+9. ✅ 구조화된 감사 로그 테이블 — 해결됨 (`b501ca5`). `migrations/011_audit_log.sql` + `/api/audit`
    조회 API. 사용자 생성/토글/삭제·로그인 등에서 기록. `actor_user_id`는 `ON DELETE SET NULL`,
    `actor_label` 별도 보존 — 계정 삭제로 감사 흔적을 지울 수 없게 설계.
 
-   주의: 기존 `/api/audit`는 `events` 테이블(작업·워커 생명주기)을 반환하는 **별개** 엔드포인트다.
+   경로 정리: 예전에는 `/api/audit`가 `events` 테이블(작업·워커 생명주기)을 `/api/events`와
+   중복 제공해 이름이 혼동됐다. 중복 핸들러를 제거하고 `/api/audit`는 인증/권한 감사 전용,
+   작업·워커 이벤트는 `/api/events` 전용으로 분리했다.
 10. ⏳ 세션 토큰 로테이션 부재 — 8시간 고정 토큰 (`auth.rs:37 SESSION_DURATION_SECS`). 로그인 시
     1회 발급 후 갱신·연장 경로 없음.
 11. ⏳ 페이지네이션 불일치 — `WorkerFilter`에 offset 없음. 추가로 fleet-api `list_workers`가

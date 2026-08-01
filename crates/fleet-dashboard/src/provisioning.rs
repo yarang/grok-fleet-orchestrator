@@ -3,6 +3,7 @@
 //! 대시보드에서 직접 원격 호스트를 프로비저닝할 수 있게 한다.
 //! SSH 비밀키는 `MasterKey` (AES-256-GCM)로 암호화하여 DB에 저장.
 
+use crate::error::ApiError;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,26 +27,25 @@ pub async fn create_ssh_key_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<CreateSshKeyRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Insufficient permissions".into()))?;
+        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
-    let master_key = state.master_key.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Master key not configured".into(),
-    ))?;
+    let master_key = state
+        .master_key
+        .as_ref()
+        .ok_or_else(|| ApiError::Unavailable("Master key not configured".into()))?;
 
     // 입력 검증.
     if req.name.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "name must not be empty".into()));
+        return Err(ApiError::BadRequest("name must not be empty".into()));
     }
     if !req.private_key.contains("BEGIN OPENSSH PRIVATE KEY")
         && !req.private_key.contains("BEGIN RSA PRIVATE KEY")
         && !req.private_key.contains("BEGIN EC PRIVATE KEY")
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
+        return Err(ApiError::BadRequest(
             "private_key does not look like a valid PEM key".into(),
         ));
     }
@@ -61,10 +61,7 @@ pub async fn create_ssh_key_api(
         .encrypt(req.private_key.as_bytes())
         .map_err(|e| {
             tracing::error!(error = %e, "failed to encrypt SSH key");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Encryption failed".into(),
-            )
+            ApiError::Internal("Encryption failed".into())
         })?;
 
     let key = SshKey {
@@ -79,7 +76,7 @@ pub async fn create_ssh_key_api(
 
     state.store.create_ssh_key(&key).await.map_err(|e| {
         tracing::error!(error = %e, "create_ssh_key failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into())
+        ApiError::Internal("DB error".into())
     })?;
 
     tracing::info!(
@@ -122,17 +119,17 @@ pub async fn delete_ssh_key_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     Path(name): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, ApiError> {
     require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Insufficient permissions".into()))?;
+        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     let deleted = state.store.delete_ssh_key(&name).await.map_err(|e| {
         tracing::error!(error = %e, "delete_ssh_key failed");
-        (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into())
+        ApiError::Internal("DB error".into())
     })?;
 
     if !deleted {
-        return Err((StatusCode::NOT_FOUND, "SSH key not found".into()));
+        return Err(ApiError::NotFound("SSH key not found".into()));
     }
 
     tracing::info!(
@@ -151,15 +148,15 @@ pub async fn provision_host_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<ProvisionRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Insufficient permissions".into()))?;
+        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
-    let master_key = state.master_key.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Master key not configured".into(),
-    ))?;
+    let master_key = state
+        .master_key
+        .as_ref()
+        .ok_or_else(|| ApiError::Unavailable("Master key not configured".into()))?;
 
     // SSH 키 조회.
     let ssh_key = state
@@ -168,22 +165,16 @@ pub async fn provision_host_api(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "get_ssh_key failed");
-            (StatusCode::INTERNAL_SERVER_ERROR, "DB error".into())
+            ApiError::Internal("DB error".into())
         })?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("SSH key '{}' not found", req.ssh_key_name),
-        ))?;
+        .ok_or_else(|| ApiError::NotFound(format!("SSH key '{}' not found", req.ssh_key_name)))?;
 
     // 비밀키 복호화.
     let decrypted_key = {
         let blob = fleet_credentials::EncryptedBlob::from_string(&ssh_key.encrypted_blob);
         master_key.decrypt(&blob).map_err(|e| {
             tracing::error!(error = %e, "failed to decrypt SSH key");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Decryption failed".into(),
-            )
+            ApiError::Internal("Decryption failed".into())
         })?
     };
 
@@ -191,10 +182,7 @@ pub async fn provision_host_api(
     let temp_key_path = format!("/tmp/.fleet-ssh-key-{}", uuid::Uuid::new_v4().simple());
     std::fs::write(&temp_key_path, &decrypted_key).map_err(|e| {
         tracing::error!(error = %e, "failed to write temp key file");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to write key file".into(),
-        )
+        ApiError::Internal("Failed to write key file".into())
     })?;
     // 0600 권한 설정.
     #[cfg(unix)]
@@ -219,10 +207,10 @@ async fn run_provisioning(
     req: &ProvisionRequest,
     key_path: &str,
     principal: &AuthPrincipal,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     // grok_secret 자동 생성 (비어 있으면).
     let grok_secret = if req.grok_secret.is_empty() {
-        hex::encode(&rand::random::<[u8; 32]>())
+        hex::encode(rand::random::<[u8; 32]>())
     } else {
         req.grok_secret.clone()
     };
@@ -284,10 +272,7 @@ async fn run_provisioning(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, host = %req.host, "SSH connect failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("SSH connection failed: {e}"),
-            )
+            ApiError::Unavailable(format!("SSH connection failed: {e}"))
         })?;
 
     // Playbook 실행.
@@ -403,10 +388,7 @@ async fn run_provisioning(
         }
         Err(e) => {
             tracing::error!(error = %e, host = %req.host, "provisioning failed");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Provisioning failed: {e}"),
-            ))
+            Err(ApiError::Internal(format!("Provisioning failed: {e}")))
         }
     }
 }

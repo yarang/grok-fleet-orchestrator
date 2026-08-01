@@ -25,6 +25,7 @@ pub mod audit;
 pub mod auth;
 pub mod auth_util;
 pub mod email;
+pub mod error;
 pub mod handlers;
 pub mod provisioning;
 pub mod schema;

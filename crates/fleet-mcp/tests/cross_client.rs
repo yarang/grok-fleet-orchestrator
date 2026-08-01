@@ -72,10 +72,19 @@ async fn write_line<W: AsyncWriteExt + Unpin>(stdin: &mut W, value: &Value) -> s
     stdin.write_all(s.as_bytes()).await
 }
 
+/// 응답 대기 상한.
+///
+/// 첫 응답까지는 subprocess가 Postgres 연결 + 마이그레이션을 마쳐야 하므로
+/// 실제 기동 시간보다 넉넉해야 한다. 2초로 두었을 때 `cargo test --workspace`
+/// 처럼 머신이 바쁜 상황에서 간헐적으로 "no initialize response"로 실패했다.
+/// 응답이 아예 오지 않아야 하는 negative 테스트는 이 값과 무관하게 자체
+/// 짧은 timeout을 쓰므로, 이 값을 늘려도 테스트가 느려지지 않는다.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// 한 줄 읽기 (timeout 포함).
 async fn read_line<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Option<Value> {
     let mut buf = String::new();
-    let n = timeout(Duration::from_secs(2), reader.read_line(&mut buf))
+    let n = timeout(RESPONSE_TIMEOUT, reader.read_line(&mut buf))
         .await
         .ok()?
         .ok()?;
