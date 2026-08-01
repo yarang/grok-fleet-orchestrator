@@ -45,15 +45,18 @@
    Postgres 서비스가 있었지만 같은 이유로 놓쳤다. 하네스를 **"`DATABASE_URL` 미설정 시에만 skip,
    설정됐는데 연결/마이그레이션 실패 시 `panic!`"** 으로 전환해 재발 시 CI가 반드시 하드 실패한다.
 
-5. 🟡 **지연 시간/처리량 메트릭** — 부분 완료. `fleet_task_duration_seconds` 히스토그램 구현됨
-   (`_bucket{le=}`/`_sum`/`_count` 정상 출력). **잔여**: `dispatch_latency`, `http_request_duration`.
-   → 담당: coder
+5. ✅ **지연 시간/처리량 메트릭** — 해결됨. `fleet_task_duration_seconds`(`b501ca5`) +
+   `fleet_http_request_duration_seconds`(`8755c0d`) 히스토그램 구현
+   (`_bucket{le=}`/`_sum`/`_count` 정상 출력).
+
+   **`dispatch_latency`는 스키마 변경이 선행되어야 해 항목 #31로 분리했다** — 이 항목에서
+   누락시키지 않기 위해 별도 번호를 부여한다.
 
    참고: prometheus 크레이트 의존성이 없고 `metrics.rs`가 텍스트를 직접 생성하는 방식이라
-   히스토그램 버킷을 수작업 구현해야 한다 — 겉보기보다 비용이 크다.
+   히스토그램 버킷을 수작업 구현했다.
 
-6. ⏳ **DB 백업 스크립트 부재** — `pg_dump` 자동화, 시점 복구 설정 없음. 현재 `docs/deployment.md`에
-   산문 안내만 존재. → 담당: devops
+6. ✅ **DB 백업 스크립트** — 해결됨 (`853a1d0`). `scripts/db-backup.sh`(pg_dump 자동화),
+   `scripts/db-restore.sh`(복구), systemd 타이머 포함.
 
 ## P2 — Scale Prep
 
@@ -73,23 +76,25 @@
 11. ⏳ 페이지네이션 불일치 — `WorkerFilter`에 offset 없음. 추가로 fleet-api `list_workers`가
     `WorkerFilter::default()`를 사용해 **쿼리스트링 필터가 스토어까지 전달되지 않는다** (문서 최초
     기술보다 심각).
-12. ⏳ API 오류 응답 포맷 불일치 — fleet-api는 `{error:{code,message}}`, dashboard는 ad-hoc.
-    → 담당: coder
+12. ✅ API 오류 응답 포맷 통일 — 해결됨 (`8755c0d`). dashboard도 `ApiError`로 일원화해
+    `{error:{code,message}}` 형식을 공유한다. 500번대는 내부 상세를 응답에 노출하지 않고
+    서버 로그에만 남긴다.
 13. ⏳ OpenTelemetry / 분산 추적 부재 — `#[instrument]` 스팬 없음.
 14. ⏳ 다크 모드, 컬럼 정렬, 고급 필터링 부재.
 15. 🟡 시작 시 설정 검증 — 부분 완료. `DATABASE_URL` 존재 여부는 `fleet-cli/src/runtime.rs`에서
     fail-fast 검증하고, fleet-worker는 자체 `validate()`를 갖추고 있다. **잔여**: 비어있음/형식
     검증 없음. 또한 `fleet-core/src/config.rs`의 `OrchestratorConfig`는 검증도 없고 **어디서도
     역직렬화되지 않는 죽은 구조체**다 — 사용하거나 제거할 것.
-16. ⏳ 커넥션 풀 튜닝 부재 — `max_connections`만 설정. `acquire_timeout`, `max_lifetime`,
-    `idle_timeout` 미설정. → 담당: dbtest
+16. ✅ 커넥션 풀 튜닝 — 해결됨 (`bac4dc7`). `PoolConfig`로 `acquire_timeout`(30s),
+    `max_lifetime`(30m), `idle_timeout`(10m) 설정. 장수명 서버 프로세스(`fleet serve`)에서
+    sqlx 기본값을 그대로 쓰던 문제 해소.
 17. ✅ `fleet_list_tasks` MCP 도구 — 해결됨 (`3fb296a`). `schema.rs:34 TOOL_LIST_TASKS`,
     핸들러·테스트 포함.
-18. ⏳ 예약된 DB 정리 작업 부재 — 만료된 세션/토큰 미청소. `delete_expired_sessions`는 구현되어
-    있으나 **프로덕션 호출자가 없다**(테스트만 호출). `delete_old_login_attempts`는 로그인 성공 시
-    기회적으로만 실행된다. → 담당: dbtest
-19. ⏳ 마이그레이션 롤백 스크립트 부재 — sqlx 단순(비가역) 모드, down 스크립트 없음.
-    → 담당: devops
+18. ✅ 예약된 DB 정리 작업 — 해결됨 (`bac4dc7`). `fleet-scheduler/src/cleanup.rs`의
+    `SessionCleanup`이 `runtime.rs`에서 `tokio::spawn`으로 기동되어 주기적으로 만료 세션과
+    오래된 로그인 시도를 정리한다(`--no-cleanup`으로 비활성화, 주기·보존기간 설정 가능).
+    이전에는 `delete_expired_sessions`에 프로덕션 호출자가 아예 없었다.
+19. ✅ 마이그레이션 롤백 — 해결됨 (`853a1d0`). `scripts/db-migrate-safe.sh`로 세이프 롤백 제공.
 
 ## P3 — Nice-to-have
 
@@ -105,23 +110,53 @@
     (DATABASE_URL, FLEET_HTTP_BIND, FLEET_API_TOKENS 등) + `examples/worker.toml`이 같은 역할을 한다.
     종료 또는 최하위 강등 권고.
 28. ⏳ 추가 MCP 도구 (토큰 관리, 호스트 인벤토리, 브레이커 리셋).
-29. ⏳ Dashboard API의 하드코딩된 도구 목록 — `handlers.rs:848`이 도구 목록을 하드코딩해
-    `fleet-mcp/src/schema.rs`(단일 진실 원천)와 어긋날 수 있다.
+29. ✅ Dashboard API의 하드코딩된 도구 목록 — 해결됨 (`8755c0d`). `list_tools_api`가
+    `fleet_mcp::schema::all_tools()`를 그대로 노출해 단일 진실 원천을 따른다.
+    (별도 보고 없이 #12 작업에 포함되어 반영됐다 — 실측 대조 중 확인.)
 30. ✅ CI 커버리지 리포팅 — 해결됨 (`afd8d35`). `.github/workflows/ci.yml`에 `coverage` job 추가
     (`cargo-llvm-cov`, 워크스페이스 전체, Postgres 서비스, lcov 아티팩트 + 잡 로그 요약).
     외부 서비스(Codecov 등) 계정/토큰 연동은 후속 과제.
+
+## 신규 항목 (2026-08-01 추가)
+
+31. ⏳ **`dispatch_latency` 메트릭** (P2) — #5에서 분리. 작업이 큐에 들어온 시점과 워커에
+    디스패치된 시점의 차이를 재려면 **스키마 변경(디스패치 타임스탬프 컬럼)이 선행**되어야 한다.
+    #5의 나머지 두 히스토그램과 달리 기존 데이터만으로는 계산할 수 없다.
+
+32. ⏳ **`/admin/*` HTML 페이지에 RBAC 검사 부재** (P2, 보안) — → 담당: security
+
+    `admin_audit_page`, `admin_users_page`, `admin_tools_page` 세 핸들러 모두 인자 없이
+    `serve_page(...)`만 호출하며 `require_permission` 검사가 없다. **`/admin/audit` 한 곳의
+    문제가 아니라 관리자 페이지 전반의 동일 패턴이다** — 한 곳만 고치면 나머지 두 곳이 그대로
+    남는다.
+
+    **정확한 노출 범위 (과대평가 주의)**: 세 라우트 모두 `protected` 라우터에 속해
+    `require_session`은 적용된다. 즉 **미인증 접근은 불가**하다. 또한 실제 데이터를 제공하는
+    API는 권한을 강제한다 — `/api/audit`는 `require_permission(AuditRead)`,
+    `/api/users`는 `UserRead`를 검사한다. 따라서 권한 없는 인증 사용자가 얻는 것은
+    **API 호출이 403으로 막히는 빈 HTML 셸**이며 데이터 유출은 아니다.
+
+    → 심각도는 *데이터 노출*이 아니라 **심층 방어 결여 + 관리 UI 구조 노출**이다. 다만 페이지
+    계층에 검사가 없다는 사실 자체가, 향후 어떤 페이지가 데이터를 인라인으로 렌더링하기
+    시작하면 즉시 실제 취약점으로 바뀌는 구조다. 세 페이지를 **일괄** 수정할 것.
 
 ---
 
 ## 현재 진행 상황 (2026-08-01 기준)
 
+> **P0·P1은 전부 해소됐다.** 남은 항목은 모두 P2 이하다.
+
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| coder | #5 잔여(dispatch_latency, http_request_duration), #12 |
-| devops | #6, #19 |
-| dbtest | #16, #18 |
-| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#29 |
+| security | #32 (`/admin/*` RBAC — 3개 페이지 일괄) |
+| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31 |
+
+### 호환성 주의 — `/api/audit` 의미 변경 (`8755c0d`)
+`/api/audit`가 반환하는 데이터가 **바뀌었다**. 기존에는 작업·워커 생명주기 이벤트(`events`
+테이블)를 `/api/events`와 중복 제공했으나, 이제는 **인증/권한 감사 로그(`audit_log` 테이블)**
+전용이다. 작업·워커 이벤트가 필요한 소비자는 `/api/events`로 옮겨야 한다.
+API 버전(`/v1`, #22)이 없는 상태의 파괴적 변경이므로 외부 소비자가 있다면 사전 공지가 필요하다.
 
 ### 완료된 기능
 - ✅ RBAC 권한 강제 (10개 API 핸들러)
@@ -132,10 +167,13 @@
 - ✅ 태스크/워커 상세 페이지, 사용자 관리 CRUD UI, SSE 실시간 업데이트
 - ✅ mTLS, 서킷 브레이커, ACP 자동 재연결, 헬스체커 + 하트비트
 - ✅ 프로비저너 (Ansible 플레이북)
-- ✅ Prometheus 메트릭 (7개 패밀리 + task_duration 히스토그램)
+- ✅ Prometheus 메트릭 (7개 패밀리 + task_duration / http_request_duration 히스토그램)
 - ✅ 컨테이너화 (Dockerfile / docker-compose)
-- ✅ 구조화된 감사 로그 (`audit_log`)
+- ✅ 구조화된 감사 로그 (`audit_log`) + `/api/audit`↔`/api/events` 역할 분리
 - ✅ CI 커버리지 리포팅 (cargo-llvm-cov)
+- ✅ 커넥션 풀 튜닝 + 만료 세션/로그인시도 정리 백그라운드 잡
+- ✅ DB 백업·복구·세이프 롤백 스크립트 (systemd 타이머)
+- ✅ API 오류 응답 포맷 통일 (`{error:{code,message}}`)
 
 ### 테스트 현황
 ~497개 (`#[test]`/`#[tokio::test]` 함수 기준, 2026-07-31 스냅샷 — 병렬 작업 중이라 수치는 계속
