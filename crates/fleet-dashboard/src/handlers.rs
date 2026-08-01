@@ -196,9 +196,17 @@ pub async fn list_events(
             ApiError::Store(e.to_string())
         })?;
 
+    // 작업 stdout/stderr는 `task:output` 권한이 있어야 볼 수 있다.
+    // 스트리밍 경로(sse.rs)와 반드시 동일한 필터를 통과시킨다 — 한쪽만 막으면
+    // 다른 쪽으로 그대로 새어나간다.
+    let events = crate::event_view::filter_events(
+        events,
+        crate::event_view::may_see_task_output(&principal),
+    );
+
     Ok(Json(serde_json::json!({
-        "events": events,
         "count": events.len(),
+        "events": events,
     })))
 }
 
