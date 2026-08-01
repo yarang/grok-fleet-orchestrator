@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Audit Log — Fleet</title>
+  <title>Activity Log — Fleet</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -15,13 +15,13 @@
       <a href="/tasks">Tasks</a>
       <a href="/hosts">Hosts</a>
       <a href="/admin/users">Users</a>
-      <a href="/admin/audit" class="active">Audit</a>
+      <a href="/admin/activity" class="active">Activity</a>
     </nav>
     <span id="user-menu" style="margin-left:auto;"></span>
   </header>
 
   <main>
-    <h1 class="page-title">Audit Log</h1>
+    <h1 class="page-title">Activity Log</h1>
     <p class="page-subtitle">Append-only event log for security and compliance.</p>
 
     <div class="filter-bar">
@@ -33,7 +33,7 @@
       </div>
     </div>
 
-    <div id="audit-table" class="table">
+    <div id="activity-table" class="table">
       <div class="row header">
         <div>Seq</div><div>Type</div><div>Task</div><div>Worker</div><div>Details</div><div>Time</div>
       </div>
@@ -48,15 +48,15 @@
     let allEvents = [];
     let currentFilter = 'all';
 
-    async function fetchAudit() {
+    async function fetchActivity() {
       try {
-        // 작업·워커 생명주기 이벤트. (인증/권한 감사는 별도로 /api/audit)
+        // 작업·워커 생명주기 이벤트. 인증/권한 감사 로그는 별개이며 /api/audit이 담당한다.
         const resp = await fetch('/api/events?limit=200');
         const data = await resp.json();
         // /api/events는 { events, count } 형태로 감싸서 반환한다.
         allEvents = data.events ?? [];
         render();
-      } catch(e) { console.error('fetch audit:', e); }
+      } catch(e) { console.error('fetch activity:', e); }
     }
 
     function fmtTime(iso) {
@@ -103,7 +103,7 @@
 
     function render() {
       const filtered = allEvents.filter(matchesFilter);
-      const table = document.getElementById('audit-table');
+      const table = document.getElementById('activity-table');
       const empty = document.getElementById('empty-state');
 
       table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
@@ -148,8 +148,8 @@
       });
     });
 
-    fetchAudit();
-    setInterval(fetchAudit, 10000);
+    fetchActivity();
+    setInterval(fetchActivity, 10000);
 
     // SSE
     const pill = document.getElementById('status-pill');
@@ -157,7 +157,7 @@
       const es = new EventSource('/api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
-      es.onmessage = () => fetchAudit();
+      es.onmessage = () => fetchActivity();
     } catch(e) {}
 
     // 사용자 메뉴

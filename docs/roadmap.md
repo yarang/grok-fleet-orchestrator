@@ -125,8 +125,8 @@
 
 32. ⏳ **`/admin/*` HTML 페이지에 RBAC 검사 부재** (P2, 보안) — → 담당: security
 
-    `admin_audit_page`, `admin_users_page`, `admin_tools_page` 세 핸들러 모두 인자 없이
-    `serve_page(...)`만 호출하며 `require_permission` 검사가 없다. **`/admin/audit` 한 곳의
+    `admin_activity_page`(당시 `admin_audit_page`), `admin_users_page`, `admin_tools_page` 세 핸들러 모두 인자 없이
+    `serve_page(...)`만 호출하며 `require_permission` 검사가 없다. **`/admin/activity`(당시 `/admin/audit`) 한 곳의
     문제가 아니라 관리자 페이지 전반의 동일 패턴이다** — 한 곳만 고치면 나머지 두 곳이 그대로
     남는다.
 

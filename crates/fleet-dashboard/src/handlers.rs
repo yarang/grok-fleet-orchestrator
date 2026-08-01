@@ -873,13 +873,20 @@ fn host_to_summary(h: &fleet_core::Host, worker_name: Option<String>) -> HostSum
 
 // ── P2: Audit Log ────────────────────────────────────────────────────
 
-/// GET /admin/audit — 활동 로그 HTML 페이지 (작업·워커 이벤트).
+/// GET /admin/activity — 활동 로그 HTML 페이지 (작업·워커 생명주기 이벤트).
 ///
-/// 페이지 접근에는 `audit:read`가 필요하다. 표시 데이터는 `/api/events`
-/// (`events:list`)에서 가져온다 — 이 페이지는 `/api/audit`(인증 감사 로그)를
-/// 호출하지 않는다.
-pub async fn admin_audit_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
-    serve_page_if_permitted(&principal, PermissionKind::AuditRead, "admin-audit.html")
+/// 표시 데이터가 `/api/events`(`events:list`)이므로 페이지 게이트도 같은
+/// 권한으로 맞춘다 — 이전에는 `audit:read`(admin 전용)로 잠겨 있었는데,
+/// 정작 내용은 전 역할이 `/api/events`로 볼 수 있는 이벤트라 의미가 어긋났다.
+///
+/// 인증/권한 감사 로그는 이 페이지가 아니라 `/api/audit`가 담당한다
+/// (전용 화면은 아직 없음).
+pub async fn admin_activity_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::EventsList,
+        "admin-activity.html",
+    )
 }
 
 /// `GET /api/audit` 쿼리 파라미터.
@@ -2316,10 +2323,10 @@ mod tests {
     #[test]
     fn viewer_is_denied_admin_pages() {
         let viewer = principal_for(fleet_core::BuiltinRole::Viewer);
-        // Viewer는 user:read / audit:read / host:provision 이 없다.
+        // Viewer는 user:read / host:provision 이 없다.
+        // (활동 로그는 events:list라 Viewer도 접근 가능 — 아래 별도 테스트 참조.)
         for (perm, page) in [
             (PermissionKind::UserRead, "admin-users.html"),
-            (PermissionKind::AuditRead, "admin-audit.html"),
             (PermissionKind::HostProvision, "admin-ssh-keys.html"),
         ] {
             let resp = serve_page_if_permitted(&viewer, perm, page);
@@ -2332,17 +2339,38 @@ mod tests {
     }
 
     #[test]
-    fn operator_is_denied_user_and_audit_pages() {
+    fn operator_is_denied_user_pages() {
         let operator = principal_for(fleet_core::BuiltinRole::Operator);
-        for (perm, page) in [
-            (PermissionKind::UserRead, "admin-users.html"),
-            (PermissionKind::AuditRead, "admin-audit.html"),
+        let resp = serve_page_if_permitted(&operator, PermissionKind::UserRead, "admin-users.html");
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "operator should be denied the user management page"
+        );
+    }
+
+    /// 활동 로그는 `/api/events`(events:list)를 보여주므로 전 역할이 접근 가능해야 한다.
+    ///
+    /// 이전에는 `audit:read`(admin 전용)로 잠겨 있어, Viewer가 페이지를 열면
+    /// 데이터 fetch가 403이 나 빈 표만 보였다. 게이트를 데이터 권한에 맞춘 뒤의
+    /// 동작을 고정한다.
+    #[test]
+    fn all_roles_can_view_activity_page() {
+        for role in [
+            fleet_core::BuiltinRole::Viewer,
+            fleet_core::BuiltinRole::Operator,
+            fleet_core::BuiltinRole::Admin,
         ] {
-            let resp = serve_page_if_permitted(&operator, perm, page);
-            assert_eq!(
+            let principal = principal_for(role);
+            let resp = serve_page_if_permitted(
+                &principal,
+                PermissionKind::EventsList,
+                "admin-activity.html",
+            );
+            assert_ne!(
                 resp.status(),
                 StatusCode::FORBIDDEN,
-                "operator should be denied {page}"
+                "{role:?} should be allowed the activity page"
             );
         }
     }
@@ -2352,7 +2380,7 @@ mod tests {
         let admin = principal_for(fleet_core::BuiltinRole::Admin);
         for (perm, page) in [
             (PermissionKind::UserRead, "admin-users.html"),
-            (PermissionKind::AuditRead, "admin-audit.html"),
+            (PermissionKind::EventsList, "admin-activity.html"),
             (PermissionKind::HostProvision, "admin-ssh-keys.html"),
         ] {
             let resp = serve_page_if_permitted(&admin, perm, page);
@@ -2371,5 +2399,36 @@ mod tests {
         let viewer = principal_for(fleet_core::BuiltinRole::Viewer);
         assert!(viewer.has(PermissionKind::EventsList));
         assert!(!viewer.has(PermissionKind::TaskOutput));
+    }
+}
+
+#[cfg(test)]
+mod asset_embed_tests {
+    /// 페이지 핸들러가 참조하는 자산이 실제로 임베드되어 있어야 한다.
+    ///
+    /// 자산 파일명을 바꾸면서 핸들러 문자열을 안 고치면(또는 그 반대) 컴파일은
+    /// 통과하고 런타임에만 "page not built" 404가 난다. 이름을 바꾼 적이 있어
+    /// (`admin-audit.html` → `admin-activity.html`) 그 조합을 고정해 둔다.
+    #[test]
+    fn page_assets_referenced_by_handlers_exist() {
+        for name in [
+            "index.html",
+            "tasks.html",
+            "admin-activity.html",
+            "admin-tools.html",
+            "admin-users.html",
+            "hosts.html",
+        ] {
+            assert!(
+                crate::assets::Asset::get(name).is_some(),
+                "임베드된 자산에 {name}이 없다"
+            );
+        }
+    }
+
+    /// 이름을 바꾼 옛 자산이 남아 있으면 안 된다 (중복 방치 방지).
+    #[test]
+    fn renamed_asset_is_gone() {
+        assert!(crate::assets::Asset::get("admin-audit.html").is_none());
     }
 }

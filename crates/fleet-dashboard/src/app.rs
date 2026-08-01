@@ -107,7 +107,7 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/hosts/:hostname", get(handlers::host_detail_page))
         .route("/hosts/provision", get(crate::provisioning::provision_page))
         // ── P2: 관리 ──
-        .route("/admin/audit", get(handlers::admin_audit_page))
+        .route("/admin/activity", get(handlers::admin_activity_page))
         .route("/admin/tools", get(handlers::admin_tools_page))
         .route(
             "/admin/ssh-keys",

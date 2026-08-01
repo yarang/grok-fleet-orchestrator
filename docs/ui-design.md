@@ -36,7 +36,7 @@ fleet.agentthread.dev/
 ├── /tasks/:id                 # 태스크 상세 (큐에 통합)
 │
 ├── /admin/users               # 사용자 관리                     [P1]
-├── /admin/audit               # 감사 로그                       [P2]
+├── /admin/activity            # 활동 로그 (작업·워커 이벤트)     [P2]
 │
 └── /admin/tools               # MCP 도구 탐색기                 [P2]
 ```
@@ -53,7 +53,7 @@ fleet.agentthread.dev/
 | `/workers/:id`   | ✓    | viewer       | 읽기 전용                     |
 | `/tasks`         | ✓    | viewer       | 읽기 전용                     |
 | `/admin/users`   | ✓    | administrator| 관리자 전용                   |
-| `/admin/audit`   | ✓    | administrator| 관리자 전용                   |
+| `/admin/activity`| ✓    | viewer       | events:list — 전 역할 열람    |
 | `/admin/tools`   | ✓    | operator     | 도구 호출은 operator 이상     |
 
 ---
@@ -717,9 +717,12 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ---
 
-### 3.7 페이지 #7 — 감사 로그 (Audit Log)
+### 3.7 페이지 #7 — 활동 로그 (Activity Log)
 
-**라우트**: `/admin/audit`  **권한**: administrator  **테마**: Dark
+**라우트**: `/admin/activity`  **권한**: viewer (`events:list`)  **테마**: Dark
+
+> 이 페이지는 작업·워커 **생명주기 이벤트**(`events` 테이블, `/api/events`)를 보여준다.
+> 인증/권한 감사 로그(`audit_log` 테이블)는 `/api/audit`가 제공하며 전용 화면은 아직 없다.
 
 **목적**: 보안 컴플라이언스, 침해 탐지, 운영 회귀 분석.
 
@@ -876,7 +879,7 @@ flowchart LR
     I -->|재시도 필요| J[재시도 액션]
     J -->|operator+ 권한| K[재실행]
     J -->|viewer 권한| L[403 — 관리자 요청]
-    A -->|이벤트 클릭| M[/admin/audit 딥링크]
+    A -->|이벤트 클릭| M[/admin/activity 딥링크]
 ```
 
 ### 4.4 관리자 플로우 (신규 사용자 초대 → 권한 검증)
@@ -891,7 +894,7 @@ flowchart TD
     F --> G[신규 사용자 /bootstrap 접속]
     G --> H[OTP + 본인 정보 입력]
     H --> I[계정 생성]
-    I --> J[/admin/audit에서 이벤트 확인]
+    I --> J[/admin/activity에서 이벤트 확인]
     J --> K[세션 활성 모니터링]
 ```
 
@@ -1224,7 +1227,7 @@ crates/fleet-dashboard/
 │   ├── admin-users.html        # P1: User Mgmt (#6)
 │   ├── hosts.html              # P1.5: Host Inventory (#2.5)
 │   ├── host-detail.html        # P1.5: Host Detail (#2.6)
-│   ├── admin-audit.html        # P2: Audit Log (#7)
+│   ├── admin-activity.html     # P2: Activity Log (#7)
 │   ├── admin-tools.html        # P2: MCP Tools (#8)
 │   ├── styles/
 │   │   ├── tokens.css          # 디자인 토큰 (색상, 타이포, 라디우스)
