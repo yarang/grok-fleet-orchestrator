@@ -14,7 +14,7 @@ name = "build-arm64-01"
 
 # orchestrator 의 base URL. trailing slash 없이.
 # Cloudflare Tunnel 등을 거친다면 tunnel 의 퍼블릭 도메인 사용.
-orchestrator_url = "https://fleet.example.com"
+orchestrator_url = "https://fleet.agentthread.dev"
 
 # 하트비트 주기 (초). 기본 15초.
 # orchestrator 의 `--health-missed` × 이 주기 보다 오래 하트비트가 끊기면

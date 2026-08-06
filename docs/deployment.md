@@ -230,7 +230,7 @@ Environment=FLEET_API_TOKENS=<token1>,<token2>
 # 필수: 사용자 생성 시 인증 이메일 발송. 미설정 시 로그에만 출력.
 Environment=FLEET_GMAIL_USER=your-address@gmail.com
 Environment=FLEET_GMAIL_APP_PASS=xxxx xxxx xxxx xxxx
-Environment=FLEET_BASE_URL=https://fleet.example.com
+Environment=FLEET_BASE_URL=https://fleet.agentthread.dev
 ExecStart=/opt/fleet/bin/fleet serve \
   --http-bind 127.0.0.1:8081 \
   --dashboard-bind 127.0.0.1:8082 \
@@ -254,7 +254,7 @@ limit_req_zone $binary_remote_addr zone=fleet_limit:10m rate=15r/s;
 server {
     listen 80;
     listen [::]:80;
-    server_name fleet.example.com;
+    server_name fleet.agentthread.dev;
 
     # Certbot ACME 챌린지용 경로
     location /.well-known/acme-challenge/ {
@@ -270,11 +270,11 @@ server {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name fleet.example.com;
+    server_name fleet.agentthread.dev;
 
     # Certbot 인증서 연동
-    ssl_certificate     /etc/letsencrypt/live/fleet.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/fleet.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/fleet.agentthread.dev/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/fleet.agentthread.dev/privkey.pem;
 
     # SSL 보안 파라미터 하드닝 (Mozilla Intermediate profile 기반)
     ssl_session_timeout 1d;
@@ -352,7 +352,7 @@ server {
 |------|------|------|
 | `FLEET_GMAIL_USER` | ✅ | 발송용 Gmail 주소 (`xxx@gmail.com`) |
 | `FLEET_GMAIL_APP_PASS` | ✅ | Google App Password (16자리) |
-| `FLEET_BASE_URL` | ✅ | 인증 링크 베이스 URL (`https://fleet.example.com`) |
+| `FLEET_BASE_URL` | ✅ | 인증 링크 베이스 URL (`https://fleet.agentthread.dev`) |
 | `FLEET_MAIL_FROM_NAME` | ❌ | 발송자 표시명 (기본: `Fleet Orchestrator`) |
 
 > 미설정 시: 사용자 생성은 되지만 인증 이메일이 발송되지 않고, 서버 로그에
@@ -369,7 +369,7 @@ fleet-api(`--http-bind`)의 정상 소비자는 fleet-cli / fleet-worker / fleet
 브라우저 기반 외부 콘솔을 붙여야 하는 경우에만 명시적 allow-list를 설정합니다:
 
 ```bash
-FLEET_API_CORS_ORIGINS="https://console.example.com,https://ops.example.com"
+FLEET_API_CORS_ORIGINS="https://console.agentthread.dev,https://ops.agentthread.dev"
 ```
 
 | 규칙 | 동작 |
@@ -406,8 +406,8 @@ FLEET_API_CORS_ORIGINS="https://console.example.com,https://ops.example.com"
 │ cloudflared tunnel run fleet-orchestrator          │
 │                                                    │
 │ ingress:                                           │
-│   - fleet.example.com/*      → 127.0.0.1:8081     │
-│   - dash.fleet.example.com/*  → 127.0.0.1:8082     │
+│   - fleet.agentthread.dev/*      → 127.0.0.1:8081     │
+│   - dash.fleet.agentthread.dev/*  → 127.0.0.1:8082     │
 └────────────────────────────────────────────────────┘
           ▲
           │ HTTP heartbeat (워커 → 오케스트레이터)
@@ -423,8 +423,8 @@ FLEET_API_CORS_ORIGINS="https://console.example.com,https://ops.example.com"
 1. **Tunnel 생성**:
 ```bash
 cloudflared tunnel create fleet-orchestrator
-cloudflared tunnel route dns fleet-orchestrator fleet.example.com
-cloudflared tunnel route dns fleet-orchestrator dash.fleet.example.com
+cloudflared tunnel route dns fleet-orchestrator fleet.agentthread.dev
+cloudflared tunnel route dns fleet-orchestrator dash.fleet.agentthread.dev
 ```
 
 2. **config.yml** (`~/.cloudflared/config.yml`):
@@ -433,15 +433,15 @@ tunnel: <tunnel-uuid>
 credentials-file: /root/.cloudflared/<tunnel-uuid>.json
 
 ingress:
-  - hostname: dash.fleet.example.com
+  - hostname: dash.fleet.agentthread.dev
     service: http://127.0.0.1:8082
-  - hostname: fleet.example.com
+  - hostname: fleet.agentthread.dev
     service: http://127.0.0.1:8081
   - service: http_status:404
 ```
 
 3. **Access Application 생성** (Cloudflare 대시보드):
-   - Application domain: `fleet.example.com`, `dash.fleet.example.com`
+   - Application domain: `fleet.agentthread.dev`, `dash.fleet.agentthread.dev`
    - Identity provider: Google / GitHub / Okta 등
    - AUD 값 기록 (예: `abc123def456...`)
 
@@ -471,7 +471,7 @@ fleet provision \
   --name worker-a \
   --labels arch=x86_64,gpu=false,region=us-east \
   --cf-token <cloudflare-api-token> \
-  --orchestrator-url https://fleet.example.com
+  --orchestrator-url https://fleet.agentthread.dev
 ```
 
 또는 인벤토리 파일로 일괄 처리:
@@ -485,7 +485,7 @@ defaults:
   user: ubuntu
   ssh_key: ~/.ssh/id_fleet
   cf_token: cloudflare-token-here
-  orchestrator_url: https://fleet.example.com
+  orchestrator_url: https://fleet.agentthread.dev
 
 workers:
   - name: build-1
@@ -507,7 +507,7 @@ workers:
 ```toml
 [worker]
 name = "build-farm-1"
-orchestrator_url = "https://fleet.example.com"
+orchestrator_url = "https://fleet.agentthread.dev"
 heartbeat_interval_secs = 15
 bootstrap_token = "fleet-xxx"        # 선택 — orchestrator가 bearer auth 요구 시
 labels = { arch = "arm64" }
@@ -567,7 +567,7 @@ Phase 8.3부터는 orchestrator 측에서 발급한 **bootstrap 토큰** 한 번
            │ ────────────────────────────────────────► │ (채널: 슬랙/이메일/...)
            │                                          │
            │                                          │ fleet-worker join \
-           │                                          │   --orchestrator-url https://fleet.example.com \
+           │                                          │   --orchestrator-url https://fleet.agentthread.dev \
            │                                          │   --token fleet-xxxx... \
            │                                          │   --name gpu-a100-1 \
            │                                          │   --labels gpu=true,arch=arm64 \
@@ -590,7 +590,7 @@ Phase 8.3부터는 orchestrator 측에서 발급한 **bootstrap 토큰** 한 번
 ```bash
 # 단일-사용, 1시간 짜리 토큰
 fleet token issue \
-  --api-url https://fleet.example.com \
+  --api-url https://fleet.agentthread.dev \
   --api-token "$FLEET_ADMIN_TOKEN" \
   --max-uses 1 \
   --expires-in-secs 3600 \
@@ -608,8 +608,8 @@ fleet token issue --max-uses 10 --expires-in-secs 86400 --notes "build-farm batc
 토큰 목록 / 폐기:
 
 ```bash
-fleet token list --api-url https://fleet.example.com --api-token "$FLEET_ADMIN_TOKEN"
-fleet token revoke fleet-9f3a7c2b... --api-url https://fleet.example.com
+fleet token list --api-url https://fleet.agentthread.dev --api-token "$FLEET_ADMIN_TOKEN"
+fleet token revoke fleet-9f3a7c2b... --api-url https://fleet.agentthread.dev
 ```
 
 #### 2) 워커 머신에서 가입
@@ -617,7 +617,7 @@ fleet token revoke fleet-9f3a7c2b... --api-url https://fleet.example.com
 ```bash
 # 바이너리가 이미 설치되어 있다고 가정
 fleet-worker join \
-  --orchestrator-url https://fleet.example.com \
+  --orchestrator-url https://fleet.agentthread.dev \
   --token fleet-9f3a7c2b... \
   --name gpu-a100-1 \
   --labels gpu=true,arch=arm64 \
@@ -651,7 +651,7 @@ fleet-worker join \
 
 [worker]
 name                = "gpu-a100-1"
-orchestrator_url    = "https://fleet.example.com"
+orchestrator_url    = "https://fleet.agentthread.dev"
 heartbeat_interval_secs = 15
 max_concurrent_tasks    = 2
 bootstrap_token         = "fleet-9f3a7c2b..."
@@ -823,8 +823,8 @@ PATH 상의 `fleet`.) `fleet-store`가 마이그레이션을 컴파일 타임에
 
 ```bash
 fleet doctor \
-  --api-url https://fleet.example.com \
-  --dashboard-url https://dash.fleet.example.com
+  --api-url https://fleet.agentthread.dev \
+  --dashboard-url https://dash.fleet.agentthread.dev
 ```
 
 출력 예:
@@ -838,8 +838,8 @@ migrations                       OK       applied successfully
 workers                          OK       4 total (online=3, offline=1)
 dispatch_readiness               OK       —
 tasks                            OK       backend reachable (sampled 1 task(s))
-api_health                       OK       https://fleet.example.com/v1/health returned 200 OK
-dashboard_health                 OK       https://dash.fleet.example.com/health returned 200 OK
+api_health                       OK       https://fleet.agentthread.dev/v1/health returned 200 OK
+dashboard_health                 OK       https://dash.fleet.agentthread.dev/health returned 200 OK
 ==============================================================================
 summary: 8 OK, 0 WARN, 0 FAIL (total 8)
 ==============================================================================

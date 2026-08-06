@@ -34,7 +34,7 @@ defaults:
 # ─── 프로비저닝 동작 옵션 ──────────────────────────────────────────────
 options:
   # orchestrator 의 퍼블릭 URL. 워커의 worker.toml 에 자동으로 들어감.
-  orchestrator_url: https://fleet.example.com
+  orchestrator_url: https://fleet.agentthread.dev
   # 동시에 프로비저닝할 호스트 수. 네트워크/disk I/O 고려해 조정.
   parallel: 2
   # 1차 실패 시 재시도.

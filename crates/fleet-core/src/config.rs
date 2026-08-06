@@ -262,7 +262,7 @@ mod tests {
     fn env_validation_rejects_base_url_without_scheme() {
         let issues = validate_env_with(env_of(&[
             ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
-            ("FLEET_BASE_URL", "fleet.example.com"),
+            ("FLEET_BASE_URL", "fleet.agentthread.dev"),
         ]));
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].key, "FLEET_BASE_URL");
@@ -272,7 +272,7 @@ mod tests {
     fn env_validation_rejects_base_url_trailing_slash() {
         let issues = validate_env_with(env_of(&[
             ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
-            ("FLEET_BASE_URL", "https://fleet.example.com/"),
+            ("FLEET_BASE_URL", "https://fleet.agentthread.dev/"),
         ]));
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].key, "FLEET_BASE_URL");
@@ -299,7 +299,7 @@ mod tests {
     fn env_validation_accepts_fully_configured_smtp() {
         let issues = validate_env_with(env_of(&[
             ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
-            ("FLEET_BASE_URL", "https://fleet.example.com"),
+            ("FLEET_BASE_URL", "https://fleet.agentthread.dev"),
             ("FLEET_GMAIL_USER", "ops@example.com"),
             ("FLEET_GMAIL_APP_PASS", "secret"),
         ]));

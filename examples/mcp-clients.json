@@ -70,7 +70,7 @@
       "_content": {
         "mcpServers": {
           "fleet": {
-            "url": "https://fleet.example.com/mcp",
+            "url": "https://fleet.agentthread.dev/mcp",
             "headers": {
               "Authorization": "Bearer fleet-CHANGE_ME_TOKEN_1"
             }
