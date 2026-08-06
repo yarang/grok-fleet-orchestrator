@@ -177,7 +177,7 @@ admin 전용 — 발급/조회/폐기에는 일반 `Authorization: Bearer <admin
   "max_uses": 1,
   "expires_in_secs": 3600,
   "notes": "gpu-a100-1 온보딩",
-  "created_by": "admin@fleet.example.com"
+  "created_by": "admin@fleet.agentthread.dev"
 }
 ```
 
@@ -213,7 +213,7 @@ admin 전용 — 발급/조회/폐기에는 일반 `Authorization: Bearer <admin
   {
     "token": "fleet-9f3a***************",
     "created_at": "2026-07-19T09:30:00Z",
-    "created_by": "admin@fleet.example.com",
+    "created_by": "admin@fleet.agentthread.dev",
     "expires_at": "2026-07-19T10:30:00Z",
     "max_uses": 1,
     "use_count": 0,

@@ -271,7 +271,7 @@ crates/fleet-worker/
 ```toml
 [worker]
 name = "build-farm-1"
-orchestrator_url = "https://fleet.example.com"
+orchestrator_url = "https://fleet.agentthread.dev"
 heartbeat_interval_secs = 15
 bootstrap_token = "fleet-xxx"        # bearer auth (선택)
 labels = { arch = "arm64", gpu = "false" }
@@ -495,14 +495,14 @@ RETURNING token;
 
 ```bash
 # 1. 어드민이 토큰 발급 (DB 저장).
-fleet token issue --api-url https://fleet.example.com \
+fleet token issue --api-url https://fleet.agentthread.dev \
                   --api-token $ADMIN_TOKEN \
                   --max-uses 1 \
                   --expires-in-secs 3600
 # → fleet_ABCD...
 
 # 2. 발급된 토큰 목록.
-fleet token list --api-url https://fleet.example.com --api-token $ADMIN_TOKEN
+fleet token list --api-url https://fleet.agentthread.dev --api-token $ADMIN_TOKEN
 
 # 3. 회수.
 fleet token revoke fleet_ABCD... --api-url ... --api-token $ADMIN_TOKEN
@@ -517,7 +517,7 @@ fleet token revoke fleet_ABCD... --api-url ... --api-token $ADMIN_TOKEN
 
 ```bash
 fleet-worker join \
-  --orchestrator-url https://fleet.example.com \
+  --orchestrator-url https://fleet.agentthread.dev \
   --token fleet_ABCD... \
   --name build-farm-1 \
   --labels arch=arm64,gpu=false \

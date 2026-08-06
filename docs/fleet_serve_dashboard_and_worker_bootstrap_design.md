@@ -76,7 +76,7 @@ sequenceDiagram
     Orch-->>Admin: 발급된 토큰 출력 (fleet_ABCD...)
 
     Note over Admin, Worker: 2단계: 워커 조인 명령 실행
-    Admin->>Worker: fleet-worker join --token fleet_ABCD... --orchestrator-url https://fleet.example.com
+    Admin->>Worker: fleet-worker join --token fleet_ABCD... --orchestrator-url https://fleet.agentthread.dev
     
     Note over Worker, Orch: 3단계: 토큰 인증 및 설정 렌더링
     Worker->>Orch: POST /v1/workers/join { token, worker_name, labels }
