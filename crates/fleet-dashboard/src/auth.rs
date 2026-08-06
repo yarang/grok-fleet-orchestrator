@@ -495,6 +495,45 @@ pub async fn record_login_success(
     Ok(())
 }
 
+pub fn extract_client_ip(headers: &axum::http::HeaderMap, peer_addr: std::net::SocketAddr) -> String {
+    let trusted_proxies: Vec<std::net::IpAddr> = std::env::var("FLEET_TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .collect();
+
+    let peer_ip = peer_addr.ip();
+
+    if trusted_proxies.contains(&peer_ip) {
+        if let Some(cf_ip) = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        {
+            return cf_ip.to_string();
+        }
+
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            let parts: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+            for part in parts.iter().rev() {
+                if let Ok(ip) = part.parse::<std::net::IpAddr>() {
+                    if !trusted_proxies.contains(&ip) {
+                        return ip.to_string();
+                    }
+                }
+            }
+            if let Some(first) = parts.first() {
+                if let Ok(ip) = first.parse::<std::net::IpAddr>() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+
+    peer_ip.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,43 +603,4 @@ mod tests {
         // 마지막 세션도 최초 로그인 기준 만료 시각을 넘기지 못한다.
         assert!(created < absolute_expiry);
     }
-}
-
-pub fn extract_client_ip(headers: &axum::http::HeaderMap, peer_addr: std::net::SocketAddr) -> String {
-    let trusted_proxies: Vec<std::net::IpAddr> = std::env::var("FLEET_TRUSTED_PROXIES")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim())
-        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
-        .collect();
-
-    let peer_ip = peer_addr.ip();
-
-    if trusted_proxies.contains(&peer_ip) {
-        if let Some(cf_ip) = headers
-            .get("cf-connecting-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
-        {
-            return cf_ip.to_string();
-        }
-
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            let parts: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
-            for part in parts.iter().rev() {
-                if let Ok(ip) = part.parse::<std::net::IpAddr>() {
-                    if !trusted_proxies.contains(&ip) {
-                        return ip.to_string();
-                    }
-                }
-            }
-            if let Some(first) = parts.first() {
-                if let Ok(ip) = first.parse::<std::net::IpAddr>() {
-                    return ip.to_string();
-                }
-            }
-        }
-    }
-
-    peer_ip.to_string()
 }

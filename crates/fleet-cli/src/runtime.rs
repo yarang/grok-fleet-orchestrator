@@ -47,6 +47,11 @@ use fleet_scheduler::{
 use fleet_store::{PgStore, PoolConfig, Store};
 use fleet_transport::{MockTransport, WorkerTransport};
 
+#[cfg(feature = "acp")]
+use fleet_transport::AcpTransport;
+#[cfg(feature = "mtls")]
+use fleet_transport::ClientTlsConfig;
+
 /// Postgres 연결 URL 조회 (`DATABASE_URL` 필수).
 fn database_url() -> Result<String> {
     std::env::var("DATABASE_URL")
@@ -74,11 +79,11 @@ pub struct MtlsFlags<'a> {
 impl<'a> MtlsFlags<'a> {
     /// 세 플래그가 모두 설정된 경우 `Some(ClientTlsConfig)` 반환.
     /// 하나라도 누락되면 `None`.
-    fn to_tls_config(self) -> Option<fleet_transport::ClientTlsConfig> {
+    fn to_tls_config(self) -> Option<ClientTlsConfig> {
         let ca = self.ca?;
         let cert = self.cert?;
         let key = self.key?;
-        Some(fleet_transport::ClientTlsConfig::from_paths(ca, cert, key))
+        Some(ClientTlsConfig::from_paths(ca, cert, key))
     }
 }
 
@@ -87,8 +92,8 @@ impl<'a> MtlsFlags<'a> {
 #[cfg(feature = "acp")]
 fn build_acp_transport(
     mtls_flags: &MtlsFlags,
-) -> Result<fleet_transport::AcpTransport, anyhow::Error> {
-    let transport = fleet_transport::AcpTransport::new();
+) -> Result<AcpTransport, anyhow::Error> {
+    let transport = AcpTransport::new();
     #[cfg(feature = "mtls")]
     {
         if let Some(ca) = mtls_flags.ca {
