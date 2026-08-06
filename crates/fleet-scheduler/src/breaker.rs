@@ -61,9 +61,23 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig) -> Self {
+        Self::new_with_state(config, CircuitState::Closed)
+    }
+
+    pub fn new_with_state(config: CircuitBreakerConfig, state: CircuitState) -> Self {
+        let mut inner = BreakerInner::new();
+        inner.state = match state {
+            CircuitState::Closed => BreakerState::Closed,
+            CircuitState::Open => BreakerState::Open,
+            CircuitState::HalfOpen => BreakerState::HalfOpen,
+        };
+        if state == CircuitState::Open {
+            // opened_at을 초기화하여 쿨다운 경과시간 계산이 유효하도록 함
+            inner.opened_at = Some(std::time::Instant::now());
+        }
         Self {
             config,
-            inner: Mutex::new(BreakerInner::new()),
+            inner: Mutex::new(inner),
         }
     }
 
@@ -215,11 +229,11 @@ impl BreakerRegistry {
     }
 
     /// 워커의 브레이커를 조회. 없으면 생성.
-    pub fn get(&self, worker_id: WorkerId) -> std::sync::Arc<CircuitBreaker> {
+    pub fn get(&self, worker_id: WorkerId, initial_state: CircuitState) -> std::sync::Arc<CircuitBreaker> {
         let mut breakers = self.breakers.lock().unwrap();
         breakers
             .entry(worker_id)
-            .or_insert_with(|| std::sync::Arc::new(CircuitBreaker::new(self.config.clone())))
+            .or_insert_with(|| std::sync::Arc::new(CircuitBreaker::new_with_state(self.config.clone(), initial_state)))
             .clone()
     }
 
@@ -309,7 +323,7 @@ mod tests {
         let w1 = WorkerId::new();
         let w2 = WorkerId::new();
 
-        let cb1 = reg.get(w1);
+        let cb1 = reg.get(w1, CircuitState::Closed);
         for _ in 0..3 {
             cb1.record(Outcome::Failure);
         }

@@ -243,41 +243,98 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### 2.3 Nginx 리버스 프록시 (옵션)
+### 2.3 Nginx 리버스 프록시 (권장 게이트웨이 표준)
+
+Grok Fleet Orchestrator는 외부 네트워크와의 경계에서 안전한 TLS 종단 및 Real IP 격리를 위해 **Nginx**를 역방향 프록시 및 게이트웨이 표준으로 사용하는 것을 강력히 권장합니다.
 
 ```nginx
+# 1차 DDoS 및 패스워드 스프레이 방어를 위한 Rate Limit Zone 설정
+limit_req_zone $binary_remote_addr zone=fleet_limit:10m rate=15r/s;
+
 server {
-    listen 443 ssl http2;
+    listen 80;
+    listen [::]:80;
     server_name fleet.example.com;
 
+    # Certbot ACME 챌린지용 경로
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    # HTTPS 리다이렉트
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name fleet.example.com;
+
+    # Certbot 인증서 연동
     ssl_certificate     /etc/letsencrypt/live/fleet.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/fleet.example.com/privkey.pem;
 
-    # 대시보드
+    # SSL 보안 파라미터 하드닝 (Mozilla Intermediate profile 기반)
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    # 보안 헤더 추가
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # 업로드 파일 크기 제한 (워커 패키지 업로드 고려)
+    client_max_body_size 50M;
+
+    # 공통 프록시 파라미터 적용 (Real IP 추출 필수 헤더)
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    # 대시보드 서빙 (포트 8082)
     location / {
+        limit_req zone=fleet_limit burst=30 nodelay;
+
         proxy_pass http://127.0.0.1:8082;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        # SSE 지원
+        proxy_set_header Connection "";
+
+        # SSE 스트리밍이 정상 작동하도록 버퍼링 제거 필수
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 86400s;
     }
 
-    # API
+    # 오케스트레이터 HTTP API 서버 (포트 8081)
     location /v1/ {
+        limit_req zone=fleet_limit burst=50 nodelay;
         proxy_pass http://127.0.0.1:8081;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
     }
 
+    # 프로메테우스 메트릭스 엔드포인트
     location = /metrics {
         proxy_pass http://127.0.0.1:8081/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
     }
 }
 ```
 
-> 중요: SSE (`/api/events/stream`)는 버퍼링을 꺼야 합니다 (`proxy_buffering off`).
+> **중요 (Real IP 신뢰 연동 설정)**: Nginx 리버스 프록시를 적용하면, 오케스트레이터의 실패 카운터와 레이트 리미트가 올바른 사용자 IP로 격리되어 오동작을 유발하지 않도록 `FLEET_TRUSTED_PROXIES` 환경변수를 반드시 활성화해야 합니다.
+> `/etc/fleet/fleet.env` 혹은 systemd 환경변수에 다음과 같이 지정합니다:
+> ```env
+> FLEET_TRUSTED_PROXIES="127.0.0.1,::1"
+> ```
 
 ### 2.4 이메일 인증 (Gmail SMTP)
 
@@ -622,6 +679,18 @@ secret       = "<32-byte-random-hex>"            # join 시 자동 생성
 - `--api-tokens` (admin 전용) 과 bootstrap 토큰 (워커 가입 전용)은 별도의
   자격 증명입니다 — bootstrap 토큰을 가진 워커는 다른 API 엔드포인트를
   호출할 수 없습니다.
+
+### 3.5 이그레스 프록시 — 아웃바운드 API 트래픽 단일 IP 통합
+
+여러 워커 노드가 `api.z.ai` 등 외부 API를 각자의 공인 IP로 직접 호출하면, 공급자 측
+Fair Usage / 이상 탐지 시스템이 "여러 IP에서의 동시 접근"으로 오탐할 수 있습니다.
+`examples/egress-proxy/`는 HAProxy(SNI 기반 TCP 릴레이) + keepalived로 워커들의
+아웃바운드를 단일 고정 IP로 통합하는 구성입니다.
+
+핵심 설계: HTTP(S)_PROXY 환경변수나 `grok` CLI의 프록시 지원 여부에 의존하지 않고,
+DNS 오버라이드(`api.z.ai` → 프록시 VIP) + TLS SNI 기반 raw TCP 릴레이로 동작하므로
+애플리케이션 레벨 수정이 전혀 필요 없습니다. 자세한 구조·설치 순서·검증 절차는
+`examples/egress-proxy/README.md` 참조.
 
 ## 4. 모니터링
 

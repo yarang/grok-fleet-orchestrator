@@ -986,8 +986,10 @@ use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, record_login_failure, record_login_success, record_rate_limited_request,
-    CSRF_COOKIE, SESSION_COOKIE, SESSION_DURATION_SECS,
+    check_rate_limit, check_rate_limit_custom, record_login_failure, record_login_success,
+    record_rate_limited_request, extract_client_ip, CSRF_COOKIE, SESSION_COOKIE,
+    SESSION_DURATION_SECS, EMAIL_SEND_WINDOW_SECS, MAX_EMAIL_SEND_ATTEMPTS,
+    MAX_IP_EMAIL_SEND_ATTEMPTS,
 };
 use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
@@ -1045,7 +1047,7 @@ pub async fn login(
     headers: axum::http::HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<(CookieJar, Redirect), (CookieJar, Response)> {
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, addr);
 
     // CSRF 검증 — 더블 서밋 쿠키 패턴.
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1061,9 +1063,6 @@ pub async fn login(
         .await
         .map_err(|_| (jar.clone(), internal_error_page()))?;
     if !allowed {
-        record_login_failure(&state, &form.email, Some(&ip), "rate_limited")
-            .await
-            .ok();
         // 감사: 차단까지 도달했다는 것은 브루트포스 정황이므로 반드시 남긴다.
         crate::audit::record(
             &state,
@@ -1491,9 +1490,10 @@ pub async fn resend_verification_form(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(form): Form<ResendVerificationForm>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, addr);
 
     // CSRF 검증.
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1507,9 +1507,16 @@ pub async fn resend_verification_form(
     // 스팸이 `/login`의 동일 email 카운터를 소모해 피해자를 로그인 불가로
     // 만들 수 있다(교차 엔드포인트 락아웃).
     let rl_identifier = format!("resend:{}", form.email);
-    let allowed = check_rate_limit(&state, &rl_identifier, Some(&ip))
-        .await
-        .unwrap_or(false);
+    let allowed = check_rate_limit_custom(
+        &state,
+        &rl_identifier,
+        Some(&ip),
+        MAX_EMAIL_SEND_ATTEMPTS,
+        MAX_IP_EMAIL_SEND_ATTEMPTS,
+        EMAIL_SEND_WINDOW_SECS,
+    )
+    .await
+    .unwrap_or(false);
     if !allowed {
         // 차단된 요청은 기록하지 않는다 — 기록하면 공격자가 요청을 계속
         // 퍼부어 잠금을 무한 연장할 수 있다(락아웃 증폭).
@@ -1523,7 +1530,7 @@ pub async fn resend_verification_form(
         &state,
         &rl_identifier,
         Some(&ip),
-        "resend_verification_request",
+        "resend_verification",
     )
     .await
     .ok();
@@ -1640,9 +1647,10 @@ pub async fn forgot_password(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, addr);
 
     // CSRF 검증.
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1656,9 +1664,16 @@ pub async fn forgot_password(
     // 스팸이 `/login`의 동일 email 카운터를 소모해 피해자를 로그인 불가로
     // 만들 수 있다(교차 엔드포인트 락아웃).
     let rl_identifier = format!("forgot:{}", form.email);
-    let allowed = check_rate_limit(&state, &rl_identifier, Some(&ip))
-        .await
-        .unwrap_or(false);
+    let allowed = check_rate_limit_custom(
+        &state,
+        &rl_identifier,
+        Some(&ip),
+        MAX_EMAIL_SEND_ATTEMPTS,
+        MAX_IP_EMAIL_SEND_ATTEMPTS,
+        EMAIL_SEND_WINDOW_SECS,
+    )
+    .await
+    .unwrap_or(false);
     if !allowed {
         // 차단된 요청은 기록하지 않는다 (락아웃 증폭 방지).
         return info_page("error", "Too many requests. Please try again later.");
@@ -1667,7 +1682,7 @@ pub async fn forgot_password(
     // 카운터 증가 — 응답이 항상 동일(계정 열거 방지)하므로 통과한 모든 요청을
     // 1건으로 센다. 유효한 이메일에 대한 반복 요청이 곧 이메일 폭탄이므로
     // "실패 경로에서만 기록"하면 방어가 성립하지 않는다.
-    record_rate_limited_request(&state, &rl_identifier, Some(&ip), "forgot_password_request")
+    record_rate_limited_request(&state, &rl_identifier, Some(&ip), "forgot_password")
         .await
         .ok();
 
@@ -1771,9 +1786,10 @@ pub async fn reset_password(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(form): Form<ResetPasswordForm>,
 ) -> Response {
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, addr);
 
     // CSRF 검증.
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -2059,6 +2075,7 @@ pub async fn bootstrap(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     jar: CookieJar,
+    headers: axum::http::HeaderMap,
     Form(form): Form<BootstrapForm>,
 ) -> Result<(CookieJar, Redirect), (StatusCode, CookieJar, Response)> {
     use fleet_core::auth::password::hash_password;
@@ -2090,7 +2107,7 @@ pub async fn bootstrap(
         ));
     }
 
-    let ip = addr.ip().to_string();
+    let ip = extract_client_ip(&headers, addr);
 
     // Rate limit — bootstrap 엔드포인트도 무차별 대입 공격에서 보호.
     // 식별자는 "bootstrap:<ip>" (아직 사용자가 없으므로 IP 기반).
@@ -2105,14 +2122,6 @@ pub async fn bootstrap(
             )
         })?;
     if !allowed {
-        crate::auth::record_login_failure(
-            &state,
-            &bootstrap_id,
-            Some(&ip),
-            "bootstrap_rate_limited",
-        )
-        .await
-        .ok();
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             jar,

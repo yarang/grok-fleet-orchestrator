@@ -38,6 +38,10 @@ thiserror = "1.0"
 anyhow = "1.0"
 tracing = "0.1"
 
+# JWT 및 HTTP 요청
+jsonwebtoken = "9.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # 인증 / 암호화 (Phase 9.1: RBAC + cookie session)
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["alloc"] }

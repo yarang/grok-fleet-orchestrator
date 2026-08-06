@@ -84,6 +84,15 @@ pub trait Store: Send + Sync {
         heartbeat: &WorkerHeartbeat,
     ) -> Result<(), StoreError>;
 
+    /// 워커의 CircuitBreaker 상태 강제 갱신.
+    async fn update_worker_circuit_state(
+        &self,
+        _id: WorkerId,
+        _state: fleet_core::worker::CircuitState,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
     // ── Event log (append-only) ────────────────────────────────────
 
     /// 이벤트를 로그에 추가. 발급된 시퀀스 번호 반환.

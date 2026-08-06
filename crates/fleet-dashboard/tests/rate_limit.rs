@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 
 /// `auth.rs`의 `MAX_FAILED_ATTEMPTS`와 동일해야 한다.
 const MAX_FAILED_ATTEMPTS: usize = 5;
+const MAX_EMAIL_SEND_ATTEMPTS: usize = 3;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  login_attempts만 구현한 최소 인메모리 Store
@@ -298,7 +299,7 @@ async fn forgot_password_blocks_after_max_attempts() {
 
     // 존재하지 않는 이메일이어도 요청 자체가 카운트되어야 한다
     // (계정 열거 방지로 응답이 항상 동일하므로 "실패 경로"가 없다).
-    for i in 0..MAX_FAILED_ATTEMPTS {
+    for i in 0..MAX_EMAIL_SEND_ATTEMPTS {
         let body = post_form(&server, "/forgot-password", &[("email", email)]).await;
         assert!(
             !is_rate_limited(&body),
@@ -310,7 +311,7 @@ async fn forgot_password_blocks_after_max_attempts() {
     // 카운터가 실제로 증가했는지 확인 (핵심 회귀 지점).
     assert_eq!(
         server.store.failure_count(&format!("forgot:{email}")),
-        MAX_FAILED_ATTEMPTS,
+        MAX_EMAIL_SEND_ATTEMPTS,
         "정상 요청이 카운터를 증가시켜야 한다"
     );
 
@@ -319,13 +320,13 @@ async fn forgot_password_blocks_after_max_attempts() {
     assert!(
         is_rate_limited(&body),
         "{}회 초과 시 차단되어야 한다",
-        MAX_FAILED_ATTEMPTS
+        MAX_EMAIL_SEND_ATTEMPTS
     );
 
     // 차단된 요청은 기록하지 않는다 (락아웃 무한 연장 방지).
     assert_eq!(
         server.store.failure_count(&format!("forgot:{email}")),
-        MAX_FAILED_ATTEMPTS,
+        MAX_EMAIL_SEND_ATTEMPTS,
         "차단된 요청은 카운터를 더 늘리지 않아야 한다"
     );
 }
@@ -336,7 +337,7 @@ async fn resend_verification_blocks_after_max_attempts() {
     let server = spawn_server().await;
     let email = "victim2@example.com";
 
-    for i in 0..MAX_FAILED_ATTEMPTS {
+    for i in 0..MAX_EMAIL_SEND_ATTEMPTS {
         let body = post_form(&server, "/resend-verification", &[("email", email)]).await;
         assert!(
             !is_rate_limited(&body),
@@ -347,7 +348,7 @@ async fn resend_verification_blocks_after_max_attempts() {
 
     assert_eq!(
         server.store.failure_count(&format!("resend:{email}")),
-        MAX_FAILED_ATTEMPTS
+        MAX_EMAIL_SEND_ATTEMPTS
     );
 
     let body = post_form(&server, "/resend-verification", &[("email", email)]).await;
@@ -415,13 +416,13 @@ async fn forgot_password_spam_does_not_consume_login_counter() {
     let server = spawn_server().await;
     let email = "victim3@example.com";
 
-    for _ in 0..MAX_FAILED_ATTEMPTS {
+    for _ in 0..MAX_EMAIL_SEND_ATTEMPTS {
         post_form(&server, "/forgot-password", &[("email", email)]).await;
     }
 
     assert_eq!(
         server.store.failure_count(&format!("forgot:{email}")),
-        MAX_FAILED_ATTEMPTS
+        MAX_EMAIL_SEND_ATTEMPTS
     );
     assert_eq!(
         server.store.failure_count(email),

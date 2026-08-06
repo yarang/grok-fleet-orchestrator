@@ -62,6 +62,15 @@ pub const MAX_IP_FAILED_ATTEMPTS: u64 = 20;
 /// 실패 잠금 윈도우 (최근 60초).
 pub const FAILED_ATTEMPT_WINDOW_SECS: i64 = 60;
 
+/// 이메일 발송 시도 실패 허용 한계 — identifier 단독 (사용자명당 3회).
+pub const MAX_EMAIL_SEND_ATTEMPTS: u64 = 3;
+
+/// 이메일 발송 시도 실패 허용 한계 — IP 단독 (IP당 10회).
+pub const MAX_IP_EMAIL_SEND_ATTEMPTS: u64 = 10;
+
+/// 이메일 발송 잠금 윈도우 (1시간 = 3600초).
+pub const EMAIL_SEND_WINDOW_SECS: i64 = 3600;
+
 /// 인증된 사용자 컨텍스트 (handler에서 권한 검사에 사용).
 #[derive(Debug, Clone)]
 pub struct AuthPrincipal {
@@ -156,7 +165,7 @@ pub async fn require_session(
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         {
-            let current_ip = addr.ip().to_string();
+            let current_ip = extract_client_ip(req.headers(), *addr);
             if session_ip != &current_ip {
                 tracing::warn!(
                     user_id = %principal.user.id,
@@ -369,24 +378,42 @@ pub async fn check_rate_limit(
     identifier: &str,
     ip: Option<&str>,
 ) -> Result<bool, StatusCode> {
-    // 1. identifier 단독 카운트 — 기존 (identifier, ip) 쿼리를 ip=None 없이
-    //    모든 IP의 실패를 합산하도록 변경.
+    check_rate_limit_custom(
+        state,
+        identifier,
+        ip,
+        MAX_FAILED_ATTEMPTS,
+        MAX_IP_FAILED_ATTEMPTS,
+        FAILED_ATTEMPT_WINDOW_SECS,
+    )
+    .await
+}
+
+pub async fn check_rate_limit_custom(
+    state: &DashboardState,
+    identifier: &str,
+    ip: Option<&str>,
+    max_id_attempts: u64,
+    max_ip_attempts: u64,
+    window_secs: i64,
+) -> Result<bool, StatusCode> {
+    // 1. identifier 단독 카운트
     let id_count = state
         .store
-        .count_recent_failed_attempts(identifier, None, FAILED_ATTEMPT_WINDOW_SECS)
+        .count_recent_failed_attempts(identifier, None, window_secs)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if id_count >= MAX_FAILED_ATTEMPTS {
+    if id_count >= max_id_attempts {
         return Ok(false);
     }
-    // 2. IP 단독 카운트 — IP 회전 공격 방어.
+    // 2. IP 단독 카운트
     if let Some(ip) = ip {
         let ip_count = state
             .store
-            .count_recent_ip_failures(ip, FAILED_ATTEMPT_WINDOW_SECS)
+            .count_recent_ip_failures(ip, window_secs)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if ip_count >= MAX_IP_FAILED_ATTEMPTS {
+        if ip_count >= max_ip_attempts {
             return Ok(false);
         }
     }
@@ -457,7 +484,7 @@ pub async fn record_login_success(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .store
-        .clear_login_attempts(identifier, ip)
+        .clear_login_attempts(identifier, None)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -537,4 +564,43 @@ mod tests {
         // 마지막 세션도 최초 로그인 기준 만료 시각을 넘기지 못한다.
         assert!(created < absolute_expiry);
     }
+}
+
+pub fn extract_client_ip(headers: &axum::http::HeaderMap, peer_addr: std::net::SocketAddr) -> String {
+    let trusted_proxies: Vec<std::net::IpAddr> = std::env::var("FLEET_TRUSTED_PROXIES")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim())
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .collect();
+
+    let peer_ip = peer_addr.ip();
+
+    if trusted_proxies.contains(&peer_ip) {
+        if let Some(cf_ip) = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        {
+            return cf_ip.to_string();
+        }
+
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            let parts: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+            for part in parts.iter().rev() {
+                if let Ok(ip) = part.parse::<std::net::IpAddr>() {
+                    if !trusted_proxies.contains(&ip) {
+                        return ip.to_string();
+                    }
+                }
+            }
+            if let Some(first) = parts.first() {
+                if let Ok(ip) = first.parse::<std::net::IpAddr>() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+
+    peer_ip.to_string()
 }

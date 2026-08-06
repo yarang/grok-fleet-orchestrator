@@ -431,6 +431,28 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn update_worker_circuit_state(
+        &self,
+        id: WorkerId,
+        state: fleet_core::worker::CircuitState,
+    ) -> Result<(), StoreError> {
+        let circuit_str = circuit_state_to_str(state);
+        let result = sqlx::query(
+            r#"UPDATE workers SET
+                 circuit_state = $2
+               WHERE id = $1"#,
+        )
+        .bind(id.as_uuid())
+        .bind(circuit_str)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     // ── Event log ──────────────────────────────────────────────────────
 
     async fn append_event(&self, event: &FleetEvent) -> Result<u64, StoreError> {
@@ -1421,6 +1443,7 @@ impl Store for PgStore {
             SELECT COUNT(*) FROM login_attempts
              WHERE ip_address = $1
                AND success = FALSE
+               AND (failure_reason IS NULL OR failure_reason NOT IN ('forgot_password', 'resend_verification'))
                AND attempted_at >= NOW() - make_interval(secs => $2)
             "#,
         )
@@ -1440,7 +1463,7 @@ impl Store for PgStore {
             r#"
             DELETE FROM login_attempts
              WHERE identifier = $1
-               AND (ip_address IS NOT DISTINCT FROM $2)
+               AND ($2::text IS NULL OR ip_address IS NOT DISTINCT FROM $2)
             "#,
         )
         .bind(identifier)

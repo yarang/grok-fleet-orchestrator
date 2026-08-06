@@ -73,8 +73,34 @@ impl Dispatcher {
         match event {
             WorkerEvent::Completed { task_id, result } => {
                 let worker_id = result.worker_id;
-                let cb = self.state.breakers.get(worker_id);
+                let initial_state = self.get_worker_circuit_state(worker_id).await;
+                let cb = self.state.breakers.get(worker_id, initial_state);
+                let old_state = cb.state();
                 cb.record(Outcome::Success);
+                let new_state = cb.state();
+
+                if old_state != new_state {
+                    let from_state = match old_state {
+                        BreakerState::Closed => CircuitState::Closed,
+                        BreakerState::Open => CircuitState::Open,
+                        BreakerState::HalfOpen => CircuitState::HalfOpen,
+                    };
+                    let to_state = match new_state {
+                        BreakerState::Closed => CircuitState::Closed,
+                        BreakerState::Open => CircuitState::Open,
+                        BreakerState::HalfOpen => CircuitState::HalfOpen,
+                    };
+                    let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+                    let _ = self
+                        .state
+                        .store
+                        .append_event(&FleetEvent::worker_circuit_changed(
+                            worker_id,
+                            from_state,
+                            to_state,
+                        ))
+                        .await;
+                }
 
                 self.state
                     .store
@@ -96,18 +122,31 @@ impl Dispatcher {
                 let worker_id = self.current_worker_of(task_id).await;
 
                 if let Some(wid) = worker_id {
-                    let cb = self.state.breakers.get(wid);
+                    let initial_state = self.get_worker_circuit_state(wid).await;
+                    let cb = self.state.breakers.get(wid, initial_state);
+                    let old_state = cb.state();
                     cb.record(Outcome::Failure);
-
                     let new_state = cb.state();
-                    if matches!(new_state, BreakerState::Open) {
+
+                    if old_state != new_state {
+                        let from_state = match old_state {
+                            BreakerState::Closed => CircuitState::Closed,
+                            BreakerState::Open => CircuitState::Open,
+                            BreakerState::HalfOpen => CircuitState::HalfOpen,
+                        };
+                        let to_state = match new_state {
+                            BreakerState::Closed => CircuitState::Closed,
+                            BreakerState::Open => CircuitState::Open,
+                            BreakerState::HalfOpen => CircuitState::HalfOpen,
+                        };
+                        let _ = self.state.store.update_worker_circuit_state(wid, to_state).await;
                         let _ = self
                             .state
                             .store
                             .append_event(&FleetEvent::worker_circuit_changed(
                                 wid,
-                                CircuitState::Closed,
-                                CircuitState::Open,
+                                from_state,
+                                to_state,
                             ))
                             .await;
                     }
@@ -197,8 +236,36 @@ impl Dispatcher {
         };
 
         // 4. CircuitBreaker 체크
-        let cb = self.state.breakers.get(worker_id);
-        if let Err(e) = cb.check() {
+        let initial_state = self.get_worker_circuit_state(worker_id).await;
+        let cb = self.state.breakers.get(worker_id, initial_state);
+        let old_state = cb.state();
+        let check_res = cb.check();
+        let new_state = cb.state();
+
+        if old_state != new_state {
+            let from_state = match old_state {
+                BreakerState::Closed => CircuitState::Closed,
+                BreakerState::Open => CircuitState::Open,
+                BreakerState::HalfOpen => CircuitState::HalfOpen,
+            };
+            let to_state = match new_state {
+                BreakerState::Closed => CircuitState::Closed,
+                BreakerState::Open => CircuitState::Open,
+                BreakerState::HalfOpen => CircuitState::HalfOpen,
+            };
+            let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+            let _ = self
+                .state
+                .store
+                .append_event(&FleetEvent::worker_circuit_changed(
+                    worker_id,
+                    from_state,
+                    to_state,
+                ))
+                .await;
+        }
+
+        if let Err(e) = check_res {
             let failure = TaskFailure {
                 error: format!("circuit open: {e}"),
                 kind: FailureKind::CircuitOpen,
@@ -241,7 +308,33 @@ impl Dispatcher {
 
         if let Err(e) = self.state.transport.dispatch(req).await {
             // dispatch 자체 실패 (연결 등)
+            let old_state = cb.state();
             cb.record(Outcome::Failure);
+            let new_state = cb.state();
+
+            if old_state != new_state {
+                let from_state = match old_state {
+                    BreakerState::Closed => CircuitState::Closed,
+                    BreakerState::Open => CircuitState::Open,
+                    BreakerState::HalfOpen => CircuitState::HalfOpen,
+                };
+                let to_state = match new_state {
+                    BreakerState::Closed => CircuitState::Closed,
+                    BreakerState::Open => CircuitState::Open,
+                    BreakerState::HalfOpen => CircuitState::HalfOpen,
+                };
+                let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+                let _ = self
+                    .state
+                    .store
+                    .append_event(&FleetEvent::worker_circuit_changed(
+                        worker_id,
+                        from_state,
+                        to_state,
+                    ))
+                    .await;
+            }
+
             let failure = TaskFailure {
                 error: e.to_string(),
                 kind: FailureKind::WorkerError,
@@ -373,6 +466,15 @@ impl Dispatcher {
 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    async fn get_worker_circuit_state(&self, id: WorkerId) -> CircuitState {
+        self.state.store.get_worker(id)
+            .await
+            .ok()
+            .flatten()
+            .map(|w| w.circuit_state)
+            .unwrap_or(CircuitState::Closed)
     }
 }
 

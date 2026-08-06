@@ -176,6 +176,22 @@ pub fn validate_env_with(get: impl Fn(&str) -> Option<String>) -> Vec<ConfigIssu
         _ => {}
     }
 
+    // ── FLEET_TRUSTED_PROXIES — 선택이지만, 설정했다면 형식이 맞아야 함 ──
+    if let Some(proxies_str) = get("FLEET_TRUSTED_PROXIES") {
+        let proxies_str = proxies_str.trim();
+        if !proxies_str.is_empty() {
+            for part in proxies_str.split(',') {
+                let part = part.trim();
+                if !part.is_empty() && part.parse::<std::net::IpAddr>().is_err() {
+                    issues.push(ConfigIssue {
+                        key: "FLEET_TRUSTED_PROXIES",
+                        problem: format!("유효하지 않은 IP 주소입니다: '{part}'"),
+                    });
+                }
+            }
+        }
+    }
+
     issues
 }
 
@@ -286,6 +302,25 @@ mod tests {
             ("FLEET_BASE_URL", "https://fleet.example.com"),
             ("FLEET_GMAIL_USER", "ops@example.com"),
             ("FLEET_GMAIL_APP_PASS", "secret"),
+        ]));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+    }
+
+    #[test]
+    fn env_validation_rejects_invalid_trusted_proxies() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_TRUSTED_PROXIES", "127.0.0.1,invalid-ip"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_TRUSTED_PROXIES");
+    }
+
+    #[test]
+    fn env_validation_accepts_valid_trusted_proxies() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_TRUSTED_PROXIES", "127.0.0.1, ::1, 10.0.0.1"),
         ]));
         assert!(issues.is_empty(), "issues: {issues:?}");
     }

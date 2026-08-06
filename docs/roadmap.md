@@ -5,6 +5,10 @@
 > 항목 번호는 팀 내 참조 키이므로 **완료되어도 번호를 재사용하거나 삭제하지 않는다** — ✅로 표시하고 원인/커밋을 남긴다.
 > 이 문서의 갱신 오너는 planner이며, 단계 완료 시점마다 코드 실측 대조 후 일괄 갱신한다.
 > 다른 담당자는 커밋 메시지에 항목 번호(`#7`, `#20`)만 남기면 된다.
+>
+> 🔐 **보안 백로그는 [`docs/security-findings.md`](./security-findings.md)에 별도 관리**한다.
+> 미해결 발견 6건(S1~S6, HIGH 3건 포함)이 등록되어 있으며, 각 항목은 재확인 명령·
+> 악용 시나리오·수정 방향·회귀 테스트 방침을 포함한다. 아래 #33 참조.
 
 ## P0 — Production Blockers
 
@@ -139,6 +143,24 @@
     → 심각도는 *데이터 노출*이 아니라 **심층 방어 결여 + 관리 UI 구조 노출**이다. 다만 페이지
     계층에 검사가 없다는 사실 자체가, 향후 어떤 페이지가 데이터를 인라인으로 렌더링하기
     시작하면 즉시 실제 취약점으로 바뀌는 구조다. 세 페이지를 **일괄** 수정할 것.
+
+    ✅ 해결됨 (`db614ec`). 지적된 3개 페이지에 더해 `admin_ssh_keys_page`·`provision_page`까지
+    5개를 `serve_page_if_permitted`로 일괄 처리했다. 작업 중 **실제 데이터 유출 1건**을 함께
+    발견·수정했다 — `/api/events/stream`(SSE)에 권한 검사가 전무해 `task:output` 권한이 없는
+    `Viewer`가 REST(`get_task_detail_api`)에서 막힌 작업 stdout/stderr를 받아갈 수 있었다.
+    이후 동일 데이터의 폴링 경로(`GET /api/events`)에도 같은 누락이 있음이 드러나
+    `event_view.rs` 공통 필터로 통합했다 (`80acf3c`).
+
+33. ✅ **미해결 보안 발견 6건 (S1~S6) 해결 완료** (P1, 보안) — → 담당: security
+    
+    상세: [`docs/security-findings.md`](./security-findings.md). 2026-08-06에 6대 보안 결함 전체를 해결 완료했습니다.
+
+    * **S1 (락아웃 증폭)**: 차단 분기 내의 `record_login_failure` 호출을 제거해 계정 영구 잠금 취약점을 해소했습니다.
+    * **S2 (JWT 서명 미검증)**: `jsonwebtoken`을 도입해 JWKS(certs) 기반 RS256 서명, `iss`, `aud`, `exp`를 정상 검증하도록 고도화하고 로컬 테스트 모킹용 헬퍼를 추가했습니다.
+    * **S3 (프록시 IP 루프백)**: `FLEET_TRUSTED_PROXIES` allow-list를 활용해 프록시 뒤의 Real Client IP를 정확히 역추출하는 `extract_client_ip`를 미들웨어 및 5개 핸들러에 적용했습니다.
+    * **S4 (IP 실패 엔드포인트 잠식)**: `count_recent_ip_failures` SQL에 필터를 넣어 비밀번호 재설정(`forgot_password`) 및 이메일 재발송(`resend_verification`) 로그의 가짜 실패 이력을 IP 예산 카운트에서 제외시켰습니다.
+    * **S5 (clear_login_attempts NULL 지뢰)**: `$2::text IS NULL OR ...`로 안전화하고, 로그인 성공 시 특정 IP만이 아닌 계정 전체의 IP 실패 기록을 일괄 초기화하도록 변경했습니다.
+    * **S6 (60초 메일 제한)**: 메일 발송 엔드포인트에 1시간당 최대 3회 발송만 허용하는 별도의 `check_rate_limit_custom` 로직을 추가하여 이메일 폭탄 취약점을 해결했습니다.
 
 ---
 

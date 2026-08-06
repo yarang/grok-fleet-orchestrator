@@ -16,6 +16,7 @@
 | `fleet-backup.service`     | `scripts/db-backup.sh` 실행용 one-shot systemd 유닛        | orchestrator    |
 | `fleet-backup.timer`       | `fleet-backup.service` 일 단위 자동 실행 타이머            | orchestrator    |
 | `mcp-clients.json`         | grok build / Claude Code / Cursor / Gemini CLI 연결 예시   | MCP 클라이언트  |
+| `egress-proxy/`            | 워커의 `api.z.ai` 아웃바운드를 단일 IP로 통합하는 HAProxy+keepalived 구성 | 이그레스 프록시 |
 
 ## 전형적인 배포 플로우
 
