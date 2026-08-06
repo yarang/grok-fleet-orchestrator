@@ -162,6 +162,10 @@
     * **S5 (clear_login_attempts NULL 지뢰)**: `$2::text IS NULL OR ...`로 안전화하고, 로그인 성공 시 특정 IP만이 아닌 계정 전체의 IP 실패 기록을 일괄 초기화하도록 변경했습니다.
     * **S6 (60초 메일 제한)**: 메일 발송 엔드포인트에 1시간당 최대 3회 발송만 허용하는 별도의 `check_rate_limit_custom` 로직을 추가하여 이메일 폭탄 취약점을 해결했습니다.
 
+34. ⏳ **liteLLM 중앙 게이트웨이 통합 및 연동** (P2, LLM 인프라)
+    
+    상세: [`docs/llm-wiki/README.md`](./llm-wiki/README.md). 오케스트레이터의 멀티 LLM 공급자 연동과 Spend Control(비용 추적/한도)을 제어하기 위해 liteLLM 프록시 서비스를 Docker Compose에 수용하고, 시작 시 환경변수(`FLEET_LLM_GATEWAY_URL`) Fail-Fast 설정을 추가합니다.
+
 ---
 
 ## 현재 진행 상황 (2026-08-01 기준)

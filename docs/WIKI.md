@@ -31,3 +31,9 @@ Grok Fleet Orchestrator 프로젝트의 설계 사상, 배포 가이드라인, �
 *   **[리눅스 패키지 관리 설계 (linux_package_management_design.md)](./linux_package_management_design.md)**: 워커 데몬이 UFW 방화벽 및 시스템 패키지를 검사/설치하기 위한 로직 아키텍처.
 *   **[고급 서버 관리 기능 제안서 (advanced_server_management_proposals.md)](./advanced_server_management_proposals.md)**: UFW 방화벽 동적 제어, GPU 드라이버 헬스체크 및 SSH Key 로테이션 요구사항 제안.
 *   **[클라우드 & 물리 서버 자가 치유 설계 (cloud_and_baremetal_hardware_healing_design.md)](./cloud_and_baremetal_hardware_healing_design.md)**: 가상화 클라우드(AWS, GCP 등)의 GPU Throttling 간접 감지 및 환경별(VM 재시작 vs 베어메탈 쿨링 파워 제한) 차별화 서킷 브레이커 자가 복구 가이드.
+
+### 5. 🤖 LLM 게이트웨이 및 프록시 (LLM Gateway & Proxy)
+다양한 LLM 공급사 API의 통합 통제 및 비용 제어를 위한 게이트웨이 설계서입니다.
+*   **[LLM 게이트웨이 위키 메인 (llm-wiki/README.md)](./llm-wiki/README.md)**: liteLLM 표준 도입 배경, Go `One API` 대안과의 비교 분석 요약 및 로드맵 가이드.
+*   **[멀티 LLM 공급자 대안 분석 보고서 (llm-wiki/multi_provider_llm_proxy_analysis.md)](./llm-wiki/multi_provider_llm_proxy_analysis.md)**: 벤더사별 프록시 도입의 장단점 및 비용(Spend Control) 관련 분석서.
+*   **[liteLLM 게이트웨이 연동 설계 계획서 (llm-wiki/litellm_integration_plan.md)](./llm-wiki/litellm_integration_plan.md)**: Docker Compose 통합, `litellm-config.yaml` 템플릿 명세 및 Fail-Fast 밸리데이터 구현 계획.
