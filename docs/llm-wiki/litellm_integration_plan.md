@@ -1,8 +1,8 @@
-# liteLLM 게이트웨이 도입 및 연동 설계 계획서 (liteLLM Integration Plan)
+# liteLLM 게이트웨이 도입 및 연동 설계 계획서
 
-> 작성일: 2026-08-06. 담당: Antigravity.
-> 
-> 이 문서의 목적은 Grok Fleet Orchestrator에 **liteLLM 프록시 게이트웨이**를 표준 연동 체계로 안착시켜, 워커 노드와 오케스트레이터 내부에서 여러 외부 LLM 공급자(OpenAI, Anthropic, Gemini, Zhipu 등)를 단일 OpenAI API 규격으로 관리하고 비용 및 예산(Spend Tracking) 한도를 제어하도록 구성하는 기술 설계 계획을 제시하는 것입니다.
+> 최종 개정: 2026-08-06.
+
+본 문서는 Grok Fleet Orchestrator에 **liteLLM 프록시 게이트웨이**를 연동하기 위한 인프라 패키징 및 설정 파일 설계 사양을 정의합니다.
 
 ---
 
@@ -14,44 +14,18 @@
 
 ---
 
-## 2. 사용자 피드백/리뷰 필요 사항 (User Review Required)
+## 2. 인프라 최적화 의사 결정 (Database & Cache Settings)
 
-> [!IMPORTANT]
-> **인프라 종속성 추가 (PostgreSQL & Redis)**
-> *   liteLLM의 비용 추적, 사용자 관리, 그리고 Rate limit 정책을 프로덕션 수준으로 구현하려면 데이터베이스(Postgres)와 캐시(Redis)가 필요합니다.
-> *   기존 오케스트레이터 DB(`fleet-db`) 내에 `litellm` 전용 독립 데이터베이스/스키마를 생성하여 사용함으로써 추가 DB 서버 증설 오버헤드를 막을 것을 제안합니다.
-> *   캐시용으로 Redis 컨테이너를 Docker Compose에 추가하거나, 소규모 배포 시에는 로컬 인메모리 캐시로 대체할 수 있게 기본값을 설정하겠습니다.
+*   **PostgreSQL 단일화 (Redis 제거)**:
+    *   liteLLM의 토큰 비용 추적, API 키 발급 및 한도 설정을 위해 PostgreSQL 연동을 활용합니다.
+    *   추가적인 캐시 서버(Redis) 증설 오버헤드를 막기 위해, 소규모/중규모 배포 환경에서는 Redis 없이 기존 PostgreSQL 서버 내 독립 DB(`litellm`)만을 바인딩하여 심플하게 운영합니다.
 
 ---
 
-## 3. 상세 연동 아키텍처 및 흐름
+## 3. 상세 구성 명세 (Configuration Spec)
 
-```
-[워커 / 대시보드 / 에이전트] 
-       │ (OpenAI SDK 스펙 통신)
-       ▼ (포트 4000)
-┌────────────────────────────────────────────────────────┐
-│             liteLLM Proxy Gateway                      │
-│ - API Key 인증 & Rate Limiting                         │
-│ - Model Mapping (e.g., 'gpt-4o' -> 'claude-3-5-sonnet')│
-│ - Redis 캐싱 & DB 사용량 로깅                           │
-└────────────────────────────────────────────────────────┘
-       │ (각 벤더사 고유 포맷 번역)
-       ├───► OpenAI API (GPT)
-       ├───► Anthropic API (Claude)
-       └───► Google Vertex AI (Gemini)
-```
-
----
-
-## 4. 제안된 변경 사항 (Proposed Changes)
-
-### 4.1 [MODIFY] `docker-compose.yml` (Root)
-*   **작업 내용**: `litellm` 게이트웨이 서비스 정의 추가.
-*   **세부 구성**:
-    *   BerriAI 공식 이미지 `ghcr.io/berriai/litellm:main-latest` 사용.
-    *   포트 `4000` 노출.
-    *   오케스트레이터 DB 서버(`db.internal`)에 종속성을 연결하여 데이터 저장.
+### 3.1 `docker-compose.yml` 추가 사양
+오케스트레이터의 `docker-compose.yml`에 게이트웨이 서비스를 병합합니다.
 
 ```yaml
   litellm:
@@ -63,7 +37,7 @@
       - ./examples/litellm-config.yaml:/app/config.yaml
     environment:
       - DATABASE_URL=postgresql://fleet:secret@db.internal:5432/litellm
-      # 외부 LLM API 키 (필요한 것만 활성화)
+      # 외부 LLM API 키 (필요한 것만 주입)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
@@ -73,10 +47,8 @@
         condition: service_healthy
 ```
 
----
-
-### 4.2 [NEW] `examples/litellm-config.yaml`
-*   **작업 내용**: liteLLM의 모델 라우팅, Fallback 및 로드밸런싱 설정을 선언하는 템플릿 예시 추가.
+### 3.2 `examples/litellm-config.yaml` 템플릿 명세
+프로젝트 최상위의 예시 템플릿 파일로 신설할 설정 구조입니다.
 
 ```yaml
 model_list:
@@ -92,54 +64,38 @@ model_list:
       model: openai/gpt-4o
       api_key: "os.environ/OPENAI_API_KEY"
 
-  # 3. 범용 추론 가상 모델 정의 (Fallback & Load Balancing 연동)
+  # 3. 가상 대표 모델 정의 (Fallback 연동)
   - model_name: fleet-default-model
     litellm_params:
       model: anthropic/claude-3-5-sonnet-20241022
       api_key: "os.environ/ANTHROPIC_API_KEY"
-    fallback_models: ["gpt-4o"] # Claude 장애 시 GPT로 스위칭
+    fallback_models: ["gpt-4o"] # Claude 장애 시 GPT로 자동 대체
 
 general_settings:
-  master_key: sk-fleet-master-key-1234 # 관리 대시보드 진입 및 키 생성용 마스터키
+  master_key: sk-fleet-master-key-1234 # 관리 API 및 대시보드 진입용 마스터키
   database_url: "os.environ/DATABASE_URL"
 
 litellm_settings:
-  drop_params: true # 지원되지 않는 파라미터가 와도 에러 대신 드롭 처리하여 호환성 극대화
+  drop_params: true # 지원하지 않는 비표준 인자가 들어와도 안전하게 드롭 후 통과 처리
   set_verbose: true
 ```
 
 ---
 
-### 4.3 [MODIFY] `docs/deployment.md`
-*   **작업 내용**: 배포 문서 내에 **"5. 외부 LLM Gateway (liteLLM) 연동 가이드"** 색션을 추가하여, 다중화된 오케스트레이터 배포 환경에서 백엔드 LLM 인프라를 확장하는 표준 명령어 및 가이드를 명시합니다.
+## 4. 검증 계획 (Verification Plan)
 
----
+### 4.1 자동화 테스트
+*   **테스트 대상**: 오케스트레이터 기동 시 `FLEET_LLM_GATEWAY_URL` 환경변수 Fail-Fast 밸리데이터 동작 검증.
+*   **명령어**: `cargo test -p fleet-core`
 
-### 4.4 [MODIFY] `crates/fleet-core/src/config.rs` & `fleet.env`
-*   **작업 내용**: 오케스트레이터가 외부 LLM 프록시를 바라보도록 환경변수 명세를 추가하고, 시작 시 유효성 검증을 정비합니다.
-    *   `FLEET_LLM_GATEWAY_URL` : liteLLM 프록시 게이트웨이 엔드포인트 (기본: `http://localhost:4000`)
-    *   `FLEET_LLM_API_KEY` : liteLLM 통신용 API 키
-
----
-
-## 5. 검증 계획 (Verification Plan)
-
-### 자동화 테스트 (Automated Tests)
-*   **테스트 대상**: 환경변수 밸리데이터 및 설정 파일 로딩 테스트.
-*   **실행 명령어**:
-    ```bash
-    cargo test -p fleet-core --lib config::tests
-    ```
-
-### 수동 검증 (Manual Verification)
-1.  `docker-compose up -d` 기동 후 `http://localhost:4000/health` 및 `http://localhost:4000/v1/models` 가 OpenAI 규격으로 사용 가능한 모델 목록을 올바르게 응답하는지 확인.
-2.  `curl` 명령을 사용하여 임의의 가짜 키로 호출 시 차단되고, `sk-fleet-master-key-1234`로 호출 시 Claude/GPT 모델 추론 스트림이 정상 수신되는지 검증.
-    ```bash
-    curl http://localhost:4000/v1/chat/completions \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer sk-fleet-master-key-1234" \
-      -d '{
-        "model": "fleet-default-model",
-        "messages": [{"role": "user", "content": "Hello, is liteLLM working?"}]
-      }'
-    ```
+### 4.2 수동 API 연동 테스트
+Nginx를 거치거나 내부 망에서 직접 통신하여 OpenAI 호환 규격으로 추론을 던져봅니다.
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-fleet-master-key-1234" \
+  -d '{
+    "model": "fleet-default-model",
+    "messages": [{"role": "user", "content": "Hello, is liteLLM working?"}]
+  }'
+```
