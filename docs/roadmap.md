@@ -162,11 +162,13 @@
     * **S5 (clear_login_attempts NULL 지뢰)**: `$2::text IS NULL OR ...`로 안전화하고, 로그인 성공 시 특정 IP만이 아닌 계정 전체의 IP 실패 기록을 일괄 초기화하도록 변경했습니다.
     * **S6 (60초 메일 제한)**: 메일 발송 엔드포인트에 1시간당 최대 3회 발송만 허용하는 별도의 `check_rate_limit_custom` 로직을 추가하여 이메일 폭탄 취약점을 해결했습니다.
 
-34. ⏳ **liteLLM 중앙 게이트웨이 통합 및 연동** (P2, LLM 인프라)
+34. ✅ **liteLLM 중앙 게이트웨이 통합 및 연동** (P2, LLM 인프라) — 해결됨 (`cbbea58`).
     
     상세: [`docs/llm-wiki/README.md`](./llm-wiki/README.md). 오케스트레이터의 멀티 LLM 공급자 연동과 Spend Control(비용 추적/한도)을 제어하기 위해 liteLLM 프록시 서비스를 Docker Compose에 수용하고, 시작 시 환경변수(`FLEET_LLM_GATEWAY_URL`) Fail-Fast 설정을 추가합니다.
 
-    **문서 정합성 수정 (2026-08-06~07)**: [`docs/single_server_deployment_plan.md`](./single_server_deployment_plan.md)가 이 결정 이전에 작성되어 "One API(경량 대안)를 liteLLM 대신 채택"이라고 반대로 기술하고 있던 충돌을 발견했다. liteLLM 기준(포트 4000, `ghcr.io/berriai/litellm`, `litellm` 전용 논리 DB, `FLEET_LLM_GATEWAY_URL`)으로 갱신해 모순을 해소하는 한편, 재발 방지를 위해 `docs/llm-wiki/`를 게이트웨이 결정·스펙의 **정본(canonical source)**으로 격상했다 — `multi_provider_llm_proxy_analysis.md`에 liteLLM vs One API 비교표를 추가해 선택 근거를 명문화하고, `single_server_deployment_plan.md`의 Docker Compose 예시는 이제 그 정본을 인용한 사본임을 명시했다. 이어서 [Karpathy의 "LLM Wiki" 패턴](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)에 맞춰 `docs/llm-wiki/index.md`(페이지 카탈로그)와 `docs/llm-wiki/log.md`(ingest/query/lint append-only 이력)를 신설하고, `README.md`를 운영 규칙(스키마) 문서로 재편했다 — 상세 이력은 `log.md` 참고. 실제 Docker Compose·검증 코드(`FLEET_LLM_GATEWAY_URL` Fail-Fast validator, `examples/litellm-config.yaml`)는 아직 미구현 — 본 항목은 계속 ⏳.
+    **문서 정합성 수정 (2026-08-06~07)**: [`docs/single_server_deployment_plan.md`](./single_server_deployment_plan.md)가 이 결정 이전에 작성되어 "One API(경량 대안)를 liteLLM 대신 채택"이라고 반대로 기술하고 있던 충돌을 발견했다. liteLLM 기준(포트 4000, `ghcr.io/berriai/litellm`, `litellm` 전용 논리 DB, `FLEET_LLM_GATEWAY_URL`)으로 갱신해 모순을 해소하는 한편, 재발 방지를 위해 `docs/llm-wiki/`를 게이트웨이 결정·스펙의 **정본(canonical source)**으로 격상했다 — `multi_provider_llm_proxy_analysis.md`에 liteLLM vs One API 비교표를 추가해 선택 근거를 명문화하고, `single_server_deployment_plan.md`의 Docker Compose 예시는 이제 그 정본을 인용한 사본임을 명시했다. 이어서 [Karpathy의 "LLM Wiki" 패턴](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)에 맞춰 `docs/llm-wiki/index.md`(페이지 카탈로그)와 `docs/llm-wiki/log.md`(ingest/query/lint append-only 이력)를 신설하고, `README.md`를 운영 규칙(스키마) 문서로 재편했다 — 상세 이력은 `log.md` 참고.
+    
+    **구현 완료 (2026-08-07)**: `crates/fleet-core/src/config.rs`에 `FLEET_LLM_GATEWAY_URL`의 유효한 HTTP/HTTPS URL 스킴 검증 필터를 추가하고 단위 테스트 2개를 작성하여 무결성을 확보했습니다. 또한 `docker-compose.yml`에 포트 4000번 기반의 `litellm` 컨테이너 서비스를 추가하고, 오케스트레이터 서비스가 기동 시 이를 자동 바인딩하도록 연동시켰으며, `examples/litellm-config.yaml` 템플릿 설정을 구축했습니다.
 
 ---
 
