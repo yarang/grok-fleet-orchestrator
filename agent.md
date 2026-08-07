@@ -98,3 +98,17 @@ GitHub Actions CI 환경에서 조건부 컴파일 및 코드 검사가 깨지�
         # 2. 전체 타깃/피처 하에서의 Clippy 경고 유무 확인
         cargo clippy --all-targets --all-features
         ```
+
+---
+
+## 5. LLM-Wiki 지식 관리 규약
+
+AI 에이전트(LLM)와 인간 개발자 간의 문서 정합성을 통제하고 효율적인 컨텍스트 전달을 위해, **모든 기술 문서, 설계 아키팩트, 분석 보고서는 안드레이 카파시의 LLM-Wiki 원칙**에 맞춰 기입해야 합니다.
+
+1.  **YAML 프론트매터 메타데이터 기재**:
+    *   모든 Wiki 마크다운 문서 최상단에 `type: wiki`, `status: canonical | derived`, `source: "<원본경로>"`, `last_verified` 항목을 필수로 설정해야 합니다.
+2.  **카탈로그 등록 및 히스토리 기록**:
+    *   신규 마크다운 문서를 생성하는 즉시 `docs/llm-wiki/index.md` 에 해당 파일 경로와 신뢰도 상태를 등록해야 합니다.
+    *   수정 및 생성이 완료되면 `docs/llm-wiki/log.md` 에 append-only 방식으로 변경 사항(날짜, 주체, 상세 내역)을 무조건 덧붙여야 합니다.
+3.  **Canonical-Derived 정합성 동기화**:
+    *   상위 의사 결정 문서(Canonical)를 변경할 경우, 이를 원천 소스(`source`)로 선언하여 참조하고 있는 하부 명세서나 설정 문서(Derived) 목록을 추적하여 모조리 연동 수정해야 합니다.
