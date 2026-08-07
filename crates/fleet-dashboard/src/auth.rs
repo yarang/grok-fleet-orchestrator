@@ -495,7 +495,10 @@ pub async fn record_login_success(
     Ok(())
 }
 
-pub fn extract_client_ip(headers: &axum::http::HeaderMap, peer_addr: std::net::SocketAddr) -> String {
+pub fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    peer_addr: std::net::SocketAddr,
+) -> String {
     let trusted_proxies: Vec<std::net::IpAddr> = std::env::var("FLEET_TRUSTED_PROXIES")
         .unwrap_or_default()
         .split(',')

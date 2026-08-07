@@ -215,12 +215,8 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_unreachable_port_fails() {
-        // closed port (bind 후 drop).
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let result = health_check(&addr.to_string(), 200).await;
+        // 절대 열려있지 않은 포트(예: 포트 1)를 타깃으로 삼아 즉각 Connection Refused 실패 유도
+        let result = health_check("127.0.0.1:1", 200).await;
         assert!(result.is_err());
     }
 

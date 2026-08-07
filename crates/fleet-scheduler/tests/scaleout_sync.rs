@@ -14,9 +14,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_core::{
-    CircuitBreakerConfig, CircuitState, FleetEvent, Worker, WorkerId,
-};
+use fleet_core::{CircuitBreakerConfig, CircuitState, FleetEvent, Worker, WorkerId};
 use fleet_scheduler::breaker::BreakerState;
 use fleet_scheduler::sync::MultiAdminSync;
 use fleet_scheduler::FleetState;
@@ -77,8 +75,16 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
     let transport_b = Arc::new(fleet_transport::MockTransport::new());
 
     // 독립된 노드 A, B의 FleetState 생성
-    let state_a = Arc::new(FleetState::new(Arc::new(store_a), transport_a, cb_config.clone()));
-    let state_b = Arc::new(FleetState::new(Arc::new(store_b), transport_b, cb_config.clone()));
+    let state_a = Arc::new(FleetState::new(
+        Arc::new(store_a),
+        transport_a,
+        cb_config.clone(),
+    ));
+    let state_b = Arc::new(FleetState::new(
+        Arc::new(store_b),
+        transport_b,
+        cb_config.clone(),
+    ));
 
     // 노드 B의 동기화 코디네이터(MultiAdminSync) 백그라운드 기동
     let sync_b = MultiAdminSync::new(state_b.clone(), pool_a.clone());

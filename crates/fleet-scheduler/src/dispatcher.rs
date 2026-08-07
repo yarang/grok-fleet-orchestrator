@@ -90,14 +90,16 @@ impl Dispatcher {
                         BreakerState::Open => CircuitState::Open,
                         BreakerState::HalfOpen => CircuitState::HalfOpen,
                     };
-                    let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+                    let _ = self
+                        .state
+                        .store
+                        .update_worker_circuit_state(worker_id, to_state)
+                        .await;
                     let _ = self
                         .state
                         .store
                         .append_event(&FleetEvent::worker_circuit_changed(
-                            worker_id,
-                            from_state,
-                            to_state,
+                            worker_id, from_state, to_state,
                         ))
                         .await;
                 }
@@ -139,14 +141,16 @@ impl Dispatcher {
                             BreakerState::Open => CircuitState::Open,
                             BreakerState::HalfOpen => CircuitState::HalfOpen,
                         };
-                        let _ = self.state.store.update_worker_circuit_state(wid, to_state).await;
+                        let _ = self
+                            .state
+                            .store
+                            .update_worker_circuit_state(wid, to_state)
+                            .await;
                         let _ = self
                             .state
                             .store
                             .append_event(&FleetEvent::worker_circuit_changed(
-                                wid,
-                                from_state,
-                                to_state,
+                                wid, from_state, to_state,
                             ))
                             .await;
                     }
@@ -253,14 +257,16 @@ impl Dispatcher {
                 BreakerState::Open => CircuitState::Open,
                 BreakerState::HalfOpen => CircuitState::HalfOpen,
             };
-            let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+            let _ = self
+                .state
+                .store
+                .update_worker_circuit_state(worker_id, to_state)
+                .await;
             let _ = self
                 .state
                 .store
                 .append_event(&FleetEvent::worker_circuit_changed(
-                    worker_id,
-                    from_state,
-                    to_state,
+                    worker_id, from_state, to_state,
                 ))
                 .await;
         }
@@ -323,14 +329,16 @@ impl Dispatcher {
                     BreakerState::Open => CircuitState::Open,
                     BreakerState::HalfOpen => CircuitState::HalfOpen,
                 };
-                let _ = self.state.store.update_worker_circuit_state(worker_id, to_state).await;
+                let _ = self
+                    .state
+                    .store
+                    .update_worker_circuit_state(worker_id, to_state)
+                    .await;
                 let _ = self
                     .state
                     .store
                     .append_event(&FleetEvent::worker_circuit_changed(
-                        worker_id,
-                        from_state,
-                        to_state,
+                        worker_id, from_state, to_state,
                     ))
                     .await;
             }
@@ -469,7 +477,9 @@ impl Dispatcher {
     }
 
     async fn get_worker_circuit_state(&self, id: WorkerId) -> CircuitState {
-        self.state.store.get_worker(id)
+        self.state
+            .store
+            .get_worker(id)
             .await
             .ok()
             .flatten()

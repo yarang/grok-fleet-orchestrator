@@ -229,11 +229,20 @@ impl BreakerRegistry {
     }
 
     /// 워커의 브레이커를 조회. 없으면 생성.
-    pub fn get(&self, worker_id: WorkerId, initial_state: CircuitState) -> std::sync::Arc<CircuitBreaker> {
+    pub fn get(
+        &self,
+        worker_id: WorkerId,
+        initial_state: CircuitState,
+    ) -> std::sync::Arc<CircuitBreaker> {
         let mut breakers = self.breakers.lock().unwrap();
         breakers
             .entry(worker_id)
-            .or_insert_with(|| std::sync::Arc::new(CircuitBreaker::new_with_state(self.config.clone(), initial_state)))
+            .or_insert_with(|| {
+                std::sync::Arc::new(CircuitBreaker::new_with_state(
+                    self.config.clone(),
+                    initial_state,
+                ))
+            })
             .clone()
     }
 

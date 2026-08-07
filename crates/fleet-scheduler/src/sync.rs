@@ -309,7 +309,10 @@ mod tests {
         let worker_id = WorkerId::new();
 
         // 먼저 Open 설정
-        state.breakers.get(worker_id, CircuitState::Closed).force_open();
+        state
+            .breakers
+            .get(worker_id, CircuitState::Closed)
+            .force_open();
         assert_eq!(state.breakers.state_of(worker_id), BreakerState::Open);
 
         let event = FleetEvent::WorkerCircuitChanged {
@@ -327,7 +330,10 @@ mod tests {
     async fn worker_left_resets_breaker() {
         let state = make_state();
         let worker_id = WorkerId::new();
-        state.breakers.get(worker_id, CircuitState::Closed).force_open();
+        state
+            .breakers
+            .get(worker_id, CircuitState::Closed)
+            .force_open();
 
         let event = FleetEvent::worker_left(worker_id, "test");
         let applied = MultiAdminSync::apply_one_to(&state, &event).await;

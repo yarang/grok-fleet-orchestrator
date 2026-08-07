@@ -90,9 +90,7 @@ impl<'a> MtlsFlags<'a> {
 /// `--transport acp` 인 경우 `AcpTransport` 생성. mTLS 플래그가 모두
 /// 설정된 경우 `with_client_tls` 로 클라이언트 인증서를 전달.
 #[cfg(feature = "acp")]
-fn build_acp_transport(
-    mtls_flags: &MtlsFlags,
-) -> Result<AcpTransport, anyhow::Error> {
+fn build_acp_transport(mtls_flags: &MtlsFlags) -> Result<AcpTransport, anyhow::Error> {
     let transport = AcpTransport::new();
     #[cfg(feature = "mtls")]
     {

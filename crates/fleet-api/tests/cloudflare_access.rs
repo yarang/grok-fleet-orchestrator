@@ -233,7 +233,12 @@ async fn cf_access_accepts_valid_jwt() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let jwt = make_jwt(iss, "my-aud-123", unix_now() + 3600, Some("user@example.com"));
+    let jwt = make_jwt(
+        iss,
+        "my-aud-123",
+        unix_now() + 3600,
+        Some("user@example.com"),
+    );
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/workers"))
         .header("cf-access-jwt-assertion", jwt)
@@ -256,7 +261,12 @@ async fn cf_access_rejects_expired_jwt() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let jwt = make_jwt(iss, "my-aud-123", unix_now() - 100, Some("user@example.com"));
+    let jwt = make_jwt(
+        iss,
+        "my-aud-123",
+        unix_now() - 100,
+        Some("user@example.com"),
+    );
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/workers"))
         .header("cf-access-jwt-assertion", jwt)
@@ -279,7 +289,12 @@ async fn cf_access_rejects_wrong_audience() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let jwt = make_jwt(iss, "wrong-aud", unix_now() + 3600, Some("user@example.com"));
+    let jwt = make_jwt(
+        iss,
+        "wrong-aud",
+        unix_now() + 3600,
+        Some("user@example.com"),
+    );
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/workers"))
         .header("cf-access-jwt-assertion", jwt)

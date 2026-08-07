@@ -986,10 +986,9 @@ use std::net::SocketAddr;
 
 use crate::assets::Asset;
 use crate::auth::{
-    check_rate_limit, check_rate_limit_custom, record_login_failure, record_login_success,
-    record_rate_limited_request, extract_client_ip, CSRF_COOKIE, SESSION_COOKIE,
-    SESSION_DURATION_SECS, EMAIL_SEND_WINDOW_SECS, MAX_EMAIL_SEND_ATTEMPTS,
-    MAX_IP_EMAIL_SEND_ATTEMPTS,
+    check_rate_limit, check_rate_limit_custom, extract_client_ip, record_login_failure,
+    record_login_success, record_rate_limited_request, CSRF_COOKIE, EMAIL_SEND_WINDOW_SECS,
+    MAX_EMAIL_SEND_ATTEMPTS, MAX_IP_EMAIL_SEND_ATTEMPTS, SESSION_COOKIE, SESSION_DURATION_SECS,
 };
 use crate::auth_util::{csrf_tokens_match, generate_csrf_token};
 
@@ -1526,14 +1525,9 @@ pub async fn resend_verification_form(
     // 카운터 증가 — 응답이 항상 동일(계정 열거 방지)하므로 실패 경로가 아니라
     // 통과한 모든 요청을 1건으로 센다. 이 호출이 없으면 카운터가 0에 머물러
     // 위 차단 분기에 영원히 도달하지 못한다.
-    record_rate_limited_request(
-        &state,
-        &rl_identifier,
-        Some(&ip),
-        "resend_verification",
-    )
-    .await
-    .ok();
+    record_rate_limited_request(&state, &rl_identifier, Some(&ip), "resend_verification")
+        .await
+        .ok();
 
     match state.store.get_user_by_email(&form.email).await {
         Ok(Some(user)) if !user.email_verified => {
