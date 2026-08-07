@@ -46,3 +46,10 @@
   - `crates/fleet-api/src/handlers.rs`와 `crates/fleet-dashboard/src/handlers.rs`의 쿼리스트링 라벨 필터 접두사 `label_` 누락 및 파싱 불일치 버그를 전면 수정.
   - `limit/offset` 페이지네이션 매개변수가 Postgres Store 계층까지 연동되지 않던 쿼리 누락 결함을 정비하고 E2E 통합 테스트 코드들을 전량 보강.
   - 전담 서브에이전트 `grok_actions_tracker` 를 자동으로 탑재하여 최신 커밋(`7e17558`)의 GitHub Actions 원격 빌드가 100% 그린(success)으로 패스함을 추적 입증하고 `ci_monitor_report.md` 를 작성함.
+
+## 2026-08-07 — lint — 커스텀 스킬 외부 전역 플러그인 패키징 및 워크스페이스 정리
+
+- **조치**:
+  - 기존에 프로젝트 워크스페이스 내부(`.agents/skills/`)에 위치해 있던 `github-actions-monitor` 와 `multi-agent-spec-designer` 스킬 소스 일체를 플랫폼 전역 플러그인 경로(`~/.gemini/config/plugins/grok-fleet-custom-plugins`)로 완전히 추출 및 독립 패키징화 완료.
+  - 이를 통해 모든 프로젝트 워크스페이스에서 두 스킬이 범용(universal) 로드되도록 아키텍처 격리.
+  - 프로젝트 내부의 중복 로컬 스킬 폴더들은 깔끔하게 삭제하여 Git 리포지토리의 경량성 및 무결성 확보.
