@@ -36,6 +36,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      litellm:
+        condition: service_started
     environment:
       DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
       # `mock` transport — no real grok agent connections; sufficient for
@@ -46,6 +48,7 @@ services:
       FLEET_DASHBOARD_BIND: 0.0.0.0:8082
       FLEET_HEALTH_INTERVAL: "15"
       FLEET_HEALTH_MISSED: "3"
+      FLEET_LLM_GATEWAY_URL: http://litellm:4000
       RUST_LOG: "info,fleet=debug,fleet_store=info,sqlx=warn,tower_http=info"
       # Unset by default -> HTTP API runs in NO-AUTH mode, matching
       # docs/deployment.md section 1 (local dev). Uncomment to test bearer
@@ -61,6 +64,21 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
+      LITELLM_MASTER_KEY: sk-litellm-master-key
+      PORT: 4000
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./examples/litellm-config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
 
   worker:
     build:

@@ -1,0 +1,13 @@
+model_list:
+  - model_name: gemini-3.5-flash
+    litellm_params:
+      model: gemini/gemini-3.5-flash
+      api_key: "os.environ/GEMINI_API_KEY"
+  - model_name: gemini-3.5-pro
+    litellm_params:
+      model: gemini/gemini-3.5-pro
+      api_key: "os.environ/GEMINI_API_KEY"
+
+general_settings:
+  master_key: sk-litellm-master-key
+  database_url: postgres://fleet:fleet@postgres:5432/fleet_dev

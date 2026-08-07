@@ -192,6 +192,32 @@ pub fn validate_env_with(get: impl Fn(&str) -> Option<String>) -> Vec<ConfigIssu
         }
     }
 
+    // ── FLEET_LLM_GATEWAY_URL — 선택이지만, 설정했다면 HTTP/HTTPS URL 형식이어야 함 ──
+    if let Some(gateway_url) = get("FLEET_LLM_GATEWAY_URL") {
+        let gateway_url = gateway_url.trim();
+        if !gateway_url.is_empty() {
+            match url::Url::parse(gateway_url) {
+                Ok(parsed) => {
+                    let scheme = parsed.scheme();
+                    if scheme != "http" && scheme != "https" {
+                        issues.push(ConfigIssue {
+                            key: "FLEET_LLM_GATEWAY_URL",
+                            problem: format!(
+                                "스킴은 http 또는 https 이어야 합니다 (현재: '{scheme}')"
+                            ),
+                        });
+                    }
+                }
+                Err(e) => {
+                    issues.push(ConfigIssue {
+                        key: "FLEET_LLM_GATEWAY_URL",
+                        problem: format!("유효하지 않은 URL 형식입니다: {e}"),
+                    });
+                }
+            }
+        }
+    }
+
     issues
 }
 
@@ -342,5 +368,40 @@ mod tests {
     #[test]
     fn parse_labels_rejects_bad_input() {
         assert!(parse_labels("no_equals").is_err());
+    }
+
+    #[test]
+    fn env_validation_rejects_invalid_llm_gateway_url() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_LLM_GATEWAY_URL", "not-a-url"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_LLM_GATEWAY_URL");
+
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_LLM_GATEWAY_URL", "ftp://localhost:4000"),
+        ]));
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].key, "FLEET_LLM_GATEWAY_URL");
+    }
+
+    #[test]
+    fn env_validation_accepts_valid_llm_gateway_url() {
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            ("FLEET_LLM_GATEWAY_URL", "http://localhost:4000"),
+        ]));
+        assert!(issues.is_empty(), "issues: {issues:?}");
+
+        let issues = validate_env_with(env_of(&[
+            ("DATABASE_URL", "postgres://fleet@localhost/fleet"),
+            (
+                "FLEET_LLM_GATEWAY_URL",
+                "https://litellm.agentthread.dev/api",
+            ),
+        ]));
+        assert!(issues.is_empty(), "issues: {issues:?}");
     }
 }
