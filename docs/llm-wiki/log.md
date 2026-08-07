@@ -39,3 +39,10 @@
   - 본 `log.md` 신설 — 과거 이력(8/6 ingest 1건, lint 2건)을 소급 기록.
   - `index.md` 신설 — 정본/사본/메타데이터를 갖춘 페이지 카탈로그 + 역참조 표.
   - `README.md`를 페이지 나열 위주에서 **스키마(운영 규칙: 정본/사본 구분, ingest/query/lint 워크플로우, 필수 부기 파일)** 문서로 재편, 상세 목록은 `index.md`로 이관해 중복 방지.
+
+## 2026-08-07 — ingest — list_workers 라벨 필터 및 페이지네이션 결함 해결 및 CI 검증 완료
+
+- **조치**:
+  - `crates/fleet-api/src/handlers.rs`와 `crates/fleet-dashboard/src/handlers.rs`의 쿼리스트링 라벨 필터 접두사 `label_` 누락 및 파싱 불일치 버그를 전면 수정.
+  - `limit/offset` 페이지네이션 매개변수가 Postgres Store 계층까지 연동되지 않던 쿼리 누락 결함을 정비하고 E2E 통합 테스트 코드들을 전량 보강.
+  - 전담 서브에이전트 `grok_actions_tracker` 를 자동으로 탑재하여 최신 커밋(`7e17558`)의 GitHub Actions 원격 빌드가 100% 그린(success)으로 패스함을 추적 입증하고 `ci_monitor_report.md` 를 작성함.
