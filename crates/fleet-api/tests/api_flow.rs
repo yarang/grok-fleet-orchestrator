@@ -66,7 +66,7 @@ impl Store for MemStore {
             .cloned())
     }
     async fn list_workers(&self, f: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-        Ok(self
+        let mut all: Vec<Worker> = self
             .workers
             .lock()
             .unwrap()
@@ -74,7 +74,14 @@ impl Store for MemStore {
             .filter(|w| f.status.map_or(true, |s| w.status == s))
             .filter(|w| f.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)))
             .cloned()
-            .collect())
+            .collect();
+
+        all.sort_by_key(|w| w.registered_at);
+        all.reverse();
+
+        let start = f.offset.min(all.len());
+        let end = (start + f.limit).min(all.len());
+        Ok(all[start..end].to_vec())
     }
     async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
         self.workers.lock().unwrap().remove(&id);
@@ -498,4 +505,55 @@ async fn register_with_empty_endpoint_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn list_workers_label_filtering_and_pagination() {
+    let srv = spawn_server().await;
+
+    // 두 개의 워커 등록
+    let resp1 = client()
+        .post(format!("http://{}/v1/workers/register", srv.addr))
+        .json(&json!({
+            "name": "w-arm",
+            "agent_endpoint": "wss://127.0.0.1:8080/ws",
+            "labels": { "arch": "arm64", "gpu": "true" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 200);
+
+    let resp2 = client()
+        .post(format!("http://{}/v1/workers/register", srv.addr))
+        .json(&json!({
+            "name": "w-x86",
+            "agent_endpoint": "wss://127.0.0.1:8081/ws",
+            "labels": { "arch": "x86_64", "gpu": "true" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+
+    // 1. 라벨 필터링 테스트: label_arch=arm64
+    let resp = client()
+        .get(format!("http://{}/v1/workers?label_arch=arm64", srv.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0]["name"], "w-arm");
+
+    // 2. 페이지네이션 테스트: limit=1 & offset=1
+    let resp = client()
+        .get(format!("http://{}/v1/workers?limit=1&offset=1", srv.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let workers_paginated: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(workers_paginated.len(), 1);
 }

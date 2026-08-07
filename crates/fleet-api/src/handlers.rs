@@ -308,7 +308,6 @@ pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, ApiError> {
-    // label_filters에서 예약 키를 빼고 나머지는 라벨로 처리
     let mut filter = WorkerFilter::default();
     let mut labels = HashMap::new();
 
@@ -322,8 +321,10 @@ pub async fn list_workers(
         filter.offset = offset;
     }
     for (k, v) in query.label_filters {
-        if !RESERVED_WORKER_QUERY_KEYS.contains(&k.as_str()) {
-            labels.insert(k, v);
+        if let Some(clean_key) = k.strip_prefix("label_") {
+            if !clean_key.is_empty() {
+                labels.insert(clean_key.to_string(), v);
+            }
         }
     }
     if !labels.is_empty() {

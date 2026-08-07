@@ -167,9 +167,20 @@ impl Store for MemStore {
         if let Some(status) = filter.status {
             all.retain(|w| w.status == status);
         }
+        if !filter.labels.is_empty() {
+            all.retain(|w| {
+                filter
+                    .labels
+                    .iter()
+                    .all(|(k, v)| w.labels.get(k) == Some(v))
+            });
+        }
         all.sort_by_key(|w| w.registered_at);
-        all.truncate(filter.limit);
-        Ok(all)
+        all.reverse();
+
+        let start = filter.offset.min(all.len());
+        let end = (start + filter.limit).min(all.len());
+        Ok(all[start..end].to_vec())
     }
     async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
         self.workers.lock().unwrap().remove(&id);
@@ -780,4 +791,56 @@ async fn host_detail_not_found_returns_404() {
     .await
     .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn list_workers_filtering_and_pagination() {
+    let mut w1 = sample_worker("worker-1", fleet_core::WorkerStatus::Online);
+    w1.labels.insert("arch".into(), "arm64".into());
+    w1.labels.insert("gpu".into(), "true".into());
+
+    let mut w2 = sample_worker("worker-2", fleet_core::WorkerStatus::Online);
+    w2.labels.insert("arch".into(), "x86_64".into());
+    w2.labels.insert("gpu".into(), "true".into());
+
+    let mut w3 = sample_worker("worker-3", fleet_core::WorkerStatus::Offline);
+    w3.labels.insert("arch".into(), "arm64".into());
+
+    let store = MemStore::new()
+        .with_worker(w1)
+        .with_worker(w2)
+        .with_worker(w3);
+
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    // 1. 라벨 필터링 테스트: label_arch=arm64 && label_gpu=true
+    let resp = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/workers?label_arch=arm64&label_gpu=true",
+            server.addr
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0]["name"], "worker-1");
+
+    // 2. 페이지네이션 테스트: limit=1 & offset=1
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/workers?limit=1&offset=1", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let workers_paginated: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(workers_paginated.len(), 1);
 }

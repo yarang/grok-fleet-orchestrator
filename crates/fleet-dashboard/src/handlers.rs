@@ -109,6 +109,9 @@ pub struct ListWorkersQuery {
     /// 건너뛸 행 수 (페이지네이션). 태스크 목록과 동일한 계약.
     #[serde(default)]
     pub offset: usize,
+    /// `label_` 접두사를 기반으로 하는 동적 라벨 필터 수집
+    #[serde(flatten)]
+    pub label_filters: std::collections::HashMap<String, String>,
 }
 
 fn default_limit() -> usize {
@@ -128,6 +131,18 @@ pub async fn list_workers(
     }
     filter.limit = q.limit;
     filter.offset = q.offset;
+
+    let mut labels = std::collections::HashMap::new();
+    for (k, v) in q.label_filters {
+        if let Some(clean_key) = k.strip_prefix("label_") {
+            if !clean_key.is_empty() {
+                labels.insert(clean_key.to_string(), v);
+            }
+        }
+    }
+    if !labels.is_empty() {
+        filter.labels = labels;
+    }
 
     let workers = state.store.list_workers(&filter).await.map_err(|e| {
         tracing::error!(error = %e, "list_workers failed");
