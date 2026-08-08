@@ -224,12 +224,16 @@ async fn create_user(
     let pw = read_password("New password: ", password)?;
     let hash = hash_password(&pw).context("argon2 hashing failed")?;
 
+    // 역할 리스트 확인. viewer를 디폴트로 함.
+    let role_names = roles.unwrap_or_else(|| vec!["viewer".into()]);
+    let is_admin = role_names.iter().any(|r| r == "admin");
+
     // 사용자 생성.
     let user = User {
         id: UserId::new(),
         username: username.into(),
         email: email.map(|s| s.into()),
-        email_verified: false,
+        email_verified: is_admin,
         password_hash: hash,
         enabled: true,
         created_at: chrono::Utc::now(),
@@ -241,7 +245,6 @@ async fn create_user(
         .context("create_user failed")?;
 
     // 역할 부여.
-    let role_names = roles.unwrap_or_else(|| vec!["viewer".into()]);
     for role_name in &role_names {
         if let Err(e) = assign_role(store, username, role_name).await {
             eprintln!("⚠️  role assign '{role_name}' failed: {e:#}");
