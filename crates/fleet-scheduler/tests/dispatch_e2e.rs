@@ -83,6 +83,9 @@ impl Store for InMemoryStore {
             return Err(StoreError::NotFound);
         };
         task.status = status.clone();
+        if matches!(status, TaskStatus::Dispatched { .. }) {
+            task.dispatched_at = Some(chrono::Utc::now());
+        }
         Ok(())
     }
 

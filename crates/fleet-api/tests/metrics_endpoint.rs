@@ -214,6 +214,7 @@ async fn metrics_returns_prometheus_text() {
     assert!(body.contains("fleet_workers_capacity_total"));
     assert!(body.contains("fleet_workers_active_tasks_total"));
     assert!(body.contains("fleet_events_written_total"));
+    assert!(body.contains("fleet_task_dispatch_latency_seconds"));
 }
 
 #[tokio::test]

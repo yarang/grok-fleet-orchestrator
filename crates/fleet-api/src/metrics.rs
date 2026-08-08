@@ -94,8 +94,15 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     let mut t_counts = TaskCounts::default();
     let mut tok_counts = TokenCounts::default();
     let mut duration_hist = Histogram::new(TASK_DURATION_BUCKETS);
+    let mut dispatch_latency_hist = Histogram::new(TASK_DISPATCH_LATENCY_BUCKETS);
+
     for t in &tasks {
         t_counts.total += 1;
+        if let Some(dispatched) = t.dispatched_at {
+            let latency = ((dispatched - t.created_at).num_milliseconds() as f64 / 1000.0).max(0.0);
+            dispatch_latency_hist.observe(latency);
+        }
+
         match &t.status {
             TaskStatus::Pending => t_counts.pending += 1,
             TaskStatus::Dispatched { .. } => t_counts.dispatched += 1,
@@ -255,6 +262,14 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     );
     out.push_str("# TYPE fleet_task_duration_seconds histogram\n");
     duration_hist.render(&mut out, "fleet_task_duration_seconds");
+    out.push('\n');
+
+    // fleet_task_dispatch_latency_seconds — 작업 디스패치 지연 시간 분포.
+    out.push_str(
+        "# HELP fleet_task_dispatch_latency_seconds Queue wait time of tasks before being dispatched to a worker in seconds.\n",
+    );
+    out.push_str("# TYPE fleet_task_dispatch_latency_seconds histogram\n");
+    dispatch_latency_hist.render(&mut out, "fleet_task_dispatch_latency_seconds");
 
     debug!(
         workers = workers.len(),
@@ -347,6 +362,12 @@ impl HttpMetrics {
 /// 초 단위부터 1시간까지 넓게 잡는다. 기본 타임아웃이 3600초라 마지막 유한
 /// 버킷을 3600으로 두어 "타임아웃 근처" 구간이 드러나게 했다.
 const TASK_DURATION_BUCKETS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 1800.0, 3600.0];
+
+/// `fleet_task_dispatch_latency_seconds` 버킷 경계 (초).
+///
+/// 작업이 큐에서 대기하는 시간으로, 스케줄링 성능 향상 분석을 위해 0.1초 수준부터
+/// 15분 대기까지 촘촘하고 폭넓게 구성합니다.
+const TASK_DISPATCH_LATENCY_BUCKETS: &[f64] = &[0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0];
 
 /// Prometheus 히스토그램 누산기.
 ///

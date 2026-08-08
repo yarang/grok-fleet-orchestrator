@@ -301,9 +301,6 @@ pub struct ListWorkersQuery {
     pub label_filters: HashMap<String, String>,
 }
 
-/// `#[serde(flatten)]`이 흡수해버리는 예약 키 — 라벨로 취급하면 안 된다.
-const RESERVED_WORKER_QUERY_KEYS: [&str; 3] = ["status", "limit", "offset"];
-
 pub async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListWorkersQuery>,

@@ -167,9 +167,9 @@ impl Store for PgStore {
             r#"
             INSERT INTO tasks
                 (id, prompt, cwd, model, server_hint, required_labels,
-                 max_turns, timeout_secs, created_at, created_by, priority, status)
+                 max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(task.id.as_uuid())
@@ -184,6 +184,7 @@ impl Store for PgStore {
         .bind(&task.created_by)
         .bind(priority_str)
         .bind(status_json)
+        .bind(task.dispatched_at)
         .execute(&self.pool)
         .await?;
 
@@ -193,7 +194,7 @@ impl Store for PgStore {
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
-                      max_turns, timeout_secs, created_at, created_by, priority, status
+                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -205,11 +206,22 @@ impl Store for PgStore {
 
     async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError> {
         let status_json = serde_json::to_value(status)?;
-        let result = sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
-            .bind(id.as_uuid())
-            .bind(status_json)
-            .execute(&self.pool)
-            .await?;
+        let is_dispatching = matches!(status, TaskStatus::Dispatched { .. });
+
+        let result = if is_dispatching {
+            sqlx::query("UPDATE tasks SET status = $2, dispatched_at = NOW() WHERE id = $1")
+                .bind(id.as_uuid())
+                .bind(status_json)
+                .execute(&self.pool)
+                .await?
+        } else {
+            sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+                .bind(id.as_uuid())
+                .bind(status_json)
+                .execute(&self.pool)
+                .await?
+        };
+
         if result.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
@@ -228,7 +240,7 @@ impl Store for PgStore {
         //   {"Completed": {"worker_id": "..."}}
         //   {"Failed": {"worker_id": "..."}}
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
-                          max_turns, timeout_secs, created_at, created_by, priority, status
+                          max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -1721,6 +1733,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let created_by: String = row.try_get("created_by")?;
     let priority_str: String = row.try_get("priority")?;
     let status_json: serde_json::Value = row.try_get("status")?;
+    let dispatched_at: Option<DateTime<Utc>> = row.try_get("dispatched_at")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
@@ -1739,6 +1752,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         created_by,
         priority,
         status,
+        dispatched_at,
     })
 }
 

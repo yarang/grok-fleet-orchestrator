@@ -69,6 +69,8 @@ pub struct Task {
     pub created_by: String,
     pub priority: TaskPriority,
     pub status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatched_at: Option<DateTime<Utc>>,
 }
 
 impl Task {
@@ -87,6 +89,7 @@ impl Task {
             created_by: req.created_by,
             priority: req.priority,
             status: TaskStatus::Pending,
+            dispatched_at: None,
         }
     }
 
@@ -323,6 +326,7 @@ mod tests {
             created_by: "x".into(),
             priority: TaskPriority::Normal,
             status: TaskStatus::Completed(result),
+            dispatched_at: None,
         };
         assert!(t.is_terminal());
         assert!(!t.is_running());

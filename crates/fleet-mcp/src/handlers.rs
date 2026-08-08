@@ -717,6 +717,7 @@ mod tests {
             created_by: "test".into(),
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
+            dispatched_at: None,
         };
         let summary = task_summary_with_options(&task, true);
         assert_eq!(summary["phase"], "completed");
@@ -754,6 +755,7 @@ mod tests {
             created_by: "test".into(),
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
+            dispatched_at: None,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["token_usage"]["input_tokens"], 100);
@@ -786,6 +788,7 @@ mod tests {
             created_by: "test".into(),
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
+            dispatched_at: None,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["phase"], "completed");
