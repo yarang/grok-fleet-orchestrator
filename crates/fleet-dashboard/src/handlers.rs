@@ -1029,7 +1029,7 @@ pub async fn login_page(
         .path("/")
         .http_only(false) // JS에서 읽을 수 있어야 함 (더블 서밋 패턴)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(3600))
         .build();
     let jar = jar.add(csrf_cookie);
@@ -1198,7 +1198,7 @@ pub async fn login(
         .path("/")
         .http_only(true)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(SESSION_DURATION_SECS))
         .build();
     let new_jar = jar.add(cookie);
@@ -1210,7 +1210,7 @@ pub async fn login(
         .path("/")
         .http_only(false)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(3600))
         .build();
     let new_jar = new_jar.add(csrf_cookie);
@@ -1221,7 +1221,7 @@ pub async fn login(
 /// POST /logout — 세션 삭제 + 쿠키 제거.
 ///
 /// CSRF 보호: JS에서 `X-CSRF-Token` 헤더로 CSRF 토큰을 전송해야 함.
-/// (세션 쿠키는 SameSite::Strict이지만 defense-in-depth로 이중 검증.)
+/// (세션 쿠키는 SameSite::Lax이지만 defense-in-depth로 이중 검증.)
 pub async fn logout(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -1458,7 +1458,7 @@ pub async fn resend_verification_page(
         .path("/")
         .http_only(false)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(3600))
         .build();
     let jar = jar.add(csrf_cookie);
@@ -1610,7 +1610,7 @@ pub async fn forgot_password_page(
         .path("/")
         .http_only(false)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(3600))
         .build();
     let jar = jar.add(csrf_cookie);
@@ -2059,7 +2059,7 @@ pub async fn bootstrap_page(
         .path("/")
         .http_only(false)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(3600))
         .build();
     let jar = jar.add(csrf_cookie);
@@ -2269,7 +2269,7 @@ pub async fn bootstrap(
         .path("/")
         .http_only(true)
         .secure(state.secure_cookies)
-        .same_site(SameSite::Strict)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(SESSION_DURATION_SECS))
         .build();
     let new_jar = jar.add(cookie);
