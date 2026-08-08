@@ -75,20 +75,17 @@
    경로 정리: 예전에는 `/api/audit`가 `events` 테이블(작업·워커 생명주기)을 `/api/events`와
    중복 제공해 이름이 혼동됐다. 중복 핸들러를 제거하고 `/api/audit`는 인증/권한 감사 전용,
    작업·워커 이벤트는 `/api/events` 전용으로 분리했다.
-10. ⏳ 세션 토큰 로테이션 부재 — 8시간 고정 토큰 (`auth.rs:37 SESSION_DURATION_SECS`). 로그인 시
-    1회 발급 후 갱신·연장 경로 없음.
-11. ⏳ 페이지네이션 불일치 — `WorkerFilter`에 offset 없음. 추가로 fleet-api `list_workers`가
-    `WorkerFilter::default()`를 사용해 **쿼리스트링 필터가 스토어까지 전달되지 않는다** (문서 최초
-    기술보다 심각).
+10. ✅ 세션 토큰 로테이션 — 해결됨 (`0177e56`). 30분 단위 지수 로테이션 및 30초의 동시 병렬 요청
+    유예기간(grace period)을 두어 세션 쿠키를 자율적으로 로테이션 수행.
+11. ✅ 페이지네이션 불일치 및 필터 전달 수정 — 해결됨 (`7e17558`). 쿼리스트링 라벨 필터의 접두사
+    `label_` 탈거 누락 버그 해결 및 limit/offset 페이지네이션 매개변수를 Postgres Store까지 전달 연동.
 12. ✅ API 오류 응답 포맷 통일 — 해결됨 (`8755c0d`). dashboard도 `ApiError`로 일원화해
     `{error:{code,message}}` 형식을 공유한다. 500번대는 내부 상세를 응답에 노출하지 않고
     서버 로그에만 남긴다.
 13. ⏳ OpenTelemetry / 분산 추적 부재 — `#[instrument]` 스팬 없음.
 14. ⏳ 다크 모드, 컬럼 정렬, 고급 필터링 부재.
-15. 🟡 시작 시 설정 검증 — 부분 완료. `DATABASE_URL` 존재 여부는 `fleet-cli/src/runtime.rs`에서
-    fail-fast 검증하고, fleet-worker는 자체 `validate()`를 갖추고 있다. **잔여**: 비어있음/형식
-    검증 없음. 또한 `fleet-core/src/config.rs`의 `OrchestratorConfig`는 검증도 없고 **어디서도
-    역직렬화되지 않는 죽은 구조체**다 — 사용하거나 제거할 것.
+15. ✅ 시작 시 설정 검증 및 데드코드 정리 — 해결됨 (`0177e56`). `DATABASE_URL`, `FLEET_BASE_URL`
+    등의 형식 검증 및 `OrchestratorConfig` 등 레거시 데드코드 구조체 일괄 소거 완료.
 16. ✅ 커넥션 풀 튜닝 — 해결됨 (`bac4dc7`). `PoolConfig`로 `acquire_timeout`(30s),
     `max_lifetime`(30m), `idle_timeout`(10m) 설정. 장수명 서버 프로세스(`fleet serve`)에서
     sqlx 기본값을 그대로 쓰던 문제 해소.
@@ -123,9 +120,7 @@
 
 ## 신규 항목 (2026-08-01 추가)
 
-31. ⏳ **`dispatch_latency` 메트릭** (P2) — #5에서 분리. 작업이 큐에 들어온 시점과 워커에
-    디스패치된 시점의 차이를 재려면 **스키마 변경(디스패치 타임스탬프 컬럼)이 선행**되어야 한다.
-    #5의 나머지 두 히스토그램과 달리 기존 데이터만으로는 계산할 수 없다.
+31. ✅ **`dispatch_latency` 메트릭** (P2) — 해결됨 (`ed82b27`). `tasks` 테이블에 `dispatched_at` 컬럼을 추가하는 마이그레이션(`012_task_dispatch_latency.sql`)을 진행하고, 스케줄러 디스패치 시점에 갱신하도록 처리. 대기 시간차를 계산하여 Prometheus Histogram `fleet_task_dispatch_latency_seconds` 메트릭으로 노출 완료.
 
 32. ⏳ **`/admin/*` HTML 페이지에 RBAC 검사 부재** (P2, 보안) — → 담당: security
 

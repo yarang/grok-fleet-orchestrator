@@ -53,3 +53,10 @@
   - 기존에 프로젝트 워크스페이스 내부(`.agents/skills/`)에 위치해 있던 `github-actions-monitor` 와 `multi-agent-spec-designer` 스킬 소스 일체를 플랫폼 전역 플러그인 경로(`~/.gemini/config/plugins/grok-fleet-custom-plugins`)로 완전히 추출 및 독립 패키징화 완료.
   - 이를 통해 모든 프로젝트 워크스페이스에서 두 스킬이 범용(universal) 로드되도록 아키텍처 격리.
   - 프로젝트 내부의 중복 로컬 스킬 폴더들은 깔끔하게 삭제하여 Git 리포지토리의 경량성 및 무결성 확보.
+
+## 2026-08-08 — ingest — 디스패치 지연 시간(dispatch_latency) 메트릭 수집 및 DB 스키마 추가
+
+- **조치**:
+  - `tasks` 테이블에 `dispatched_at` TIMESTAMP 컬럼을 추가하는 신규 DB 마이그레이션(`012_task_dispatch_latency.sql`)을 작성하여 데이터 스키마 연동.
+  - `Task` 모델 및 `PgStore` / `InMemoryStore` 의 상태 갱신 코드(`update_task_status`)에 `Dispatched` 상태 전이 시 `dispatched_at` 을 갱신하는 로직 추가.
+  - `fleet_task_dispatch_latency_seconds` 히스토그램 메트릭을 `crates/fleet-api/src/metrics.rs` 에 구현하고 `/metrics` 엔드포인트 통합 테스트 보강 완료.
