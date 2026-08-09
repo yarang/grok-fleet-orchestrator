@@ -69,6 +69,7 @@ impl Dispatcher {
         }
     }
 
+    #[tracing::instrument(skip(self, event))]
     async fn handle_worker_event(&self, event: WorkerEvent) {
         match event {
             WorkerEvent::Completed { task_id, result } => {
@@ -202,6 +203,7 @@ impl Dispatcher {
     }
 
     /// 작업을 제출. 워커 선택 → dispatch → 백그라운드 실행.
+    #[tracing::instrument(skip(self, task), fields(task_id = %task.id))]
     pub async fn submit(&self, mut task: Task) -> Result<TaskId, DispatchError> {
         let task_id = task.id;
 
@@ -380,6 +382,7 @@ impl Dispatcher {
     ///
     /// **CircuitBreaker 고려**: 취소는 사용자 의도이므로 실패로 간주하지 않습니다.
     /// 따라서 브레이커에는 어떤 outcome도 기록하지 않습니다.
+    #[tracing::instrument(skip(self, reason), fields(task_id = %task_id))]
     pub async fn cancel(
         &self,
         task_id: TaskId,

@@ -917,5 +917,6 @@ async fn main() -> Result<()> {
     }
     .context("fleet command failed")?;
 
+    logging::shutdown();
     Ok(())
 }

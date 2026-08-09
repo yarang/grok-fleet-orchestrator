@@ -82,7 +82,7 @@
 12. ✅ API 오류 응답 포맷 통일 — 해결됨 (`8755c0d`). dashboard도 `ApiError`로 일원화해
     `{error:{code,message}}` 형식을 공유한다. 500번대는 내부 상세를 응답에 노출하지 않고
     서버 로그에만 남긴다.
-13. ⏳ OpenTelemetry / 분산 추적 부재 — `#[instrument]` 스팬 없음.
+13. ✅ OpenTelemetry / 분산 추적 부재 — 해결됨. OTLP gRPC(Tonic) 연동 및 SdkTracerProvider 조건부 초기화 구현 완료, `submit`/`cancel`/`register`/`heartbeat` 등 핵심 오케스트레이션 라이프사이클에 `#[instrument]` 스팬 완벽 장착.
 14. ⏳ 다크 모드, 컬럼 정렬, 고급 필터링 부재.
 15. ✅ 시작 시 설정 검증 및 데드코드 정리 — 해결됨 (`0177e56`). `DATABASE_URL`, `FLEET_BASE_URL`
     등의 형식 검증 및 `OrchestratorConfig` 등 레거시 데드코드 구조체 일괄 소거 완료.

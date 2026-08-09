@@ -38,6 +38,7 @@ pub async fn health() -> Json<HealthResponse> {
 /// 2. `existing_worker_id`가 있으면 해당 ID 유지
 /// 3. last_seen을 now로 설정
 /// 4. status를 Online으로 설정 (재등록 시 암묵적 복구)
+#[tracing::instrument(skip(state, req), fields(worker_name = %req.name))]
 pub async fn register_worker(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
@@ -121,6 +122,7 @@ pub async fn register_worker(
 }
 
 /// `POST /v1/workers/heartbeat`.
+#[tracing::instrument(skip(state, req), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<HeartbeatRequest>,
@@ -405,6 +407,7 @@ pub async fn deregister_worker(
 ///   (인증 미들웨어의 bearer token과 별개)
 /// - 응답에 worker_config_toml을 포함하여 클라이언트가 디스크에 바로 기록 가능.
 /// - 항상 신규 worker_id 발급 (재등록은 `/register` 사용).
+#[tracing::instrument(skip(state, req), fields(worker_name = %req.name))]
 pub async fn join_worker(
     State(state): State<Arc<AppState>>,
     Json(req): Json<JoinRequest>,

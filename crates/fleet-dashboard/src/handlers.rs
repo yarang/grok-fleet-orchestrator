@@ -1054,6 +1054,7 @@ pub async fn login_page(
 ///
 /// 성공: 쿠키 설정 + `/` 리다이렉트.
 /// 실패: 401 + login.html 재렌더 (에러 메시지 포함).
+#[tracing::instrument(skip(state, jar, headers, form), fields(email = %form.email))]
 pub async fn login(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -1954,9 +1955,24 @@ fn info_page(kind: &str, message: &str) -> Response {
 fn csrf_valid(cookie_token: Option<&str>, submitted_token: &str) -> bool {
     match cookie_token {
         Some(cookie) if !cookie.is_empty() && !submitted_token.is_empty() => {
-            csrf_tokens_match(cookie, submitted_token)
+            let matched = csrf_tokens_match(cookie, submitted_token);
+            if !matched {
+                tracing::warn!(
+                    cookie_len = cookie.len(),
+                    submitted_len = submitted_token.len(),
+                    "CSRF token mismatch — cookies and form fields do not match"
+                );
+            }
+            matched
         }
-        _ => false,
+        None => {
+            tracing::warn!("CSRF token validation failed — fleet_csrf cookie is missing from request");
+            false
+        }
+        Some(_) => {
+            tracing::warn!("CSRF token validation failed — empty cookie or empty form token");
+            false
+        }
     }
 }
 
@@ -2080,6 +2096,7 @@ pub async fn bootstrap_page(
 }
 
 /// POST /bootstrap — OTP 검증 + 첫 관리자 생성 + 자동 로그인.
+#[tracing::instrument(skip(state, jar, headers, form), fields(email = %form.email))]
 pub async fn bootstrap(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
