@@ -1002,7 +1002,6 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         if let Some(url) = &args.orchestrator_url {
             register_host_with_orchestrator(
                 url,
-                &name,
                 host,
                 args.ssh_port.into(),
                 &args.user,
@@ -1017,15 +1016,23 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
 }
 
 /// 프로비저닝 완료 후 오케스트레이터에 호스트를 등록 (best-effort).
+///
+/// `hostname`은 `--name`(워커 논리 이름 — provision 실행마다, 또는
+/// `--tags credentials`처럼 워커 재사용 목적으로 다르게 줄 수 있음)이 아니라
+/// `ssh_host`(접속 대상)에서 도메인 접미사를 제거해 도출한다. 과거엔 `--name`을
+/// 그대로 hostname으로 보내서, 최초 프로비저닝(`--name oci-yarangdev-arm1`)과
+/// 이후 재실행(예: `--name worker-arm1`으로 자격증명만 재적용)이 서로 다른
+/// hostname으로 `hosts` 테이블에 등록되어 `ON CONFLICT (hostname)` upsert가
+/// 매칭되지 못하고 동일 머신이 중복 행으로 쌓였다.
 async fn register_host_with_orchestrator(
     orchestrator_url: &str,
-    hostname: &str,
     ssh_host: &str,
     ssh_port: i32,
     ssh_user: &str,
     succeeded: bool,
     api_token: Option<&str>,
 ) {
+    let hostname = ssh_host.split('.').next().unwrap_or(ssh_host);
     let url = format!(
         "{}/v1/hosts/register",
         orchestrator_url.trim_end_matches('/')
