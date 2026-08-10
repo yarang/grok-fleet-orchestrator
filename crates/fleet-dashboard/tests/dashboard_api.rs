@@ -618,6 +618,27 @@ async fn events_list_returns_empty_array() {
     assert!(body["events"].is_array());
 }
 
+/// 회귀 테스트: `/static/*`는 세션 없이도 200을 반환해야 한다. 과거 이 라우트가
+/// `require_session` 뒤(protected 그룹)에 있어서, 로그인 페이지 자신의
+/// `login.css`조차 303(→ /login으로 리다이렉트, 세션 없으므로)을 받아 로그인
+/// 화면이 스타일 없이(unstyled) 뜨는 순환 버그가 있었다 — 프로덕션에서 직접
+/// 관측.
+#[tokio::test]
+async fn static_asset_css_served_without_session() {
+    let server = spawn_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/static/styles.css", server.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "static assets must be servable pre-auth so /login can load its own CSS"
+    );
+}
+
 #[tokio::test]
 async fn static_asset_css_served() {
     let (server, cookie) = spawn_authed_server(MemStore::new()).await;

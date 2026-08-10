@@ -56,8 +56,10 @@ impl DashboardState {
 /// 전체 라우터 조립.
 ///
 /// 라우트 그룹:
-/// - **public**: `/login`, `/logout`, `/health` (세션 미들웨어 없음)
-/// - **protected**: `/`, `/api/*`, `/static/*` (require_session 적용)
+/// - **public**: `/login`, `/logout`, `/health`, `/static/*` (세션 미들웨어 없음 —
+///   `/static/*`는 로그인/부트스트랩 등 인증 전 화면도 자신의 CSS/JS를 로드해야
+///   하므로 여기 속한다; 민감 데이터 없음)
+/// - **protected**: `/`, `/api/*` (require_session 적용)
 ///
 /// 보안 헤더 (Phase 9.1.7):
 /// - CSP, X-Frame-Options, HSTS, X-Content-Type-Options, Referrer-Policy
@@ -86,7 +88,13 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route(
             "/api/users/resend-verification",
             post(handlers::resend_verification_api),
-        );
+        )
+        // 정적 자산(CSS/JS) — 민감 데이터 없음, 로그인/부트스트랩처럼 인증 전
+        // 화면도 이걸 로드해야 한다. require_session 뒤에 있으면 로그인 페이지가
+        // 자기 자신의 스타일시트를 못 불러와 303으로 리다이렉트되는 순환에
+        // 빠진다 — 실제로 프로덕션에서 로그인 화면이 스타일 없이(unstyled) 뜨는
+        // 버그로 관측됨.
+        .route("/static/*path", get(handlers::static_asset));
 
     let protected = Router::new()
         .route("/", get(handlers::index))
@@ -145,7 +153,6 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             post(crate::provisioning::provision_host_api),
         )
         .route("/logout", post(handlers::logout))
-        .route("/static/*path", get(handlers::static_asset))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
