@@ -230,8 +230,15 @@ impl WorkerConfig {
     /// 등록 시 grok agent의 WebSocket endpoint로 노출될 URL.
     /// orchestrator는 이 값을 transport.register()에 전달.
     ///
-    /// - mTLS 비활성: `ws://<orchestrator-host>/ws?server-key=...`
-    ///   (Phase 7 모델 — cloudflared가 localhost:2419를 터널링한다고 가정)
+    /// - mTLS 비활성: `<ws|wss>://<orchestrator-host>/ws?server-key=...`
+    ///   스킴은 `orchestrator_url`의 스킴을 따른다 (`https://` → `wss://`,
+    ///   `http://` → `ws://`). nginx/Caddy 리버스 프록시 배포(§2)에서는 `/ws`가
+    ///   TLS 종단 서버 블록에만 있는 경우가 흔해서, 무조건 `ws://`(80번 포트
+    ///   기본값)로 고정하면 핸드셰이크가 리다이렉트/404로 실패한다 — 실제
+    ///   프로덕션에서 이 불일치로 태스크 디스패치가 전부 "worker not
+    ///   registered"로 실패한 사례가 있었다 (등록/하트비트는 REST라 영향 없이
+    ///   정상으로 보였음). Cloudflare Tunnel 배포(§3)는 보통 `orchestrator_url`
+    ///   자체가 `https://`이므로 이 변경으로도 그대로 동작한다.
     /// - mTLS 활성 (Phase 8.5): `wss://<advertised_host>:<advertised_port>/ws?server-key=...`
     pub fn agent_endpoint(&self) -> String {
         let secret = &self.grok.secret;
@@ -252,7 +259,8 @@ impl WorkerConfig {
             }
             _ => {
                 let host = self.orchestrator_url_host();
-                format!("ws://{host}/ws?server-key={secret}")
+                let scheme = ws_scheme_for(&self.worker.orchestrator_url);
+                format!("{scheme}://{host}/ws?server-key={secret}")
             }
         }
     }
@@ -265,6 +273,18 @@ impl WorkerConfig {
             .find(['/', '?', '#'])
             .unwrap_or(after_scheme.len());
         &after_scheme[..host_end]
+    }
+}
+
+/// `orchestrator_url`의 스킴에 맞는 WebSocket 스킴 선택.
+/// `https://` → `wss://`, 그 외(`http://` 등) → `ws://`.
+/// `join.rs::derive_agent_endpoint`도 동일 로직을 쓴다 — 두 곳 모두 orchestrator가
+/// 실제로 서빙하는 프로토콜과 일치해야 `/ws` 핸드셰이크가 성립한다.
+pub(crate) fn ws_scheme_for(orchestrator_url: &str) -> &'static str {
+    if orchestrator_url.starts_with("https://") {
+        "wss"
+    } else {
+        "ws"
     }
 }
 
@@ -466,8 +486,21 @@ secret = "x"
             .grok_secret("topsecret")
             .build();
         let endpoint = config.agent_endpoint();
-        assert!(endpoint.starts_with("ws://"));
+        // orchestrator_url이 https:// 이므로 wss:// 를 따라야 함 (회귀 테스트 —
+        // 과거 무조건 ws:// 하드코딩 버그로 nginx/https 배포에서 /ws 핸드셰이크가
+        // 실패했었다).
+        assert!(endpoint.starts_with("wss://"), "got: {endpoint}");
         assert!(endpoint.contains("server-key=topsecret"));
+    }
+
+    #[test]
+    fn agent_endpoint_uses_ws_for_http_orchestrator() {
+        let config = WorkerConfig::for_test()
+            .orchestrator_url("http://127.0.0.1:8080")
+            .grok_secret("topsecret")
+            .build();
+        let endpoint = config.agent_endpoint();
+        assert!(endpoint.starts_with("ws://"), "got: {endpoint}");
     }
 
     #[test]
@@ -515,9 +548,11 @@ secret = "x"
             .mtls(mtls)
             .build();
         let endpoint = config.agent_endpoint();
+        // mtls가 꺼져 있으면 mtls 섹션의 advertised_host/port는 무시되지만,
+        // 스킴 자체는 (mtls와 무관하게) orchestrator_url을 따른다 — 여기선 https.
         assert!(
-            endpoint.starts_with("ws://"),
-            "disabled mtls must keep ws://"
+            endpoint.starts_with("wss://"),
+            "disabled mtls must still follow orchestrator_url's scheme, got: {endpoint}"
         );
         assert!(!endpoint.contains("ignored"));
     }

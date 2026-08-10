@@ -165,11 +165,17 @@ fn extract_host(url: &str) -> Result<&str> {
 }
 
 /// orchestrator URL 기반으로 agent_endpoint 자동 생성.
-/// cloudflared가 orchestrator와 같은 호스트에서 localhost:2419를 터널링한다고 가정.
-/// ws://<orchestrator-host>/ws?server-key=<secret>
+/// <ws|wss>://<orchestrator-host>/ws?server-key=<secret>
+///
+/// 스킴은 orchestrator_url을 따른다 (`config::ws_scheme_for` 참조) — nginx/Caddy
+/// 리버스 프록시 배포에서 `/ws`가 TLS 종단 서버 블록에만 있을 수 있어, `https://`
+/// orchestrator에 무조건 `ws://`(평문, 80번 포트 기본값)로 붙으면 핸드셰이크가
+/// 실패한다. Cloudflare Tunnel 배포는 orchestrator_url 자체가 보통 `https://`라
+/// 이 변경으로도 그대로 동작한다.
 fn derive_agent_endpoint(orchestrator_url: &str, grok_secret: &str) -> Result<String> {
     let host = extract_host(orchestrator_url)?;
-    Ok(format!("ws://{host}/ws?server-key={grok_secret}"))
+    let scheme = crate::config::ws_scheme_for(orchestrator_url);
+    Ok(format!("{scheme}://{host}/ws?server-key={grok_secret}"))
 }
 
 /// 무작위 grok 시크릿 생성 (base64url, 32바이트).
@@ -307,8 +313,10 @@ mod tests {
 
     #[test]
     fn derive_endpoint_includes_secret() {
+        // https:// orchestrator → wss:// (회귀 테스트, config.rs의
+        // agent_endpoint_includes_secret과 동일한 스킴-일치 버그 수정 대상).
         let endpoint = derive_agent_endpoint("https://fleet.example.com", "topsecret").unwrap();
-        assert_eq!(endpoint, "ws://fleet.example.com/ws?server-key=topsecret");
+        assert_eq!(endpoint, "wss://fleet.example.com/ws?server-key=topsecret");
     }
 
     #[test]
