@@ -42,7 +42,8 @@ use fleet_provisioner::{
     SshConnectInfo, StepContext,
 };
 use fleet_scheduler::{
-    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, SessionCleanup,
+    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, ReconcileConfig,
+    Reconciler, SessionCleanup,
 };
 use fleet_store::{PgStore, PoolConfig, Store};
 use fleet_transport::{MockTransport, WorkerTransport};
@@ -220,6 +221,9 @@ pub async fn run_serve(
     no_cleanup: bool,
     cleanup_interval_secs: u64,
     cleanup_retention_days: i64,
+    no_reconcile: bool,
+    reconcile_interval_secs: u64,
+    reconcile_stale_secs: u64,
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
@@ -325,6 +329,27 @@ pub async fn run_serve(
         Some(cleanup.spawn())
     } else {
         tracing::info!("cleanup task disabled by --no-cleanup");
+        None
+    };
+
+    // stale `Pending` 작업 재조정 루프 (옵션). `Dispatcher::submit()`은
+    // 제출 시점에 딱 한 번만 워커 선택/dispatch를 시도하므로, 그 시도가
+    // 터미널 상태에 도달하기 전에 프로세스가 죽으면 작업이 영구히 `Pending`에
+    // 고아로 남는다 — 이 루프가 주기적으로 그런 작업을 재시도한다.
+    let _reconcile_handle = if !no_reconcile {
+        let cfg = ReconcileConfig {
+            interval: Duration::from_secs(reconcile_interval_secs.max(1)),
+            stale_after: Duration::from_secs(reconcile_stale_secs.max(1)),
+        };
+        tracing::info!(
+            interval_secs = reconcile_interval_secs,
+            stale_secs = reconcile_stale_secs,
+            "pending-task reconciliation loop enabled"
+        );
+        let reconciler = Reconciler::new(state.clone(), dispatcher.clone(), cfg);
+        Some(reconciler.spawn())
+    } else {
+        tracing::info!("pending-task reconciliation loop disabled by --no-reconcile");
         None
     };
 
@@ -461,6 +486,9 @@ pub async fn run_serve(
         h.abort().await;
     }
     if let Some(h) = _cleanup_handle {
+        h.abort().await;
+    }
+    if let Some(h) = _reconcile_handle {
         h.abort().await;
     }
     if let Some(h) = _http_handle {

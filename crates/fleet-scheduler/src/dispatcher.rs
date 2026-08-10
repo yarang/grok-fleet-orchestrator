@@ -204,7 +204,7 @@ impl Dispatcher {
 
     /// 작업을 제출. 워커 선택 → dispatch → 백그라운드 실행.
     #[tracing::instrument(skip(self, task), fields(task_id = %task.id))]
-    pub async fn submit(&self, mut task: Task) -> Result<TaskId, DispatchError> {
+    pub async fn submit(&self, task: Task) -> Result<TaskId, DispatchError> {
         let task_id = task.id;
 
         // 1. Store에 작업 저장
@@ -225,18 +225,57 @@ impl Dispatcher {
             ))
             .await;
 
+        // 3-6. 워커 선택 → CircuitBreaker 확인 → dispatch. `submit()`은 최초
+        // 제출 시도이므로 선택/회로 실패도 기존과 동일하게 즉시 `Failed`로
+        // 마킹한다 (`mark_unavailable_as_failed = true`). 재조정 루프
+        // ([`crate::reconcile::Reconciler`])는 같은 경로를 재사용하되 그 경우
+        // `false`를 전달해 "지금 당장 용량이 없음"을 실패로 취급하지 않는다.
+        self.dispatch_existing(task, true).await?;
+
+        Ok(task_id)
+    }
+
+    /// 이미 Store에 존재하는 작업(= `insert_task`/`task_created` 이벤트가 이미
+    /// 처리된 작업)에 대해 워커 선택 → CircuitBreaker 확인 → `Dispatched` 상태
+    /// 전이 → transport dispatch를 수행한다.
+    ///
+    /// [`submit`](Self::submit)(최초 제출)과
+    /// [`Reconciler`](crate::reconcile::Reconciler)(stale `Pending` 작업 재시도)가
+    /// 공유하는 경로다 — 두 경로 모두 "이미 Store에 존재하는 작업을 실제로
+    /// 워커에 붙이는" 동일한 ~80줄짜리 선택/회로/transport 로직이 필요하므로
+    /// 중복 구현을 피하기 위해 여기로 추출했다.
+    ///
+    /// `mark_unavailable_as_failed`:
+    /// - `true` — 워커 선택 실패 또는 CircuitOpen도 즉시 작업을 `Failed`로
+    ///   마킹한다. `submit()`의 기존 동작을 그대로 보존하기 위함.
+    /// - `false` — 위 두 경우 작업 상태를 건드리지 않고 `Pending`인 채로
+    ///   둔다. 재조정 루프에서 사용 — "지금 당장 쓸 수 있는 워커가 없음"은
+    ///   실패가 아니라 다음 tick에 재시도할 정상적인 정상 상태이기 때문이다.
+    ///
+    /// transport dispatch 자체의 실패(연결 오류 등, step 6)는 이 플래그와
+    /// 무관하게 항상 `Failed`로 마킹한다 — 이건 재시도 여부와 상관없이
+    /// "진짜" 에러이기 때문이다.
+    pub(crate) async fn dispatch_existing(
+        &self,
+        mut task: Task,
+        mark_unavailable_as_failed: bool,
+    ) -> Result<(), DispatchError> {
+        let task_id = task.id;
+
         // 3. 워커 선택
         let worker_id = match self.state.selector.select(&task).await {
             Ok(id) => id,
             Err(e) => {
-                // 선택 실패 → 작업을 Failed로 표시
-                let failure = TaskFailure {
-                    error: e.to_string(),
-                    kind: FailureKind::WorkerUnavailable,
-                    worker_id: None,
-                    attempts: 0,
-                };
-                self.mark_failed(task_id, failure).await;
+                if mark_unavailable_as_failed {
+                    // 선택 실패 → 작업을 Failed로 표시
+                    let failure = TaskFailure {
+                        error: e.to_string(),
+                        kind: FailureKind::WorkerUnavailable,
+                        worker_id: None,
+                        attempts: 0,
+                    };
+                    self.mark_failed(task_id, failure).await;
+                }
                 return Err(DispatchError::NoWorker(e.to_string()));
             }
         };
@@ -274,13 +313,15 @@ impl Dispatcher {
         }
 
         if let Err(e) = check_res {
-            let failure = TaskFailure {
-                error: format!("circuit open: {e}"),
-                kind: FailureKind::CircuitOpen,
-                worker_id: Some(worker_id),
-                attempts: 0,
-            };
-            self.mark_failed(task_id, failure).await;
+            if mark_unavailable_as_failed {
+                let failure = TaskFailure {
+                    error: format!("circuit open: {e}"),
+                    kind: FailureKind::CircuitOpen,
+                    worker_id: Some(worker_id),
+                    attempts: 0,
+                };
+                self.mark_failed(task_id, failure).await;
+            }
             return Err(DispatchError::CircuitOpen(worker_id));
         }
 
@@ -315,7 +356,8 @@ impl Dispatcher {
         inc_running();
 
         if let Err(e) = self.state.transport.dispatch(req).await {
-            // dispatch 자체 실패 (연결 등)
+            // dispatch 자체 실패 (연결 등) — 재조정 여부와 무관하게 항상 실제
+            // 실패로 취급한다.
             let old_state = cb.state();
             cb.record(Outcome::Failure);
             let new_state = cb.state();
@@ -357,7 +399,7 @@ impl Dispatcher {
         }
 
         info!(%task_id, %worker_id, "task dispatched");
-        Ok(task_id)
+        Ok(())
     }
 
     /// 작업을 실패로 마킹하고 이벤트 발행.

@@ -103,6 +103,22 @@ enum Command {
         #[arg(long, env = "FLEET_CLEANUP_RETENTION_DAYS", default_value_t = 7)]
         cleanup_retention_days: i64,
 
+        /// stale `Pending` 작업 재조정(reconciliation) 루프 비활성화 (기본값: 활성).
+        /// 비활성화 시, `submit()` 도중 프로세스가 죽는 등의 이유로 `Pending`에
+        /// 고아로 남은 작업을 아무도 재시도하지 않는다.
+        #[arg(long, default_value_t = false)]
+        no_reconcile: bool,
+
+        /// 재조정 루프 폴링 주기 (초).
+        #[arg(long, env = "FLEET_RECONCILE_INTERVAL_SECS", default_value_t = 30)]
+        reconcile_interval_secs: u64,
+
+        /// 이 시간(초)보다 오래 `Pending` 상태로 머문 작업만 재조정 대상으로
+        /// 삼는다. 정상적으로 진행 중인 `submit()` 호출(보통 수십~수백ms)과
+        /// 경합하지 않도록 dispatch 왕복 시간보다 충분히 크게 잡아야 한다.
+        #[arg(long, env = "FLEET_RECONCILE_STALE_SECS", default_value_t = 60)]
+        reconcile_stale_secs: u64,
+
         /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
         /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
         /// 지정하면 워커 등록/하트비트 엔드포인트가 병렬로 serve됩니다.
@@ -806,6 +822,9 @@ async fn main() -> Result<()> {
             no_cleanup,
             cleanup_interval_secs,
             cleanup_retention_days,
+            no_reconcile,
+            reconcile_interval_secs,
+            reconcile_stale_secs,
             http_bind,
             api_tokens,
             cf_audience,
@@ -826,6 +845,9 @@ async fn main() -> Result<()> {
                 no_cleanup,
                 cleanup_interval_secs,
                 cleanup_retention_days,
+                no_reconcile,
+                reconcile_interval_secs,
+                reconcile_stale_secs,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),

@@ -130,6 +130,11 @@ Pending → Dispatched → Completed
 - `wait_for_task` (또는 `stream_task_output`)로 결과를 폴링
 - `cancel_task`로 사용자 주도 취소
 - 워커 장애 시 Dispatcher가 `Failed(kind=WorkerUnavailable)`로 표시
+- `submit()`은 제출 시점에 딱 한 번만 워커 선택/dispatch를 시도하므로, 그
+  시도가 터미널 상태에 도달하기 전에 오케스트레이터가 재시작되면 작업이
+  `Pending`에 고아로 남을 수 있다 — 백그라운드 재조정(reconciliation) 루프
+  (`fleet-scheduler::reconcile::Reconciler`, `--reconcile-*` CLI 플래그)가
+  주기적으로 stale `Pending` 작업을 다시 훑어 재dispatch를 시도한다.
 
 ## 데이터 모델
 
