@@ -560,14 +560,25 @@ async fn exponential_backoff_increases_between_failures() {
         .await;
     assert!(result.is_err());
 
+    // 회귀 테스트: 최초 연결 실패 직후에도 워커는 clients 맵에 이미 등록돼 있어야
+    // 한다 (register()는 supervisor spawn 직후 무조건 insert — 최초 연결 성공
+    // 여부와 무관). 과거 버그: 이 insert가 최초 연결 성공 시에만 실행돼서, 나중에
+    // supervisor의 백그라운드 재연결이 성공해도 dispatch()가 영원히 "worker not
+    // registered"로 실패했다 (하트비트/ACP ping은 정상 응답하는데도).
+    assert!(
+        transport.conn_state(worker).await.is_some(),
+        "worker must be tracked (Connecting/Disconnected) even after the first connect attempt fails"
+    );
+
     // supervisor는 register() 실패 후에도 계속 재시도 중.
     // 600ms 대기 후 unregister — supervisor가 깔끔히 종료되는지 (교착 없음) 확인.
     tokio::time::sleep(Duration::from_millis(600)).await;
 
-    // worker_id가 clients 맵에 없으므로 Err 반환 — 정상.
+    // 워커가 clients 맵에 있으므로 unregister는 성공해야 함 — backoff 재시도
+    // 도중이라도 supervisor가 깔끔히 종료됨을 함께 검증.
     let result = transport.unregister(worker).await;
     assert!(
-        result.is_err(),
-        "worker should not be in map after failed register"
+        result.is_ok(),
+        "worker should remain tracked (and cleanly unregisterable) even after a failed initial register"
     );
 }

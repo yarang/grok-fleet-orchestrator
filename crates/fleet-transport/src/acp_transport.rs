@@ -450,20 +450,29 @@ impl WorkerTransport for AcpTransport {
         );
         *session.supervisor.lock().await = Some(supervisor_handle);
 
-        // 초기 연결 결과 대기 — register()는 첫 연결이 성공해야 Ok 반환.
-        // 실패해도 supervisor는 백그라운드에서 재시도 중이지만, 호출자에게 명확한 에러 전달.
+        // supervisor를 즉시 clients에 등록 — 최초 연결 시도의 성공 여부와 무관하게.
+        // supervisor는 연결에 실패해도 자체 지수 백오프로 백그라운드 재연결을
+        // 계속하므로(위 모듈 doc의 "재연결" 절 참조), 여기서 등록해 둬야 나중에
+        // 재연결이 성공했을 때 dispatch()가 그 세션을 찾을 수 있다.
+        //
+        // 과거 버그: 이 insert가 (구) `Ok(Ok(()))` 분기에서만 실행됐다. 최초 연결이
+        // 일시적으로 실패하면(401/502/등, 예: 재시작 직후 nginx가 아직 준비되지
+        // 않은 경우) register()는 즉시 Err를 반환하고 insert는 건너뛰었다. 이후
+        // supervisor가 몇 초 안에 재연결에 성공해 하트비트/ACP ping이 정상 응답해도,
+        // clients 맵엔 끝내 등록되지 않아 dispatch()는 영원히
+        // `TransportError::WorkerNotRegistered`로 실패했다 — 워커는 "online"으로 보이지만
+        // 어떤 태스크도 절대 실행되지 않는, 겉보기엔 모순된 상태.
+        self.clients.write().await.insert(worker_id, session);
+
+        // 초기 연결 결과 대기 — 호출자(register_worker 핸들러)에게 즉시 연결 상태를
+        // 알리기 위함일 뿐, 이 결과의 성패가 위 clients 등록 여부에 더 이상 영향을
+        // 주지 않는다. 첫 시도가 실패해도 워커는 이미 추적 중이며, supervisor의
+        // 다음 재연결이 성공하는 즉시 dispatch가 가능해진다.
         match first_result_rx.await {
-            Ok(Ok(())) => {
-                self.clients.write().await.insert(worker_id, session);
-                Ok(())
-            }
-            Ok(Err(e)) => {
-                // 첫 연결 실패 — supervisor가 계속 재시도 중이지만 register()는 에러 반환.
-                // (사용자가 unregister 없이 다시 register 시도하지 않도록 주의해야 함.)
-                Err(TransportError::Connection(format!(
-                    "initial ACP connect failed for {worker_id}: {e}"
-                )))
-            }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(TransportError::Connection(format!(
+                "initial ACP connect failed for {worker_id}: {e} (still tracked — supervisor keeps retrying in the background)"
+            ))),
             Err(_) => Err(TransportError::Connection(format!(
                 "supervisor task dropped first-result channel for {worker_id}"
             ))),
