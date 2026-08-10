@@ -800,6 +800,21 @@ pub enum MtlsAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23+는 crypto backend(ring/aws-lc-rs)를 프로세스 시작 시 명시적으로
+    // 설치해야 한다 — 워크스페이스 의존성 그래프에 두 백엔드가 동시에 컴파일되면
+    // (예: tokio-tungstenite의 rustls-tls-webpki-roots가 끌어오는 rustls 설정이
+    // 워크스페이스 루트의 `features = ["ring", ...]`와 겹치는 경우) 자동 감지가
+    // 모호해져서 첫 TLS 핸드셰이크(예: AcpTransport의 wss:// 워커 접속)에서
+    // "Could not automatically determine the process-level CryptoProvider" 패닉이
+    // 난다. 지금까지 프로덕션의 워커 endpoint가 전부 ws://(평문)였던 탓에 이
+    // 경로가 한 번도 실행되지 않아 발견되지 못했었다 — wss:// 스킴 수정 후
+    // 처음으로 드러난 버그. main() 최상단에서 한 번 명시적으로 설치해 모호성을
+    // 없앤다.
+    #[cfg(feature = "acp")]
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls ring CryptoProvider — should only happen if called twice");
+
     let cli = Cli::parse();
     logging::init(&cli.log_level);
 
