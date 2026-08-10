@@ -175,6 +175,7 @@ struct WorkerSession {
 #[derive(Debug, Clone)]
 enum BufferedEvent {
     Output { seq: u64, chunk: String },
+    Completed { result: crate::acp::PromptResult },
     Failed { error: String },
 }
 
@@ -562,8 +563,24 @@ impl WorkerTransport for AcpTransport {
                                     chunk,
                                 });
                             }
+                            BufferedEvent::Completed { result } => {
+                                // 회귀 수정: Completed 버퍼링 지원 자체가 없어 이
+                                // 레이스(짧은 프롬프트의 응답이 session/prompt RPC
+                                // 응답보다 먼저 도착)에 걸린 태스크는 실행이 실제로는
+                                // 성공했는데도 영원히 "dispatched"에 멈췄었다.
+                                let task_result =
+                                    task_result_from_prompt(worker_id, result);
+                                let _ = broadcaster.send(WorkerEvent::Completed {
+                                    task_id,
+                                    result: task_result,
+                                });
+                                session_clone.complete(task_id).await;
+                            }
                             BufferedEvent::Failed { error } => {
                                 let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
+                                // 회귀 수정: 기존엔 여기서 complete()를 호출하지 않아
+                                // in_flight/prompt_index 슬롯이 영구히 새고 있었다.
+                                session_clone.complete(task_id).await;
                             }
                         }
                     }
@@ -963,7 +980,8 @@ async fn run_reader_loop(
                 }
             }
             AcpEvent::Completed { prompt_id, result } => {
-                // prompt_id로 task 역조회. unknown인 경우 이미 complete된 task.
+                // prompt_id로 task 역조회. unknown인 경우 이미 complete된 task이거나,
+                // dispatch()가 아직 set_prompt_id를 호출하지 않은 레이스 윈도우.
                 let task_id_opt = match prompt_id {
                     Some(pid) => session.task_for_prompt(pid).await,
                     None => {
@@ -974,31 +992,32 @@ async fn run_reader_loop(
                         None
                     }
                 };
-                if let Some(task_id) = task_id_opt {
-                    let output = extract_output_text(&result);
-                    let token_usage = result.usage.map(|u| TokenUsage {
-                        input_tokens: u.input_tokens,
-                        output_tokens: u.output_tokens,
-                        cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
-                    });
-                    let task_result = TaskResult {
-                        output,
-                        exit_code: 0,
-                        duration_secs: 0.0,
-                        token_usage,
-                        worker_id,
-                        finished_at: Utc::now(),
-                    };
-                    let _ = broadcaster.send(WorkerEvent::Completed {
-                        task_id,
-                        result: task_result,
-                    });
-                    session.complete(task_id).await;
-                } else if let Some(pid) = prompt_id {
-                    debug!(
-                        %worker_id, prompt_id = pid.0,
-                        "Completed event for unregistered prompt_id — likely set_prompt_id hasn't run yet; dropping (rare race)"
-                    );
+                match (task_id_opt, prompt_id) {
+                    (Some(task_id), _) => {
+                        let task_result = task_result_from_prompt(worker_id, result);
+                        let _ = broadcaster.send(WorkerEvent::Completed {
+                            task_id,
+                            result: task_result,
+                        });
+                        session.complete(task_id).await;
+                    }
+                    (None, Some(pid)) => {
+                        // dispatch()가 prompt_id를 아직 등록하지 않았을 수 있음
+                        // (짧은 프롬프트는 grok의 응답이 session/prompt RPC 응답보다
+                        // 먼저 도착할 수 있다 — Output/Failed와 동일한 레이스).
+                        // Output/Failed처럼 버퍼링해 set_prompt_id가 drain하도록 한다.
+                        // 과거 버그: Completed만 버퍼링 없이 즉시 drop해서, 이 레이스에
+                        // 걸린 태스크는 실제로는 성공했는데도 영원히 "dispatched"
+                        // 상태로 멈췄었다.
+                        session
+                            .buffer_event(pid, BufferedEvent::Completed { result })
+                            .await;
+                        debug!(
+                            %worker_id, prompt_id = pid.0,
+                            "buffered early Completed — will flush on prompt_id register"
+                        );
+                    }
+                    (None, None) => {}
                 }
             }
             AcpEvent::Failed { prompt_id, error } => {
@@ -1059,6 +1078,25 @@ async fn run_prompt_with_timeout(
     }
 }
 
+/// `PromptResult` → `TaskResult` 변환. reader loop의 즉시 라우팅 경로와
+/// dispatch()의 버퍼드-이벤트 drain 경로가 동일 로직을 공유.
+fn task_result_from_prompt(worker_id: WorkerId, result: crate::acp::PromptResult) -> TaskResult {
+    let output = extract_output_text(&result);
+    let token_usage = result.usage.map(|u| TokenUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
+    });
+    TaskResult {
+        output,
+        exit_code: 0,
+        duration_secs: 0.0,
+        token_usage,
+        worker_id,
+        finished_at: Utc::now(),
+    }
+}
+
 /// PromptResult.agent_message에서 텍스트를 추출.
 fn extract_output_text(result: &crate::acp::PromptResult) -> String {
     let mut out = String::new();
@@ -1111,6 +1149,43 @@ mod tests {
             usage: None,
         };
         assert_eq!(extract_output_text(&result), "foobar");
+    }
+
+    /// 회귀 테스트: 짧은 프롬프트에 대한 grok의 응답이 `session/prompt` RPC
+    /// 응답(→ set_prompt_id 호출)보다 먼저 도착하는 레이스에서, Completed
+    /// 이벤트가 Output/Failed와 동일하게 버퍼링되어 set_prompt_id가 drain할 때
+    /// 함께 나와야 한다. 과거 버그: `BufferedEvent`에 `Completed` variant 자체가
+    /// 없어서 이 레이스에 걸린 태스크는 실행이 실제로는 성공했는데도 영원히
+    /// "dispatched" 상태로 멈췄다 — 프로덕션에서 실제로 관측된 사례.
+    #[tokio::test]
+    async fn buffered_completed_event_flushes_on_prompt_id_registration() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<SupervisorCmd>();
+        let session = WorkerSession::new(WorkerId::new(), "ws://x".into(), 4, cmd_tx);
+        let task_id = TaskId::new();
+        let prompt_id = PromptId(42);
+
+        session.try_acquire(task_id).await.unwrap();
+
+        // grok의 응답이 먼저 도착 — set_prompt_id가 아직 호출되지 않은 시점.
+        let result = crate::acp::PromptResult {
+            prompt_id: Some(42),
+            agent_message: vec![serde_json::json!({"type": "text", "text": "hi"})],
+            end_of_turn: true,
+            usage: None,
+        };
+        session
+            .buffer_event(prompt_id, BufferedEvent::Completed { result })
+            .await;
+
+        // session/prompt RPC 응답이 뒤늦게 도착 — 버퍼가 drain되어야 함.
+        let flushed = session.set_prompt_id(task_id, prompt_id).await;
+        assert_eq!(flushed.len(), 1, "buffered Completed must flush");
+        match &flushed[0] {
+            BufferedEvent::Completed { result } => {
+                assert_eq!(extract_output_text(result), "hi");
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[test]
