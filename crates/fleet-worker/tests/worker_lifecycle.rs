@@ -268,20 +268,15 @@ async fn register_includes_labels_and_max_concurrent_tasks() {
 
     let registers = state.registers.lock().await;
     assert_eq!(registers.len(), 1);
-    let label_array = registers[0]["labels"].as_array().unwrap();
-    // 라벨이 모두 포함되어야 함 (순서 무관).
-    let label_pairs: Vec<(String, String)> = label_array
-        .iter()
-        .map(|v| {
-            let arr = v.as_array().unwrap();
-            (
-                arr[0].as_str().unwrap().to_string(),
-                arr[1].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    let _ = labels; // for documentation
-    assert!(label_pairs.contains(&("arch".into(), "arm64".into())));
-    assert!(label_pairs.contains(&("gpu".into(), "true".into())));
+    // fleet-api의 RegisterRequest.labels: HashMap<String,String>은 JSON 객체만
+    // 받아들인다 — 배열로 보내면 422로 거부된다 (과거 회귀 버그, registration.rs
+    // 참조). 객체 형태로 정확히 직렬화되는지 검증.
+    let label_obj = registers[0]["labels"]
+        .as_object()
+        .expect("labels must serialize as a JSON object, not an array");
+    assert_eq!(label_obj.len(), labels.len());
+    for (k, v) in &labels {
+        assert_eq!(label_obj[k], *v);
+    }
     assert_eq!(registers[0]["max_concurrent_tasks"], 8);
 }

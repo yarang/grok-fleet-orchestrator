@@ -63,8 +63,8 @@ pub struct RegisterResponse {
 struct RegisterRequest {
     name: String,
     agent_endpoint: String,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    labels: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty", default)]
+    labels: std::collections::HashMap<String, String>,
     max_concurrent_tasks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     existing_worker_id: Option<String>,
@@ -139,13 +139,7 @@ impl RegistrationClient {
     /// 1회 등록 시도. 성공 시 worker_id를 내부 상태에 저장.
     pub async fn register_once(&self) -> Result<RegisterResponse, WorkerError> {
         let endpoint = self.config.agent_endpoint();
-        let labels: Vec<(String, String)> = self
-            .config
-            .worker
-            .labels
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let labels = self.config.worker.labels.clone();
 
         let body = RegisterRequest {
             name: self.config.worker.name.clone(),
@@ -654,6 +648,37 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("server-key="));
+    }
+
+    /// 회귀 테스트: 비어있지 않은 labels가 JSON *배열*이 아니라 *객체*로 직렬화되는지
+    /// 검증. fleet-api의 `RegisterRequest.labels: HashMap<String,String>`은 map만
+    /// 받아들이므로, 과거 `Vec<(String,String)>` 구현은 라벨이 하나라도 있으면
+    /// 실제 오케스트레이터에서 422로 거부됐다 (labels가 비어있을 때만
+    /// `skip_serializing_if`로 필드 자체가 생략되어 우연히 가려져 있던 버그).
+    #[tokio::test]
+    async fn register_with_labels_serializes_as_json_object_not_array() {
+        let state = MockState::default();
+        let url = start_mock_orchestrator(state.clone()).await;
+
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url(url)
+                .label("model", "gemini")
+                .label("arch", "arm64")
+                .build(),
+        );
+        let client = RegistrationClient::new(config).unwrap();
+        client.register_once().await.unwrap();
+
+        let registers = state.registers.lock().await;
+        assert_eq!(registers.len(), 1);
+        let labels = &registers[0]["labels"];
+        assert!(
+            labels.is_object(),
+            "labels must serialize as a JSON object (map), got: {labels:?}"
+        );
+        assert_eq!(labels["model"], "gemini");
+        assert_eq!(labels["arch"], "arm64");
     }
 
     #[tokio::test]
