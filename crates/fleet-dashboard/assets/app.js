@@ -40,26 +40,21 @@ async function loadCurrentUser() {
   }
 }
 
+/// 사이드바 하단의 #sidebar-user-menu 컨테이너에 사용자 메뉴를 렌더링한다.
+/// 모든 인증된 페이지가 공유하는 단일 진입점 — 페이지마다 중복 구현하지 않는다.
+/// data-rendered 플래그로 중복 초기화만 막고, 컨테이너가 이미 존재해도 항상 채운다
+/// (과거 버전은 getElementById('user-menu')로 조기 반환하여 정적 placeholder가 있는
+/// 페이지에서 메뉴가 영영 렌더링되지 않는 버그가 있었다).
 function renderUserMenu() {
   if (!currentUser) return;
-  const header = document.querySelector('header');
-  if (!header || document.getElementById('user-menu')) return;
+  const container = document.getElementById('sidebar-user-menu');
+  if (!container || container.dataset.rendered === 'true') return;
 
-  const menu = document.createElement('div');
-  menu.id = 'user-menu';
-  menu.style.cssText = 'display:flex; align-items:center; gap:12px;';
-  menu.innerHTML = `
-    <span style="font-size: 13px; color: var(--ink-muted, #615d59);">
-      ${escapeHtml(currentUser.username || '')}
-    </span>
-    <button id="logout-btn"
-            style="background:transparent; border:1px solid var(--hairline,#e6e6e6);
-                   border-radius:8px; padding:6px 12px; cursor:pointer;
-                   font-size:12px; color: var(--ink-secondary, #31302e);">
-      Sign out
-    </button>
+  container.dataset.rendered = 'true';
+  container.innerHTML = `
+    <span>${escapeHtml(currentUser.username || '')}</span>
+    <button id="logout-btn" type="button">Sign out</button>
   `;
-  header.appendChild(menu);
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
     await fetch('/logout', {
@@ -67,6 +62,35 @@ function renderUserMenu() {
       headers: { 'X-CSRF-Token': getCsrfToken() },
     });
     window.location.href = '/login';
+  });
+}
+
+// ── 사이드바 모바일 드로어 토글 ──────────────────────────────────────────
+
+/// 모든 인증된 페이지에서 공유하는 사이드바 partial의 햄버거 버튼 / 백드롭을 초기화한다.
+function initSidebarToggle() {
+  const toggle = document.getElementById('sidebar-toggle');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  if (!toggle) return;
+
+  const close = () => {
+    document.body.classList.remove('sidebar-open');
+    toggle.setAttribute('aria-expanded', 'false');
+  };
+  const open = () => {
+    document.body.classList.add('sidebar-open');
+    toggle.setAttribute('aria-expanded', 'true');
+  };
+
+  toggle.addEventListener('click', () => {
+    document.body.classList.contains('sidebar-open') ? close() : open();
+  });
+  if (backdrop) backdrop.addEventListener('click', close);
+
+  // 사이드바 링크 클릭 시(모바일) 드로어 닫기 — 페이지 이동으로 자연히 닫히지만
+  // 같은 페이지 내 앵커/재클릭 대비.
+  document.querySelectorAll('.sidebar-link').forEach(link => {
+    link.addEventListener('click', close);
   });
 }
 
@@ -234,14 +258,19 @@ async function refreshAll() {
 }
 
 (async () => {
-  // 1. 인증된 사용자 정보 로드 (401 → 자동 리다이렉트).
+  // 0. 사이드바 모바일 드로어는 모든 인증된 페이지에서 공통으로 초기화.
+  initSidebarToggle();
+
+  // 1. 인증된 사용자 정보 로드 (401 → 자동 리다이렉트). 사이드바 사용자 메뉴도 여기서 렌더링.
   await loadCurrentUser();
   if (!currentUser) return;
 
-  // 2. 데이터 초기 로드.
-  await refreshAll();
-  startEventStream();
-
-  // 3. 5초 폴링 (SSE와 병행).
-  setInterval(refreshAll, 5000);
+  // 2. Overview 대시보드 위젯(#overview-grid)이 있는 페이지(index.html)에서만
+  //    메트릭/워커/태스크 폴링과 SSE 스트림을 시작한다. 다른 페이지는 자체 스크립트가
+  //    자신의 데이터를 관리하므로 여기서 중복 폴링/SSE 연결을 만들지 않는다.
+  if (document.getElementById('overview-grid')) {
+    await refreshAll();
+    startEventStream();
+    setInterval(refreshAll, 5000);
+  }
 })();
