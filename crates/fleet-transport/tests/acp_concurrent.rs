@@ -143,7 +143,12 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "prompt_id": prompt_id,
+                        // camelCase — 위 session/update의 "promptId"와 일관되게.
+                        // (과거 이 mock은 snake_case "prompt_id"를 썼는데, 마침
+                        // 실제 PromptResult 구조체도 rename 없이 snake_case를
+                        // 기대하던 버그와 우연히 맞아떨어져 여기선 드러나지
+                        // 않았었다 — messages.rs의 PromptResult.prompt_id 참조.)
+                        "promptId": prompt_id,
                         "agent_message": [{
                             "type": "text",
                             "text": format!("echo:{prompt_id}"),

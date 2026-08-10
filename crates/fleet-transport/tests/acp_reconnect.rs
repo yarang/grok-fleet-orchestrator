@@ -156,7 +156,8 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": {
-                            "prompt_id": prompt_id,
+                            // camelCase — 위 session/update의 "promptId"와 일관되게.
+                            "promptId": prompt_id,
                             "agent_message": [{"type": "text", "text": "hello"}],
                             "end_of_turn": true,
                             "usage": {"input_tokens": 1, "output_tokens": 2},

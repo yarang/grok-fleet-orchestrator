@@ -189,7 +189,15 @@ pub struct SessionPromptParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PromptResult {
     /// 서버가 할당한 프롬프트 식별자.
-    #[serde(default)]
+    ///
+    /// 회귀 버그: 실제 grok 응답은 이 필드를 camelCase `promptId`로 보내는데
+    /// (이 파일의 다른 모든 ACP 필드 — `sessionId`, `SessionUpdate.promptId`
+    /// 등 — 와 동일한 관례), rename 없이 snake_case `prompt_id`로만 받고
+    /// `#[serde(default)]`가 걸려 있어 항상 조용히 `None`으로 떨어졌다. 매칭되는
+    /// JSON 키가 없어도 에러 없이 그냥 기본값(None)으로 넘어가는 바람에 프로덕션
+    /// 로그 어디에도 이 실패가 드러나지 않았다 — Completed 이벤트가 prompt_id
+    /// 없이 나가는 근본 원인이었다.
+    #[serde(default, rename = "promptId")]
     pub prompt_id: Option<u64>,
     /// 에이전트의 최종 메시지 (텍스트 블록들).
     #[serde(default)]

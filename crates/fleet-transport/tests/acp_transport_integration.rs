@@ -123,7 +123,10 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "prompt_id": prompt_id,
+                        // camelCase — 위 session/update의 "promptId"와 일관되게
+                        // (실제 grok과 동일한 관례; PromptResult.prompt_id의
+                        // #[serde(rename = "promptId")] 참조).
+                        "promptId": prompt_id,
                         "agent_message": [{
                             "type": "text",
                             "text": chunks.join(""),

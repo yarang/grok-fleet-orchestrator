@@ -133,12 +133,14 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     let _ = writer.send(WsMessage::Text(update.to_string())).await;
                 }
 
-                // 최종 응답.
+                // 최종 응답. camelCase — 위 session/update의 "promptId"와
+                // 일관되게 (실제 grok과 동일한 관례; PromptResult.prompt_id의
+                // #[serde(rename = "promptId")] 참조).
                 Some(json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": {
-                        "prompt_id": prompt_id,
+                        "promptId": prompt_id,
                         "agent_message": [{
                             "type": "text",
                             "text": chunks.join(""),
@@ -239,6 +241,10 @@ async fn prompt_streams_chunks_then_completes() {
         .expect("prompt timeout")
         .expect("prompt ok");
 
+    // mock 서버가 자체 발급한 promptId(카운터 첫 값 1)를 신뢰해 그대로 반환.
+    // 회귀 테스트: 아래 Completed 이벤트의 prompt_id와 반드시 일치해야 한다
+    // (과거엔 이벤트만 항상 None이라 서로 달라 Completed가 영원히 드롭되는
+    // 프로덕션 버그였다 — messages.rs의 PromptResult.prompt_id 참조).
     assert_eq!(prompt_id, PromptId(1));
 
     // events 수집 — Output 2개 + Completed 1개 예상.
@@ -248,7 +254,10 @@ async fn prompt_streams_chunks_then_completes() {
     while std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(200), events.recv()).await {
             Ok(Some(AcpEvent::Output { chunk, .. })) => outputs.push(chunk),
-            Ok(Some(AcpEvent::Completed { .. })) => {
+            Ok(Some(AcpEvent::Completed { prompt_id: pid, .. })) => {
+                // 반환된 prompt_id와 이벤트의 prompt_id가 반드시 같아야 dispatch()의
+                // set_prompt_id ↔ reader loop의 라우팅이 서로 맞아떨어진다.
+                assert_eq!(pid, Some(prompt_id), "event prompt_id must match the id prompt() returned");
                 completed = true;
                 break;
             }

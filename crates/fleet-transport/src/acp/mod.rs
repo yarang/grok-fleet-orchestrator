@@ -254,15 +254,30 @@ impl AcpClient {
             AcpError::MalformedUpdate("session/prompt returned no result".to_string())
         })?;
         let result: PromptResult = serde_json::from_value(result_value)?;
-        let prompt_id = result.prompt_id.map(PromptId);
+
+        // 서버가 할당한 promptId를 신뢰 — session/update(Output) notification도
+        // 동일한 promptId로 라우팅되므로(위 SessionUpdate.promptId), 이 값을 써야
+        // Output과 Completed가 같은 키 공간에서 일관되게 매칭된다.
+        // (별개로 수정된 버그: PromptResult.prompt_id에 camelCase rename이
+        // 빠져 있어 실제로는 항상 None으로 파싱되고 있었다 — messages.rs 참조.)
+        // 그래도 서버가 정말 생략하는 예외적인 경우를 대비해 우리 요청 id로
+        // 폴백한다. 과거 버그: 이 폴백은 반환값에만 적용되고 emit되는 이벤트는
+        // 폴백 없이 `result.prompt_id`(=None)를 그대로 실어 보내서, 반환값과
+        // 이벤트가 서로 다른 prompt_id를 쓰는 불일치가 있었다 — dispatch()는
+        // 반환값으로 set_prompt_id를 등록하고 reader loop는 이벤트의 prompt_id로
+        // 라우팅하므로, 어긋나면 Completed가 영원히 드롭됐다. 아래는 반환값과
+        // 이벤트가 항상 같은 값을 쓰도록 먼저 하나로 확정한다.
+        let prompt_id = result.prompt_id.map(PromptId).unwrap_or(PromptId(id));
 
         // Completed 이벤트 emit (이 시점까지 도착한 session/update 외의
         // 완료 신호 — end_of_turn=true인 경우에는 ACP가 update로도 end_of_turn을
         // 보냈을 수 있지만, 안전하게 한 번 더 emit하여 구독자가 결과를 받도록).
-        self.inner
-            .emit_event(AcpEvent::Completed { prompt_id, result });
+        self.inner.emit_event(AcpEvent::Completed {
+            prompt_id: Some(prompt_id),
+            result,
+        });
 
-        Ok(prompt_id.unwrap_or(PromptId(id)))
+        Ok(prompt_id)
     }
 
     /// `session/cancel`. 진행 중인 프롬프트 취소.
