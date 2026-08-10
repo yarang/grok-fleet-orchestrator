@@ -101,20 +101,33 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
 이 패턴은 [Grok Build의 `CircuitBreakerRegistry`](https://github.com/xai-org/grok-build)에서
 차용했지만, 워커별로 키를 관리하도록 재구현했습니다.
 
-### 6. WorkerSelector: hint + label + least-loaded
+### 6. WorkerSelector: hint + label + model + least-loaded
 
 ```text
-submit_task(server_hint="gpu-box", required_labels=["gpu"])
+submit_task(server_hint="gpu-box", required_labels=["gpu"], model="gemini")
+   │
+   ├─ required_labels를 만족하지 않는 워커 제외
+   │
+   ├─ model이 지정된 경우: labels["model"]이 정확히 일치하지 않는 워커 제외
+   │    (모두 제외되면 즉시 에러, fallback 없음)
    │
    ├─ server_hint가 지정된 경우:
-   │    일치하는 워커만 후보. 없으면 에러 (fallback 없음).
+   │    남은 후보 중 일치하는 워커만. 없으면 에러 (fallback 없음).
    │
    ├─ server_hint 없는 경우:
-   │    labels를 만족하는 모든 dispatchable 워커에서
-   │    active_tasks가 가장 적은 것을 선택.
+   │    남은 후보 중 active_tasks가 가장 적은 것을 선택.
    │
    └─ dispatchable = online && 회로 닫힘 && active < max_concurrent
 ```
+
+grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바꿀 수 없으므로
+(`session/new`/`session/prompt`에 `model` 파라미터 없음), 모델 선택은 오직
+"어느 워커로 보낼 것인가"로만 구현됩니다. 워커를 `model=<slug>` 라벨로
+등록해 그 워커의 `grok agent serve` 프로세스가 실제로 어떤 백엔드로
+설정되어 있는지 표시하면(예: `worker.toml`의
+`[worker] labels = { model = "gemini" }` 또는
+`fleet-worker join --labels model=gemini,...`), `fleet_dispatch_task`의
+`model` 파라미터가 그 라벨과 정확히 일치하는 워커로만 라우팅합니다.
 
 ### 7. 비동기 장기 실행 작업 모델
 

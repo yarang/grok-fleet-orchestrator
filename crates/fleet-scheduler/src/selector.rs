@@ -2,9 +2,11 @@
 //!
 //! 선택 순서:
 //! 1. 라벨 매칭 필터 (`required_labels`)
-//! 2. 회로 차단된 워커 제외
-//! 3. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
-//! 4. 없으면 least-loaded (활성 작업 수 최소)
+//! 2. 모델 매칭 필터 (`task.model` — 지정된 경우 `labels["model"]`이 정확히
+//!    일치하는 워커만 후보로 남긴다. 지정하지 않으면 기존과 동일)
+//! 3. 회로 차단된 워커 제외
+//! 4. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
+//! 5. 없으면 least-loaded (활성 작업 수 최소)
 
 use std::sync::Arc;
 
@@ -29,6 +31,9 @@ pub enum SelectionError {
 
     #[error("hinted worker '{0}' is offline or circuit-open (not falling back, per user intent)")]
     HintedUnavailable(String),
+
+    #[error("no online worker is labeled for model '{0}'")]
+    NoWorkerForModel(String),
 }
 
 /// 워커 선택기.
@@ -70,6 +75,17 @@ impl WorkerSelector {
 
         if candidates.is_empty() {
             return Err(SelectionError::NoMatchingLabels);
+        }
+
+        // 2.5. 모델 매칭 필터 — task.model이 지정된 경우에만 적용. `labels["model"]`
+        // 값이 정확히 일치하는 워커만 후보로 남긴다. task.model이 None이면 이 단계는
+        // 완전히 건너뛰어 기존(모델 필터 도입 이전) 동작과 동일하게 유지한다.
+        if let Some(model) = &task.model {
+            candidates.retain(|w| w.labels.get("model") == Some(model));
+
+            if candidates.is_empty() {
+                return Err(SelectionError::NoWorkerForModel(model.clone()));
+            }
         }
 
         // 3. 회로 차단된 워커 제외
@@ -348,5 +364,109 @@ mod tests {
         let task = make_task("train", None, &["tpu"]);
         let result = selector.select(&task).await;
         assert!(matches!(result, Err(SelectionError::NoMatchingLabels)));
+    }
+
+    #[tokio::test]
+    async fn select_model_routes_to_matching_worker() {
+        let workers = vec![
+            make_worker("gemini-1", 0, &[("model", "gemini")]),
+            make_worker("glm-1", 0, &[("model", "glm-5")]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let mut task = make_task("work", None, &[]);
+        task.model = Some("gemini".into());
+
+        let selected = selector.select(&task).await.unwrap();
+        let gemini_worker = store.get_worker_by_name("gemini-1").await.unwrap().unwrap();
+        assert_eq!(
+            selected, gemini_worker.id,
+            "must route to gemini-labeled worker only"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_no_worker_for_model() {
+        let workers = vec![
+            make_worker("glm-1", 0, &[("model", "glm-5")]),
+            make_worker("plain-1", 0, &[]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let mut task = make_task("work", None, &[]);
+        task.model = Some("gemini".into());
+
+        let result = selector.select(&task).await;
+        match result {
+            Err(SelectionError::NoWorkerForModel(m)) => {
+                assert!(
+                    m.contains("gemini"),
+                    "error message should mention model: {m}"
+                );
+                let msg = SelectionError::NoWorkerForModel(m).to_string();
+                assert!(
+                    msg.contains("gemini"),
+                    "Display impl should mention model: {msg}"
+                );
+            }
+            other => panic!("expected NoWorkerForModel, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_model_none_is_backward_compatible() {
+        // task.model == None → model 라벨 유무와 무관하게 기존과 동일하게 동작해야 함.
+        let workers = vec![
+            make_worker("busy", 5, &[("model", "gemini")]),
+            make_worker("idle", 0, &[]),
+            make_worker("medium", 2, &[("model", "glm-5")]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let task = make_task("work", None, &[]); // model: None (default)
+        let selected = selector.select(&task).await.unwrap();
+
+        // least-loaded 정책은 그대로 유지 — "idle"이 선택되어야 함
+        let idle_worker = store.get_worker_by_name("idle").await.unwrap().unwrap();
+        assert_eq!(
+            selected, idle_worker.id,
+            "model=None must ignore model labels and pick least-loaded, unchanged from prior behavior"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_model_and_required_labels_compose() {
+        // required_labels와 model 필터가 AND로 결합되어야 함 (둘 다 만족하는 워커만 남음).
+        let workers = vec![
+            // gpu 라벨은 있지만 model이 다름 → 제외
+            make_worker("gpu-glm", 0, &[("gpu", "true"), ("model", "glm-5")]),
+            // model은 맞지만 gpu 라벨이 없음 → 제외
+            make_worker("cpu-gemini", 0, &[("model", "gemini")]),
+            // 둘 다 만족 → 선택되어야 함
+            make_worker("gpu-gemini", 0, &[("gpu", "true"), ("model", "gemini")]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let mut task = make_task("train", None, &["gpu"]);
+        task.model = Some("gemini".into());
+
+        let selected = selector.select(&task).await.unwrap();
+        let expected = store
+            .get_worker_by_name("gpu-gemini")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected, expected.id,
+            "must satisfy both required_labels AND model filters"
+        );
     }
 }

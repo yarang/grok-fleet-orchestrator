@@ -577,6 +577,52 @@ async fn label_filtering_selects_only_matching_worker() {
     }
 }
 
+#[tokio::test]
+async fn dispatch_with_unmatched_model_marks_task_failed() {
+    // 워커는 온라인/가용 상태이지만 어느 누구도 요청된 model 라벨을 갖고 있지
+    // 않은 경우 — task는 Pending에 멈추거나 panic하지 않고 Failed로
+    // 종료되어야 하며, FailureKind::WorkerUnavailable + 에러 메시지에
+    // 요청된 model이 언급되어야 한다.
+    let mut glm = make_worker("glm-1");
+    glm.labels.insert("model".into(), "glm-5".into());
+    let plain = make_worker("plain-1");
+
+    let (state, dispatcher) = setup(
+        vec![glm, plain],
+        vec![], // 선택 단계에서 실패하므로 mock worker 불필요
+    )
+    .await;
+
+    let task = Task::from_request(TaskRequest {
+        prompt: "gemini-only work".into(),
+        model: Some("gemini".into()),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let task_id = task.id;
+
+    let result = dispatcher.submit(task).await;
+    assert!(
+        result.is_err(),
+        "submit should fail since no worker is labeled for model 'gemini'"
+    );
+
+    let terminal = wait_until_terminal(&state, task_id).await;
+    let failure = match terminal.status {
+        TaskStatus::Failed(f) => f,
+        other => panic!("expected Failed, got {:?}", other),
+    };
+    assert!(matches!(
+        failure.kind,
+        fleet_core::FailureKind::WorkerUnavailable
+    ));
+    assert!(
+        failure.error.contains("gemini"),
+        "error should reference the requested model: {}",
+        failure.error
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //  Phase 2: cancel + wait
 // ─────────────────────────────────────────────────────────────────────

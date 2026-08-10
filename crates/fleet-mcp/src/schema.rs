@@ -220,7 +220,7 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     },
                     "model": {
                         "type": "string",
-                        "description": "Model slug to use (optional, e.g. 'gllm-5')."
+                        "description": "Model slug to route this task to (optional, e.g. 'gemini'). Only workers whose 'model' label exactly matches are eligible; the task fails immediately if none are online. Omit to let the scheduler pick any available worker regardless of configured model."
                     },
                     "server_hint": {
                         "type": "string",
