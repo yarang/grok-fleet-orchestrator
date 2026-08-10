@@ -155,23 +155,13 @@ pub struct SessionNewResult {
 
 // --- session/prompt ---
 
-/// ACP 프롬프트의 user message 콘텐츠.
-#[derive(Debug, Clone, Serialize)]
-pub struct AgentMessage {
-    pub role: &'static str,
-    pub content: Vec<ContentBlock>,
-}
-
-impl AgentMessage {
-    /// 단일 텍스트 프롬프트에서 user 메시지 생성.
-    pub fn user_text(text: impl Into<String>) -> Self {
-        Self {
-            role: "user",
-            content: vec![ContentBlock::text(text)],
-        }
-    }
-}
-
+/// ACP `session/prompt`의 `prompt` 필드는 콘텐츠 블록의 평면 배열이다 —
+/// `{role, content}`로 감싼 메시지 객체가 아니다. grok 자신의 공식 ACP SDK
+/// 예제(`~/.grok/README.md`의 Python `create()`)가 정확히 이 형태를 쓴다:
+/// `prompt = [{"type": "text", "text": m["content"]} for m in messages]`.
+/// 과거엔 `Vec<AgentMessage>`(`{role:"user", content:[...]}`)로 감싸 보냈는데,
+/// grok 0.2.103이 이를 `-32602 Invalid params`로 거부했다 — 배포 후 처음으로
+/// end-to-end 디스패치가 실제 워커까지 도달했을 때 드러난 버그.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContentBlock {
     #[serde(rename = "type")]
@@ -192,7 +182,7 @@ impl ContentBlock {
 #[allow(non_snake_case)]
 pub struct SessionPromptParams {
     pub sessionId: String,
-    pub prompt: Vec<AgentMessage>,
+    pub prompt: Vec<ContentBlock>,
 }
 
 /// `session/prompt` 응답. 스트리밍 모드에서는 end_of_turn=true로 도착.
@@ -339,11 +329,11 @@ pub fn build_session_new(id: u64, cwd: Option<&str>) -> RpcRequest {
     RpcRequest::request(id, "session/new", Some(json!(params)))
 }
 
-/// `session/prompt` 요청 빌더. 단일 텍스트 프롬프트를 user message로 래핑.
+/// `session/prompt` 요청 빌더. 단일 텍스트 프롬프트를 콘텐츠 블록 하나로 래핑.
 pub fn build_session_prompt(id: u64, session_id: &str, prompt: &str) -> RpcRequest {
     let params = SessionPromptParams {
         sessionId: session_id.to_string(),
-        prompt: vec![AgentMessage::user_text(prompt)],
+        prompt: vec![ContentBlock::text(prompt)],
     };
     RpcRequest::request(id, "session/prompt", Some(json!(params)))
 }
@@ -401,6 +391,27 @@ mod tests {
         let m: RpcMessage = serde_json::from_str(raw).unwrap();
         assert!(m.is_response());
         assert_eq!(m.error.unwrap().code, -32600);
+    }
+
+    /// 회귀 테스트: `session/prompt`의 `prompt` 필드는 콘텐츠 블록의 평면
+    /// 배열이어야 한다(`[{"type":"text","text":"..."}]`) — `{role,content}`로
+    /// 감싼 메시지 객체(구 `AgentMessage`)가 아니다. 감싸서 보내면 grok
+    /// 0.2.103이 `-32602 Invalid params`로 거부한다 — 프로덕션에서 다른 3개
+    /// 커넥션 버그를 전부 고친 뒤에야 처음으로 드러난 다섯 번째 버그였다.
+    #[test]
+    fn session_prompt_params_prompt_is_flat_content_block_array() {
+        let req = build_session_prompt(7, "sess-1", "hello");
+        let v = serde_json::to_value(&req).unwrap();
+        let prompt = &v["params"]["prompt"];
+        assert!(prompt.is_array(), "prompt must be a JSON array, got: {prompt}");
+        let block = &prompt[0];
+        assert_eq!(block["type"], "text", "block must have a top-level 'type', not be wrapped in {{role, content}}");
+        assert_eq!(block["text"], "hello");
+        assert!(
+            block.get("role").is_none() && block.get("content").is_none(),
+            "prompt entries must be raw content blocks, not {{role, content}} messages — got: {block}"
+        );
+        assert_eq!(v["params"]["sessionId"], "sess-1");
     }
 
     #[test]
