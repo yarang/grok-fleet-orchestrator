@@ -18,6 +18,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
 };
+use axum_extra::extract::cookie::{Cookie, SameSite};
 use axum_extra::extract::CookieJar;
 use chrono::Utc;
 use fleet_core::{PermissionKind, Session, User};
@@ -178,14 +179,50 @@ pub async fn require_session(
         }
     }
 
+    // 9. CSRF 쿠키 갱신 — 기존 값이 있으면 재사용(그대로 유지), 없으면 새로
+    //    발급한다. 응답을 만들기 전에 값을 정해둬야 next.run() 안의 핸들러가
+    //    (드물게) 직접 쿠키를 참조하더라도 일관된다.
+    //
+    // FLEET FIX (2026-08-12): task_new_page를 비롯한 인증된 페이지 핸들러들은
+    // 원래 fleet_csrf 쿠키를 전혀 재발급하지 않았다 — 로그인 시 한 번 발급된
+    // 뒤로는 순수히 브라우저의 Max-Age에만 의존했다. 세션이 살아있는 한
+    // fleet_csrf도 항상 존재하도록, 인증된 모든 요청에서 여기 한 곳에서
+    // 갱신한다(개별 핸들러마다 반복하다 하나를 빠뜨리는 이전과 같은 실수를
+    // 구조적으로 방지).
+    let csrf_token = cookies
+        .get(CSRF_COOKIE)
+        .map(|c| c.value().to_string())
+        .unwrap_or_else(crate::auth_util::generate_csrf_token);
+
     req.extensions_mut().insert(principal);
 
-    // 9. 토큰 로테이션 판단은 응답 생성 **전에** 끝낸다 (session은 여기서 소비).
+    // 10. 토큰 로테이션 판단은 응답 생성 **전에** 끝낸다 (session은 여기서 소비).
     let rotation = maybe_rotate_session(&state, &session).await;
 
     let mut response = next.run(req).await;
 
-    // 10. 새 토큰이 발급되었으면 응답에 쿠키를 심는다.
+    // 11. CSRF 쿠키를 응답에 심는다 (매 요청 슬라이딩 갱신 — 세션과 수명 동기화).
+    match Cookie::build((CSRF_COOKIE, csrf_token))
+        .path("/")
+        .http_only(false) // JS에서 읽어야 함 (더블 서밋 패턴)
+        .secure(state.secure_cookies)
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS))
+        .build()
+        .to_string()
+        .parse()
+    {
+        Ok(value) => {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to build refreshed CSRF cookie");
+        }
+    }
+
+    // 12. 새 세션 토큰이 발급되었으면 응답에 쿠키를 심는다.
     if let Some(new_token) = rotation {
         match session_cookie_header(&state, &new_token) {
             Ok(value) => {

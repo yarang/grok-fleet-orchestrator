@@ -20,7 +20,7 @@ use fleet_core::{
     Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
     WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
-use fleet_dashboard::{build_dashboard_app, DashboardState};
+use fleet_dashboard::{build_dashboard_app, DashboardState, SESSION_DURATION_SECS};
 use fleet_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -1007,6 +1007,83 @@ async fn submit_task_rejects_missing_csrf_cookie() {
         .unwrap();
 
     assert_eq!(resp.status(), 403);
+}
+
+/// FLEET FIX (2026-08-12) 회귀 테스트.
+///
+/// 세션은 유효하지만 `fleet_csrf` 쿠키가 없는 상태(만료·삭제 등)로 아무
+/// 보호된 페이지나 열람하면, `require_session` 미들웨어가 응답에 새
+/// `fleet_csrf` 쿠키를 발급해야 한다 — 그래야 사용자가 다음 폼을 제출할 때
+/// 다시 CSRF 오류를 겪지 않는다. 이 미들웨어 갱신이 없으면(수정 전 상태),
+/// `/tasks/new`처럼 쿠키를 건드리지 않는 핸들러에서는 재로그인 전까지
+/// 영원히 CSRF 오류에 갇힌다.
+#[tokio::test]
+async fn authenticated_request_without_csrf_cookie_gets_one_issued() {
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    // fleet_session만 보내고 fleet_csrf는 아예 없음.
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/overview", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let set_cookie_values: Vec<String> = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .collect();
+    let csrf_cookie = set_cookie_values
+        .iter()
+        .find(|c| c.starts_with("fleet_csrf="))
+        .unwrap_or_else(|| panic!("expected a fleet_csrf Set-Cookie, got: {set_cookie_values:?}"));
+
+    assert!(
+        csrf_cookie.contains(&format!("Max-Age={SESSION_DURATION_SECS}")),
+        "CSRF cookie must live as long as the session, got: {csrf_cookie}"
+    );
+}
+
+/// 기존 `fleet_csrf` 쿠키가 있는 상태로 요청하면, 미들웨어는 값을 새로
+/// 굴리지 않고 그대로 재사용해야 한다 — 이미 화면에 렌더링된(혹은 다른 탭이
+/// 들고 있는) 토큰을 이 요청 하나가 무효화시키면 안 된다. 수명만 슬라이딩
+/// 갱신된다.
+#[tokio::test]
+async fn authenticated_request_preserves_existing_csrf_cookie_value() {
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/api/overview", server.addr))
+        .header(
+            "cookie",
+            format!("fleet_session={cookie}; fleet_csrf={TEST_CSRF}"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let csrf_cookie = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok().map(String::from))
+        .find(|c| c.starts_with("fleet_csrf="))
+        .expect("expected a fleet_csrf Set-Cookie");
+
+    assert!(
+        csrf_cookie.starts_with(&format!("fleet_csrf={TEST_CSRF};")),
+        "existing CSRF value must be preserved, got: {csrf_cookie}"
+    );
 }
 
 #[tokio::test]
