@@ -401,6 +401,20 @@ h2 {
   grid-template-columns: 0.8fr 1fr 2fr 1fr 0.8fr 0.7fr 1.2fr;
 }
 
+/* /tasks 페이지 태스크 테이블(ID/Phase/Prompt/Model/Worker/Tokens/Duration/Created,
+   8열) — 2026-08-11: #task-list와 별개 페이지인데 그동안 전용 규칙이 없어
+   grid-template-columns 미적용 상태였다(= 컬럼 정렬 없이 세로로 쌓여 보임).
+   #task-table(tasks.html) 실제 마크업에 맞춰 신설. */
+#task-table .row {
+  grid-template-columns: 0.7fr 0.7fr 2.2fr 0.9fr 0.7fr 0.6fr 0.7fr 1fr;
+}
+
+/* /hosts 페이지 호스트 테이블(Hostname/Status/Worker/grok/Worker Ver/OS/Arch/
+   Last Heartbeat, 8열) — 위와 동일한 이유로 신설. */
+#host-table .row {
+  grid-template-columns: 1.3fr 0.8fr 1fr 0.8fr 0.8fr 0.9fr 0.6fr 1.1fr;
+}
+
 /* ── Status pills ────────────────────────────────────────────────── */
 
 .status-pill {
@@ -483,7 +497,9 @@ h2 {
   h2 { font-size: 21px; }
 
   #worker-list .row,
-  #task-list .row {
+  #task-list .row,
+  #task-table .row,
+  #host-table .row {
     grid-template-columns: 1fr;
     gap: 2px;
   }
