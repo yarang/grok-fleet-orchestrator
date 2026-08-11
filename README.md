@@ -143,6 +143,7 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 
 ## 문서
 
+- [`docs/index.md`](docs/index.md) — 전체 설계·운영 문서 카탈로그 (정본/사본 상태, 최종 개정일)
 - [`docs/architecture.md`](docs/architecture.md) — 시스템 아키텍처, 데이터 흐름, 핵심 추상화
 - [`docs/api-reference.md`](docs/api-reference.md) — HTTP API + MCP 도구 레퍼런스
 - [`docs/deployment.md`](docs/deployment.md) — 단일 서버 및 분산 배포 가이드 (Cloudflare Tunnel 포함)

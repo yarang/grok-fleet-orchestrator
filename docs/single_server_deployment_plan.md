@@ -12,7 +12,7 @@
 ┌────────────────────────────────────────────────────────────────────────┐
 │  Single Linux Server (Host OS)                                         │
 │                                                                        │
-│  [외부 클라이언트] ──► [포트 443 / HTTPS] ──► [ Caddy 웹 서버 (Native) ]      │
+│  [외부 클라이언트] ──► [포트 443 / HTTPS] ──► [ Nginx 웹 서버 (Native) ]      │
 │                                                   │                    │
 │      ┌────────────────────────────────────────────┼──────────────┐     │
 │      ▼ (Dashboard & MCP)                          ▼ (API Proxy)  │     │
@@ -36,9 +36,9 @@
 * **`fleet serve` (오케스트레이터)**:
   * **설치**: Rust 컴파일 산출물(바이너리)을 `/usr/local/bin/fleet`에 위치시킵니다.
   * **관리**: `systemd` 서비스(`fleet.service`)를 통해 구동 및 모니터링합니다.
-* **`Caddy` (리버스 프록시)**:
+* **`Nginx` (리버스 프록시)**:
   * **설치**: APT/YUM 패키지 매니저를 통해 네이티브 설치합니다.
-  * **역할**: 외부 도메인 바인딩, Let's Encrypt SSL 인증서 자동 발급, 외부 요청 라우팅을 담당합니다.
+  * **역할**: 외부 도메인 바인딩, Certbot 기반 Let's Encrypt SSL 인증서 자동 발급/갱신, 외부 요청 라우팅을 담당합니다. Caddy에서 Nginx로 전환한 배경과 전체 하드닝 설정은 [`docs/nginx_transition_proposal.md`](./nginx_transition_proposal.md)(정본)를 참고합니다.
 
 ### 2.2 Docker 컨테이너 영역 (Docker Compose)
 관리가 복잡하고 다른 서버로의 이전이 잦을 수 있는 상태 저장(Stateful) 서비스 및 서드파티 프록시입니다.
@@ -96,25 +96,51 @@ volumes:
 
 > `litellm` 데이터베이스는 `postgres` 컨테이너 기동 후 최초 1회 `CREATE DATABASE litellm;`로 생성해 둡니다 (애플리케이션 DB인 `fleet`와 동일 서버, 별도 논리 DB로 분리).
 
-### Step 2: Caddy 리버스 프록시 설정
+### Step 2: Nginx 리버스 프록시 설정
 외부 도메인(`fleet.yourdomain.com`)을 통해 대시보드 및 API 프록시에 안전하게 암호화(HTTPS) 접속을 지원하도록 설정합니다.
 
-```caddy
-# /etc/caddy/Caddyfile
-fleet.yourdomain.com {
+> Nginx 하드닝 설정(Real IP 격리, 타임아웃, `FLEET_TRUSTED_PROXIES` 연동 포함)의 정본은
+> [`docs/deployment.md`](./deployment.md) §2.3이다. 아래는 이 단일 서버 구성(liteLLM 게이트웨이
+> 포트 4000 포함)에 맞춰 인용한 **사본**이다. 설정을 바꿀 때는 **정본을 먼저 고친 뒤 이 사본을
+> 동기화**한다 — 이 순서를 지키지 않아 과거 Caddy→Nginx 전환 이후에도 이 섹션이 오래
+> Caddyfile로 남아있던 불일치가 발생했다 ([`docs/log.md`](./log.md) 2026-08-11 lint 항목 참고).
+
+```nginx
+# /etc/nginx/sites-available/fleet
+server {
+    listen 443 ssl;
+    server_name fleet.yourdomain.com;
+
     # 1. 웹 대시보드 라우팅
-    reverse_proxy /dashboard* 127.0.0.1:8082
-    reverse_proxy /api/events/stream* 127.0.0.1:8082
-    
+    location /dashboard {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    location /api/events/stream {
+        proxy_pass http://127.0.0.1:8082;
+        proxy_buffering off; # SSE
+    }
+
     # 2. 오케스트레이터 HTTP API 라우팅
-    reverse_proxy /v1/* 127.0.0.1:8081
-    
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     # 3. 모델 API 게이트웨이 (liteLLM) 라우팅 (워커가 접근하는 경로)
-    reverse_proxy /api-gateway/* 127.0.0.1:4000
+    location /api-gateway/ {
+        proxy_pass http://127.0.0.1:4000/;
+    }
+
+    # SSL 인증서는 certbot이 관리 (managed by Certbot)
 }
 ```
 
-오케스트레이터 기동 시에는 `FLEET_LLM_GATEWAY_URL` 환경변수(예: `https://fleet.yourdomain.com/api-gateway`)를 설정해야 하며, 미설정 시 Fail-Fast로 기동이 거부됩니다.
+오케스트레이터 기동 시에는 `FLEET_LLM_GATEWAY_URL` 환경변수(예: `https://fleet.yourdomain.com/api-gateway`)를 설정해야 하며, 미설정 시 Fail-Fast로 기동이 거부됩니다. `FLEET_TRUSTED_PROXIES`도 함께 설정해 Nginx 뒤에서 Real Client IP가 올바르게 추출되도록 합니다(정본: [`docs/deployment.md`](./deployment.md) §2.3, [`docs/security-findings.md`](./security-findings.md) S3).
 
 ---
 
