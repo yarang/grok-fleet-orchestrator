@@ -14,7 +14,7 @@
 | 워커별 LLM API 키 (`grok-build` 모델 등: GLM, Gemini 등) | grok agent가 워커에서 실행 시 사용하는 모델 프로바이더 키 | Postgres `worker_credentials` 테이블 (AES-256-GCM 암호화, `fleet-credentials` 크레이트) | `WorkerCredentials` 구조체 → `~/.grok/config.toml` `[model.X]` 섹션 렌더링 | 각 워커 호스트의 grok 클라이언트 | `WorkerCredentials.rotated_at`로 감사 추적 (자동 회전 없음) | 사용 중 — 이미 전용 시스템으로 관리됨, 이 파일 기반 규칙 대상 아님 |
 | `WIKI_MCP_API_KEY` | `wiki.agentthread.dev/mcp` Streamable HTTP 엔드포인트 Bearer 인증 | `ec1:/etc/fleet/secrets/wiki-mcp.env` (`rw-------`, root:root) | `secrets.token_urlsafe(32)`, base64url 문자열 | `wiki-mcp.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 2026-08-10 생성 |
 | Cloudflare API 토큰 (`agentthread.dev` 존, DNS 편집 권한) | DNS 레코드 자동화(A 레코드 생성 등) | `arm2:/etc/fleet/secrets/cloudflare.env` (`rw-------`, root:root) | Cloudflare API Token (`cfut_...`) | 수동 실행(현재 자동화된 서비스 소비자 없음 — ad-hoc 작업용, SSH 후 `sudo`로만 판독) | 수동(미정) | 사용 중 — 2026-08-11 저장 완료 |
-| ec1 워커 부트스트랩 시크릿 | 워커 등록/조인 인증 | `ec1:/etc/fleet/worker.toml` | `worker_join_authentication_design.md` 참고 | `fleet-worker.service` | 수동(미정) | 사용 중 — 상세는 [`worker_join_authentication_design.md`](../worker_join_authentication_design.md) 참고, 값 위치만 여기 등재 |
+| ec1 워커 부트스트랩 시크릿 | 워커 등록/조인 인증 | `ec1:/etc/fleet/worker.toml` | `worker-bootstrap/join-authentication.md` 참고 | `fleet-worker.service` | 수동(미정) | 사용 중 — 상세는 [`join-authentication.md`](../worker-bootstrap/join-authentication.md) 참고, 값 위치만 여기 등재 |
 | SSH 호스트 접근 키 (`oci-yarangdev-arm1/arm2/ec1/ec2`) | 운영자(사람/Claude 세션)의 프로덕션 호스트 SSH 접근 | 로컬 Mac `~/.ssh/`(config·개인키), 각 호스트 `~/.ssh/authorized_keys` | OpenSSH 개인/공개키 | 사람 운영자 SSH 클라이언트 | 수동(미정) | 사용 중 — 이 registry의 관리 범위 밖(로컬 머신 전용, 서버 배치 대상 아님) |
 
 ## 알려진 미정 항목 (조치 필요)

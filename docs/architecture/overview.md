@@ -1,7 +1,7 @@
 # 아키텍처
 
 이 문서는 Grok Fleet Orchestrator의 내부 구조, 데이터 흐름, 핵심 설계 결정을
-설명합니다. 배포 가이드는 [`deployment.md`](deployment.md), API 레퍼런스는
+설명합니다. 배포 가이드는 [`deployment.md`](../deployment/deployment.md), API 레퍼런스는
 [`api-reference.md`](api-reference.md)를 참조하세요.
 
 ## TL;DR
@@ -181,7 +181,7 @@ Pending → Dispatched → Completed
 
 운영 환경에서는 Cloudflare Access가 1차 방어선이고, bearer 토큰은
 대시보드/모니터링 등 내부 시스템을 위한 2차 인증입니다.
-자세한 내용은 [`deployment.md`](deployment.md)를 참조하세요.
+자세한 내용은 [`deployment.md`](../deployment/deployment.md)를 참조하세요.
 
 ## 크로스 클라이언트 호환성
 

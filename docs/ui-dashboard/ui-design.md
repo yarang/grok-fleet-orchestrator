@@ -2,7 +2,7 @@
 
 이 문서는 Grok Fleet Orchestrator 웹 대시보드의 화면 설계, 사용자 흐름,
 내비게이션 패턴, 공통 컴포넌트를 정의합니다. 시스템 아키텍처는
-[`architecture.md`](architecture.md), RBAC 구현 계획은 해당 plan 문서를
+[`architecture.md`](../architecture/overview.md), RBAC 구현 계획은 해당 plan 문서를
 참조하세요.
 
 ## TL;DR
@@ -61,16 +61,16 @@ fleet.agentthread.dev/
 ## 2. 디자인 시스템
 
 > ⚠️ **이 섹션(§2)은 최초 제안 당시(2026-07-20)의 초안이며 실제로 채택되지 않았다.**
-> 루트 [`CHANGELOG.md`](../CHANGELOG.md)(커밋 `837c41c`, 2026-07-28)에 따라 대시보드
+> 루트 [`CHANGELOG.md`](../../CHANGELOG.md)(커밋 `837c41c`, 2026-07-28)에 따라 대시보드
 > 전체에 **단일 Apple Design System**(parchment 캔버스, Action Blue 액센트, SF Pro
 > 타이포그래피, pill CTA, 글로벌 블랙 내비게이션)이 적용됐다. 색상/타이포그래피/라운드
-> 토큰의 정본은 [`DESIGN-apple.md`](../DESIGN-apple.md)이며, 아래 §2.1~2.5의 "이중
+> 토큰의 정본은 [`DESIGN-apple.md`](../../DESIGN-apple.md)이며, 아래 §2.1~2.5의 "이중
 > 테마(Dark + Notion)" 안은 **역사적 기록으로만 보존**한다 — 실제 대시보드 CSS
 > (`crates/fleet-dashboard/assets/*.css`)에는 Notion 테마 흔적이 없다. §3 이후의
 > 페이지별 레이아웃/컴포넌트 설명은 구조적으로는 여전히 유효해 보이지만, 이 절의 옛
 > 토큰 이름(`--bg-card`, `--text-heading` 등)을 인용하는 부분이 남아있을 수 있으므로
 > 실제 값 확인 시 반드시 `DESIGN-apple.md`를 기준으로 삼는다
-> ([`docs/log.md`](./log.md) 2026-08-11 lint 항목 참고).
+> ([`docs/log.md`](../log.md) 2026-08-11 lint 항목 참고).
 
 ### 2.1 이중 테마 전략 (원안, 미채택 — §2 상단 배너 참고)
 
@@ -1302,10 +1302,10 @@ crates/fleet-dashboard/
 
 ## 13. 참고 자료
 
-- [DESIGN-notion.md](../DESIGN-notion.md) — Notion 디자인 시스템 원전
-- [architecture.md](architecture.md) — 시스템 아키텍처
-- [api-reference.md](api-reference.md) — HTTP API 명세
-- [deployment.md](deployment.md) — 배포 가이드 (Caddy 설정 포함)
+- [DESIGN-notion.md](../../DESIGN-notion.md) — Notion 디자인 시스템 원전
+- [architecture.md](../architecture/overview.md) — 시스템 아키텍처
+- [api-reference.md](../architecture/api-reference.md) — HTTP API 명세
+- [deployment.md](../deployment/deployment.md) — 배포 가이드 (Nginx 설정 포함, 2026-08-11 갱신 — 원문의 "Caddy" 기술은 폐기됨)
 - RBAC 구현 계획 — plan 문서 (Phase 9.1.1 ~ 9.1.6)
 
 ---

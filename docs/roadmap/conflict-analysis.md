@@ -2,7 +2,7 @@
 
 > 작성일: 2026-08-06. 담당: Antigravity.
 > 
-> 이 보고서는 **Caddy에서 Nginx로의 프록시 이전 결정** 및 **보안 1단계 마일스톤(S1~S6) 완료**에 따라, 프로젝트의 공식 개발 로드맵([`docs/roadmap.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/roadmap.md))과 신규 서버 관리 기능 간의 충돌 구조 변화를 정밀하게 갱신한 문서입니다.
+> 이 보고서는 **Caddy에서 Nginx로의 프록시 이전 결정** 및 **보안 1단계 마일스톤(S1~S6) 완료**에 따라, 프로젝트의 공식 개발 로드맵([`docs/roadmap.md`](./roadmap.md))과 신규 서버 관리 기능 간의 충돌 구조 변화를 정밀하게 갱신한 문서입니다.
 
 ---
 

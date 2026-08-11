@@ -1,0 +1,15 @@
+# 핵심 아키텍처 & API (Core Reference)
+
+> 이 도메인은 시스템 내부 설계와 외부 API 계약을 다룬다. 전체 문서 카탈로그는
+> [`../index.md`](../index.md), 운영 규칙은 [`../llm-wiki/README.md`](../llm-wiki/README.md)의
+> 정본/사본 스키마를 따른다.
+
+| 문서 | 정본 범위 |
+|---|---|
+| [`overview.md`](./overview.md) | 내부 구조 — Store trait, CircuitBreaker, WorkerSelector, ACP 전송, 워커 데몬, mTLS, 부트스트랩 토큰 |
+| [`api-reference.md`](./api-reference.md) | 외부 계약 — HTTP REST 엔드포인트 + MCP 7종 도구 |
+
+두 문서는 상호 보완적이다: `overview.md`가 "왜 이렇게 설계했는가"를, `api-reference.md`가
+"실제로 무엇을 호출할 수 있는가"를 답한다. 값이 어긋나면(예: 엔드포인트 경로 불일치)
+`api-reference.md`가 실제 라우터 코드(`crates/fleet-api/src/`)와 더 직접 대응하므로 우선한다 —
+단, 최종 근거는 항상 코드다.

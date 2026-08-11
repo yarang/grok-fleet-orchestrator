@@ -36,7 +36,7 @@
 
 **선택 기준**: 단순 라우팅과 최소 리소스만 필요하다면 One API가 유리하다. 그러나 이 프로젝트는 로드맵 #34가 요구하는 **에이전트/워커별 세부 토큰 예산 통제(Spend Control)**와 **다중 공급자 장애 시 Fallback**이 핵심 요구사항이며, 향후 지원 프로바이더가 늘어날 가능성(100+ 플러그인 생태계)까지 감안하면 초기 리소스 비용보다 기능 완결성이 우선한다. 따라서 **liteLLM을 공식 표준으로 채택**한다 — One API는 "더 가볍다"는 이유만으로는 이 요구사항을 충족하지 못하므로 채택하지 않는다.
 
-> 과거 [`docs/single_server_deployment_plan.md`](../single_server_deployment_plan.md) 초안에는 반대로 "무겁고 복잡한 liteLLM 대신 One API"로 기술되어 있었다. 이는 본 비교 분석 이전에 작성된 문서로, 2026-08-06 정합성 수정을 통해 본 결론을 따르도록 갱신했다. **이 문서(`multi_provider_llm_proxy_analysis.md`)가 게이트웨이 선택에 대한 단일 진실 공급원(canonical source)이며, 다른 문서와 상충할 경우 이 문서가 우선한다.**
+> 과거 [`docs/deployment/single-server.md`](../deployment/single-server.md) 초안에는 반대로 "무겁고 복잡한 liteLLM 대신 One API"로 기술되어 있었다. 이는 본 비교 분석 이전에 작성된 문서로, 2026-08-06 정합성 수정을 통해 본 결론을 따르도록 갱신했다. **이 문서(`multi_provider_llm_proxy_analysis.md`)가 게이트웨이 선택에 대한 단일 진실 공급원(canonical source)이며, 다른 문서와 상충할 경우 이 문서가 우선한다.**
 
 ---
 

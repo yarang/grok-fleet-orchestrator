@@ -16,8 +16,8 @@
 
 | 문서 | 인용 대상 | 위치 |
 |---|---|---|
-| [`docs/single_server_deployment_plan.md`](../single_server_deployment_plan.md) | `litellm_integration_plan.md`의 Docker Compose 스펙 (사본) | §2.2, §3 Step 1 |
-| [`docs/roadmap.md`](../roadmap.md) #34 | `multi_provider_llm_proxy_analysis.md`의 채택 결론 | 항목 34 |
+| [`docs/deployment/single-server.md`](../deployment/single-server.md) | `litellm_integration_plan.md`의 Docker Compose 스펙 (사본) | §2.2, §3 Step 1 |
+| [`docs/roadmap.md`](../roadmap/roadmap.md) #34 | `multi_provider_llm_proxy_analysis.md`의 채택 결론 | 항목 34 |
 
 ## 고아 페이지 / 미해결 교차참조
 

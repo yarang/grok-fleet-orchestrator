@@ -4,7 +4,7 @@
 
 본 문서는 Grok Fleet Orchestrator에 **liteLLM 프록시 게이트웨이**를 연동하기 위한 인프라 패키징 및 설정 파일 설계 사양을 정의합니다.
 
-> ⚠️ **정본(canonical source) 표시**: 아래 §3의 `docker-compose.yml` / `litellm-config.yaml` 사양이 liteLLM 인프라 정의의 정본이다. [`docs/single_server_deployment_plan.md`](../single_server_deployment_plan.md) 등 다른 문서에 등장하는 동일 스펙은 **이 문서를 인용한 사본**이며, 값이 어긋나면 이 문서가 우선한다. 포트·이미지 태그·환경변수를 변경할 때는 이 문서를 먼저 갱신한 뒤 인용처를 동기화한다.
+> ⚠️ **정본(canonical source) 표시**: 아래 §3의 `docker-compose.yml` / `litellm-config.yaml` 사양이 liteLLM 인프라 정의의 정본이다. [`docs/deployment/single-server.md`](../deployment/single-server.md) 등 다른 문서에 등장하는 동일 스펙은 **이 문서를 인용한 사본**이며, 값이 어긋나면 이 문서가 우선한다. 포트·이미지 태그·환경변수를 변경할 때는 이 문서를 먼저 갱신한 뒤 인용처를 동기화한다.
 
 ---
 
