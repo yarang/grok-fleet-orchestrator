@@ -34,6 +34,12 @@
       e.preventDefault();
       const form = e.target;
       const data = new URLSearchParams(new FormData(form));
+      // 빈 값의 optional 필드는 아예 제거한다 — 특히 max_turns/timeout_secs는
+      // 서버의 Option<u32>/<u64>가 빈 문자열을 파싱하려다 400을 내므로, 키 자체를
+      // 보내지 않아야 정상적으로 None으로 역직렬화된다.
+      for (const key of Array.from(data.keys())) {
+        if (key !== 'csrf_token' && data.get(key) === '') data.delete(key);
+      }
       data.set('csrf_token', getCsrf());
 
       const status = document.getElementById('submit-status');
@@ -48,9 +54,15 @@
           body: data,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         });
-        const body = await resp.json().catch(() => null);
+        // Response 본문은 스트림이라 한 번만 읽을 수 있다 — text()로 한 번만 읽고
+        // 필요하면 그 문자열을 JSON.parse한다. json()과 text()를 순차 호출하면
+        // 두 번째 호출이 "body stream already read"로 항상 실패한다.
+        const rawText = await resp.text();
+        let body = null;
+        try { body = JSON.parse(rawText); } catch (_) { /* JSON이 아니면 body는 null 유지 */ }
+
         if (!resp.ok) {
-          const msg = (body && body.error && body.error.message) || (await resp.text());
+          const msg = (body && body.error && body.error.message) || rawText || ('HTTP ' + resp.status);
           status.textContent = 'Error: ' + msg;
           status.style.color = 'var(--badge-failed, #c0392b)';
           return;
