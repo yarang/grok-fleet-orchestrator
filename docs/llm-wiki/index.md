@@ -8,6 +8,7 @@
 |---|---|---|---|
 | [`multi_provider_llm_proxy_analysis.md`](./multi_provider_llm_proxy_analysis.md) | liteLLM vs One API vs 자체 구현(Rust-native) 비교 및 게이트웨이 채택 근거 | 🟢 정본 — 게이트웨이 **선택** | 2026-08-07 |
 | [`litellm_integration_plan.md`](./litellm_integration_plan.md) | liteLLM Docker Compose / `litellm-config.yaml` 인프라 연동 상세 스펙 | 🟢 정본 — 인프라 **스펙** | 2026-08-07 |
+| [`free_tier_providers_analysis.md`](./free_tier_providers_analysis.md) | Groq/OpenRouter 무료 티어 검증 + 워커별 모델 분리 아키텍처 연동 설계 + 쿼터 관리/UI 통합 체크리스트 | 🟢 정본 — 무료 공급자 **채택 여부** | 2026-08-11 |
 | [`ci_monitor_report.md`](../../.gemini/antigravity-cli/brain/d50a2258-c305-47ae-b38f-e60e1f48b093/ci_monitor_report.md) | list_workers 라벨/페이지네이션 결함 해결 커밋 Actions 빌드 모니터링 결과 보고서 | 🔵 사본 — CI **모니터** | 2026-08-07 |
 | [`README.md`](./README.md) | 위키의 목적, 정본/사본 규칙, ingest/query/lint 워크플로우 (스키마) | ⚪ 스키마 문서 | 2026-08-07 |
 | [`log.md`](./log.md) | ingest/query/lint 작업의 append-only 시간순 기록 | ⚪ 부기 문서 | 2026-08-07 |

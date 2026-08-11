@@ -60,3 +60,17 @@
   - `tasks` 테이블에 `dispatched_at` TIMESTAMP 컬럼을 추가하는 신규 DB 마이그레이션(`012_task_dispatch_latency.sql`)을 작성하여 데이터 스키마 연동.
   - `Task` 모델 및 `PgStore` / `InMemoryStore` 의 상태 갱신 코드(`update_task_status`)에 `Dispatched` 상태 전이 시 `dispatched_at` 을 갱신하는 로직 추가.
   - `fleet_task_dispatch_latency_seconds` 히스토그램 메트릭을 `crates/fleet-api/src/metrics.rs` 에 구현하고 `/metrics` 엔드포인트 통합 테스트 보강 완료.
+
+## 2026-08-11 — query — Groq/OpenRouter 무료 티어 도입 검증 및 설계
+
+- **소스**: 사용자가 Groq/OpenRouter 무료 티어 요약을 제공, 검증·문서화·Fleet 통합 설계·UI
+  연동 고려·사용자 결정 체크리스트 작성을 요청.
+- **조치**: 공식 문서(Groq `console.groq.com/docs/rate-limits`, OpenRouter
+  `openrouter.ai/docs/api-reference/limits`) 및 웹 검색으로 대조 검증 —
+  OpenRouter는 원본과 완전 일치, Groq는 모델 라인업이 일부 최신화 필요(원본의 "Qwen 3 32B"가
+  현재 `qwen/qwen3.6-27b`로 교체됨 등)했음을 확인. `free_tier_providers_analysis.md` 신설 —
+  기존 워커별 모델 분리 + 라벨 라우팅 아키텍처(코드 변경 불필요) 재사용 설계, CircuitBreaker가
+  "워커 건강"과 "계정 쿼터 소진"을 구분하지 못하는 아키텍처 공백 식별(방안 A 최소 대응 / 방안
+  B 능동적 쿼터 추적 옵션 제시), 모델 선택 UI·토큰 통계 UI(기존 대기 작업)와의 연결점 정리.
+- **문서 위치 결정**: 새 디렉토리를 만들지 않고 `docs/llm-wiki/`에 편입 — 이미 이 위키가
+  "멀티 LLM 공급자 게이트웨이" 도메인을 다루고 있어 분절(fragmentation)을 피함.
