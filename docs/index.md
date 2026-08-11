@@ -74,7 +74,7 @@
 |---|---|---|---|
 | [`ui-dashboard/ui-design.md`](./ui-dashboard/ui-design.md) | 8개 대시보드 페이지 IA·플로우·컴포넌트 카탈로그. §2 디자인 시스템은 2026-08-11 배너로 정정 | 🟡 부분 수정됨 | 2026-08-11 |
 | [`../DESIGN-apple.md`](../DESIGN-apple.md) | 실제 적용된 Apple Design System 토큰(Action Blue, SF Pro, parchment, pill CTA) | 🟢 정본 — 루트 문서 | 2026-07-27 |
-| [`../DESIGN-notion.md`](../DESIGN-notion.md) | Notion 테마 원안 분석 | ⚫ 폐기(미채택) — 루트 문서 | 2026-07-20 |
+| [`../DESIGN-notion.md`](../DESIGN-notion.md) | 이전 Notion 테마 원안 분석 (폐기, 현재는 Apple 정본으로 대체) | ⚫ 폐기(미채택) — 루트 문서 | 2026-07-20 |
 
 ## 도메인 8. 🧩 Engineering Patterns (기타)
 

@@ -8,7 +8,7 @@
 ## TL;DR
 
 - **8개 페이지** 제안: 운영 코어 3 + 인증 2 + 관리 2 + 고급 1
-- **이중 디자인 시스템**: 다크 테마(운영/관측) + Notion 테마(인증/관리)
+- **단일 디자인 시스템**: Apple Design System(white/parchment/dark tiles, Action Blue, SF Pro, pill CTA)
 - **3개 핵심 흐름**: 온보딩(Bootstrap → Login → Overview), 일반 운영
   (Login → Overview → Worker → Task), 관리자(User Mgmt → Audit Log)
 - **공통 컴포넌트 11종**: StatusPill, Badge, Card, DataTable, EventLog,
@@ -60,165 +60,81 @@ fleet.agentthread.dev/
 
 ## 2. 디자인 시스템
 
-> ⚠️ **이 섹션(§2)은 최초 제안 당시(2026-07-20)의 초안이며 실제로 채택되지 않았다.**
-> 루트 [`CHANGELOG.md`](../../CHANGELOG.md)(커밋 `837c41c`, 2026-07-28)에 따라 대시보드
-> 전체에 **단일 Apple Design System**(parchment 캔버스, Action Blue 액센트, SF Pro
-> 타이포그래피, pill CTA, 글로벌 블랙 내비게이션)이 적용됐다. 색상/타이포그래피/라운드
-> 토큰의 정본은 [`DESIGN-apple.md`](../../DESIGN-apple.md)이며, 아래 §2.1~2.5의 "이중
-> 테마(Dark + Notion)" 안은 **역사적 기록으로만 보존**한다 — 실제 대시보드 CSS
-> (`crates/fleet-dashboard/assets/*.css`)에는 Notion 테마 흔적이 없다. §3 이후의
-> 페이지별 레이아웃/컴포넌트 설명은 구조적으로는 여전히 유효해 보이지만, 이 절의 옛
-> 토큰 이름(`--bg-card`, `--text-heading` 등)을 인용하는 부분이 남아있을 수 있으므로
-> 실제 값 확인 시 반드시 `DESIGN-apple.md`를 기준으로 삼는다
-> ([`docs/log.md`](../log.md) 2026-08-11 lint 항목 참고).
+> 이 문서는 루트 [`DESIGN-apple.md`](../../DESIGN-apple.md)를 정본으로 삼아,
+> 실제 대시보드 구현과 동일한 토큰/레이아웃 원칙으로 다시 쓰였다. 기존의
+> 이중 테마 언어는 제거하고, 단일 Apple Design System으로 통합한다.
 
-### 2.1 이중 테마 전략 (원안, 미채택 — §2 상단 배너 참고)
+### 2.1 핵심 원칙
 
-| 테마         | 적용 페이지          | 철학                              |
-| ------------ | -------------------- | --------------------------------- |
-| **Dark**     | #1, #2, #3, #7       | 관측성, 모니터링, 데이터 밀도     |
-| **Notion**   | #4, #5, #6, #8       | 인지 부담 최소, 신뢰, 온보딩 친화 |
-
-사용자는 한 흐름 안에서 두 테마를 오가게 됩니다(예: Notion 로그인 →
-Dark 대시보드). 전환 지점은 **라우트 경계**로 명확히 분리되므로 시각적
-충돌이 없습니다.
+- **사진 중심, chrome 은 거의 보이지 않게**: 전체 페이지는 제품/상태를 강조하는
+  tile 기반 섹션으로 구성한다.
+- **단일 액센트**: 모든 클릭 가능한 요소와 포커스 표시에는 Action Blue(`#0066cc`)만 사용한다.
+- **전역 네비게이션은 검은색**: 상단 글로벌 nav는 `surface-black`를 사용하고, 섹션별
+  sub-nav는 parchment 배경 위에 frosted-glass 느낌을 유지한다.
+- **CTA는 pill**: Primary 버튼은 완전한 capsule 모양의 pill CTA로 표시한다.
+- **공백은 구조다**: 섹션 간 간격은 최소 80px, 카드/utility grid는 24px 패딩으로 정리한다.
 
 ### 2.2 색상 토큰
 
-#### Dark 테마
-
-```css
-/* 배경/표면 */
---bg-app:        #0f1115;  /* 페이지 배경 (near-black) */
---bg-card:       #181b22;  /* 카드 표면 */
---bg-card-alt:   #1c1f27;  /* 강조 카드 */
---bg-inset:      #0d0f13;  /* 코드/터미널/인셋 */
---bg-hover:      #1f232c;  /* 행 호버 */
-
-/* 테두리 */
---border-subtle: #232732;  /* 카드 외곽 */
---border-strong: #2a2e38;  /* 입력/강조 */
---border-table:  #1a1d24;  /* 테이블 헤더 구분 */
-
-/* 텍스트 */
---text-primary:   #ffffff;
---text-secondary: #9ca3af;  /* 라벨/메타 */
---text-muted:     #6b7280;  /* 빈 상태/힌트 */
---text-faint:     #4b5563;  /* 타임스탬프 등 */
-
-/* 상태 (sticker palette) */
---status-online:    #10b981;  /* green */
---status-degraded:  #f59e0b;  /* amber */
---status-offline:   #ef4444;  /* red */
---status-info:      #3b82f6;  /* blue */
---status-circuit:   #a855f7;  /* purple */
---status-neutral:   #6b7280;  /* gray */
-```
-
-#### Notion 테마
-
-```css
-/* 배경/표면 */
---canvas:         #f6f5f4;  /* warm canvas (페이지 배경) */
---canvas-soft:    #fafafa;  /* 헤더 행/서브 섹션 */
---surface:        #ffffff;  /* 카드 */
---surface-sunken: #f6f5f4;  /* 인셋/코드 블록 */
-
-/* 테두리 */
---border-light:   #e9e9e9;  /* 카드/구분선 */
---border-input:   #d9d9d9;  /* 입력 필드 */
-
-/* 텍스트 */
---text-heading:   #191919;
---text-body:      #37352f;  /* Notion 본문 톤 */
---text-muted:     #6b6b6b;
---text-faint:     #b3b3b3;
-
-/* 액센트 (단일 주색 + 보조) */
---accent-primary: #0075de;  /* Notion Blue (CTA/링크) */
---accent-hero:    #213183;  /* deep indigo (Bootstrap hero) */
-
-/* Sticker palette (장식 전용 — UI 강조에 사용 금지) */
---sticker-mustard: #d9730d;
---sticker-teal:    #0f7b6c;
---sticker-coral:   #e8855e;
---sticker-mint:    #4d6468;
---sticker-purple:  #9085d8;
-```
+| 토큰 | 값 | 용도 |
+| --- | --- | --- |
+| `primary` | `#0066cc` | 링크, 버튼, 포커스, 활성 상태 |
+| `primary-focus` | `#0071e3` | 키보드 포커스 링 |
+| `primary-on-dark` | `#2997ff` | 다크 타일 위 inline link |
+| `canvas` | `#ffffff` | 기본 화이트 섹션 |
+| `canvas-parchment` | `#f5f5f7` | parchment 섹션 / footer |
+| `surface-pearl` | `#fafafc` | secondary pill/ghost button |
+| `surface-tile-1` | `#272729` | 기본 다크 타일 |
+| `surface-tile-2` | `#2a2a2c` | 미세 구분용 다크 타일 |
+| `surface-tile-3` | `#252527` | 하단/embedded frame 용 |
+| `surface-black` | `#000000` | 글로벌 네비게이션 |
+| `ink` | `#1d1d1f` | 본문/헤드라인 |
+| `body-on-dark` | `#ffffff` | 다크 타일 위 텍스트 |
+| `ink-muted-80` | `#333333` | 부드러운 본문 |
+| `ink-muted-48` | `#7a7a7a` | footer fine print |
+| `hairline` | `#e0e0e0` | 가는 경계선 |
+| `divider-soft` | `#f0f0f0` | Pearl button 테두리 |
 
 ### 2.3 타이포그래피
 
-```css
-/* 폰트 패밀리 */
---font-sans: "Inter", system-ui, -apple-system, sans-serif;
---font-mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+| 토큰 | 값 | 적용 |
+| --- | --- | --- |
+| `hero-display` | 56px / 600 / -0.28px | 히어로 제목 |
+| `display-lg` | 40px / 600 / 0 | 섹션 제목 |
+| `lead` | 28px / 400 / 0.196px | 서브 헤드라인 |
+| `tagline` | 21px / 600 / 0.231px | 카테고리명 / sub-nav |
+| `body` | 17px / 400 / -0.374px | 본문 |
+| `body-strong` | 17px / 600 / -0.374px | 카드 제목 / 라벨 |
+| `caption` | 14px / 400 / -0.224px | 보조 텍스트 |
+| `button-utility` | 14px / 400 | utility nav 링크 |
+| `fine-print` | 12px / 400 | footer/legal |
 
-/* 사이즈 스케일 */
---text-xs:    11px;   /* 타임스탬프, 카운터 */
---text-sm:    13px;   /* 라벨, 본문 small */
---text-base:  14px;   /* 기본 본문, 입력 */
---text-md:    15px;   /* 카드 제목 */
---text-lg:    18px;   /* 섹션 소제목 */
---text-xl:    20px;   /* 페이지 제목 small */
---text-2xl:   24px;   /* 페이지 제목 */
---text-3xl:   28px;   /* Notion 페이지 제목 */
---text-display: 48px; /* Bootstrap hero */
+- Display 크기에서만 음수 자간을 사용한다.
+- 본문은 SF Pro Text, 헤드라인은 SF Pro Display를 사용한다.
+- 인터랙티브 텍스트는 모두 Action Blue를 사용하고, 다크 타일에서는 `primary-on-dark`를 사용한다.
 
-/* 자간 (Notion 핵심: 제목은 negative tracking) */
---tracking-tight:  -0.03em;  /* display */
---tracking-snug:   -0.01em;  /* 제목 */
---tracking-normal: 0;
---tracking-wide:   0.04em;   /* eyebrow, 라벨 */
---tracking-mono:   -0.01em;  /* 모노 본문 */
+### 2.4 반경 / 간격 / 그림자
 
-/* 행간 */
---leading-tight:   1.2;
---leading-normal:  1.5;
---leading-relaxed: 1.7;
-```
+| 토큰 | 값 | 용도 |
+| --- | --- | --- |
+| `rounded.none` | `0px` | 전체 폭 tile |
+| `rounded.lg` | `18px` | utility card |
+| `rounded.pill` | `9999px` | primary CTA / chip / search input |
+| `spacing.section` | `80px` | 섹션 수직 여백 |
+| `spacing.lg` | `24px` | 카드 padding |
+| `spacing.xl` | `32px` | 큰 유틸리티 카드 간격 |
+| `shadow.product` | `rgba(0,0,0,0.22) 3px 5px 30px` | 제품 렌더링에만 적용 |
 
-### 2.4 라운드 스케일 (Notion 핵심 의도)
+- 카드/버튼에는 그림자 없이 평면 구조를 유지한다.
+- 제품 이미지가 surface 위에 놓일 때만 한 번의 soft shadow를 적용한다.
+- 배경 전환(light tile ↔ dark tile) 자체가 시각적 구분 역할을 수행한다.
 
-```css
---radius-xs:   4px;     /* 입력, 인풋 — tight */
---radius-sm:   6px;     /* 작은 카드, OTP 박스 */
---radius-md:   8px;     /* 일반 카드, 버튼 utility */
---radius-lg:   12px;    /* 큰 카드, 모달 */
---radius-xl:   16px;    /* 인증 카드 */
---radius-full: 9999px;  /* CTA primary (pill) */
-```
+### 2.5 레이아웃 패턴
 
-> **Notion 미학의 핵심**: 입력은 `radius-xs(4px)`로 **tight** 하고,
-> 주요 CTA 버튼은 `radius-full(9999px)`로 **pill** 형태입니다. 이
-> **의도적 대비**가 Notion의 시그니처입니다.
-
-### 2.5 그림자 / 그리드
-
-```css
-/* 그림자 (거의 없음 — Notion 철학) */
---shadow-0: none;
---shadow-1: 0 1px 2px rgba(0,0,0,0.04);            /* 카드 기본 */
---shadow-2: 0 4px 12px rgba(0,0,0,0.08);           /* 모달, 드롭다운 */
---shadow-glow: 0 0 0 3px rgba(0,117,222,0.20);     /* 포커스 링 */
-
-/* 그리드 */
---space-1: 4px;
---space-2: 8px;
---space-3: 12px;
---space-4: 16px;
---space-5: 20px;
---space-6: 24px;
---space-8: 32px;
---space-10: 40px;
---space-12: 48px;
---space-16: 64px;
-
-/* 레이아웃 */
---max-width-page:    1440px;
---max-width-auth:    400px;
---max-width-modal:   520px;
---content-padding:   48px;
-```
+- **Hero tile**: 전체 폭, 흰색/파치먼트/다크 색상 중 하나로 채우고, 제목·서브 카피·CTA·제품 렌더를 수직 스택으로 배치한다.
+- **Utility grid**: store/accessories 페이지에서 3~5열 카드 그리드를 사용한다.
+- **Sub-nav**: 상단 global nav 아래에 52px 높이의 frosted sub-nav를 배치하고, 오른쪽 끝에 primary CTA를 둔다.
+- **Footer**: parchment 배경에 dense link column을 배치하고, legal row를 하단에 고정한다.
 
 ---
 
@@ -226,43 +142,27 @@ Dark 대시보드). 전환 지점은 **라우트 경계**로 명확히 분리되
 
 ### 3.1 페이지 #1 — 메인 대시보드 (Overview)
 
-**라우트**: `/`  **권한**: viewer+  **테마**: Dark
+**라우트**: `/`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 시스템 전체 상태를 한 화면에. 운영자의 기본 랜딩.
 
-#### 레이아웃
+#### 레이아웃 (SVG wireframe)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ HEADER: [logo] Fleet Orchestrator          [● online]      │
-├─────────────────────────────────────────────────────────────┤
-│ SECTION 1 — Overview (4 metric cards)                       │
-│ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐            │
-│ │    1    │ │    0    │ │    0    │ │    0    │            │
-│ │ Workers │ │ Active  │ │  Total  │ │ Circuit │            │
-│ │ online  │ │  tasks  │ │  tasks  │ │  open   │            │
-│ └─────────┘ └─────────┘ └─────────┘ └─────────┘            │
-├─────────────────────────────────────────────────────────────┤
-│ SECTION 2 — Workers                                         │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │ Worker ID │ Status │ Heartbeat │ Task │ Circuit         ││
-│ │ arm2-prod │ ● on   │ 3s ago   │ idle │ closed          ││
-│ └─────────────────────────────────────────────────────────┘│
-├─────────────────────────────────────────────────────────────┤
-│ SECTION 3 — Tasks                                           │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │ [empty state: No tasks yet — Dispatch via MCP]         ││
-│ └─────────────────────────────────────────────────────────┘│
-├─────────────────────────────────────────────────────────────┤
-│ SECTION 4 — Events (SSE tail)                               │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │ [02:09:37] worker arm2 heartbeat received              ││
-│ │ [02:09:22] worker arm2 joined (transport=acp)          ││
-│ │ [02:08:51] scheduler tick: 0 pending, 0 dispatched     ││
-│ │ [02:08:36] POST /v1/workers/register → 200 (12ms)      ││
-│ └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Header / Fleet Orchestrator / online</text>
+  <rect x="40" y="120" width="820" height="72" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="152" font-family="Inter, sans-serif" font-size="14" fill="#444">Overview metrics row</text>
+  <rect x="40" y="208" width="240" height="110" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="300" y="208" width="240" height="110" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="560" y="208" width="300" height="110" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="338" width="820" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="238" font-family="Inter, sans-serif" font-size="14" fill="#444">Workers panel</text>
+  <text x="320" y="238" font-family="Inter, sans-serif" font-size="14" fill="#444">Tasks panel</text>
+  <text x="580" y="238" font-family="Inter, sans-serif" font-size="14" fill="#444">Events panel</text>
+  <text x="60" y="372" font-family="Inter, sans-serif" font-size="14" fill="#444">arm2-prod • online • idle • closed</text>
+</svg>
 
 #### 인터랙션
 
@@ -285,41 +185,25 @@ Dark 대시보드). 전환 지점은 **라우트 경계**로 명확히 분리되
 
 ### 3.2 페이지 #2 — 워커 상세 (Worker Detail)
 
-**라우트**: `/workers/:id`  **권한**: viewer+  **테마**: Dark
+**라우트**: `/workers/:id`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 단일 워커의 건강도, 연결 상태, 작업 이력을 진단.
 
-#### 레이아웃
+#### 레이아웃 (SVG wireframe)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ ← Workers / arm2-prod                       [● online]      │
-├─────────────────────────────────────────────────────────────┤
-│ IDENTITY CARD                                               │
-│ [(icon)] worker-arm2-prod                                   │
-│ ACP transport • arm64 Linux                                 │
-│                          Uptime   Tasks   Success  mTLS     │
-│                          14d 3h   47      98.2%    89d left │
-├──────────────────────────────────┬──────────────────────────┤
-│ LEFT COLUMN (60%)                │ RIGHT COLUMN (40%)       │
-│                                  │                          │
-│ ┌─ Heartbeat (last 60m) ──────┐ │ ┌─ ACP Connection ─────┐ │
-│ │   [line chart, 8-24ms]      │ │ │ Endpoint: wss://...   │ │
-│ │   x: time, y: latency (ms)  │ │ │ Protocol: ACP/1.0     │ │
-│ └─────────────────────────────┘ │ │ mTLS: verified ✓      │ │
-│                                  │ │ Reconnects: 2         │ │
-│ ┌─ Circuit Breaker ───────────┐ │ │ Last event: 3s ago    │ │
-│ │ Status: [CLOSED]            │ │ └──────────────────────┘ │
-│ │ Failures: 0/5               │ │                          │
-│ │ Last trip: never            │ │ ┌─ Current Task ────────┐ │
-│ │ [state diagram]             │ │ │ Idle — awaiting       │ │
-│ └─────────────────────────────┘ │ │ dispatch [pulsing]    │ │
-│                                  │ └──────────────────────┘ │
-├─────────────────────────────────────────────────────────────┤
-│ RECENT EVENTS (filtered to this worker)                     │
-│ [terminal log, 6 lines]                                     │
-└─────────────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Workers / arm2-prod / online</text>
+  <rect x="40" y="112" width="820" height="96" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="224" width="500" height="180" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="560" y="224" width="300" height="180" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="420" width="820" height="90" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="150" font-family="Inter, sans-serif" font-size="14" fill="#444">Identity card / worker summary</text>
+  <text x="60" y="262" font-family="Inter, sans-serif" font-size="14" fill="#444">Heartbeat / circuit breaker</text>
+  <text x="580" y="262" font-family="Inter, sans-serif" font-size="14" fill="#444">ACP connection / current task</text>
+  <text x="60" y="455" font-family="Inter, sans-serif" font-size="14" fill="#444">Recent events panel</text>
+</svg>
 
 #### 인터랙션
 
@@ -334,7 +218,7 @@ Dark 대시보드). 전환 지점은 **라우트 경계**로 명확히 분리되
 
 ### 3.2.5 페이지 #2.5 — 호스트 인벤토리 (Host Inventory)
 
-**라우트**: `/hosts`  **권한**: viewer+  **테마**: Dark
+**라우트**: `/hosts`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 물리/가상 호스트 전체의 가시성 확보. 워커 등록 상태,
 grok CLI 설치 여부/버전, 프로비저닝 이력을 한눈에.
@@ -398,30 +282,21 @@ CREATE TABLE host_events (
 CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 ```
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Hosts                                       [↻ Refresh]      │
-│ Infrastructure inventory & agent health                     │
-├─────────────────────────────────────────────────────────────┤
-│ METRIC CARDS                                                │
-│ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐            │
-│ │    4    │ │    3    │ │    1    │ │    0    │            │
-│ │ Total   │ │ Online  │ │ Ready   │ │ Failed  │            │
-│ │ hosts   │ │ workers │ │ to join │ │         │            │
-│ └─────────┘ └─────────┘ └─────────┘ └─────────┘            │
-├─────────────────────────────────────────────────────────────┤
-│ HOST TABLE                                                  │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │Host      │Grok    │Worker  │Status  │Region │History   ││
-│ │10.0.1.10 │0.2.112 │v0.1.0  │● online│ap-ne-2│[12 ev] → ││
-│ │10.0.1.11 │0.2.112 │v0.1.0  │● online│ap-ne-2│[8 ev]  → ││
-│ │10.0.2.20 │—       │—       │○ ready │us-west│[3 ev]  → ││
-│ │10.0.3.30 │0.2.103 │v0.1.0  │● online│ap-ne-2│[15 ev] → ││
-│ │10.0.4.40 │0.2.112 │—       │⚠ failed│us-east│[5 ev]  → ││
-│ └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Hosts                               [↻ Refresh]      │
+│ Inventory + agent health                            │
+├──────────────────────────────────────────────────────┤
+│ Metric cards: Total 4 | Online 3 | Ready 1 | Failed 0 │
+├──────────────────────────────────────────────────────┤
+│ Host table                                          │
+│ host | grok | worker | status | region | history   │
+│ 10.0.1.10 | 0.2.112 | v0.1.0 | online | ap-ne-2 | [12 ev] │
+│ 10.0.1.11 | 0.2.112 | v0.1.0 | online | ap-ne-2 | [8 ev] │
+│ 10.0.2.20 | — | — | ready | us-west | [3 ev]       │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -443,46 +318,31 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.2.6 페이지 #2.6 — 호스트 상세 (Host Detail)
 
-**라우트**: `/hosts/:hostname`  **권한**: viewer+  **테마**: Dark
+**라우트**: `/hosts/:hostname`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 단일 호스트의 전체 히스토리 — 프로비저닝, grok 설치/업그레이드,
 워커 시작/중지, 헬스체크 결과를 타임라인으로 표시.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ ← Hosts / worker-ec1 (10.0.1.10)            [● online]      │
-├─────────────────────────────────────────────────────────────┤
-│ IDENTITY                                                    │
-│ [(icon)] worker-ec1                                         │
-│ 10.0.1.10 • ubuntu:22 • ap-northeast-2 • aarch64           │
-├─────────────────────────────────────────────────────────────┤
-│ SOFTWARE VERSIONS                                           │
-│ ┌─────────────────────┐ ┌──────────────────────┐            │
-│ │ grok CLI            │ │ fleet-worker         │            │
-│ │ 0.2.112             │ │ v0.1.0               │            │
-│ │ (installed 3d ago)  │ │ (running)            │            │
-│ └─────────────────────┘ └──────────────────────┘            │
-├─────────────────────────────────────────────────────────────┤
-│ WORKER REGISTRATION                                         │
-│ Worker ID: 16c3ab45-0f85-...  •  Circuit: closed           │
-│ Active tasks: 0/4  •  Last heartbeat: 3s ago               │
-├─────────────────────────────────────────────────────────────┤
-│ EVENT HISTORY (timeline)                                    │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │ 2026-07-27 14:30:12  ● worker_started                  ││
-│ │   fleet-worker systemd unit activated                   ││
-│ │ 2026-07-27 14:28:05  ● grok_upgraded                   ││
-│ │   0.2.103 → 0.2.112                                     ││
-│ │ 2026-07-27 14:15:33  ● provisioned                      ││
-│ │   SSH provisioning completed, worker.toml deployed      ││
-│ │ 2026-07-27 14:10:00  ● config_changed                   ││
-│ │   GLM-5.1 BYOK credentials rotated                     ││
-│ │ 2026-07-19 22:44:58  ● grok_installed                   ││
-│ │   grok CLI 0.2.103 installed via install.sh             ││
-│ └─────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ ← Hosts / worker-ec1 (10.0.1.10)   [● online]       │
+├──────────────────────────────────────────────────────┤
+│ Identity                                            │
+│ worker-ec1 • 10.0.1.10 • ubuntu:22 • ap-northeast-2 │
+├──────────────────────────────────────────────────────┤
+│ Software versions                                   │
+│ grok CLI 0.2.112 | fleet-worker v0.1.0             │
+├──────────────────────────────────────────────────────┤
+│ Worker registration                                 │
+│ Worker ID ... | Circuit closed | Active tasks 0/4   │
+├──────────────────────────────────────────────────────┤
+│ Event history                                       │
+│ • 2026-07-27 14:30:12 worker_started                │
+│ • 2026-07-27 14:28:05 grok_upgraded                 │
+│ • 2026-07-27 14:15:33 provisioned                   │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -513,33 +373,26 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.3 페이지 #3 — 태스크 큐 (Task Queue)
 
-**라우트**: `/tasks`  **권한**: viewer+  **테마**: Dark
+**라우트**: `/tasks`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 태스크 생명주기 추적, 실패 디버깅.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Tasks                       [filter: status▾ worker▾ time▾] │
-│                                                       [↻]   │
-├─────────────────────────────────────────────────────────────┤
-│ STATS: [●pending 3] [●dispatched 1] [●completed 47]         │
-│        [●failed 2]                                          │
-├─────────────────────────────────────────────────────────────┤
-│ TABLE                                                        │
-│ Task ID │ Worker │ Status │ Priority │ Created │ Dur │ [...] │
-│ b7e2    │ arm2   │ ●done  │ normal   │ 14:22   │ 3.4s│  ⋯    │ ← 확장됨
-│ ├─ TIMELINE: ●created → ●dispatched → ●running → ●completed │
-│ ├─ INPUT payload:  { "template": "code-review", ... }       │
-│ ├─ OUTPUT result:  { "ok": true, "issues": [] }             │
-│ └─ LOGS: [terminal, 3 lines]                                │
-│ a8f3    │ arm2   │ ●done  │ normal   │ 14:21   │ 4.2s│  ⋯    │
-│ 9c41    │ arm2   │ ●done  │ high     │ 14:20   │ 8.1s│  ⋯    │
-│ 8d33    │ -      │ ●pend  │ normal   │ 14:19   │ -   │  ⋯    │
-│ 7f01    │ -      │ ●pend  │ high     │ 14:19   │ -   │  ⋯    │
-│ 6a2b    │ arm2   │ ●fail  │ normal   │ 14:18   │ 12s │  ⚠    │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Tasks                     [filters]      [↻]         │
+├──────────────────────────────────────────────────────┤
+│ Stats: pending 3 | dispatched 1 | completed 47 | failed 2 │
+├──────────────────────────────────────────────────────┤
+│ Task list                                           │
+│ b7e2 | arm2 | done | normal | 14:22 | 3.4s         │
+│ a8f3 | arm2 | done | normal | 14:21 | 4.2s         │
+│ 8d33 | —    | pending | normal | 14:19 | —        │
+├──────────────────────────────────────────────────────┤
+│ Selected task detail                                │
+│ timeline • payload • output • logs                  │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -555,47 +408,24 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.4 페이지 #4 — 로그인 (Login)
 
-**라우트**: `/login`  **권한**: 공개  **테마**: Notion
+**라우트**: `/login`  **권한**: 공개  **스타일**: Apple auth surface
 
 **목적**: 쿠키 세션 발급.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│                    [warm canvas #f6f5f4]                    │
-│                                                             │
-│              ┌─────────────────────────┐                    │
-│              │                         │                    │
-│              │        [F logo]         │  ← Notion Blue     │
-│              │                         │                    │
-│              │   Sign in to Fleet      │  ← 20px semibold   │
-│              │  Use your admin account │  ← 14px muted      │
-│              │                         │                    │
-│              │   Email                 │                    │
-│              │  ┌──────────────────┐   │  ← 4px radius      │
-│              │  │ admin@...        │   │    (tight input)   │
-│              │  └──────────────────┘   │                    │
-│              │                         │                    │
-│              │   Password         [👁] │                    │
-│              │  ┌──────────────────┐   │                    │
-│              │  │ ••••••••         │   │                    │
-│              │  └──────────────────┘   │                    │
-│              │                         │                    │
-│              │  ╭─────────────────╮    │  ← pill CTA        │
-│              │  │    Sign in       │    │    (radius-full)   │
-│              │  ╰─────────────────╯    │                    │
-│              │                         │                    │
-│              │  Forgot password?       │                    │
-│              │  ─────────────────────  │                    │
-│              │  Need access? Get a     │                    │
-│              │  bootstrap token →      │  ← Notion Blue link│
-│              │                         │                    │
-│              └─────────────────────────┘                    │
-│                                                             │
-│         Fleet Orchestrator v0.1.0 • RBAC + CF Access        │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ [Warm canvas]                                      │
+│ [F logo]                                           │
+│ Sign in to Fleet                                   │
+│ Email                                              │
+│ [admin@... ]                                       │
+│ Password                                           │
+│ [••••••••] [👁]                                    │
+│ [Sign in]                                          │
+│ Need access? Use bootstrap token                   │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -613,56 +443,24 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.5 페이지 #5 — 부트스트랩 설정 (Bootstrap)
 
-**라우트**: `/bootstrap`  **권한**: 공개(OTP 필요)  **테마**: Notion
+**라우트**: `/bootstrap`  **권한**: 공개(OTP 필요)  **스타일**: Apple auth surface
 
 **목적**: 최초 관리자 계정 등록. 1회성.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ ███████████████ HERO (deep indigo #213183) ███████████████ │
-│ █                                                          █│
-│ █       ·  ✦        ✦    ·                                 █│ ← sticker
-│ █   ✦           [FLEET]            ·         ✦              █│   constellation
-│ █              // first run                                 █│   (decorative)
-│ █         Activate your control plane                       █│
-│ █       Enter the OTP from `fleet admin bootstrap`          █│
-│ █   ·         ✦                ·     ✦                      █│
-│ ████████████████████████████████████████████████████████████│
-│                                                             │
-│                [warm canvas with faint dot grid]            │
-│         ┌──────────────────────────────────────┐            │
-│         │   Bootstrap token                    │            │
-│         │   6 segments from CLI output         │            │
-│         │   ┌──┐ ┌──┐ ┌──┐   ┌──┐ ┌──┐ ┌──┐    │            │
-│         │   │A7│ │K2│ │9X│   │  │ │  │ │  │    │            │
-│         │   └──┘ └──┘ └──┘   └──┘ └──┘ └──┘    │            │
-│         │                                      │            │
-│         │   ────── then ──────                  │            │
-│         │                                      │            │
-│         │   Email                              │            │
-│         │   ┌──────────────────────────────┐   │            │
-│         │   │ admin@agentthread.dev        │   │            │
-│         │   └──────────────────────────────┘   │            │
-│         │                                      │            │
-│         │   Password                           │            │
-│         │   ┌──────────────────────────────┐   │            │
-│         │   │ ••••••••••••                  │   │            │
-│         │   └──────────────────────────────┘   │            │
-│         │   [■■■□] strong                      │            │ ← strength
-│         │                                      │            │
-│         │   ┌──────────────────────────────┐   │            │
-│         │   │ Role: administrator           │   │            │
-│         │   │ Permissions: 14 granted       │   │            │
-│         │   │ [users:*] [tasks:*] [+12]     │   │            │
-│         │   └──────────────────────────────┘   │            │
-│         │                                      │            │
-│         │   ╭──────────────────────────────╮   │            │
-│         │   │  Activate control plane  →   │   │            │
-│         │   ╰──────────────────────────────╯   │            │
-│         └──────────────────────────────────────┘            │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Hero: Activate your control plane                  │
+├──────────────────────────────────────────────────────┤
+│ Bootstrap token                                    │
+│ [A7] [K2] [9X] [..] [..] [..]                      │
+├──────────────────────────────────────────────────────┤
+│ Email / Password                                   │
+│ [admin@agentthread.dev] [••••••••]                 │
+│ Role: administrator                                │
+│ [Activate control plane]                          │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -679,43 +477,27 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.6 페이지 #6 — 사용자 관리 (User Management)
 
-**라우트**: `/admin/users`  **권한**: administrator  **테마**: Notion
+**라우트**: `/admin/users`  **권한**: administrator  **스타일**: Apple auth surface
 
 **목적**: RBAC 관리 패널.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Fleet Orchestrator           [Avatar YA] Yarang  [Sign out] │
-├─────────────────────────────────────────────────────────────┤
-│ Users & Roles                              [+ Invite user]  │
-│ Manage who can access the fleet control plane               │
-│                                                             │
-│ [Total: 3] [Active sessions: 2●] [Admins: 1] [Pending: 0]   │
-│                                                             │
-│ ┌─────────────────────────────────────────────────────────┐│
-│ │ User │ Role     │ Status │ Last active │ Perms │        ││
-│ │┌──┐  │          │        │             │       │        ││
-│ ││YA│ Yarang│[administrator]│ ●active│ 2m ago │ users:*│ You││ ← 현재 사용자
-│ │└──┘ yarang@..│ (dark pill) │         │        │ tasks:*│    │
-│ │┌──┐                                                                  ││
-│ ││JK│ Jikang│  [operator]   │ ●active│ 1h ago │ tasks:│  ⋯  ││
-│ │└──┘ jikang@..│(border pill)│         │        │ dispatch│    ││
-│ │┌──┐           │             │         │        │        │    ││
-│ ││MS│ Minsu │   [viewer]     │ ○inactive│3d ago │ view │  ⋯  ││
-│ │└──┘ minsu@..│(border pill) │         │        │       │    ││
-│ └─────────────────────────────────────────────────────────┘│
-│                                                             │
-│ ┌─ Permission matrix ───────────────────────────────────┐  │
-│ │              │ administrator │ operator │ viewer       │  │
-│ │ users:read   │      ✓        │    ✓     │    —         │  │
-│ │ users:write  │      ✓        │    —     │    —         │  │
-│ │ tasks:dispatch│     ✓        │    ✓     │    —         │  │
-│ │ workers:view │      ✓        │    ✓     │    ✓         │  │
-│ │ config:edit  │      ✓        │    —     │    —         │  │
-│ └─────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Fleet Orchestrator       [Avatar YA] [Sign out]     │
+├──────────────────────────────────────────────────────┤
+│ Users & Roles                                      │
+│ [Total 3] [Active 2] [Admins 1] [Pending 0]        │
+├──────────────────────────────────────────────────────┤
+│ User table                                         │
+│ YA | Yarang | administrator | active | 2m ago      │
+│ JK | Jikang | operator | active | 1h ago          │
+│ MS | Minsu  | viewer | inactive | 3d ago          │
+├──────────────────────────────────────────────────────┤
+│ Permission matrix                                   │
+│ users:read | users:write | tasks:dispatch | ...    │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 인터랙션
@@ -731,39 +513,28 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.7 페이지 #7 — 활동 로그 (Activity Log)
 
-**라우트**: `/admin/activity`  **권한**: viewer (`events:list`)  **테마**: Dark
+**라우트**: `/admin/activity`  **권한**: viewer (`events:list`)  **스타일**: Apple tile system
 
 > 이 페이지는 작업·워커 **생명주기 이벤트**(`events` 테이블, `/api/events`)를 보여준다.
 > 인증/권한 감사 로그(`audit_log` 테이블)는 `/api/audit`가 제공하며 전용 화면은 아직 없다.
 
 **목적**: 보안 컴플라이언스, 침해 탐지, 운영 회귀 분석.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Audit Log                                                   │
-│ All security-sensitive actions across the fleet             │
-├─────────────────────────────────────────────────────────────┤
-│ FILTER BAR                                                  │
-│ [Time ▾] [User ▾] [auth●] [rbac] [tasks●] [workers] [config]│
-│ [🔍 search...]                       [Export JSON] [CSV]    │
-├─────────────────────────────────────────────────────────────┤
-│ Events: 1,247 │ Failed logins: 3 │ Perm changes: 1 │ Disp: 47│
-├─────────────────────────────────────────────────────────────┤
-│ Timestamp │ User │ Category │ Action │ Resource │ IP │ Result│
-│ 02:09:37  │ yaran│[auth]    │ session│ sess:8f3 │168.│[200] │ ← selected
-│ 02:08:14  │ syst │[sched]   │ task.di│ task_b7e │127.│[200] │
-│ 02:07:55  │ yaran│[tasks]   │ task.vi│ task_b7e │168.│[200] │
-│ 02:04:12  │ —    │[auth]    │ login. │ user:unk │45. │[401] │
-│ 02:04:08  │ —    │[auth]    │ login. │ user:unk │45. │[401] │ ← suspicious
-│ 02:03:33  │ jikan│[auth]    │ session│ sess:7c2 │168.│[200] │
-│ ...                                              ┌────────┐│
-│                                                  │ Detail ││
-│                                                  │ {json} ││
-│                                                  │   ...  ││
-│                                                  └────────┘│
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Audit Log                                          │
+│ Filters: time | user | category | search           │
+├──────────────────────────────────────────────────────┤
+│ Metrics: events 1,247 | failed logins 3 | perm changes 1 │
+├──────────────────────────────────────────────────────┤
+│ Event list                                         │
+│ 02:09:37 | yaran | auth | session | ...           │
+│ 02:08:14 | syst  | tasks | task.dispatch | ...    │
+├──────────────────────────────────────────────────────┤
+│ Detail pane: JSON payload                          │
+└──────────────────────────────────────────────────────┘
 ```
 
 #### 카테고리 컬러 코딩
@@ -781,49 +552,24 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.8 페이지 #8 — MCP 도구 탐색기 (MCP Tools)
 
-**라우트**: `/admin/tools`  **권한**: operator+  **테마**: Notion
+**라우트**: `/admin/tools`  **권한**: operator+  **스타일**: Apple auth surface
 
 **목적**: MCP 도구 자가발견성, AI 클라이언트 연동 가이드.
 
-#### 레이아웃
+#### 레이아웃 (간소화된 ASCII)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Fleet Orchestrator           [Avatar YA] Yarang  [Sign out] │
-├─────────────────────────────────────────────────────────────┤
-│ // MODEL CONTEXT PROTOCOL                                  │
-│ MCP Tools                                                   │
-│ 7 tools exposed via JSON-RPC 2.0 stdio for AI clients       │
-│                                                       [Grid▾]│
-├─────────────────────────────────────────────────────────────┤
-│ ┌──────────┐ ┌──────────┐ ┌──────────┐                       │
-│ │[teal]    │ │[mustard] │ │[coral]   │                       │
-│ │workers.  │ │workers.  │ │tasks.    │                       │
-│ │list      │ │inspect   │ │dispatch  │ ← selected (blue border)│
-│ │2 params  │ │3 params  │ │4 params  │                       │
-│ │calls:142 │ │calls:89  │ │calls:47  │                       │
-│ └──────────┘ └──────────┘ └──────────┘                       │
-│ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐          │
-│ │[blue]    │ │[purple]  │ │[mint]    │ │[gray]    │          │
-│ │tasks.    │ │events.   │ │health.   │ │bootstrap.│          │
-│ │list      │ │tail      │ │check     │ │issue     │          │
-│ └──────────┘ └──────────┘ └──────────┘ └──────────┘          │
-├─────────────────────────────────────────────────────────────┤
-│ DETAIL PANEL — fleet.tasks.dispatch                         │
-│ Dispatch a task to the worker pool.                         │
-│                                                             │
-│ INPUT SCHEMA              │  USAGE EXAMPLE                  │
-│ {                         │  // Request                     │
-│   "template": string,     │  {                              │
-│   "payload": object,      │    "jsonrpc": "2.0",            │
-│   "priority": enum,       │    "method": "fleet.tasks...    │
-│   "worker_id": string?    │    "params": {...},             │
-│ }                         │    "id": 1                      │
-│                           │  }                              │
-│                           │  // Response                    │
-│                           │  { "result": { "task_id": ... }}│
-│ Avg: 12ms │ Success: 100% │ Last: 3m ago                   │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────┐
+│ Fleet Orchestrator          [Sign out]              │
+├──────────────────────────────────────────────────────┤
+│ MCP Tools                                          │
+│ 7 tools exposed via JSON-RPC 2.0 stdio            │
+├──────────────────────────────────────────────────────┤
+│ Tool cards: workers.list | workers.inspect | tasks.dispatch │
+├──────────────────────────────────────────────────────┤
+│ Detail panel: fleet.tasks.dispatch                 │
+│ input schema | usage example | metrics            │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -968,7 +714,7 @@ flowchart LR
 
 ### 5.1 글로벌 내비게이션
 
-Dark 테마 페이지 상단에 고정 헤더:
+Apple tile 기반 페이지 상단에 고정 헤더:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1006,10 +752,10 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 ### 6.1 StatusPill
 
-상태 표시용 작은 둥근 배지.
+상태 표시용 작은 둥근 배지. Apple 스타일은 색상보다는 명확한 레이블과 아이콘을 우선한다.
 
-```
-[● online]      ← green dot + text, pill bg
+```text
+[● online]      ← green dot + text
 [● degraded]    ← amber
 [● offline]     ← red
 [● pending]     ← amber, blinking
@@ -1019,87 +765,86 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 ### 6.2 Badge (역할/카테고리)
 
-| 타입        | 스타일                                        | 용도             |
-| ----------- | --------------------------------------------- | ---------------- |
-| Role-admin  | dark bg #191919 + white text                  | administrator    |
-| Role-other  | white bg + 1px border + text                  | operator/viewer  |
-| Category    | tinted bg (blue/purple/green/amber/gray) /20  | Audit categories |
+| 타입 | 스타일 | 용도 |
+| --- | --- | --- |
+| Role-admin | Action Blue pill, white text | administrator |
+| Role-other | parchment surface, 1px hairline | operator/viewer |
+| Category | tint chip on parchment | Audit categories |
 
 ### 6.3 Card
 
-| 변형           | 배경        | 테두리      | 라디우스 | 그림자 |
-| -------------- | ----------- | ----------- | -------- | ------ |
-| Dark 기본      | #181b22     | #232732     | 8px      | 없음   |
-| Dark 강조      | #1c1f27     | #2a2e38     | 8px      | 없음   |
-| Notion 기본    | #ffffff     | #e9e9e9     | 12px     | shadow-1 |
-| Notion 인증    | #ffffff     | 없음        | 16px     | shadow-1 |
-| Notion 인셋    | #f6f5f4     | 없음        | 8px      | 없음   |
+| 변형 | 배경 | 테두리 | 라디우스 | 그림자 |
+| --- | --- | --- | --- | --- |
+| Tile light | `#ffffff` | 없음 | `0px` | 없음 |
+| Tile parchment | `#f5f5f7` | 없음 | `0px` | 없음 |
+| Tile dark | `#272729` | 없음 | `0px` | 없음 |
+| Utility card | `#ffffff` | `#e0e0e0` | `18px` | 없음 |
+| Modal | `#ffffff` | `#e0e0e0` | `18px` | `rgba(0,0,0,0.08)` |
 
 ### 6.4 DataTable
 
-공용 테이블 컴포넌트. 다크/Notion 양쪽 지원.
+공용 테이블 컴포넌트. Apple의 light-first 섹션에서 가장 흔하게 쓰인다.
 
-| 속성             | Dark                          | Notion                       |
-| ---------------- | ----------------------------- | ---------------------------- |
-| 헤더 배경        | #1a1d24                       | #fafafa                      |
-| 행 높이          | 48px                          | 56px                         |
-| 호버             | #1f232c                       | #f6f5f4                      |
-| 선택             | left-border 3px #0075de       | bg #f6f5f4 + left-border 3px |
-| 빈 상태          | 중앙 + gray icon              | 중앙 + muted text            |
-| 페이지네이션     | 하단 (10/25/50/100)           | 동일                         |
+| 속성 | 값 |
+| --- | --- |
+| 헤더 배경 | `#fafafc` |
+| 행 높이 | 56px |
+| 호버 | `#f5f5f7` |
+| 선택 | left border 3px `#0066cc` |
+| 빈 상태 | 중앙 + muted text |
+| 페이지네이션 | 하단 (10/25/50/100) |
 
 ### 6.5 EventLog
 
-터미널 스타일 로그 패널.
+터미널 스타일 로그 패널. 다크 tile 위에 놓일 때는 white text, light tile 위에 놓일 때는 ink를 사용한다.
 
-- 배경 `--bg-inset: #0d0f13`
-- 폰트 `--font-mono`
-- 타임스탬프 `--text-faint: #4b5563`
-- 본문 `--text-secondary: #9ca3af`
-- 상태 코드 green/red/amber
+- 배경: `#0d0f13` 또는 `#f5f5f7` (컨텍스트에 따라)
+- 폰트: SF Mono / system monospace
+- 타임스탬프: muted gray
+- 상태 코드: green/red/amber
 - 최대 1000줄 버퍼, 자동 스크롤(사용자가 스크롤 시 일시정지)
 
 ### 6.6 EmptyState
 
-| 변형        | 아이콘 | 제목            | 부제목                          |
-| ----------- | ------ | --------------- | ------------------------------- |
-| no-tasks    | 📭     | No tasks yet    | Dispatch one via MCP tools      |
-| no-workers  | 🛰️     | No workers      | Start a worker with `fleet join`|
-| no-events   | ⏳     | Awaiting events | Listen with `fleet events tail` |
-| no-results  | 🔍     | No matches      | Try adjusting your filters      |
+| 변형 | 아이콘 | 제목 | 부제목 |
+| --- | --- | --- | --- |
+| no-tasks | 📭 | No tasks yet | Dispatch one via MCP tools |
+| no-workers | 🛰️ | No workers | Start a worker with `fleet join` |
+| no-events | ⏳ | Awaiting events | Listen with `fleet events tail` |
+| no-results | 🔍 | No matches | Try adjusting your filters |
 
 ### 6.7 Avatar
 
-원형 아바타, 이니셜 + 색상.
+원형 아바타. Apple에서는 시각적 과잉 장식보다 초기값과 색상 일관성이 더 중요하다.
 
-```
+```text
         ┌──┐
-        │YA│  ← Notion Blue #0075de fill, white text
+        │YA│  ← Action Blue fill, white text
         └──┘
 ```
 
-색상 할당 규칙 (해시 기반, Notion sticker palette):
+색상 할당 규칙 (해시 기반):
 
-| 이니셜 | 색상             | Hex       |
-| ------ | ---------------- | --------- |
-| A-E    | mustard          | #d9730d   |
-| F-J    | teal             | #0f7b6c   |
-| K-O    | coral            | #e8855e   |
-| P-T    | Notion Blue      | #0075de   |
-| U-Z    | purple           | #9085d8   |
+| 이니셜 | 색상 | Hex |
+| --- | --- | --- |
+| A-E | mustard | `#d9730d` |
+| F-J | teal | `#0f7b6c` |
+| K-O | coral | `#e8855e` |
+| P-T | Action Blue | `#0066cc` |
+| U-Z | purple | `#9085d8` |
 
 ### 6.8 기타
 
-| 컴포넌트         | 설명                                                |
-| ---------------- | --------------------------------------------------- |
-| MetricCard       | 큰 숫자 + 라벨, 강조 색상 prop                      |
-| CodeBlock        | 모노스페이스, 구문 강조, 복사 버튼                  |
-| TimelineStepper  | horizontal 단계 표시 (created→dispatched→done)      |
-| FilterBar        | 드롭다운 + pill 멀티셀렉트 + 검색                   |
-| Toast            | 우측 하단, 자동 소멸(4s)                            |
-| Modal            | 중앙, Notion 디자인 (radius-xl), backdrop blur 2px  |
-| OTPInput         | 6개 분할 입력 박스, 자동 포커스 이동               |
-| StrengthGauge    | 4단계 컬러 게이지 (zxcvbn 연동)                     |
+| 컴포넌트 | 설명 |
+| --- | --- |
+| MetricCard | 큰 숫자 + 라벨, Action Blue/neutral 상태 표시 |
+| CodeBlock | SF Mono, 복사 버튼, light/dark 컨텍스트 대응 |
+| TimelineStepper | created → dispatched → done 단계 표시 |
+| FilterBar | dropdown + pill chip + search |
+| Toast | 우측 하단, 자동 소멸(4s) |
+| Modal | 중앙, white/parchment canvas, thin border |
+| OTPInput | 6개 분할 입력 박스, 자동 포커스 이동 |
+| StrengthGauge | 4단계 게이지, Action Blue 강조 |
 
 ---
 
@@ -1160,7 +905,7 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 | 색 의존성        | 상태는 색+아이콘+텍스트 3중 표현                |
 | 모션 민감도       | `prefers-reduced-motion` 존중                    |
 
-### 9.2 다크 테마 대비 검증
+### 9.2 Apple surface 대비 검증
 
 | 색상 조합                 | 비율   | 합격 여부 |
 | ------------------------- | ------ | --------- |
@@ -1186,7 +931,7 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 | #4 로그인             | RBAC 도입의 필수 진입점                    |
 | #5 부트스트랩         | 최초 관리자 생성의 유일한 경로             |
 
-**예상 LOC**: ~1,200 (Notion 디자인 CSS + auth 프론트엔드)
+**예상 LOC**: ~1,200 (Apple Design System CSS + auth 프론트엔드)
 
 ### 10.2 P1 — 운영 강화 (Phase 9.2)
 
@@ -1243,8 +988,8 @@ crates/fleet-dashboard/
 │   ├── admin-tools.html        # P2: MCP Tools (#8)
 │   ├── styles/
 │   │   ├── tokens.css          # 디자인 토큰 (색상, 타이포, 라디우스)
-│   │   ├── dark.css            # Dark 테마 컴포넌트
-│   │   ├── notion.css          # Notion 테마 컴포넌트
+│   │   ├── surfaces.css        # tile / surface variants
+│   │   ├── auth.css            # auth-specific surface styles
 │   │   └── components.css      # 공통 컴포넌트
 │   └── scripts/
 │       ├── app.js              # 공통 (세션 관리, fetch 래퍼)
@@ -1267,10 +1012,8 @@ crates/fleet-dashboard/
 
 ### 12.1 강점
 
-- **이중 테마 전략**: 관측용(다크)과 인지용(Notion)을 명확히 분리해 각
-  목적에 최적화. 사용자는 한쪽 테마에 갇히지 않음.
-- **Notion 디자인 철학 채택**: 인증/온보딩의 인지 부담 최소화. 기존
-  다크 테마보다 신뢰감/친근함 우위.
+- **단일 Apple Design System**: 운영/인증/관리 화면이 모두 같은 토큰과 레이아웃 규칙을 공유한다.
+- **Apple 디자인 철학 채택**: 인증/온보딩은 가벼운 canvas와 명확한 CTA로 인지 부담을 최소화한다.
 - **8개 페이지 적정 범위**: 단일 목적의 작은 페이지들로 분할. 거대한
   SPA 대신 멀티 페이지 접근으로 복잡도 제어.
 - **흐름 기반 설계**: 각 페이지가 아닌 사용자 흐름(온보딩/운영/관리)을
@@ -1283,7 +1026,7 @@ crates/fleet-dashboard/
 | 약점                                    | 완화 방안                                  |
 | --------------------------------------- | ------------------------------------------ |
 | 8개 페이지 분산 → 초기 구현 부담        | P0 3개로 MVP 축소 가능                     |
-| 두 테마 유지 → CSS 중복/일관성 리스크   | tokens.css로 단일 소스, 다크/Notion은 변수만 오버라이드 |
+| 단일 시스템 유지 → CSS 중복/일관성 리스크   | tokens.css 기반으로 하나의 토큰 소스를 유지하고, surface·auth 변형만 오버라이드 |
 | 프론트엔드 프레임워크 없이 Vanilla JS   | htmx + Alpine.js 도입 검토 (선택)          |
 | 모바일 관리 액션 제한                   | 별도 모바일 최소 기능 명시 필요            |
 | Mermaid 다이어그램 → 실제 코드와 drift  | 문서 자동 생성 또는 주기적 검토 프로세스   |
@@ -1292,8 +1035,7 @@ crates/fleet-dashboard/
 
 | 대안                | 장점                          | 단점                          | 결정 |
 | ------------------- | ----------------------------- | ----------------------------- | ---- |
-| 단일 다크 테마      | 일관성, 구현 단순             | 인증 페이지의 친근함 부족      | 기각 |
-| 단일 Notion 테마    | 온보딩 우수                   | 관측용 데이터 밀도 표현 약함  | 기각 |
+| 단일 Apple 시스템      | 일관성, 구현 단순             | 특정 페이지에서 과도하게 무난해질 수 있음      | 채택 |
 | React/Next.js SPA   | 컴포넌트 재사용, 상태 관리 우수 | 빌드 파이프라인 복잡, Rust 서렁 부담 | 기각 |
 | htmx + Alpine.js    | 서버 사이드 렌더링, 가벼움     | 복잡한 UI에서 한계            | **검토 중** |
 | Vanilla JS + SSR    | 구현 자유도, 의존성 최소       | 컴포넌트 재사용 부족          | **기본 채택** |
@@ -1302,7 +1044,7 @@ crates/fleet-dashboard/
 
 ## 13. 참고 자료
 
-- [DESIGN-notion.md](../../DESIGN-notion.md) — Notion 디자인 시스템 원전
+- [DESIGN-apple.md](../../DESIGN-apple.md) — Apple Design System 정본
 - [architecture.md](../architecture/overview.md) — 시스템 아키텍처
 - [api-reference.md](../architecture/api-reference.md) — HTTP API 명세
 - [deployment.md](../deployment/deployment.md) — 배포 가이드 (Nginx 설정 포함, 2026-08-11 갱신 — 원문의 "Caddy" 기술은 폐기됨)

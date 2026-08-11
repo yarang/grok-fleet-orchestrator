@@ -109,3 +109,12 @@
   `worker_join_authentication_design.md` → `join-authentication.md`)과 디렉토리 배치는
   그대로 채택했으나, `ui-design.md` §2 색상/타이포 토큰 전면 재작성(초안 §C.2 후반부 제안)은
   범위가 커 이번 패스에서 보류 — 배너 정정만 유지.
+
+## 2026-08-11 — lint — UI docs를 Apple Design System 기준으로 재정렬
+
+- `docs/ui-dashboard/ui-design.md`의 레이아웃/컴포넌트/페이지 설명을 루트
+  `DESIGN-apple.md` 정본과 일치하도록 재작성했다. 기존의 Notion/이중 테마 표현을 제거하고,
+  Action Blue, parchment, black global nav, pill CTA, SF Pro 토큰과 tile/utility-card
+  언어로 통일했다.
+- `docs/index.md`의 UI/대시보드 참조 문서 설명을 현재 정본 기준으로 보완해,
+  `DESIGN-apple.md`가 우선 정본임을 명시했다.
