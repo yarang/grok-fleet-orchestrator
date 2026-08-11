@@ -119,6 +119,18 @@ enum Command {
         #[arg(long, env = "FLEET_RECONCILE_STALE_SECS", default_value_t = 60)]
         reconcile_stale_secs: u64,
 
+        /// 이 시간(초)보다 오래 `Dispatched` 상태로 머문 작업 중 담당 워커가
+        /// store에서 완전히 사라진 것만 `Failed`로 전이한다(워커 재시작으로
+        /// worker_id가 바뀌어 고아가 된 작업 회수). "워커 존재 여부"라는 강한
+        /// 신호에 대한 최소 유예 시간이므로 `reconcile-stale-secs`보다 짧게
+        /// 잡아도 안전하다.
+        #[arg(
+            long,
+            env = "FLEET_RECONCILE_DISPATCHED_CHECK_SECS",
+            default_value_t = 30
+        )]
+        reconcile_dispatched_check_secs: u64,
+
         /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
         /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
         /// 지정하면 워커 등록/하트비트 엔드포인트가 병렬로 serve됩니다.
@@ -813,7 +825,9 @@ async fn main() -> Result<()> {
     #[cfg(feature = "acp")]
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls ring CryptoProvider — should only happen if called twice");
+        .expect(
+            "failed to install rustls ring CryptoProvider — should only happen if called twice",
+        );
 
     let cli = Cli::parse();
     logging::init(&cli.log_level);
@@ -840,6 +854,7 @@ async fn main() -> Result<()> {
             no_reconcile,
             reconcile_interval_secs,
             reconcile_stale_secs,
+            reconcile_dispatched_check_secs,
             http_bind,
             api_tokens,
             cf_audience,
@@ -863,6 +878,7 @@ async fn main() -> Result<()> {
                 no_reconcile,
                 reconcile_interval_secs,
                 reconcile_stale_secs,
+                reconcile_dispatched_check_secs,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),

@@ -224,6 +224,7 @@ pub async fn run_serve(
     no_reconcile: bool,
     reconcile_interval_secs: u64,
     reconcile_stale_secs: u64,
+    reconcile_dispatched_check_secs: u64,
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
@@ -332,19 +333,25 @@ pub async fn run_serve(
         None
     };
 
-    // stale `Pending` 작업 재조정 루프 (옵션). `Dispatcher::submit()`은
+    // stale `Pending`/`Dispatched` 작업 재조정 루프 (옵션). `Dispatcher::submit()`은
     // 제출 시점에 딱 한 번만 워커 선택/dispatch를 시도하므로, 그 시도가
     // 터미널 상태에 도달하기 전에 프로세스가 죽으면 작업이 영구히 `Pending`에
-    // 고아로 남는다 — 이 루프가 주기적으로 그런 작업을 재시도한다.
+    // 고아로 남는다 — 이 루프가 주기적으로 그런 작업을 재시도한다. 워커가
+    // 재시작해 새 worker_id로 재등록되어 `Dispatched` 작업이 고아가 되는
+    // 케이스도 같은 루프가 회수한다 (자세한 배경은 `reconcile.rs` 모듈 문서 참고).
     let _reconcile_handle = if !no_reconcile {
         let cfg = ReconcileConfig {
             interval: Duration::from_secs(reconcile_interval_secs.max(1)),
             stale_after: Duration::from_secs(reconcile_stale_secs.max(1)),
+            dispatched_worker_check_after: Duration::from_secs(
+                reconcile_dispatched_check_secs.max(1),
+            ),
         };
         tracing::info!(
             interval_secs = reconcile_interval_secs,
             stale_secs = reconcile_stale_secs,
-            "pending-task reconciliation loop enabled"
+            dispatched_check_secs = reconcile_dispatched_check_secs,
+            "task reconciliation loop enabled (pending redispatch + orphaned dispatched reap)"
         );
         let reconciler = Reconciler::new(state.clone(), dispatcher.clone(), cfg);
         Some(reconciler.spawn())

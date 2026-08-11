@@ -403,7 +403,10 @@ impl Dispatcher {
     }
 
     /// 작업을 실패로 마킹하고 이벤트 발행.
-    async fn mark_failed(&self, task_id: TaskId, failure: TaskFailure) {
+    ///
+    /// `pub(crate)` — `Reconciler`가 orphaned `Dispatched` 작업(담당 워커가
+    /// 재등록으로 사라진 경우)을 Failed로 전이시킬 때도 재사용한다.
+    pub(crate) async fn mark_failed(&self, task_id: TaskId, failure: TaskFailure) {
         let _ = self
             .state
             .store

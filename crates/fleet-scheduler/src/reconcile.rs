@@ -1,4 +1,4 @@
-//! stale `Pending` 작업 재조정(reconciliation) 루프.
+//! stale `Pending`/`Dispatched` 작업 재조정(reconciliation) 루프.
 //!
 //! [`Dispatcher::submit`](crate::dispatcher::Dispatcher::submit)은 작업 제출
 //! 시점에 딱 한 번, 동기적으로 워커 선택 + dispatch를 시도한다. 이 시도가
@@ -9,11 +9,23 @@
 //! 않는다 (프로덕션에서 실제로 관측됨: 워커 3대가 모두 온라인·유휴 상태였는데
 //! 작업 하나가 `pending`으로 약 2일간 방치됨).
 //!
+//! `Dispatched`로 넘어간 뒤에도 별도의 고아 경로가 있다: 담당 워커가 재시작해
+//! **새 `worker_id`로 재등록**되면(예: 워커 바이너리 재배포), 그 워커가
+//! 실행 중이던 작업이 참조하던 옛 `worker_id`는 `workers` 테이블에서 완전히
+//! 사라진다. 워커 자신은 그 작업의 존재를 전혀 모르므로(재시작 시 진행 중이던
+//! 세션 상태가 날아감) 하트비트에도 `active_tasks`에 잡히지 않고, 작업은
+//! `Dispatched`에 영원히 멈춘 채 아무 이벤트도 받지 못한다 — 대시보드
+//! Overview의 "Active tasks" 카운트는 이 죽은 작업을 계속 세지만, 워커
+//! 목록의 실제 active 카운트는 0으로 어긋난다 (프로덕션에서 실제로 관측됨:
+//! 워커 3대 재배포 직후 재배포 이전에 dispatch된 작업 2건이 16시간 넘게
+//! `dispatched`로 고정).
+//!
 //! [`Reconciler`]는 [`HealthChecker`](crate::health::HealthChecker) /
 //! [`SessionCleanup`](crate::cleanup::SessionCleanup)과 동일한 "설정 + spawn +
-//! JoinHandle 기반 abort" 패턴을 따르는 백그라운드 루프로, 일정 주기마다
-//! `stale_after`보다 오래 `Pending`으로 머문 작업을 다시 훑어 재dispatch를
-//! 시도한다.
+//! JoinHandle 기반 abort" 패턴을 따르는 백그라운드 루프로, 매 tick마다 두 가지를
+//! 스윕한다: `stale_after`보다 오래 `Pending`으로 머문 작업의 재dispatch,
+//! `dispatched_worker_check_after`보다 오래됐는데 담당 워커가 더 이상 존재하지
+//! 않는 `Dispatched` 작업의 `Failed` 전이.
 //!
 //! ## 설계 노트
 //!
@@ -29,6 +41,13 @@
 //! - `stale_after`는 정상적으로 진행 중인 `submit()` 호출(보통 수십~수백ms)과
 //!   재조정 루프가 서로 경합하지 않도록, dispatch 왕복 시간보다 충분히 크게
 //!   잡아야 한다 (기본값 60초).
+//! - `dispatched_worker_check_after`는 "담당 워커가 store에서 완전히
+//!   사라졌다"는 훨씬 강한 신호에 대한 최소 유예 시간이므로 `stale_after`보다
+//!   짧게 잡아도 안전하다 (기본값 30초) — 정상적인 `dispatch_existing()`
+//!   호출이 `update_task_status`를 커밋하는 사이의 아주 짧은 순간과만
+//!   경합하면 되기 때문이다. 워커가 존재하되 단순히 응답이 느린 경우는 이
+//!   경로가 건드리지 않는다 — 워커 자체의 헬스체크/CircuitBreaker가 그 경우를
+//!   담당한다.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,12 +56,12 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use fleet_core::{TaskFilter, TaskStatusFilter};
+use fleet_core::{FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter};
 
 use crate::dispatcher::{DispatchError, Dispatcher};
 use crate::state::FleetState;
 
-/// 한 사이클에서 스캔할 최대 pending 작업 수.
+/// 한 사이클에서 스캔할 최대 pending/dispatched 작업 수.
 ///
 /// `TaskFilter`의 기본 limit(100)보다 넉넉하게 잡아, 대량의 stale 작업이
 /// 쌓인 상황에서도 재조정 루프가 일부를 놓치지 않게 한다.
@@ -57,6 +76,10 @@ pub struct ReconcileConfig {
     /// 정상적으로 진행 중인 `submit()` 호출과 경합하지 않도록 dispatch
     /// 왕복 시간보다 충분히 크게 잡아야 한다.
     pub stale_after: Duration,
+    /// 이보다 오래 `Dispatched`로 머문 작업 중 담당 워커가 store에서 완전히
+    /// 사라진 것만 `Failed`로 전이한다. "워커 존재 여부"라는 강한 신호에
+    /// 대한 최소 유예 시간이므로 `stale_after`보다 짧게 잡아도 안전하다.
+    pub dispatched_worker_check_after: Duration,
 }
 
 impl Default for ReconcileConfig {
@@ -64,6 +87,7 @@ impl Default for ReconcileConfig {
         Self {
             interval: Duration::from_secs(30),
             stale_after: Duration::from_secs(60),
+            dispatched_worker_check_after: Duration::from_secs(30),
         }
     }
 }
@@ -75,6 +99,10 @@ pub struct ReconcileSummary {
     pub stale_found: u64,
     /// 이번 라운드에 성공적으로 재dispatch된 작업 수.
     pub redispatched: u64,
+    /// 담당 워커가 사라진 것으로 발견된 stale dispatched 작업 수.
+    pub orphaned_found: u64,
+    /// 이번 라운드에 Failed로 전이시킨 orphaned dispatched 작업 수.
+    pub orphaned_failed: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -98,7 +126,11 @@ impl ReconcilerHandle {
 }
 
 impl Reconciler {
-    pub fn new(state: Arc<FleetState>, dispatcher: Arc<Dispatcher>, config: ReconcileConfig) -> Self {
+    pub fn new(
+        state: Arc<FleetState>,
+        dispatcher: Arc<Dispatcher>,
+        config: ReconcileConfig,
+    ) -> Self {
         Self {
             state,
             dispatcher,
@@ -124,7 +156,8 @@ impl Reconciler {
         info!(
             interval = ?self.config.interval,
             stale_after = ?self.config.stale_after,
-            "pending-task reconciliation loop started"
+            dispatched_worker_check_after = ?self.config.dispatched_worker_check_after,
+            "task reconciliation loop started (pending redispatch + orphaned dispatched reap)"
         );
 
         loop {
@@ -196,15 +229,91 @@ impl Reconciler {
             }
         }
 
-        if summary.stale_found > 0 {
+        self.reap_orphaned_dispatched(&mut summary).await;
+
+        if summary.stale_found > 0 || summary.orphaned_found > 0 {
             info!(
                 stale_found = summary.stale_found,
                 redispatched = summary.redispatched,
+                orphaned_found = summary.orphaned_found,
+                orphaned_failed = summary.orphaned_failed,
                 "reconciliation sweep completed"
             );
         }
 
         summary
+    }
+
+    /// `Dispatched` 작업 중 담당 워커가 store에서 완전히 사라진 것을 찾아
+    /// `Failed(WorkerUnavailable)`로 전이한다. `summary`에 결과를 누적한다.
+    async fn reap_orphaned_dispatched(&self, summary: &mut ReconcileSummary) {
+        let dispatched = match self
+            .state
+            .store
+            .list_tasks(&TaskFilter {
+                status: Some(TaskStatusFilter::Dispatched),
+                limit: MAX_PENDING_SCAN,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                warn!(error = %e, "reconcile: failed to list dispatched tasks");
+                return;
+            }
+        };
+
+        let now = Utc::now();
+        let check_after = chrono::Duration::from_std(self.config.dispatched_worker_check_after)
+            .unwrap_or_else(|_| chrono::Duration::seconds(30));
+
+        for task in dispatched {
+            let TaskStatus::Dispatched {
+                worker_id,
+                started_at,
+            } = task.status
+            else {
+                continue; // list_tasks 필터가 이미 보장하지만 방어적으로 스킵.
+            };
+
+            if now - started_at < check_after {
+                // 방금 dispatch된 작업 — dispatch_existing()의 update_task_status
+                // 커밋과 경합하지 않도록 최소 유예 시간을 둔다.
+                continue;
+            }
+
+            let worker_exists = match self.state.store.get_worker(worker_id).await {
+                Ok(w) => w.is_some(),
+                Err(e) => {
+                    // 조회 자체가 실패하면 판단할 수 없으므로 건드리지 않고 다음 tick에서 재시도.
+                    warn!(%worker_id, error = %e, "reconcile: failed to check worker existence, skipping");
+                    continue;
+                }
+            };
+
+            if worker_exists {
+                continue; // 워커는 존재 — 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가 담당.
+            }
+
+            summary.orphaned_found += 1;
+            let task_id = task.id;
+
+            let failure = TaskFailure {
+                error: format!(
+                    "assigned worker {worker_id} no longer registered (likely restarted with a new worker id)"
+                ),
+                kind: FailureKind::WorkerUnavailable,
+                worker_id: Some(worker_id),
+                attempts: 0,
+            };
+            self.dispatcher.mark_failed(task_id, failure).await;
+            summary.orphaned_failed += 1;
+            warn!(
+                %task_id, %worker_id,
+                "reconciliation: dispatched task's worker no longer exists, marked failed"
+            );
+        }
     }
 }
 
@@ -260,7 +369,11 @@ mod tests {
         async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
             Ok(self.tasks.lock().unwrap().get(&id).cloned())
         }
-        async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError> {
+        async fn update_task_status(
+            &self,
+            id: TaskId,
+            status: &TaskStatus,
+        ) -> Result<(), StoreError> {
             let mut tasks = self.tasks.lock().unwrap();
             let Some(task) = tasks.get_mut(&id) else {
                 return Err(StoreError::NotFound);
@@ -271,7 +384,10 @@ mod tests {
             }
             Ok(())
         }
-        async fn list_tasks(&self, filter: &fleet_core::TaskFilter) -> Result<Vec<Task>, StoreError> {
+        async fn list_tasks(
+            &self,
+            filter: &fleet_core::TaskFilter,
+        ) -> Result<Vec<Task>, StoreError> {
             if self.fail_list_tasks {
                 return Err(StoreError::Unsupported("list_tasks forced failure"));
             }
@@ -283,7 +399,9 @@ mod tests {
                     Some(TaskStatusFilter::Dispatched) => {
                         matches!(t.status, TaskStatus::Dispatched { .. })
                     }
-                    Some(TaskStatusFilter::Completed) => matches!(t.status, TaskStatus::Completed(_)),
+                    Some(TaskStatusFilter::Completed) => {
+                        matches!(t.status, TaskStatus::Completed(_))
+                    }
                     Some(TaskStatusFilter::Failed) => matches!(t.status, TaskStatus::Failed(_)),
                     Some(TaskStatusFilter::Cancelled) => {
                         matches!(t.status, TaskStatus::Cancelled { .. })
@@ -447,6 +565,20 @@ mod tests {
         task
     }
 
+    /// `Dispatched { worker_id }` 상태의 작업을 지정된 경과 시간(started_at 기준)으로 생성.
+    fn make_dispatched_task(prompt: &str, worker_id: WorkerId, age: chrono::Duration) -> Task {
+        let mut task = Task::from_request(TaskRequest {
+            prompt: prompt.into(),
+            created_by: "test".into(),
+            ..Default::default()
+        });
+        task.status = TaskStatus::Dispatched {
+            worker_id,
+            started_at: chrono::Utc::now() - age,
+        };
+        task
+    }
+
     async fn wait_until_terminal(store: &dyn Store, task_id: TaskId) -> Task {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -486,6 +618,7 @@ mod tests {
             ReconcileConfig {
                 interval: Duration::from_secs(3600),
                 stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
             },
         );
 
@@ -540,6 +673,7 @@ mod tests {
             ReconcileConfig {
                 interval: Duration::from_secs(3600),
                 stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
             },
         );
 
@@ -569,5 +703,102 @@ mod tests {
         // 루프 자체가 죽지 않아야 하기 때문.
         let summary = reconciler.reconcile_once().await;
         assert_eq!(summary, ReconcileSummary::default());
+    }
+
+    #[tokio::test]
+    async fn orphaned_dispatched_task_with_missing_worker_is_marked_failed() {
+        // 프로덕션에서 실제로 관측된 시나리오 재현: 워커가 재시작해 새
+        // worker_id로 재등록되면서, 옛 worker_id로 dispatch됐던 작업이 고아가 됨.
+        let ghost_worker_id = WorkerId::new();
+        let store = Arc::new(MemStore::new());
+        // 주의: ghost_worker_id는 절대 upsert_worker되지 않음 — "존재하지 않는 워커"를 재현.
+
+        let task =
+            make_dispatched_task("orphaned", ghost_worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.orphaned_found, 1);
+        assert_eq!(summary.orphaned_failed, 1);
+
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        match failed.status {
+            TaskStatus::Failed(failure) => {
+                assert_eq!(failure.kind, FailureKind::WorkerUnavailable);
+                assert_eq!(failure.worker_id, Some(ghost_worker_id));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatched_task_with_existing_worker_is_left_alone() {
+        // 워커가 여전히 존재하면 (응답이 느릴 뿐일 수 있으므로) 건드리지 않는다 —
+        // 헬스체크/CircuitBreaker의 책임 영역.
+        let worker = make_worker("still-here");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task("still running", worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.orphaned_found, 0);
+        assert_eq!(summary.orphaned_failed, 0);
+
+        let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(
+            still_dispatched.status,
+            TaskStatus::Dispatched { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn freshly_dispatched_orphan_is_left_untouched_within_grace_period() {
+        // 워커가 없더라도, started_at이 dispatched_worker_check_after보다
+        // 신선하면 dispatch_existing()의 커밋과 경합하지 않도록 건드리지 않는다.
+        let ghost_worker_id = WorkerId::new();
+        let store = Arc::new(MemStore::new());
+
+        let task = make_dispatched_task(
+            "just dispatched",
+            ghost_worker_id,
+            chrono::Duration::seconds(2),
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(
+            summary.orphaned_found, 0,
+            "fresh dispatched task should not be touched even without a matching worker"
+        );
+
+        let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(
+            still_dispatched.status,
+            TaskStatus::Dispatched { .. }
+        ));
     }
 }
