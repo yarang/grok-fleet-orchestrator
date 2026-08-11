@@ -55,7 +55,11 @@
         document.getElementById('task-prompt').textContent = t.prompt || '';
 
         if (output && output.chunks && output.chunks.length > 0) {
-          document.getElementById('task-output').textContent = output.chunks.join('');
+          // chunks는 {seq, chunk, written_at} 객체 배열 — chunk 텍스트 필드만
+          // 뽑아 이어 붙여야 한다. 예전엔 배열 자체를 join()해서 각 객체가
+          // "[object Object]"로 스트링화되는 버그가 있었다 (2026-08-11).
+          document.getElementById('task-output').textContent =
+            output.chunks.map(function (c) { return c.chunk || ''; }).join('');
         } else if (t.phase === 'completed') {
           document.getElementById('task-output').textContent = '(task completed with no stdout/stderr output)';
         } else if (t.phase === 'failed') {

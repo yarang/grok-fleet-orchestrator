@@ -16,7 +16,10 @@
 //! - `prompt()` 응답이 도착하면 `prompt_id`를 채우고 역색인 `prompt_index`에
 //!   `(prompt_id, task_id)`를 등록 — 이후 들어오는 `Output`/`Completed`/
 //!   `Failed` notification이 정확한 task로 라우팅됨.
-//! - `Output` 이벤트의 `prompt_id`가 `None`인 경우 (드문 레이스) 는 drop.
+//! - `Output`/`Completed`/`Failed` 이벤트의 `prompt_id`가 `None`인 경우
+//!   (실측: 서버가 `session/update`에 promptId를 아예 안 붙이는 경우가 있음,
+//!   2026-08-11) — 이 워커에 진행 중인 태스크가 정확히 하나뿐이면 그 태스크로
+//!   라우팅(`sole_in_flight_task` 폴백), 둘 이상이면 모호하므로 drop.
 //!
 //! ## 재연결 (Phase 8.2)
 //!
@@ -129,8 +132,15 @@ struct InFlightTask {
     /// `session/prompt` 응답이 도착하기 전에는 `None`.
     /// 응답 도착 후 `set_prompt_id`로 채워짐 — 이후 Output 이벤트 라우팅에 사용.
     prompt_id: Option<PromptId>,
-    /// dispatch 시각 (로그/진단용).
+    /// dispatch 시각. 완료 시 `duration_secs` 계산에 사용
+    /// (2026-08-11 버그 수정 전에는 이 값이 있는데도 쓰이지 않고
+    /// `duration_secs`가 항상 0.0으로 하드코딩되어 있었다).
     started: Instant,
+    /// 스트리밍 `session/update`(AgentMessageChunk) 텍스트 누적 버퍼.
+    /// 최종 `PromptResult.agent_message`가 비어 있을 때(실측: grok가 응답을
+    /// 스트리밍으로만 보내고 최종 RPC 응답에는 텍스트를 채우지 않는 경우가
+    /// 있음) `TaskResult.output`의 폴백으로 쓰인다.
+    output_buf: String,
 }
 
 impl InFlightTask {
@@ -138,6 +148,7 @@ impl InFlightTask {
         Self {
             prompt_id: None,
             started: Instant::now(),
+            output_buf: String::new(),
         }
     }
 }
@@ -274,6 +285,31 @@ impl WorkerSession {
     /// prompt_id로 task_id 역조회 (reader_loop에서 Output/Completed/Failed 처리용).
     async fn task_for_prompt(&self, prompt_id: PromptId) -> Option<TaskId> {
         self.prompt_index.lock().await.get(&prompt_id).copied()
+    }
+
+    /// `promptId`가 아예 없는 이벤트를 위한 폴백 라우팅.
+    ///
+    /// 2026-08-11 실측: `grok agent serve`가 보내는 `session/update` notification이
+    /// `promptId`를 전혀 담지 않는 경우가 있다 (session/prompt의 최종 RPC 응답과
+    /// 달리, notification 쪽은 서버가 채워준다는 보장이 없다 — ACP 스펙상
+    /// optional). 이 워커에 진행 중인 태스크가 정확히 하나뿐이면 모호하지 않으므로
+    /// 그 태스크로 라우팅한다. 둘 이상 동시 진행 중이면 어느 것인지 알 수 없으므로
+    /// 안전하게 드롭(호출자가 처리)한다.
+    async fn sole_in_flight_task(&self) -> Option<TaskId> {
+        let guard = self.in_flight.lock().await;
+        if guard.len() == 1 {
+            guard.keys().next().copied()
+        } else {
+            None
+        }
+    }
+
+    /// 스트리밍 청크를 in-flight task의 출력 버퍼에 누적.
+    /// task가 이미 완료되어 in_flight에 없으면 조용히 무시.
+    async fn append_chunk(&self, task_id: TaskId, chunk: &str) {
+        if let Some(task) = self.in_flight.lock().await.get_mut(&task_id) {
+            task.output_buf.push_str(chunk);
+        }
     }
 
     /// 진행 중인 모든 task를 한 번에 실패 처리 (연결 끊김 시).
@@ -557,6 +593,7 @@ impl WorkerTransport for AcpTransport {
                     for event in buffered {
                         match event {
                             BufferedEvent::Output { seq, chunk } => {
+                                session_clone.append_chunk(task_id, &chunk).await;
                                 let _ = broadcaster.send(WorkerEvent::Output {
                                     task_id,
                                     seq,
@@ -568,13 +605,30 @@ impl WorkerTransport for AcpTransport {
                                 // 레이스(짧은 프롬프트의 응답이 session/prompt RPC
                                 // 응답보다 먼저 도착)에 걸린 태스크는 실행이 실제로는
                                 // 성공했는데도 영원히 "dispatched"에 멈췄었다.
-                                let task_result =
-                                    task_result_from_prompt(worker_id, result);
+                                //
+                                // 2026-08-11 버그 수정: complete()를 먼저 호출해
+                                // InFlightTask(dispatch 시각 + 누적된 스트리밍 출력)를
+                                // 회수한 뒤 TaskResult를 구성한다 — 예전에는 이 호출
+                                // 순서가 반대라 duration_secs가 항상 0.0으로,
+                                // output이 최종 RPC 응답이 텍스트를 채워주지 않으면
+                                // 항상 빈 문자열로 저장됐다.
+                                let removed = session_clone.complete(task_id).await;
+                                let duration_secs = removed
+                                    .as_ref()
+                                    .map(|t| t.started.elapsed().as_secs_f64())
+                                    .unwrap_or_else(|| started.elapsed().as_secs_f64());
+                                let buffered_output =
+                                    removed.map(|t| t.output_buf).unwrap_or_default();
+                                let task_result = task_result_from_prompt(
+                                    worker_id,
+                                    result,
+                                    duration_secs,
+                                    buffered_output,
+                                );
                                 let _ = broadcaster.send(WorkerEvent::Completed {
                                     task_id,
                                     result: task_result,
                                 });
-                                session_clone.complete(task_id).await;
                             }
                             BufferedEvent::Failed { error } => {
                                 let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
@@ -964,14 +1018,32 @@ async fn run_reader_loop(
                         }
                     },
                     None => {
-                        debug!(
-                            %worker_id,
-                            "Output event without prompt_id — cannot route in concurrent mode, dropping"
-                        );
-                        None
+                        // 2026-08-11 버그 수정: 서버(grok agent serve)가 session/update
+                        // notification에 promptId를 전혀 안 붙이는 경우가 실측됨 — 예전
+                        // 코드는 이 경우 무조건 drop해서, 태스크는 completed로 표시되는데
+                        // 실제 응답 텍스트는 task_outputs/대시보드 어디에도 안 남았다.
+                        // 이 워커에 진행 중인 태스크가 하나뿐이면 모호하지 않으므로
+                        // 그 태스크로 라우팅.
+                        match session.sole_in_flight_task().await {
+                            Some(tid) => {
+                                debug!(
+                                    %worker_id, %tid,
+                                    "Output event without prompt_id — routed via sole in-flight fallback"
+                                );
+                                Some(tid)
+                            }
+                            None => {
+                                debug!(
+                                    %worker_id,
+                                    "Output event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
+                                );
+                                None
+                            }
+                        }
                     }
                 };
                 if let Some(task_id) = task_id_opt {
+                    session.append_chunk(task_id, &chunk).await;
                     let _ = broadcaster.send(WorkerEvent::Output {
                         task_id,
                         seq,
@@ -985,21 +1057,41 @@ async fn run_reader_loop(
                 let task_id_opt = match prompt_id {
                     Some(pid) => session.task_for_prompt(pid).await,
                     None => {
-                        debug!(
-                            %worker_id,
-                            "Completed event without prompt_id — cannot route in concurrent mode, dropping"
-                        );
-                        None
+                        // 실전에서는 prompt()가 항상 폴백 id를 채워 보내므로
+                        // (acp/mod.rs::prompt) 이 분기는 거의 발생하지 않지만,
+                        // Output과 동일하게 방어적으로 sole-in-flight 폴백을 둔다.
+                        match session.sole_in_flight_task().await {
+                            Some(tid) => Some(tid),
+                            None => {
+                                debug!(
+                                    %worker_id,
+                                    "Completed event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
+                                );
+                                None
+                            }
+                        }
                     }
                 };
                 match (task_id_opt, prompt_id) {
                     (Some(task_id), _) => {
-                        let task_result = task_result_from_prompt(worker_id, result);
+                        // 2026-08-11 버그 수정: complete()를 먼저 호출해 dispatch 시각과
+                        // 누적된 스트리밍 출력을 회수한 뒤 TaskResult를 구성한다.
+                        let removed = session.complete(task_id).await;
+                        let duration_secs = removed
+                            .as_ref()
+                            .map(|t| t.started.elapsed().as_secs_f64())
+                            .unwrap_or(0.0);
+                        let buffered_output = removed.map(|t| t.output_buf).unwrap_or_default();
+                        let task_result = task_result_from_prompt(
+                            worker_id,
+                            result,
+                            duration_secs,
+                            buffered_output,
+                        );
                         let _ = broadcaster.send(WorkerEvent::Completed {
                             task_id,
                             result: task_result,
                         });
-                        session.complete(task_id).await;
                     }
                     (None, Some(pid)) => {
                         // dispatch()가 prompt_id를 아직 등록하지 않았을 수 있음
@@ -1043,11 +1135,18 @@ async fn run_reader_loop(
                         }
                     },
                     None => {
-                        debug!(
-                            %worker_id,
-                            "Failed event without prompt_id — cannot route in concurrent mode, dropping"
-                        );
-                        None
+                        // Output과 동일한 sole-in-flight 폴백 — 없으면 태스크가
+                        // 영원히 "dispatched" 상태로 멈춘다(complete()가 안 불림).
+                        match session.sole_in_flight_task().await {
+                            Some(tid) => Some(tid),
+                            None => {
+                                debug!(
+                                    %worker_id,
+                                    "Failed event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
+                                );
+                                None
+                            }
+                        }
                     }
                 };
                 if let Some(task_id) = task_id_opt {
@@ -1080,8 +1179,28 @@ async fn run_prompt_with_timeout(
 
 /// `PromptResult` → `TaskResult` 변환. reader loop의 즉시 라우팅 경로와
 /// dispatch()의 버퍼드-이벤트 drain 경로가 동일 로직을 공유.
-fn task_result_from_prompt(worker_id: WorkerId, result: crate::acp::PromptResult) -> TaskResult {
-    let output = extract_output_text(&result);
+///
+/// `duration_secs`: 호출자가 `InFlightTask.started`(또는 동등한 dispatch 시각)로
+/// 계산해 넘긴다 — 2026-08-11 이전에는 이 값이 항상 0.0으로 하드코딩되어 있었다
+/// (dispatcher가 계산할 것이라는 옛 주석만 남고 실제 계산은 구현된 적이 없었음).
+///
+/// `buffered_output`: 스트리밍 `session/update`(AgentMessageChunk)로 누적된 텍스트.
+/// `result.agent_message`(최종 RPC 응답)가 비어 있을 때의 폴백 — 2026-08-11 실측:
+/// grok가 응답을 스트리밍으로만 보내고 최종 응답에는 텍스트를 채우지 않는 경우가
+/// 있어, 이 폴백이 없으면 실제로는 응답이 있었는데도 `output`이 항상 빈 문자열로
+/// 저장됐다.
+fn task_result_from_prompt(
+    worker_id: WorkerId,
+    result: crate::acp::PromptResult,
+    duration_secs: f64,
+    buffered_output: String,
+) -> TaskResult {
+    let text = extract_output_text(&result);
+    let output = if text.is_empty() {
+        buffered_output
+    } else {
+        text
+    };
     let token_usage = result.usage.map(|u| TokenUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
@@ -1090,7 +1209,7 @@ fn task_result_from_prompt(worker_id: WorkerId, result: crate::acp::PromptResult
     TaskResult {
         output,
         exit_code: 0,
-        duration_secs: 0.0,
+        duration_secs,
         token_usage,
         worker_id,
         finished_at: Utc::now(),

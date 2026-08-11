@@ -115,20 +115,22 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     .await
                     .push(prompt_text.clone());
 
-                // promptId-tagged Output notification 전송.
+                // 2026-08-11 실측 포맷: 태그 키는 sessionUpdate(type 아님), content는
+                // {text, type} 단일 객체, 톱레벨엔 promptId가 없다 — 실제 grok과
+                // 동일하게 맞춘다. 실제 promptId는 update._meta 안에 문자열로만
+                // 있고 우리 코드는 아직 그걸 안 읽는다(SessionUpdate 문서 참조) —
+                // 이 mock도 그 현실을 반영해 문자열 UUID로 채운다.
                 let update = json!({
                     "jsonrpc": "2.0",
                     "method": "session/update",
                     "params": {
                         "sessionId": "session-shared",
-                        "promptId": prompt_id,
                         "update": {
-                            "type": "agent_message_chunk",
+                            "_meta": {"promptId": format!("prompt-{prompt_id}")},
+                            "sessionUpdate": "agent_message_chunk",
                             "content": {
-                                "agent_message": [{
-                                    "type": "text",
-                                    "text": format!("echo:{prompt_id}"),
-                                }],
+                                "type": "text",
+                                "text": format!("echo:{prompt_id}"),
                             },
                         },
                     },
@@ -304,7 +306,23 @@ async fn dispatch_beyond_capacity_returns_worker_at_capacity() {
 }
 
 #[tokio::test]
-async fn output_events_routed_to_correct_task_by_prompt_id() {
+async fn output_events_dropped_safely_when_multiple_tasks_in_flight_without_prompt_id() {
+    // 2026-08-11 재작성: 이 테스트는 원래 "Output이 promptId 기반으로 올바른
+    // task에 라우팅된다"를 검증했으나, 실측 결과 실제 grok는 session/update
+    // 톱레벨에 promptId를 전혀 보내지 않는다(문자열로 update._meta 안에만
+    // 있고, 우리 PromptId는 아직 u64 기반이라 그 값을 상관관계에 못 쓴다 —
+    // messages.rs::SessionUpdate 문서 참조). 즉 **2개 이상 태스크가 동시에
+    // in-flight인 경우, 실제 grok를 상대로는 promptId 기반 라우팅이 원천적으로
+    // 불가능하다** — 이건 이번 수정 이전부터 존재하던 제약이다(이전 코드는
+    // 애초에 모든 notification 파싱에 실패해서 항상 드롭했으므로, 이 제약이
+    // 드러나지 않았을 뿐).
+    //
+    // WorkerSession::sole_in_flight_task 폴백은 in-flight 태스크가 정확히
+    // 하나일 때만 라우팅한다 — 둘 이상이면 모호하므로 안전하게 드롭한다(잘못된
+    // task로 보내는 것보다 안전). 이 테스트는 그 안전 속성(오귀속 없음)을
+    // 검증한다. 진짜 동시 다중 태스크 output 어트리뷰션을 지원하려면
+    // `_meta.promptId`(문자열) 기반 상관관계로 `PromptId` 타입 자체를
+    // 리팩터해야 한다 — 후속 작업으로 남겨둔다.
     let (_state, addr) = start_mock_server().await;
     let transport = Arc::new(AcpTransport::new());
     let mut events = transport.subscribe().await.expect("subscribe");
@@ -326,8 +344,6 @@ async fn output_events_routed_to_correct_task_by_prompt_id() {
         .await
         .unwrap();
 
-    // 각 task에 대해 Output 1개 + Completed 1개 수신 예상.
-    // Output이 promptId 기반으로 올바른 task에 라우팅되는지 검증.
     let mut outputs: std::collections::HashMap<TaskId, String> = std::collections::HashMap::new();
     let mut completed: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -345,14 +361,17 @@ async fn output_events_routed_to_correct_task_by_prompt_id() {
             _ => continue,
         }
     }
-    assert_eq!(completed.len(), 2, "both tasks should complete");
+    assert_eq!(completed.len(), 2, "both tasks should still complete");
 
-    // 각 task의 output은 고유한 echo:N (서버 발급 promptId) 형태.
-    let out1 = outputs.get(&t1).expect("t1 should have output");
-    let out2 = outputs.get(&t2).expect("t2 should have output");
-    assert!(out1.starts_with("echo:"), "t1 output: {out1}");
-    assert!(out2.starts_with("echo:"), "t2 output: {out2}");
-    assert_ne!(out1, out2, "t1 and t2 outputs must be distinct");
+    // 핵심 안전 속성: 모호한 상황(2개 이상 in-flight)에서 output을 못 받는
+    // 건 허용되지만, 서로 다른 task의 output이 뒤섞이면(cross-contamination)
+    // 절대 안 된다. 둘 다 받았다면 반드시 서로 달라야 한다.
+    if let (Some(out1), Some(out2)) = (outputs.get(&t1), outputs.get(&t2)) {
+        assert_ne!(
+            out1, out2,
+            "if both tasks received output, it must not be cross-contaminated"
+        );
+    }
 
     transport.unregister(worker).await.unwrap();
 }

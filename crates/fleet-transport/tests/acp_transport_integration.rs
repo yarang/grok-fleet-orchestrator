@@ -31,6 +31,12 @@ struct MockState {
     received: Arc<Mutex<Vec<Value>>>,
     next_prompt_id: Arc<Mutex<u64>>,
     scripted_output: Arc<Mutex<Vec<String>>>,
+    /// 2026-08-11 P0 재발방지 테스트용: 실제 grok가 그러는 것으로 실측된 대로,
+    /// `session/update`에 `promptId`를 아예 안 붙이고 최종 `session/prompt` 응답의
+    /// `agent_message`도 비워서 보낸다 — 텍스트는 스트리밍으로만 온다.
+    simulate_streaming_only_response: Arc<Mutex<bool>>,
+    /// 프롬프트 처리 중 인위적 지연 (duration_secs > 0 검증용).
+    artificial_delay: Arc<Mutex<Duration>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +102,15 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     *next += 1;
                     *next
                 };
+                let streaming_only = *state.simulate_streaming_only_response.lock().await;
+                let delay = *state.artificial_delay.lock().await;
+                if delay > Duration::ZERO {
+                    tokio::time::sleep(delay).await;
+                }
 
+                // 2026-08-11 실측 포맷: 태그 키는 sessionUpdate(type 아님), content는
+                // {text, type} 단일 객체, 톱레벨엔 promptId가 없다(항상 None으로
+                // 파싱됨 — SessionUpdate 문서 참조). 실제 grok과 동일하게 맞춘다.
                 let chunks: Vec<String> = state.scripted_output.lock().await.clone();
                 for chunk in &chunks {
                     let update = json!({
@@ -104,20 +118,26 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                         "method": "session/update",
                         "params": {
                             "sessionId": "test-session-1",
-                            "promptId": prompt_id,
                             "update": {
-                                "type": "agent_message_chunk",
+                                "_meta": {"promptId": prompt_id.to_string()},
+                                "sessionUpdate": "agent_message_chunk",
                                 "content": {
-                                    "agent_message": [{
-                                        "type": "text",
-                                        "text": chunk,
-                                    }],
+                                    "type": "text",
+                                    "text": chunk,
                                 },
                             },
                         },
                     });
                     let _ = writer.send(WsMessage::Text(update.to_string())).await;
                 }
+
+                // 실측된 실제 grok 동작: 최종 session/prompt 응답의 agent_message가
+                // 비어 있는 경우가 있다 — 텍스트는 위 스트리밍으로만 전달됨.
+                let final_agent_message: Vec<Value> = if streaming_only {
+                    vec![]
+                } else {
+                    vec![json!({"type": "text", "text": chunks.join("")})]
+                };
 
                 Some(json!({
                     "jsonrpc": "2.0",
@@ -127,10 +147,7 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                         // (실제 grok과 동일한 관례; PromptResult.prompt_id의
                         // #[serde(rename = "promptId")] 참조).
                         "promptId": prompt_id,
-                        "agent_message": [{
-                            "type": "text",
-                            "text": chunks.join(""),
-                        }],
+                        "agent_message": final_agent_message,
                         "end_of_turn": true,
                         "usage": {
                             "input_tokens": 5,
@@ -270,6 +287,121 @@ async fn dispatch_streams_output_and_completes() {
     }
     assert!(completed, "should receive Completed");
     assert_eq!(output, "Hello world");
+}
+
+/// 2026-08-11 P0 재발방지: `session/update`에 `promptId`가 전혀 없고 최종
+/// `session/prompt` 응답의 `agent_message`도 빈 경우 — 실측된 실제 grok 동작.
+/// 이 워커에 진행 중인 태스크가 하나뿐이므로 sole-in-flight 폴백으로 라우팅되어,
+/// 스트리밍 청크가 `WorkerEvent::Output`으로 전달되고 최종 `TaskResult.output`에도
+/// 버퍼링된 텍스트가 채워져야 한다 (예전엔 output이 항상 빈 문자열로 저장됐다).
+#[tokio::test]
+async fn output_without_prompt_id_routes_via_sole_in_flight_fallback() {
+    let (state, addr) = start_mock_server().await;
+    *state.scripted_output.lock().await =
+        vec!["Wiki 구조를 ".to_string(), "분석합니다".to_string()];
+    *state.simulate_streaming_only_response.lock().await = true;
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let task_id = TaskId::new();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "hi"))
+        .await
+        .expect("dispatch");
+
+    let mut streamed = String::new();
+    let mut result = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Output {
+                task_id: t, chunk, ..
+            })) => {
+                assert_eq!(t, task_id);
+                streamed.push_str(&chunk);
+            }
+            Ok(Some(WorkerEvent::Completed {
+                task_id: t,
+                result: r,
+            })) => {
+                assert_eq!(t, task_id);
+                result = Some(r);
+                break;
+            }
+            Ok(Some(WorkerEvent::Failed { task_id: t, error })) => {
+                panic!("unexpected Failed for {t}: {error}");
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    // promptId 없는 Output이 드롭되지 않고 라우팅됐어야 함.
+    assert_eq!(
+        streamed, "Wiki 구조를 분석합니다",
+        "streamed chunks should route via sole-in-flight fallback despite missing promptId"
+    );
+    let result = result.expect("Completed event");
+    assert_eq!(
+        result.output, "Wiki 구조를 분석합니다",
+        "TaskResult.output should fall back to buffered streamed text when agent_message is empty"
+    );
+}
+
+/// 2026-08-11 P0 재발방지: `duration_secs`가 실제 소요 시간을 반영해야 한다
+/// (예전엔 항상 0.0으로 하드코딩).
+#[tokio::test]
+async fn completed_duration_secs_reflects_actual_elapsed_time() {
+    let (state, addr) = start_mock_server().await;
+    *state.scripted_output.lock().await = vec!["ok".to_string()];
+    *state.artificial_delay.lock().await = Duration::from_millis(150);
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let task_id = TaskId::new();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "hi"))
+        .await
+        .expect("dispatch");
+
+    let mut result = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Completed {
+                task_id: t,
+                result: r,
+            })) => {
+                assert_eq!(t, task_id);
+                result = Some(r);
+                break;
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    let result = result.expect("Completed event");
+    assert!(
+        result.duration_secs >= 0.1,
+        "duration_secs should reflect the ~150ms artificial delay, got {}",
+        result.duration_secs
+    );
 }
 
 #[tokio::test]

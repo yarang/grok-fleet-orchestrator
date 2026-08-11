@@ -501,6 +501,8 @@ fn handle_single_update(value: serde_json::Value, inner: &Arc<ClientInner>) {
         }
     };
 
+    // 실전에서는 항상 None (SessionUpdate.promptId doc 참조) — 라우팅은
+    // WorkerSession::sole_in_flight_task 폴백이 담당.
     let prompt_id = update.promptId.map(PromptId);
 
     match update.update {
@@ -513,6 +515,12 @@ fn handle_single_update(value: serde_json::Value, inner: &Arc<ClientInner>) {
                     chunk: text,
                 });
             }
+        }
+        UpdateContent::UserMessageChunk { .. } => {
+            // 사용자가 보낸 프롬프트의 에코 — 에이전트 출력이 아니므로 무시.
+        }
+        UpdateContent::AvailableCommandsUpdate => {
+            // 슬래시 커맨드 목록 광고 — 무시.
         }
         UpdateContent::EndOfTurn => {
             // end_of_turn notification만으로 Completed를 emit하면 안 됨 —

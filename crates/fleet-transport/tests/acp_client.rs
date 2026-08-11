@@ -111,6 +111,10 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                 };
 
                 // 스크립트된 출력 청크 스트리밍.
+                // 2026-08-11 실측 포맷으로 정정: 태그 키는 sessionUpdate(type 아님),
+                // content는 {text, type} 단일 객체, promptId는 톱레벨이 아니라
+                // update._meta 안에 문자열로 온다 — 실제 grok과 동일하게 맞춘다
+                // (messages.rs::SessionUpdate 문서 참조).
                 let chunks: Vec<String> = state.scripted_output.lock().await.clone();
                 for chunk in &chunks {
                     let update = json!({
@@ -118,14 +122,12 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                         "method": "session/update",
                         "params": {
                             "sessionId": "test-session-1",
-                            "promptId": prompt_id,
                             "update": {
-                                "type": "agent_message_chunk",
+                                "_meta": {"promptId": prompt_id.to_string()},
+                                "sessionUpdate": "agent_message_chunk",
                                 "content": {
-                                    "agent_message": [{
-                                        "type": "text",
-                                        "text": chunk,
-                                    }],
+                                    "type": "text",
+                                    "text": chunk,
                                 },
                             },
                         },
@@ -257,7 +259,11 @@ async fn prompt_streams_chunks_then_completes() {
             Ok(Some(AcpEvent::Completed { prompt_id: pid, .. })) => {
                 // 반환된 prompt_id와 이벤트의 prompt_id가 반드시 같아야 dispatch()의
                 // set_prompt_id ↔ reader loop의 라우팅이 서로 맞아떨어진다.
-                assert_eq!(pid, Some(prompt_id), "event prompt_id must match the id prompt() returned");
+                assert_eq!(
+                    pid,
+                    Some(prompt_id),
+                    "event prompt_id must match the id prompt() returned"
+                );
                 completed = true;
                 break;
             }

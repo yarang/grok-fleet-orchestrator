@@ -245,13 +245,32 @@ pub struct SessionCancelParams {
 ///
 /// ACP 스펙에서 update는 `update` 배열로 오거나 단일 update로 올 수 있음.
 /// fleet은 핵심 variant만 처리하고 나머지는 무시.
+///
+/// 2026-08-11 실측 수정: 이전 구현은 이 구조를 실제 grok 페이로드와 다르게
+/// 가정하고 있었고, 그 결과 `session/update` notification이 **단 한 건도
+/// 파싱되지 않고 전부 드롭**되고 있었다(`failed to parse session/update
+/// error=missing field 'type'`) — 스트리밍 응답 텍스트가 대시보드/CLI 어디에도
+/// 안 남는 근본 원인이었다. 실제 페이로드 예:
+/// ```json
+/// {"sessionId": "...", "update": {
+///   "_meta": {"promptId": "f4f3c069-...", ...},
+///   "content": {"text": "...", "type": "text"},
+///   "sessionUpdate": "agent_message_chunk"
+/// }}
+/// ```
+/// 즉 (a) 톱레벨에 `promptId`가 없다 — `update._meta.promptId`에 **문자열**로
+/// 있다. `PromptId`가 현재 `u64` 기반이라 곧바로 상호 변환할 수 없어, 이
+/// 필드는 실전에서 항상 `None`으로 남는다(알려진 제약 — 실질적 라우팅은
+/// `WorkerSession::sole_in_flight_task` 폴백이 담당; 완전한 지원엔 `PromptId`를
+/// String 기반으로 바꾸는 더 큰 리팩터가 필요). (b) variant 태그 키는 `type`이
+/// 아니라 `sessionUpdate`.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(non_snake_case)]
 pub struct SessionUpdate {
     /// 업데이트가 속한 세션.
     #[serde(default)]
     pub sessionId: Option<String>,
-    /// 업데이트가 속한 프롬프트 (초기 executing 상태에서는 없을 수 있음).
+    /// 톱레벨에는 실전에서 존재하지 않음(위 주석 참조) — 항상 None.
     #[serde(default)]
     pub promptId: Option<u64>,
     /// 실제 업데이트 콘텐츠.
@@ -259,12 +278,20 @@ pub struct SessionUpdate {
 }
 
 /// 업데이트 variant. 알 수 없는 variant는 `Unknown`으로 보관 (raw JSON).
+/// 태그 키는 `sessionUpdate` (2026-08-11 실측 — 이전엔 `type`으로 잘못
+/// 가정되어 있어 모든 notification이 파싱 실패했다).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "sessionUpdate")]
 pub enum UpdateContent {
     /// 에이전트 출력 청크 (스트리밍 텍스트).
     #[serde(rename = "agent_message_chunk")]
     AgentMessageChunk { content: MessageChunk },
+    /// 사용자가 보낸 프롬프트의 에코 — 에이전트 출력이 아니므로 무시한다.
+    #[serde(rename = "user_message_chunk")]
+    UserMessageChunk { content: MessageChunk },
+    /// 슬래시 커맨드 목록 광고 — 무시한다.
+    #[serde(rename = "available_commands_update")]
+    AvailableCommandsUpdate,
     /// 턴 종료.
     #[serde(rename = "end_of_turn")]
     EndOfTurn,
@@ -411,9 +438,15 @@ mod tests {
         let req = build_session_prompt(7, "sess-1", "hello");
         let v = serde_json::to_value(&req).unwrap();
         let prompt = &v["params"]["prompt"];
-        assert!(prompt.is_array(), "prompt must be a JSON array, got: {prompt}");
+        assert!(
+            prompt.is_array(),
+            "prompt must be a JSON array, got: {prompt}"
+        );
         let block = &prompt[0];
-        assert_eq!(block["type"], "text", "block must have a top-level 'type', not be wrapped in {{role, content}}");
+        assert_eq!(
+            block["type"], "text",
+            "block must have a top-level 'type', not be wrapped in {{role, content}}"
+        );
         assert_eq!(block["text"], "hello");
         assert!(
             block.get("role").is_none() && block.get("content").is_none(),
@@ -446,8 +479,51 @@ mod tests {
     #[test]
     fn update_content_unknown_variant_parses_safely() {
         // serde(other)가 Unknown으로 라우팅되는지 검증.
-        let raw = r#"{"type":"some_future_variant","content":{}}"#;
+        // 태그 키는 sessionUpdate (2026-08-11 실측 — type이 아님).
+        let raw = r#"{"sessionUpdate":"some_future_variant","content":{}}"#;
         let u: UpdateContent = serde_json::from_str(raw).unwrap();
         assert!(matches!(u, UpdateContent::Unknown));
+    }
+
+    /// 2026-08-11 P0 재발방지: 실제 grok가 보내는 session/update 페이로드
+    /// (톱레벨에 promptId 없음, 태그는 sessionUpdate, content는
+    /// {text, type} 단일 객체)가 파싱돼야 한다. 이전엔 tag="type" 가정 때문에
+    /// 모든 실제 notification이 "missing field `type`"으로 파싱 실패했다.
+    #[test]
+    fn session_update_parses_real_grok_agent_message_chunk_payload() {
+        let raw = r#"{
+            "sessionId": "019ff035-0f0c-7313-95e2-da1700a12a75",
+            "update": {
+                "_meta": {"promptId": "f4f3c069-af0a-4e9b-b17b-1b36bf310f02"},
+                "content": {"text": "2 더하기 2는 4입니다.", "type": "text"},
+                "sessionUpdate": "agent_message_chunk"
+            }
+        }"#;
+        let u: SessionUpdate = serde_json::from_str(raw).expect("must parse real grok payload");
+        match u.update {
+            UpdateContent::AgentMessageChunk { content } => {
+                assert_eq!(
+                    content.extract_text().as_deref(),
+                    Some("2 더하기 2는 4입니다.")
+                );
+            }
+            other => panic!("expected AgentMessageChunk, got {other:?}"),
+        }
+    }
+
+    /// user_message_chunk(사용자 프롬프트 에코)도 에러 없이 파싱은 되어야
+    /// 한다 — 호출자가 무시할 뿐, 파싱 실패로 전체 notification이 드롭되면
+    /// 안 된다.
+    #[test]
+    fn session_update_parses_real_grok_user_message_chunk_payload() {
+        let raw = r#"{
+            "sessionId": "s1",
+            "update": {
+                "content": {"text": "질문", "type": "text"},
+                "sessionUpdate": "user_message_chunk"
+            }
+        }"#;
+        let u: SessionUpdate = serde_json::from_str(raw).expect("must parse");
+        assert!(matches!(u.update, UpdateContent::UserMessageChunk { .. }));
     }
 }

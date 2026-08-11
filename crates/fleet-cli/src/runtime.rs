@@ -771,6 +771,31 @@ async fn run_tasks_show(id_str: &str) -> Result<()> {
             println!("{:<20} {}", "WORKER_ID:", r.worker_id);
             println!("{:<20} {}", "EXIT_CODE:", r.exit_code);
             println!("{:<20} {:.2}s", "DURATION:", r.duration_secs);
+            if let Some(usage) = &r.token_usage {
+                println!(
+                    "{:<20} in={} out={}",
+                    "TOKENS:", usage.input_tokens, usage.output_tokens
+                );
+            }
+            // 2026-08-11: 예전엔 output 텍스트를 아예 출력하지 않아, CLI로는
+            // 태스크가 "completed"라는 것 외에 실제 응답 내용을 확인할 방법이
+            // 없었다. r.output이 비어 있으면(구버전 데이터, 또는 극히 드문 케이스)
+            // task_outputs 테이블(스트리밍 청크)을 폴백으로 조회한다.
+            let output_text = if !r.output.is_empty() {
+                Some(r.output.clone())
+            } else {
+                store
+                    .get_output(id, 0)
+                    .await
+                    .ok()
+                    .filter(|o| !o.chunks.is_empty())
+                    .map(|o| o.chunks.into_iter().map(|c| c.chunk).collect::<String>())
+            };
+            println!("{:-<20}", "OUTPUT:");
+            match output_text {
+                Some(text) if !text.is_empty() => println!("{text}"),
+                _ => println!("(no output captured)"),
+            }
         }
         TaskStatus::Failed(f) => {
             if let Some(w) = &f.worker_id {
