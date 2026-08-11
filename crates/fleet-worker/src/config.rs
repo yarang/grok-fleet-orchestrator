@@ -258,9 +258,17 @@ impl WorkerConfig {
                 format!("wss://{host}:{port}/ws?server-key={secret}")
             }
             _ => {
+                // 리버스 SSH 터널 경로(mTLS 미사용) — 여러 워커가 오케스트레이터의
+                // 동일 도메인 뒤에서 각자의 터널로 연결되므로, 경로에 워커 이름을
+                // 넣어 오케스트레이터 쪽 nginx가 워커별로 다른 로컬 포트로 라우팅할
+                // 수 있게 한다. 이름을 빼고 고정된 `/ws`만 쓰면 워커가 몇 대든
+                // 전부 같은 endpoint를 광고하게 되어, 실제로는 마지막에 터널을
+                // 잡은 워커 하나만 연결되고 나머지는 401로 실패한다 — 프로덕션에서
+                // 실제로 24시간 넘게 관측된 장애 원인(2026-08-11).
                 let host = self.orchestrator_url_host();
                 let scheme = ws_scheme_for(&self.worker.orchestrator_url);
-                format!("{scheme}://{host}/ws?server-key={secret}")
+                let name = &self.worker.name;
+                format!("{scheme}://{host}/ws/{name}?server-key={secret}")
             }
         }
     }
@@ -501,6 +509,28 @@ secret = "x"
             .build();
         let endpoint = config.agent_endpoint();
         assert!(endpoint.starts_with("ws://"), "got: {endpoint}");
+    }
+
+    #[test]
+    fn agent_endpoint_includes_worker_name_for_reverse_tunnel_disambiguation() {
+        // 프로덕션 장애 회귀 테스트(2026-08-11) — non-mTLS(리버스 SSH 터널) 경로에서
+        // 워커 이름이 endpoint에 없으면, 여러 워커가 동일한 오케스트레이터 도메인 뒤에서
+        // 전부 같은 endpoint(`wss://<host>/ws?server-key=...`)를 광고하게 된다.
+        // nginx의 단일 /ws 라우팅은 이를 구분 못 해 마지막에 리버스 터널을 잡은
+        // 워커 하나만 연결되고 나머지는 401로 실패 — 24시간 넘게 관측된 실제 장애.
+        let a = WorkerConfig::for_test()
+            .name("worker-a")
+            .orchestrator_url("https://fleet.example.com")
+            .grok_secret("k")
+            .build();
+        let b = WorkerConfig::for_test()
+            .name("worker-b")
+            .orchestrator_url("https://fleet.example.com")
+            .grok_secret("k")
+            .build();
+        assert_ne!(a.agent_endpoint(), b.agent_endpoint());
+        assert!(a.agent_endpoint().contains("/ws/worker-a"));
+        assert!(b.agent_endpoint().contains("/ws/worker-b"));
     }
 
     #[test]

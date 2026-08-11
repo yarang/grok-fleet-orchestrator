@@ -140,12 +140,12 @@ async fn join_auto_generates_grok_secret_when_absent() {
 
     let received = state.received.lock().await;
     let endpoint = received[0]["agent_endpoint"].as_str().unwrap();
-    // orchestrator host 기반 + server-key 포함.
+    // orchestrator host 기반 + 워커 이름(경로) + server-key 포함.
     let host = url.strip_prefix("http://").unwrap();
-    assert!(endpoint.starts_with(&format!("ws://{host}/ws?server-key=")));
+    assert!(endpoint.starts_with(&format!("ws://{host}/ws/auto?server-key=")));
     // secret이 32바이트 base64url → 43 chars.
     let secret_part = endpoint
-        .strip_prefix(&format!("ws://{host}/ws?server-key="))
+        .strip_prefix(&format!("ws://{host}/ws/auto?server-key="))
         .unwrap();
     assert_eq!(secret_part.len(), 43);
 }

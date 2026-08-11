@@ -83,7 +83,7 @@ pub async fn run_join(args: JoinArgs) -> Result<()> {
     // 3. agent_endpoint 결정. 명시적 값이 없으면 orchestrator 호스트 기반.
     let agent_endpoint = match args.agent_endpoint.as_deref() {
         Some(e) if !e.is_empty() => e.to_string(),
-        _ => derive_agent_endpoint(&args.orchestrator_url, &grok_secret)?,
+        _ => derive_agent_endpoint(&args.orchestrator_url, &args.name, &grok_secret)?,
     };
 
     // 4. orchestrator에 join 요청.
@@ -165,17 +165,26 @@ fn extract_host(url: &str) -> Result<&str> {
 }
 
 /// orchestrator URL 기반으로 agent_endpoint 자동 생성.
-/// <ws|wss>://<orchestrator-host>/ws?server-key=<secret>
+/// <ws|wss>://<orchestrator-host>/ws/<worker-name>?server-key=<secret>
 ///
 /// 스킴은 orchestrator_url을 따른다 (`config::ws_scheme_for` 참조) — nginx/Caddy
 /// 리버스 프록시 배포에서 `/ws`가 TLS 종단 서버 블록에만 있을 수 있어, `https://`
 /// orchestrator에 무조건 `ws://`(평문, 80번 포트 기본값)로 붙으면 핸드셰이크가
 /// 실패한다. Cloudflare Tunnel 배포는 orchestrator_url 자체가 보통 `https://`라
 /// 이 변경으로도 그대로 동작한다.
-fn derive_agent_endpoint(orchestrator_url: &str, grok_secret: &str) -> Result<String> {
+fn derive_agent_endpoint(
+    orchestrator_url: &str,
+    worker_name: &str,
+    grok_secret: &str,
+) -> Result<String> {
+    // 경로에 워커 이름을 넣는 이유는 `WorkerConfig::agent_endpoint`와 동일 —
+    // 여러 워커가 오케스트레이터의 같은 도메인 뒤에서 리버스 SSH 터널로 연결될 때
+    // 이름이 없으면 전부 동일한 endpoint를 광고해 서로 충돌한다.
     let host = extract_host(orchestrator_url)?;
     let scheme = crate::config::ws_scheme_for(orchestrator_url);
-    Ok(format!("{scheme}://{host}/ws?server-key={grok_secret}"))
+    Ok(format!(
+        "{scheme}://{host}/ws/{worker_name}?server-key={grok_secret}"
+    ))
 }
 
 /// 무작위 grok 시크릿 생성 (base64url, 32바이트).
@@ -315,14 +324,28 @@ mod tests {
     fn derive_endpoint_includes_secret() {
         // https:// orchestrator → wss:// (회귀 테스트, config.rs의
         // agent_endpoint_includes_secret과 동일한 스킴-일치 버그 수정 대상).
-        let endpoint = derive_agent_endpoint("https://fleet.example.com", "topsecret").unwrap();
-        assert_eq!(endpoint, "wss://fleet.example.com/ws?server-key=topsecret");
+        let endpoint =
+            derive_agent_endpoint("https://fleet.example.com", "worker-1", "topsecret").unwrap();
+        assert_eq!(
+            endpoint,
+            "wss://fleet.example.com/ws/worker-1?server-key=topsecret"
+        );
     }
 
     #[test]
     fn derive_endpoint_with_port() {
-        let endpoint = derive_agent_endpoint("http://localhost:8080", "s").unwrap();
-        assert_eq!(endpoint, "ws://localhost:8080/ws?server-key=s");
+        let endpoint = derive_agent_endpoint("http://localhost:8080", "worker-1", "s").unwrap();
+        assert_eq!(endpoint, "ws://localhost:8080/ws/worker-1?server-key=s");
+    }
+
+    #[test]
+    fn derive_endpoint_disambiguates_by_worker_name() {
+        // 프로덕션 장애 회귀 테스트(2026-08-11) — 워커 이름이 없으면 서로 다른
+        // 워커가 동일한 endpoint를 광고해, 오케스트레이터 쪽에서 마지막에 터널을
+        // 잡은 워커 하나만 연결되고 나머지는 401로 실패했다.
+        let e1 = derive_agent_endpoint("https://fleet.example.com", "worker-a", "k").unwrap();
+        let e2 = derive_agent_endpoint("https://fleet.example.com", "worker-b", "k").unwrap();
+        assert_ne!(e1, e2);
     }
 
     #[test]
