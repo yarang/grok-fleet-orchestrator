@@ -74,3 +74,19 @@
   B 능동적 쿼터 추적 옵션 제시), 모델 선택 UI·토큰 통계 UI(기존 대기 작업)와의 연결점 정리.
 - **문서 위치 결정**: 새 디렉토리를 만들지 않고 `docs/llm-wiki/`에 편입 — 이미 이 위키가
   "멀티 LLM 공급자 게이트웨이" 도메인을 다루고 있어 분절(fragmentation)을 피함.
+
+## 2026-08-11 — ingest — Groq/OpenRouter 실키 발급 및 실사용 검증, Groq 결론 변경
+
+- 사용자가 Groq/OpenRouter API 키를 실제로 발급해 전달, 로컬 `~/.grok/config.toml`에
+  `[model.groq-free]`/`[model.openrouter-free]`로 등록 후 `grok` CLI로 end-to-end 검증.
+- **Groq**: raw API 호출(curl)은 200 OK로 키 자체는 유효했으나, `grok` CLI 실사용(프로젝트
+  컨텍스트 없는 `/tmp`에서도 동일)은 매번 413 Payload Too Large. grok-build 자체 시스템
+  프롬프트+도구 스키마만으로 약 19,000토큰을 소비하는데 Groq 무료 티어의 최대 TPM(12,000)도
+  이에 못 미쳐 어떤 무료 모델을 선택해도 단일 턴이 성립하지 않음을 확인. §1.2에서 "선택
+  가능한 옵션"으로 소개했던 카드 등록형 Developer 티어(무과금, 10배 한도)가 grok-build용으로는
+  **사실상 필수 조건**으로 결론이 바뀜 — `free_tier_providers_analysis.md` §1.3, §5 갱신.
+- **OpenRouter**: `openai/gpt-oss-20b:free`로 실제 응답 정상 수신, 즉시 사용 가능 확인.
+  TPM 상한이 없어(RPM/RPD만 제한) grok-build의 큰 시스템 프롬프트도 문제없음 — 단 하루
+  50회 요청 한도는 여전히 유효.
+- 두 키 모두 아직 Fleet 워커(`docs/credentials/`)에는 등록하지 않음 — 로컬 개인 사용 확인
+  단계이며, 워커 연동 여부는 체크리스트 항목으로 남김.
