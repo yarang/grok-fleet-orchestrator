@@ -17,6 +17,8 @@
 | `fleet-backup.timer`       | `fleet-backup.service` 일 단위 자동 실행 타이머            | orchestrator    |
 | `mcp-clients.json`         | grok build / Claude Code / Cursor / Gemini CLI 연결 예시   | MCP 클라이언트  |
 | `egress-proxy/`            | 워커의 `api.z.ai` 아웃바운드를 단일 IP로 통합하는 HAProxy+keepalived 구성 | 이그레스 프록시 |
+| `litellm-config.yaml`      | liteLLM 게이트웨이 모델 매핑 (`docker-compose.yml`이 마운트)            | orchestrator    |
+| `groq-compat/`             | Groq strict-schema 대응 요청 정규화 (liteLLM 훅 + standalone shim)      | orchestrator / 로컬 |
 
 ## 전형적인 배포 플로우
 

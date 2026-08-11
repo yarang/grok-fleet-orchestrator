@@ -8,6 +8,35 @@ model_list:
       model: gemini/gemini-3.5-pro
       api_key: "os.environ/GEMINI_API_KEY"
 
+  # Groq 무료 티어 (신용카드 불필요). TPM 한도가 낮으므로 저우선순위 태스크
+  # 전용으로 라우팅할 것 — 한도는 docs/llm-wiki/free_tier_providers_analysis.md 참고.
+  # 이 모델들이 동작하려면 아래 litellm_settings.callbacks 의 groq-compat 훅이
+  # 반드시 활성화되어 있어야 한다(없으면 툴 호출 턴이 400 으로 실패).
+  - model_name: groq-free-8b        # TPM 6,000  / TPD 500,000
+    litellm_params:
+      model: groq/llama-3.1-8b-instant
+      api_key: "os.environ/GROQ_API_KEY"
+  - model_name: groq-free-oss20b    # TPM 8,000  / TPD 200,000
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: "os.environ/GROQ_API_KEY"
+  - model_name: groq-free-70b       # TPM 12,000 / TPD 100,000
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: "os.environ/GROQ_API_KEY"
+
 general_settings:
   master_key: sk-litellm-master-key
   database_url: postgres://fleet:fleet@postgres:5432/fleet_dev
+
+litellm_settings:
+  # Groq 은 chat/completions 본문을 엄격 검증하므로, grok CLI 가 assistant
+  # 메시지에 붙이는 비표준 프로퍼티(model_id / model_fingerprint)를 제거해야
+  # 한다. `drop_params` 는 top-level 파라미터만 처리하고 메시지 프로퍼티는
+  # 건드리지 않으므로 이 훅이 별도로 필요하다 (2026-08-11 실측).
+  #
+  # 경로는 config.yaml 이 있는 디렉토리 기준으로 해석된다
+  # (litellm/proxy/types_utils/utils.py::get_instance_fn) — docker-compose.yml
+  # 에서 examples/groq-compat 를 /app/groq_compat 로 마운트한다.
+  # 상세: examples/groq-compat/README.md
+  callbacks: ["groq_compat.litellm_hook.proxy_handler_instance"]

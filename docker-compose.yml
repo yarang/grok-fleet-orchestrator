@@ -74,10 +74,16 @@ services:
       DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
       LITELLM_MASTER_KEY: sk-litellm-master-key
       PORT: 4000
+      # 무료 티어 공급자 키 (선택). 미설정이면 해당 model_list 항목만 실패한다.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     ports:
       - "4000:4000"
     volumes:
       - ./examples/litellm-config.yaml:/app/config.yaml:ro
+      # groq-compat 훅. liteLLM 은 `callbacks:` 문자열을 config.yaml 디렉토리
+      # 기준으로 해석하므로 반드시 config 옆(/app)에 마운트해야 한다.
+      # 상세: examples/groq-compat/README.md
+      - ./examples/groq-compat:/app/groq_compat:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
 
   worker:

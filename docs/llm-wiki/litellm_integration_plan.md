@@ -1,6 +1,6 @@
 # liteLLM 게이트웨이 도입 및 연동 설계 계획서
 
-> 최종 개정: 2026-08-06.
+> 최종 개정: 2026-08-11 (§3.3 공급자 strict-schema 대응 훅 추가).
 
 본 문서는 Grok Fleet Orchestrator에 **liteLLM 프록시 게이트웨이**를 연동하기 위한 인프라 패키징 및 설정 파일 설계 사양을 정의합니다.
 
@@ -81,6 +81,43 @@ litellm_settings:
   drop_params: true # 지원하지 않는 비표준 인자가 들어와도 안전하게 드롭 후 통과 처리
   set_verbose: true
 ```
+
+### 3.3 공급자 strict-schema 대응 훅 (`groq-compat`)
+
+> 추가: 2026-08-11. 실제 파일은 [`examples/groq-compat/`](../../examples/groq-compat/),
+> 배경·실측·검증 절차는 해당 디렉토리의 `README.md`가 정본이다.
+
+Groq 처럼 `chat/completions` **요청 본문을 엄격 검증**하는 공급자는, 스펙에 없는
+프로퍼티가 메시지에 하나라도 붙어 있으면 400 으로 거부한다. `grok` CLI(grok-build)는
+assistant 메시지에 `model_id` / `model_fingerprint` 를 붙여 보내므로, **툴 호출이
+한 번이라도 발생한 턴은 두 번째 요청부터 전부 실패**한다(= 에이전틱 작업 불가).
+
+**§3.2 의 `drop_params: true` 로는 해결되지 않는다** — 이 옵션은 top-level 파라미터만
+드롭하고 메시지 프로퍼티는 건드리지 않는다(2026-08-11 실측). liteLLM 자체도 이 필드를
+걸러주지 않고 그대로 업스트림에 전달한다. 따라서 pre-call 훅이 별도로 필요하다.
+
+```yaml
+litellm_settings:
+  callbacks: ["groq_compat.litellm_hook.proxy_handler_instance"]
+```
+
+liteLLM 은 이 문자열을 **`config.yaml` 이 있는 디렉토리 기준**으로 해석해
+`<config_dir>/groq_compat/litellm_hook.py` 를 로드한다
+(`litellm/proxy/types_utils/utils.py::get_instance_fn`). 그러므로 §3.1 의 볼륨
+마운트에 다음이 **반드시** 포함되어야 한다 — 빠지면 liteLLM 기동 시 콜백 임포트가
+실패한다:
+
+```yaml
+    volumes:
+      - ./examples/litellm-config.yaml:/app/config.yaml:ro
+      - ./examples/groq-compat:/app/groq_compat:ro   # 콜백 모듈 (필수)
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+```
+
+훅은 OpenAI Chat Completions 스펙이 정의한 프로퍼티만 남기는 **화이트리스트** 방식이다.
+공급자가 스펙 밖 필드를 어차피 거부하므로 정보 손실이 발생하지 않으며, 클라이언트가
+새 비표준 필드를 추가해도 다시 깨지지 않는다.
 
 ---
 

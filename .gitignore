@@ -24,3 +24,7 @@ Thumbs.db
 
 # Cloudflare
 .cloudflared/
+
+# Python (examples/groq-compat/)
+__pycache__/
+*.py[cod]

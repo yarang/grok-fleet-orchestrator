@@ -106,3 +106,35 @@
   `free_tier_providers_analysis.md` §1.4에 실측 표와 함께 반영.
 - `~/.grok/config.toml`에 TPM이 다른 Groq 모델 2종(`groq-free-oss20b` 8K, `groq-free-70b`
   12K)을 추가 등록해 실험/향후 사용에 대비.
+
+## 2026-08-11 — ingest — Groq strict-schema 호환 훅 도입 (진짜 블로커는 TPM이 아니었음)
+
+- **발단**: "편집 가능한 에이전트는 무료 TPM에 못 들어간다"는 직전 결론(§1.4)을 더 밀어붙여,
+  커스텀 최소 에이전트 정의(`tools:` 화이트리스트 + 최소 `GROK_HOME`)로 프롬프트를
+  **19,000 → 3,216토큰**까지 축소. 가장 작은 무료 모델(`llama-3.1-8b-instant`, 6K TPM)에서도
+  실제 파일 편집이 성공 — **TPM 문제는 해결됨**(Developer 티어 카드 등록 불필요).
+- **발견(결론 변경)**: 그 과정에서 TPM과 무관한 진짜 블로커가 드러남. Groq 은 요청 본문을
+  엄격 검증하는데 `grok` CLI 가 assistant 메시지에 `model_id`/`model_fingerprint` 를 붙여
+  보내므로 **툴 호출이 한 번이라도 일어난 턴은 두 번째 요청부터 400 으로 전부 실패**한다
+  (`property 'model_id' is unsupported`). 무료 모델 3종·4개 독립 세션에서 100% 재현,
+  턴 내부·턴 간(`--resume`) 모두 발생. 동일 에이전트를 OpenRouter 로 돌리면 정상 동작해
+  **Groq 고유 문제**로 확정. 즉 직전의 "읽기 전용은 가능" 결론도 성립하지 않는다 —
+  코드를 읽으려면 툴을 호출해야 하므로 읽기 전용 Q&A 역시 실패한다.
+- **liteLLM 검증**: 게이트웨이를 경유해도 동일하게 400 — liteLLM 은 이 필드를 걸러주지
+  않는다. 스펙 문서가 이미 켜두라고 한 `drop_params: true` 로도 해결되지 않음(이 옵션은
+  top-level 파라미터 전용). 따라서 pre-call 훅이 별도로 필요함을 실측으로 확정.
+- **조치**: `examples/groq-compat/` 신설 — OpenAI Chat Completions 스펙 화이트리스트 기반
+  정규화 로직(`sanitizer.py`, 단위 테스트 10건)을 두고, 이를 두 경로가 공유한다:
+  - `litellm_hook.py` — **정본 경로**. liteLLM `async_pre_call_hook` 어댑터.
+    `litellm-config.yaml` 의 `callbacks:` 및 `docker-compose.yml` 볼륨 마운트 반영.
+  - `shim.py` — docker 없는 로컬 개발용 standalone 프록시(표준 라이브러리만 사용).
+  - 게이트웨이 선택 정본(`multi_provider_llm_proxy_analysis.md`)의 liteLLM 채택 결정은
+    **변경하지 않는다** — 본 훅은 게이트웨이를 대체하지 않는 정규화 계층이며,
+    `litellm_integration_plan.md` §3.3(인프라 스펙 정본)에 편입했다.
+- **검증**: ① 훅을 liteLLM 실제 진입점으로 호출 후 `litellm.completion` → 200 성공,
+  ② shim 경유 `grok` CLI 로 read → edit → confirm 멀티스텝 루프 정상 완주(파일 실제 변경),
+  ③ `test_sanitizer.py` 10건 통과.
+- **남는 제약**: 프로토콜 문제만 해결됐고 TPM 은 그대로다. 멀티스텝 턴은 모델 호출 N회가
+  같은 1분에 누적되므로 8K TPM 모델 기준 분당 약 2회가 한계 — 동작하지만 느리다.
+  `free_tier_providers_analysis.md` §1.3/§1.4/§5 는 위 결론 변경을 아직 반영하지 않았으므로
+  후속 갱신이 필요하다.
