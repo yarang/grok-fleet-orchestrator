@@ -17,7 +17,7 @@
 │      ┌────────────────────────────────────────────┼──────────────┐     │
 │      ▼ (Dashboard & MCP)                          ▼ (API Proxy)  │     │
 │  ┌───────────────────────────┐            ┌───────────────────────────┐│
-│  │ fleet serve (Native)      │            │ liteLLM (Docker)          ││
+│  │ fleet serve (Native)      │            │ liteLLM (venv+systemd)    ││
 │  │ - Port 8081 (API)         │            │ - Port 4000 (Internal)    ││
 │  │ - Port 8082 (Dashboard)   │            └─────────────┬─────────────┘│
 │  └─────────────┬─────────────┘                          │              │
@@ -39,11 +39,17 @@
 * **`Nginx` (리버스 프록시)**:
   * **설치**: APT/YUM 패키지 매니저를 통해 네이티브 설치합니다.
   * **역할**: 외부 도메인 바인딩, Certbot 기반 Let's Encrypt SSL 인증서 자동 발급/갱신, 외부 요청 라우팅을 담당합니다. Caddy에서 Nginx로 전환한 배경과 전체 하드닝 설정은 [`docs/nginx-gateway.md`](./nginx-gateway.md)(정본)를 참고합니다.
+* **`liteLLM` (LLM 게이트웨이)**:
+  * **설치**: Python venv + systemd (`litellm-gateway.service`) — **Docker 아님**. 2026-08-11 실제 배포 시점에 아래 §2.2의 Docker 설계를 의도적으로 폐기하고 이 방식을 택했다 (Prisma/Node.js 없이 DB-less로 운영하기로 하면서 Docker의 이점이 사라졌기 때문). 상세 이유·정본 스펙은 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) §3~§7(정본) 참고. 채택 근거(liteLLM 선택 자체)는 [`docs/llm-wiki/multi_provider_llm_proxy_analysis.md`](../llm-wiki/multi_provider_llm_proxy_analysis.md)(정본).
 
 ### 2.2 Docker 컨테이너 영역 (Docker Compose)
-관리가 복잡하고 다른 서버로의 이전이 잦을 수 있는 상태 저장(Stateful) 서비스 및 서드파티 프록시입니다.
+관리가 복잡하고 다른 서버로의 이전이 잦을 수 있는 상태 저장(Stateful) 서비스입니다.
 * **`PostgreSQL 16`**: 데이터 영속성 관리가 핵심이므로 Docker 볼륨 마운트 방식으로 실행합니다.
-* **`liteLLM`**: 멀티 LLM 공급자(OpenAI/Anthropic/Gemini 등) 통합, 워커·에이전트별 Spend Control(비용 추적/한도), 장애 시 Fallback 라우팅을 위해 liteLLM 프록시 게이트웨이를 Docker 컨테이너로 기동합니다. 별도 Redis 없이 기존 PostgreSQL 서버 내 독립 DB(`litellm`)만 바인딩하여 인프라를 단순하게 유지합니다. 채택 근거는 [`docs/llm-wiki/multi_provider_llm_proxy_analysis.md`](../llm-wiki/multi_provider_llm_proxy_analysis.md)(정본), 상세 스펙은 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md)(정본) 참고 — 아래 §3 예시는 그 스펙을 인용한 사본이다.
+
+> ⚠️ `liteLLM`은 더 이상 이 영역에 속하지 않는다 — §2.1로 이동됨 (2026-08-11). 아래
+> §3 Step 1의 `docker-compose.yml` 예시에 남아 있는 `litellm` 서비스 블록은
+> **폐기된 설계**([`litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) §7 참고)이며
+> 실제로 배포하지 않는다 — Postgres 컨테이너 정의만 유효하다.
 
 ---
 
@@ -52,7 +58,7 @@
 ### Step 1: Docker 및 Docker Compose 구성
 서버의 특정 경로(예: `/etc/fleet`)에 아래의 `docker-compose.yml` 파일을 작성하고 컨테이너를 구동합니다.
 
-> `litellm` 서비스 블록은 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) §3.1의 정본을 그대로 인용한 것이다. 이미지 태그·포트·환경변수를 바꿀 때는 **그 문서를 먼저 수정한 뒤 이 사본을 동기화**한다 (이 파일을 단독으로 앞서 고치지 말 것 — 과거 One API/liteLLM 불일치가 이 순서를 지키지 않아 발생했다).
+> 아래 `litellm` 서비스 블록은 **폐기된 설계**([`litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) §7)이며 참고용으로만 남겨둔다 — 실제 배포는 §2.1의 venv+systemd 방식을 따른다. `postgres` 서비스 정의만 실제로 유효하다.
 
 ```yaml
 # /etc/fleet/docker-compose.yml

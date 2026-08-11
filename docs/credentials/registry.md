@@ -16,6 +16,8 @@
 | Cloudflare API 토큰 (`agentthread.dev` 존, DNS 편집 권한) | DNS 레코드 자동화(A 레코드 생성 등) | `arm2:/etc/fleet/secrets/cloudflare.env` (`rw-------`, root:root) | Cloudflare API Token (`cfut_...`) | 수동 실행(현재 자동화된 서비스 소비자 없음 — ad-hoc 작업용, SSH 후 `sudo`로만 판독) | 수동(미정) | 사용 중 — 2026-08-11 저장 완료 |
 | ec1 워커 부트스트랩 시크릿 | 워커 등록/조인 인증 | `ec1:/etc/fleet/worker.toml` | `worker-bootstrap/join-authentication.md` 참고 | `fleet-worker.service` | 수동(미정) | 사용 중 — 상세는 [`join-authentication.md`](../worker-bootstrap/join-authentication.md) 참고, 값 위치만 여기 등재 |
 | SSH 호스트 접근 키 (`oci-yarangdev-arm1/arm2/ec1/ec2`) | 운영자(사람/Claude 세션)의 프로덕션 호스트 SSH 접근 | 로컬 Mac `~/.ssh/`(config·개인키), 각 호스트 `~/.ssh/authorized_keys` | OpenSSH 개인/공개키 | 사람 운영자 SSH 클라이언트 | 수동(미정) | 사용 중 — 이 registry의 관리 범위 밖(로컬 머신 전용, 서버 배치 대상 아님) |
+| `LITELLM_MASTER_KEY` | liteLLM 게이트웨이(`/api-gateway/`) 전체 인증용 단일 Bearer 마스터 키 | `arm2:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | `sk-litellm-...` (임의 문자열) | `litellm-gateway.service`(EnvironmentFile), 게이트웨이를 경유하는 워커의 `~/.grok/config.toml` `api_key` | 수동(미정) | 사용 중 — 2026-08-11 생성 |
+| `GEMINI_API_KEY` / `ZAI_API_KEY` / `GROQ_API_KEY` | liteLLM `config.yaml`의 `model_list`가 참조하는 업스트림 프로바이더 키 | `arm2:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | 각 프로바이더 발급 형식 | `litellm-gateway.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 상세는 [`litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) §5 참고, 값 위치만 여기 등재 |
 
 ## 알려진 미정 항목 (조치 필요)
 
@@ -48,3 +50,12 @@
   `CLOUDFLARE_API_TOKEN`으로 저장(`chmod 600`, `root:root`).
 - 저장 직후 `sudo` 컨텍스트에서 `/user/tokens/verify` 호출로 유효성 재확인(`status: active`).
   일반 사용자 권한으로는 파일 판독이 거부됨을 확인(권한 설계 의도대로 동작).
+
+### 2026-08-11 — liteLLM 게이트웨이 시크릿 등재
+
+- liteLLM 게이트웨이를 arm2에 venv+systemd로 배포하며 `LITELLM_MASTER_KEY`
+  신규 생성, `GEMINI_API_KEY`/`ZAI_API_KEY`/`GROQ_API_KEY`를
+  `arm2:/etc/fleet/secrets/litellm-gateway.env`에 통합 저장(`chmod 600`, `root:root`).
+- 검증 과정에서 `LITELLM_MASTER_KEY` 값이 로컬 스크래치패드에 참고용으로 잠시
+  캐시되었다가, 등재 완료 후 삭제(무저장 원칙 준수).
+- 상세 아키텍처/배포 이유는 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md) 참고.

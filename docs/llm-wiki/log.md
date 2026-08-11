@@ -138,3 +138,54 @@
   같은 1분에 누적되므로 8K TPM 모델 기준 분당 약 2회가 한계 — 동작하지만 느리다.
   `free_tier_providers_analysis.md` §1.3/§1.4/§5 는 위 결론 변경을 아직 반영하지 않았으므로
   후속 갱신이 필요하다.
+
+## 2026-08-11 — ingest — liteLLM 게이트웨이 실제 배포 + P0 ACP 연결 버그 수정 (`litellm_integration_plan.md` §2~§8 전면 재작성)
+
+- **발단**: "worker들은 orchestrator를 통해서 질의를 진행하지 않는가?"라는 아키텍처
+  질문에서 출발 — 실제로 워커는 오케스트레이터를 거치지 않고 각 LLM 프로바이더에
+  직결하고 있음을 확인. 이 격차를 메우기로 결정.
+- **배포**: `litellm_integration_plan.md`가 기술하던 Docker Compose + Postgres DB-backed
+  설계를 **채택하지 않고**, arm2에 Python venv + systemd(`litellm-gateway.service`)로
+  실제 배포. DB 백엔드(가상 키/예산 관리)는 Prisma/Node.js 의존성 때문에 의도적으로
+  제외, master_key 단일 인증 stateless 모드로 운영. nginx `/api-gateway/` 경로로
+  노출(`127.0.0.1:4000` 루프백만 바인딩).
+  - `fastapi<0.120` 고정 필요(자동 해석된 최신 fastapi가 `get_flat_dependant` 임포트
+    오류 유발, litellm 1.96.0 기준 실측).
+  - 모델 목록: `gemini-2.5-flash`, `GLM-5.1`(z.ai), Groq 무료 3종(TPM별). 기존
+    groq-compat 훅(§4.4 인용)을 그대로 연결.
+- **검증**: Gemini/Groq 실제 추론 성공(루프백 + 공인 경로 양쪽), Groq는 고의로 오염된
+  요청(`model_id` 주입)도 훅이 제거해 200 응답 — 훅이 실전에서 작동함을 증명. GLM은
+  429 — 게이트웨이 우회 직접 curl에서도 동일 재현되어 **z.ai 계정 레벨 기존 제한**임을
+  확인(게이트웨이 결함 아님).
+- **P0 발견 및 수정 (본 세션에서 가장 큰 사건)**: 워커 canary 전환 테스트 도중 ec1이
+  `401 Unauthorized`로 전혀 연결되지 않는 것을 발견 → 조사 결과, `fleet-worker`의
+  `agent_endpoint()`가 오케스트레이터 자신의 호스트만으로 URL을 구성해 **모든 워커가
+  동일한 엔드포인트를 광고**하고 있었음(워커 이름/식별자 없음). 공유 리버스 SSH 터널
+  포트 하나(`2419`)를 여러 워커가 경합해 실제로는 **가장 나중에 등록한 워커 하나만
+  연결 가능**한 구조적 결함 — 최소 24시간 이상 프로덕션에서 워커 가용성이 은밀하게
+  저하된 상태였다(arm1은 3주 전부터 존재하던 비-systemd ad-hoc 터널 덕에 간헐적으로만
+  동작, ec1/ec2는 터널 인프라 자체가 없었음).
+  - 수정: `agent_endpoint()`/`derive_agent_endpoint()`가 `/ws/<worker-name>` 경로로
+    워커를 구분하도록 변경. 워커별 전용 리버스 터널 systemd 유닛
+    (`fleet-acp-tunnel.service`, 포트 2419/2420/2421) 신설 + nginx를 워커별
+    `location /ws/worker-<name>` 블록으로 재구성.
+  - 배포 중 ec2 터널이 "Permission denied (publickey)"로 실패 — ec2의 `ubuntu` 공개키가
+    arm2 `authorized_keys`에 등록되어 있지 않았음(arm1/ec1은 이미 등록됨, ec2만 누락).
+    등록 후 정상화.
+  - 신규 임시 운영자 계정(`verify-p0`)으로 대시보드 `/tasks/new`를 통해 arm1/ec1/ec2
+    3대 각각에 실제 태스크를 제출·완료시켜 검증(ec2는 `canary-ec2` 라벨을 임시 추가).
+    부수 발견: 새로 만든 사용자는 `email_verified`가 자동으로 `true`가 되지 않아
+    (최근 커밋 3015bb9의 자동 인증은 admin 역할 한정) 첫 로그인이 조용히 실패함 —
+    수동으로 DB에서 `email_verified = true` 처리해 우회, 별도 버그 리포트는 미작성.
+  - 검증 완료 후 `verify-p0` 계정 삭제, 스크래치패드의 임시 시크릿 캐시 파일 삭제.
+  - 커밋: `286ab9c` (fleet-worker, push는 사용자 확인 전까지 보류 — 원격 저장소
+    `git.agentthread.dev` 미설정 상태가 이미 확인되어 있음).
+- **문서 갱신**: `litellm_integration_plan.md`를 "실제 배포 스펙"으로 전면 재작성(원
+  Docker 설계는 §7 "폐기된 설계"로 보존, 폐기 사유 명시). `docs/deployment/single-server.md`의
+  liteLLM 관련 섹션(§2.1/§2.2/§3 Step 1/개념도)을 새 정본에 맞춰 동기화.
+  `docs/credentials/registry.md`에 `LITELLM_MASTER_KEY`/`GEMINI_API_KEY`/`ZAI_API_KEY`/
+  `GROQ_API_KEY` 항목 신규 등재.
+- **남은 작업**: `arm1`/`ec2` 워커는 아직 게이트웨이 미경유(ec1만 canary 전환).
+  `examples/groq-compat/` ↔ 배포본(`/opt/litellm-gateway/groq_compat/`) 수동 동기화
+  자동화 미착수. Phase 2(DB-backed 예산 관리, Fallback 라우팅)는 `litellm_integration_plan.md`
+  §8에 로드맵으로만 기록.
