@@ -90,3 +90,19 @@
   50회 요청 한도는 여전히 유효.
 - 두 키 모두 아직 Fleet 워커(`docs/credentials/`)에는 등록하지 않음 — 로컬 개인 사용 확인
   단계이며, 워커 연동 여부는 체크리스트 항목으로 남김.
+
+## 2026-08-11 — query — Groq 프롬프트 크기 축소 방법 조사 및 실측
+
+- **질문**: "Groq을 사용할 grok의 자체 프롬프트를 줄이는 방법은 없는가?"
+- **조사**: `grok --help`/`grok inspect`/`~/.grok/docs/user-guide/`를 훑어 토큰 절감 수단을
+  찾음 — `grok inspect`에서 `~/.claude/skills/`(Claude Code 호환 스캔) 경유로 74개 스킬(대부분
+  MoAI 스위트)이 자동 로드되고 있음을 발견, 이게 시스템 프롬프트 비대화의 주요 원인 중
+  하나로 확인. `GROK_CLAUDE_SKILLS_ENABLED=false` 환경변수와 읽기 전용 `--agent explore`를
+  실제 Groq 429 에러의 "Requested: N" 수치로 직접 측정하며 조합 실험.
+- **결과**: 기본값 ~19,000~22,000토큰 → `--agent explore` + 스킬 비활성화 조합으로 **7,784**
+  까지 축소, 8K/12K TPM 무료 모델(`openai/gpt-oss-20b`, `llama-3.3-70b-versatile`)에서 실제
+  응답 수신까지 확인. 단, **편집 가능한 에이전트는 트리밍을 최대로 적용해도(10,208~14,309)
+  모든 무료 TPM 한도를 초과** — 이 경로는 읽기 전용 작업에만 유효함을 확인.
+  `free_tier_providers_analysis.md` §1.4에 실측 표와 함께 반영.
+- `~/.grok/config.toml`에 TPM이 다른 Groq 모델 2종(`groq-free-oss20b` 8K, `groq-free-70b`
+  12K)을 추가 등록해 실험/향후 사용에 대비.
