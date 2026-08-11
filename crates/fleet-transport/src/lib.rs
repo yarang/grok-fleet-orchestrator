@@ -14,15 +14,18 @@
 //! - [`MockTransport`] — 테스트/개발용 인메모리 구현
 //! - (`hub` feature) `HubTransport` — `HubConnectionPool` 래핑 (Phase 3)
 //!
-//! ## 동시성 모델 (Phase 8.4)
+//! ## 동시성 모델 (Phase 8.4, 2026-08-11 재설계)
 //!
 //! 각 워커는 `max_concurrent_tasks`개의 동시 작업을 처리할 수 있습니다.
 //! - `dispatch(req)`는 워커의 활성 작업 수가 상한에 도달한 경우 즉시
 //!   `TransportError::WorkerAtCapacity`를 반환합니다 (dispatch 큐잉 없음 —
 //!   Selector가 사전에 필터링함).
-//! - 동시 프롬프트는 단일 ACP 세션 내에서 병렬로 실행됩니다
-//!   (`session/prompt`는 `promptId`로 구분됨).
-//! - `Output` / `Completed` / `Failed` 이벤트는 `promptId`를 통해
+//! - 동시 태스크는 **태스크마다 새 ACP 세션**을 열어 병렬로 실행됩니다(워커당
+//!   WebSocket 연결은 하나 공유). 실제 grok가 신뢰할 수 있는 `promptId`
+//!   상관관계를 제공하지 않아, 세션 단위 분리로 대체 — ACP 스펙상
+//!   `session/update`가 원래 갖고 있는 `session_id`로 완전히 모호함 없이
+//!   라우팅된다. 상세는 `acp_transport` 모듈 문서 참고.
+//! - `Output` / `Completed` / `Failed` 이벤트는 `session_id`를 통해
 //!   올바른 `task_id`로 라우팅됩니다.
 
 #![forbid(unsafe_code)]
@@ -31,8 +34,6 @@
 pub mod error;
 pub mod mock;
 
-#[cfg(feature = "acp")]
-pub mod acp;
 #[cfg(feature = "acp")]
 pub mod acp_transport;
 #[cfg(feature = "mtls")]

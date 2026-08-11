@@ -1,0 +1,62 @@
+[workspace]
+git_release_type = "auto"
+git_release_latest = false
+
+# Only release when merging the release PR (avoids race conditions with squash-merge)
+release_always = false
+
+# Keep dependencies updated in Cargo.lock
+dependencies_update = true
+
+# Tag release PRs for visibility
+pr_labels = ["release"]
+
+# Override the default tag format for the original crate to preserve existing tag history
+[[package]]
+name = "agent-client-protocol"
+git_tag_name = "v{{ version }}"
+git_release_latest = true
+version_group = "acp"
+
+[[package]]
+name = "agent-client-protocol-http"
+version_group = "acp"
+
+[[package]]
+name = "agent-client-protocol-derive"
+version_group = "acp"
+
+[[package]]
+name = "agent-client-protocol-polyfill"
+version_group = "acp"
+
+# This crate publicly exposes types from both rmcp and agent-client-protocol.
+# A major-version change in either public dependency therefore requires a
+# major release here. Keep it outside the `acp` version group because its
+# version need not equal the core version, but verify dependency-only release
+# proposals manually: core 1.x -> 2.x requires rmcp 2.x -> 3.x even if
+# release-plz initially classifies the manifest update as a patch.
+[[package]]
+name = "agent-client-protocol-rmcp"
+
+[[package]]
+name = "agent-client-protocol-conductor"
+version_group = "acp"
+
+[[package]]
+name = "agent-client-protocol-test"
+version_group = "acp"
+publish = false
+
+[[package]]
+name = "agent-client-protocol-trace-viewer"
+version_group = "acp"
+
+[[package]]
+name = "agent-client-protocol-yopo"
+version_group = "acp"
+publish = false
+
+[[package]]
+name = "agent-client-protocol-cookbook"
+version_group = "acp"

@@ -1,0 +1,918 @@
+//! Cookbook of common patterns for building ACP components.
+//!
+//! This crate contains guides and examples for the three main things you can build with ACP:
+//!
+//! - **Clients** - Connect to an existing agent and send prompts
+//! - **Proxies** - Sit between client and agent to add capabilities (like MCP tools)
+//! - **Agents** - Respond to prompts with AI-powered responses
+//!
+//! See the [`agent_client_protocol::concepts`] module for detailed explanations of
+//! the concepts behind the API.
+//!
+//! # Building Clients
+//!
+//! A client connects to an agent, sends requests, and handles responses. Use
+//! [`Client.builder()`](agent_client_protocol::Client) to build connections.
+//!
+//! - [`one_shot_prompt`] - Send a single prompt and get a response (simplest pattern)
+//! - [`connecting_as_client`] - More details on connection setup and permission handling
+//!
+//! # Building Proxies
+//!
+//! A proxy sits between client and agent, intercepting and optionally modifying
+//! messages. The most common use case is adding MCP tools. Use
+//! [`Proxy.builder()`](agent_client_protocol::Proxy) for stable protocol v1
+//! proxy connections. With the core SDK's `unstable_protocol_v2` feature, use
+//! `Proxy.v2()` for a draft-v2-only proxy.
+//!
+//! **Important:** Proxies don't run standalone—they need the [`agent-client-protocol-conductor`] to
+//! orchestrate the connection between client, proxies, and agent. See
+//! [`running_proxies_with_conductor`] for how to put the pieces together.
+//!
+//! - [`global_mcp_server`] - Add tools that work across all sessions
+//! - [`per_session_mcp_server`] - Add tools with session-specific state
+//! - [`filtering_tools`] - Enable or disable tools dynamically
+//! - [`reusable_components`] - Package your proxy as a [`ConnectTo`] for composition
+//! - [`running_proxies_with_conductor`] - Run your proxy with an agent
+//!
+//! [`agent-client-protocol-conductor`]: https://crates.io/crates/agent-client-protocol-conductor
+//!
+//! # Building Agents
+//!
+//! An agent receives prompts and generates responses. Use [`Agent.builder()`](agent_client_protocol::Agent)
+//! to build agent connections.
+//!
+//! - [`building_an_agent`] - Handle initialization, sessions, and prompts
+//! - [`reusable_components`] - Package your agent as a [`ConnectTo`]
+//! - [`custom_message_handlers`] - Fine-grained control over message routing
+//!
+//! [`agent_client_protocol::concepts`]: agent_client_protocol::concepts
+//! [`Client`]: agent_client_protocol::Client
+//! [`Agent`]: agent_client_protocol::Agent
+//! [`Proxy`]: agent_client_protocol::Proxy
+//! [`ConnectTo`]: agent_client_protocol::ConnectTo
+
+pub mod one_shot_prompt {
+    //! Pattern: You Only Prompt Once.
+    //!
+    //! The simplest client pattern: connect to an agent, send one prompt, get the
+    //! response. This is useful for CLI tools, scripts, or any case where you just
+    //! need a single interaction with an agent.
+    //!
+    //! # Example
+    //!
+    //! ```
+    //! use agent_client_protocol::{Client, Agent, ConnectTo};
+    //! use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
+    //!
+    //! async fn ask_agent(
+    //!     transport: impl ConnectTo<Client> + 'static,
+    //!     prompt: &str,
+    //! ) -> Result<String, agent_client_protocol::Error> {
+    //!     Client.builder()
+    //!         .name("my-client")
+    //!         .connect_with(transport, async |connection| {
+    //!             // Initialize the connection
+    //!             connection.send_request(InitializeRequest::new(ProtocolVersion::V1))
+    //!                 .block_task().await?;
+    //!
+    //!             // Create a session, send prompt, read response
+    //!             let mut session = connection.build_session_cwd()?
+    //!                 .block_task()
+    //!                 .start_session()
+    //!                 .await?;
+    //!
+    //!             session.send_prompt(prompt)?;
+    //!             session.read_to_string().await
+    //!         })
+    //!         .await
+    //! }
+    //! ```
+    //!
+    //! # How it works
+    //!
+    //! 1. **[`connect_with`]** establishes the transport connection and runs your
+    //!    code while handling messages in the background
+    //! 2. **[`send_request`]** + **[`block_task`]** sends the initialize request
+    //!    and waits for the response
+    //! 3. **[`build_session_cwd`]** creates a session builder using the current working directory
+    //! 4. **[`start_session`]** sends the `NewSessionRequest` and returns an
+    //!    [`ActiveSession`] handle
+    //! 5. **[`send_prompt`]** queues the prompt to send to the agent
+    //! 6. **[`read_to_string`]** reads all text chunks until the agent finishes
+    //!
+    //! # Handling permission requests
+    //!
+    //! Most agents will ask for permission before taking actions like running
+    //! commands or writing files. See [`connecting_as_client`] for how to handle
+    //! [`RequestPermissionRequest`] messages.
+    //!
+    //! [`connect_with`]: agent_client_protocol::Builder::connect_with
+    //! [`send_request`]: agent_client_protocol::ConnectionTo::send_request
+    //! [`block_task`]: agent_client_protocol::SentRequest::block_task
+    //! [`build_session_cwd`]: agent_client_protocol::ConnectionTo::build_session_cwd
+    //! [`start_session`]: agent_client_protocol::SessionBuilder::start_session
+    //! [`ActiveSession`]: agent_client_protocol::ActiveSession
+    //! [`send_prompt`]: agent_client_protocol::ActiveSession::send_prompt
+    //! [`read_to_string`]: agent_client_protocol::ActiveSession::read_to_string
+    //! [`connecting_as_client`]: super::connecting_as_client
+    //! [`RequestPermissionRequest`]: agent_client_protocol::schema::v1::RequestPermissionRequest
+}
+
+pub mod connecting_as_client {
+    //! Pattern: Connecting as a client.
+    //!
+    //! To connect to an ACP agent and send requests, use [`connect_with`].
+    //! This runs your code while the connection handles incoming messages
+    //! in the background.
+    //!
+    //! # Basic Example
+    //!
+    //! ```
+    //! use agent_client_protocol::{Client, Agent, ConnectTo};
+    //! use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
+    //!
+    //! async fn connect_to_agent(transport: impl ConnectTo<Client>) -> Result<(), agent_client_protocol::Error> {
+    //!     Client.builder()
+    //!         .name("my-client")
+    //!         .connect_with(transport, async |connection| {
+    //!             // Initialize the connection
+    //!             connection.send_request(InitializeRequest::new(ProtocolVersion::V1))
+    //!                 .block_task().await?;
+    //!
+    //!             // Create a session and send a prompt
+    //!             connection.build_session_cwd()?
+    //!                 .block_task()
+    //!                 .run_until(async |mut session| {
+    //!                     session.send_prompt("Hello, agent!")?;
+    //!                     let response = session.read_to_string().await?;
+    //!                     println!("Agent said: {}", response);
+    //!                     Ok(())
+    //!                 })
+    //!                 .await
+    //!         })
+    //!         .await
+    //! }
+    //! ```
+    //!
+    //! # Using the Session Builder
+    //!
+    //! The [`build_session`] method creates a [`SessionBuilder`] that handles
+    //! session creation and provides convenient methods for interacting with
+    //! the session:
+    //!
+    //! - [`send_prompt`] - Send a text prompt to the agent
+    //! - [`read_update`] - Read the next update (text chunk, tool call, etc.)
+    //! - [`read_to_string`] - Read all text until the turn ends
+    //!
+    //! With the core SDK's `unstable_mcp_over_acp` feature, the session builder
+    //! also supports adding MCP servers with [`with_mcp_server`].
+    //!
+    //! # Handling Permission Requests
+    //!
+    //! Agents may send [`RequestPermissionRequest`] to ask for user approval
+    //! before taking actions. Handle these with [`on_receive_request`]:
+    //!
+    //! ```ignore
+    //! Client.builder()
+    //!     .on_receive_request(async |req: RequestPermissionRequest, responder, _connection| {
+    //!         // Auto-approve by selecting the first option (YOLO mode)
+    //!         let option_id = req.options.first().map(|opt| opt.option_id.clone());
+    //!         responder.respond(RequestPermissionResponse::new(
+    //!             match option_id {
+    //!                 Some(id) => RequestPermissionOutcome::Selected(
+    //!                     SelectedPermissionOutcome::new(id),
+    //!                 ),
+    //!                 None => RequestPermissionOutcome::Cancelled,
+    //!             }
+    //!         ))
+    //!     }, agent_client_protocol::on_receive_request!())
+    //!     .connect_with(transport, async |connection| { /* ... */ })
+    //!     .await
+    //! ```
+    //!
+    //! # Note on `block_task`
+    //!
+    //! Using [`block_task`] is safe inside `connect_with` because its foreground
+    //! future runs alongside, rather than inside, the dispatch loop. The loop
+    //! continues processing messages (including the response you're waiting for)
+    //! while the foreground future waits.
+    //!
+    //! [`connect_with`]: agent_client_protocol::Builder::connect_with
+    //! [`block_task`]: agent_client_protocol::SentRequest::block_task
+    //! [`build_session`]: agent_client_protocol::ConnectionTo::build_session
+    //! [`SessionBuilder`]: agent_client_protocol::SessionBuilder
+    //! [`send_prompt`]: agent_client_protocol::ActiveSession::send_prompt
+    //! [`read_update`]: agent_client_protocol::ActiveSession::read_update
+    //! [`read_to_string`]: agent_client_protocol::ActiveSession::read_to_string
+    //! [`with_mcp_server`]: agent_client_protocol::SessionBuilder::with_mcp_server
+    //! [`RequestPermissionRequest`]: agent_client_protocol::schema::v1::RequestPermissionRequest
+    //! [`on_receive_request`]: agent_client_protocol::Builder::on_receive_request
+}
+
+pub mod building_an_agent {
+    //! Pattern: Building an agent.
+    //!
+    //! An agent handles prompts and generates responses. At minimum, an agent must:
+    //!
+    //! 1. Handle [`InitializeRequest`] to establish the connection
+    //! 2. Handle [`NewSessionRequest`] to create sessions
+    //! 3. Handle [`PromptRequest`] to process prompts
+    //!
+    //! Use [`Agent.builder()`](agent_client_protocol::Agent) to build agent connections.
+    //!
+    //! # Minimal Example
+    //!
+    //! ```
+    //! use agent_client_protocol::{Agent, ConnectTo};
+    //! use agent_client_protocol::schema::v1::{
+    //!     InitializeRequest, InitializeResponse, AgentCapabilities,
+    //!     NewSessionRequest, NewSessionResponse, SessionId,
+    //!     PromptRequest, PromptResponse, StopReason,
+    //! };
+    //!
+    //! async fn run_agent(transport: impl ConnectTo<Agent>) -> Result<(), agent_client_protocol::Error> {
+    //!     Agent.builder()
+    //!         .name("my-agent")
+    //!         // Handle initialization
+    //!         .on_receive_request(async |req: InitializeRequest, responder, _connection| {
+    //!             responder.respond(
+    //!                 InitializeResponse::new(req.protocol_version)
+    //!                     .agent_capabilities(AgentCapabilities::new())
+    //!             )
+    //!         }, agent_client_protocol::on_receive_request!())
+    //!         // Handle session creation
+    //!         .on_receive_request(async |req: NewSessionRequest, responder, _connection| {
+    //!             responder.respond(NewSessionResponse::new(SessionId::new("session-1")))
+    //!         }, agent_client_protocol::on_receive_request!())
+    //!         // Handle prompts
+    //!         .on_receive_request(async |req: PromptRequest, responder, connection| {
+    //!             // Send streaming updates via notifications
+    //!             // connection.send_notification(SessionNotification { ... })?;
+    //!
+    //!             // Return final response
+    //!             responder.respond(PromptResponse::new(StopReason::EndTurn))
+    //!         }, agent_client_protocol::on_receive_request!())
+    //!         // Unknown requests receive Method not found automatically;
+    //!         // unhandled notifications are ignored.
+    //!         .connect_to(transport)
+    //!         .await
+    //! }
+    //! ```
+    //!
+    //! # Streaming Responses
+    //!
+    //! To stream text or other updates to the client, send [`SessionNotification`]s
+    //! while processing a prompt:
+    //!
+    //! ```ignore
+    //! .on_receive_request(async |req: PromptRequest, responder, connection| {
+    //!     // Stream some text
+    //!     connection.send_notification(SessionNotification::new(
+    //!         req.session_id.clone(),
+    //!         SessionUpdate::AgentMessageChunk(ContentChunk::new("Hello, ".into())),
+    //!     ))?;
+    //!
+    //!     connection.send_notification(SessionNotification::new(
+    //!         req.session_id.clone(),
+    //!         SessionUpdate::AgentMessageChunk(ContentChunk::new("world!".into())),
+    //!     ))?;
+    //!
+    //!     responder.respond(PromptResponse::new(StopReason::EndTurn))
+    //! }, agent_client_protocol::on_receive_request!())
+    //! ```
+    //!
+    //! # Requesting Permissions
+    //!
+    //! Before taking actions that require user approval (like running commands
+    //! or writing files), send a [`RequestPermissionRequest`]:
+    //!
+    //! ```ignore
+    //! let response = connection.send_request(RequestPermissionRequest::new(
+    //!     session_id.clone(),
+    //!     ToolCallUpdate::new(
+    //!         "dangerous-command",
+    //!         ToolCallUpdateFields::new()
+    //!             .title("Run rm -rf /")
+    //!             .kind(ToolKind::Execute)
+    //!             .status(ToolCallStatus::Pending),
+    //!     ),
+    //!     vec![
+    //!         PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+    //!         PermissionOption::new("deny", "Deny", PermissionOptionKind::RejectOnce),
+    //!     ],
+    //! )).block_task().await?;
+    //!
+    //! match response.outcome {
+    //!     RequestPermissionOutcome::Selected(selected) if selected.option_id == "allow" => {
+    //!         // User approved, proceed with action
+    //!     }
+    //!     _ => {
+    //!         // User denied or cancelled
+    //!     }
+    //! }
+    //! ```
+    //!
+    //! # As a Reusable Component
+    //!
+    //! For agents that will be composed with proxies, implement [`ConnectTo`].
+    //! See [`reusable_components`] for the pattern.
+    //!
+    //! [`InitializeRequest`]: agent_client_protocol::schema::v1::InitializeRequest
+    //! [`NewSessionRequest`]: agent_client_protocol::schema::v1::NewSessionRequest
+    //! [`PromptRequest`]: agent_client_protocol::schema::v1::PromptRequest
+    //! [`SessionNotification`]: agent_client_protocol::schema::v1::SessionNotification
+    //! [`RequestPermissionRequest`]: agent_client_protocol::schema::v1::RequestPermissionRequest
+    //! [`Agent`]: agent_client_protocol::Agent
+    //! [`ConnectTo`]: agent_client_protocol::ConnectTo
+    //! [`reusable_components`]: super::reusable_components
+}
+
+pub mod reusable_components {
+    //! Pattern: Defining reusable components.
+    //!
+    //! When building agents or proxies that will be composed together (for example,
+    //! with [`agent-client-protocol-conductor`]), define a struct that implements [`ConnectTo`].
+    //! This allows your component to be connected to other components in a type-safe way.
+    //!
+    //! # Example
+    //!
+    //! ```
+    //! use agent_client_protocol::{ConnectTo, Agent, Client};
+    //! use agent_client_protocol::schema::v1::{
+    //!     InitializeRequest, InitializeResponse, AgentCapabilities,
+    //! };
+    //!
+    //! struct MyAgent {
+    //!     name: String,
+    //! }
+    //!
+    //! impl ConnectTo<Client> for MyAgent {
+    //!     async fn connect_to(self, client: impl ConnectTo<Agent>) -> Result<(), agent_client_protocol::Error> {
+    //!         Agent.builder()
+    //!             .name(&self.name)
+    //!             .on_receive_request(async move |req: InitializeRequest, responder, _connection| {
+    //!                 responder.respond(
+    //!                     InitializeResponse::new(req.protocol_version)
+    //!                         .agent_capabilities(AgentCapabilities::new())
+    //!                 )
+    //!             }, agent_client_protocol::on_receive_request!())
+    //!             .connect_to(client)
+    //!             .await
+    //!     }
+    //! }
+    //!
+    //! let agent = MyAgent { name: "my-agent".into() };
+    //! ```
+    //!
+    //! # Important: Don't block the event loop
+    //!
+    //! Message handlers run on the event loop. Blocking in a handler prevents the
+    //! connection from processing new messages:
+    //!
+    //! - Use [`ConnectionTo::spawn`] to offload work to a background task
+    //! - Use [`on_receiving_result`] for bounded, ordered response handling; if it
+    //!   must await later traffic, spawn that work from the callback and return
+    //!
+    //! [`ConnectTo`]: agent_client_protocol::ConnectTo
+    //! [`ConnectionTo::spawn`]: agent_client_protocol::ConnectionTo::spawn
+    //! [`on_receiving_result`]: agent_client_protocol::SentRequest::on_receiving_result
+    //! [`agent-client-protocol-conductor`]: https://crates.io/crates/agent-client-protocol-conductor
+}
+
+pub mod custom_message_handlers {
+    //! Pattern: Custom message handlers.
+    //!
+    //! For reusable message handling logic, implement [`HandleDispatchFrom`] and use
+    //! [`MatchDispatch`] or [`MatchDispatchFrom`] for type-safe dispatching.
+    //!
+    //! This is useful when you need to:
+    //! - Share message handling logic across multiple components
+    //! - Build complex routing logic that doesn't fit the builder pattern
+    //! - Integrate with existing handler infrastructure
+    //!
+    //! # Example
+    //!
+    //! ```
+    //! use agent_client_protocol::{HandleDispatchFrom, Dispatch, Handled, ConnectionTo, UntypedRole};
+    //! use agent_client_protocol::schema::v1::{AgentCapabilities, InitializeRequest, InitializeResponse};
+    //! use agent_client_protocol::util::MatchDispatch;
+    //!
+    //! struct MyHandler;
+    //!
+    //! impl HandleDispatchFrom<UntypedRole> for MyHandler {
+    //!     async fn handle_dispatch_from(
+    //!         &mut self,
+    //!         message: Dispatch,
+    //!         _connection: ConnectionTo<UntypedRole>,
+    //!     ) -> Result<Handled<Dispatch>, agent_client_protocol::Error> {
+    //!         MatchDispatch::new(message)
+    //!             .if_request(async |req: InitializeRequest, responder| {
+    //!                 responder.respond(
+    //!                     InitializeResponse::new(req.protocol_version)
+    //!                         .agent_capabilities(AgentCapabilities::new())
+    //!                 )
+    //!             })
+    //!             .await
+    //!             .done()
+    //!     }
+    //!
+    //!     fn describe_chain(&self) -> impl std::fmt::Debug {
+    //!         "MyHandler"
+    //!     }
+    //! }
+    //! ```
+    //!
+    //! # When to use `MatchDispatch` vs `MatchDispatchFrom`
+    //!
+    //! - [`MatchDispatch`] - Use when you don't need peer-aware handling
+    //! - [`MatchDispatchFrom`] - Use in proxies where messages come from different
+    //!   peers (`Client` vs `Agent`) and may need different handling
+    //!
+    //! [`HandleDispatchFrom`]: agent_client_protocol::HandleDispatchFrom
+    //! [`MatchDispatch`]: agent_client_protocol::util::MatchDispatch
+    //! [`MatchDispatchFrom`]: agent_client_protocol::util::MatchDispatchFrom
+}
+
+pub mod global_mcp_server {
+    //! Pattern: Global MCP server in handler chain.
+    //!
+    //! Use this pattern when you want a single MCP server that handles tool calls
+    //! for all sessions. The server is added to the connection's handler chain and
+    //! automatically injects itself into every supported session setup request.
+    //! This pattern requires the core SDK's `unstable_mcp_over_acp` feature (or
+    //! the rmcp crate's matching passthrough feature). Draft v2 additionally
+    //! requires `unstable_protocol_v2`.
+    //!
+    //! # When to use
+    //!
+    //! - The MCP server provides stateless tools (no per-session state needed)
+    //! - You want the simplest setup with minimal boilerplate
+    //! - Tools don't need access to session-specific context
+    //!
+    //! # Using the builder API
+    //!
+    //! The simplest way to create an MCP server is with [`McpServer::builder`]:
+    //!
+    //! ```
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use agent_client_protocol::{ConnectTo, RunWithConnectionTo, Proxy, Conductor};
+    //! use schemars::JsonSchema;
+    //! use serde::{Deserialize, Serialize};
+    //!
+    //! #[derive(Debug, Deserialize, JsonSchema)]
+    //! struct EchoParams { message: String }
+    //!
+    //! #[derive(Debug, Serialize, JsonSchema)]
+    //! struct EchoOutput { echoed: String }
+    //!
+    //! // Build the MCP server with tools
+    //! let mcp_server = McpServer::builder("my-tools")
+    //!     .tool_fn("echo", "Echoes the input",
+    //!         async |params: EchoParams, _cx| {
+    //!             Ok(EchoOutput { echoed: params.message })
+    //!         },
+    //!         agent_client_protocol::tool_fn!())
+    //!     .build();
+    //!
+    //! // The proxy component is generic over the MCP server's runner type
+    //! struct MyProxy<R> {
+    //!     mcp_server: McpServer<Conductor, R>,
+    //! }
+    //!
+    //! impl<R: RunWithConnectionTo<Conductor> + Send + 'static> ConnectTo<Conductor> for MyProxy<R> {
+    //!     async fn connect_to(self, conductor: impl ConnectTo<Proxy>) -> Result<(), agent_client_protocol::Error> {
+    //!         Proxy.builder()
+    //!             .with_mcp_server(self.mcp_server)
+    //!             .connect_to(conductor)
+    //!             .await
+    //!     }
+    //! }
+    //!
+    //! let proxy = MyProxy { mcp_server };
+    //! ```
+    //!
+    //! The example uses stable protocol v1. A draft v2 proxy selects its API
+    //! before attaching the server:
+    //!
+    //! ```rust,ignore
+    //! Proxy.v2()
+    //!     .with_mcp_server(mcp_server)
+    //!     .connect_to(conductor)
+    //!     .await?;
+    //! ```
+    //!
+    //! # Using rmcp
+    //!
+    //! If you have an existing [rmcp](https://docs.rs/rmcp) server implementation,
+    //! use [`McpServer::from_rmcp`] from the `agent-client-protocol-rmcp` crate:
+    //!
+    //! ```
+    //! use rmcp::{ServerHandler, tool, tool_router, tool_handler};
+    //! use rmcp::handler::server::router::tool::ToolRouter;
+    //! use rmcp::handler::server::wrapper::Parameters;
+    //! use rmcp::model::*;
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol::Conductor;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use serde::{Deserialize, Serialize};
+    //!
+    //! #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+    //! struct EchoParams {
+    //!     message: String,
+    //! }
+    //!
+    //! #[derive(Clone)]
+    //! struct MyMcpServer {
+    //!     tool_router: ToolRouter<Self>,
+    //! }
+    //!
+    //! impl MyMcpServer {
+    //!     fn new() -> Self {
+    //!         Self { tool_router: Self::tool_router() }
+    //!     }
+    //! }
+    //!
+    //! #[tool_router]
+    //! impl MyMcpServer {
+    //!     #[tool(description = "Echoes back the input message")]
+    //!     async fn echo(&self, Parameters(params): Parameters<EchoParams>) -> Result<CallToolResult, rmcp::ErrorData> {
+    //!         Ok(CallToolResult::success(vec![ContentBlock::text(format!("Echo: {}", params.message))]))
+    //!     }
+    //! }
+    //!
+    //! #[tool_handler]
+    //! impl ServerHandler for MyMcpServer {
+    //!     fn get_info(&self) -> ServerInfo {
+    //!         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    //!             .with_protocol_version(ProtocolVersion::V_2024_11_05)
+    //!             .with_server_info(Implementation::from_build_env())
+    //!     }
+    //! }
+    //!
+    //! // Create an MCP server from the rmcp service
+    //! let mcp_server = McpServer::<Conductor, _>::from_rmcp("my-server", MyMcpServer::new);
+    //! ```
+    //!
+    //! The `from_rmcp` function takes a factory closure that creates a new server
+    //! instance. This allows each MCP connection to get a fresh server instance.
+    //!
+    //! # How it works
+    //!
+    //! When you call [`with_mcp_server`], the MCP server is added as a message
+    //! handler. It:
+    //!
+    //! 1. Intercepts session setup requests and adds a schema-native
+    //!    `McpServer::Acp` declaration with one connection-scoped server ID.
+    //!    V1 injects it into `session/new`, `session/load`, `session/resume`,
+    //!    and feature-gated `session/fork`; v2 injects it into
+    //!    `session/new`, `session/resume`, and feature-gated `session/fork`
+    //!    while preserving unrelated request fields
+    //! 2. Passes the modified request through to the next handler
+    //! 3. Handles `mcp/connect`, `mcp/message`, and `mcp/disconnect` for that server ID
+    //!
+    //! [`McpServer::builder`]: agent_client_protocol_rmcp::McpServerExt::builder
+    //! [`McpServer::from_rmcp`]: agent_client_protocol_rmcp::McpServerExt::from_rmcp
+    //! [`with_mcp_server`]: agent_client_protocol::Builder::with_mcp_server
+}
+
+pub mod per_session_mcp_server {
+    //! Pattern: Per-session MCP server with workspace context.
+    //!
+    //! Use this pattern when each session needs its own MCP server instance
+    //! with access to session-specific context like the working directory.
+    //! It requires the core SDK's `unstable_mcp_over_acp` feature (or the rmcp
+    //! crate's matching passthrough feature). Draft v2 additionally requires
+    //! `unstable_protocol_v2`.
+    //!
+    //! # When to use
+    //!
+    //! - Tools need access to the session's working directory
+    //! - You want eventual active-session tracking that does not need to precede later traffic
+    //! - Tools need to customize behavior based on session parameters
+    //!
+    //! # Stable v1 pattern with `on_proxy_session_start`
+    //!
+    //! The most common pattern intercepts [`NewSessionRequest`], extracts context,
+    //! creates a per-session MCP server, and uses [`on_proxy_session_start`] to
+    //! run code after the session is established:
+    //!
+    //! ```
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use agent_client_protocol::schema::v1::NewSessionRequest;
+    //! use agent_client_protocol::{Client, Proxy, Conductor, ConnectTo};
+    //!
+    //! async fn run_proxy(transport: impl ConnectTo<Proxy>) -> Result<(), agent_client_protocol::Error> {
+    //!     Proxy.builder()
+    //!         .on_receive_request_from(Client, async move |request: NewSessionRequest, responder, connection| {
+    //!             // Extract session context from the request
+    //!             let workspace_path = request.cwd.clone();
+    //!
+    //!             // Create tools that capture the workspace path
+    //!             let mcp_server = McpServer::builder("workspace-tools")
+    //!                 .tool_fn("get_workspace", "Returns the session's workspace directory", {
+    //!                     async move |_params: (), _cx| {
+    //!                         Ok(workspace_path.display().to_string())
+    //!                     }
+    //!                 }, agent_client_protocol::tool_fn!())
+    //!                 .build();
+    //!
+    //!             // Build the session and run code after it starts
+    //!             connection.build_session_from(request)
+    //!                 .with_mcp_server(mcp_server)?
+    //!                 .on_proxy_session_start(responder, async move |session_id| {
+    //!                     // Session proxying is installed before this callback is spawned.
+    //!                     //
+    //!                     // Use this for follow-up work that may wait for later connection
+    //!                     // traffic. Register ID-independent state in the request handler.
+    //!                     // For ID-keyed state, preinstall a gate that later handlers await,
+    //!                     // then populate it here.
+    //!                     tracing::info!(%session_id, "Session started");
+    //!                     Ok(())
+    //!                 })
+    //!         }, agent_client_protocol::on_receive_request!())
+    //!         .connect_to(transport)
+    //!         .await
+    //! }
+    //! ```
+    //!
+    //! # How `on_proxy_session_start` works
+    //!
+    //! [`on_proxy_session_start`] is the non-blocking way to set up a proxy session:
+    //!
+    //! 1. Sends `NewSessionRequest` to the agent
+    //! 2. When the response arrives, responds to the client automatically
+    //! 3. Sets up message proxying for the session
+    //! 4. Runs your callback with the `SessionId`
+    //!
+    //! The callback runs after the session is established but doesn't block
+    //! the message handler. It is suitable for follow-up work and eventual
+    //! session tracking. Because it runs concurrently with later traffic, it
+    //! does not guarantee that bookkeeping keyed by `SessionId` completes
+    //! first. Register ID-independent state before calling the helper. For
+    //! ID-keyed state, preinstall a gate or placeholder that later handlers
+    //! await, then populate it from the callback.
+    //!
+    //! # Draft v2 pattern
+    //!
+    //! `Proxy.v2()` exposes the same non-blocking setup shape with v2 schema
+    //! types. Its `V2SessionBuilder::on_proxy_session_start` callback receives
+    //! an `OpenedV2Session`, not just a session ID, so it retains both the
+    //! command-only handle and the complete `NewSessionResponse`:
+    //!
+    //! ```rust,ignore
+    //! use agent_client_protocol::schema::v2;
+    //!
+    //! Proxy.v2()
+    //!     .on_receive_request_from(
+    //!         Client,
+    //!         async |request: v2::NewSessionRequest, responder, connection| {
+    //!             let workspace_path = request.cwd.clone();
+    //!             let mcp_server = build_workspace_server(workspace_path);
+    //!
+    //!             connection
+    //!                 .build_session_from(request)
+    //!                 .with_mcp_server(mcp_server)?
+    //!                 .on_proxy_session_start(responder, async move |opened| {
+    //!                     let (session, setup_response) = opened.into_parts();
+    //!                     tracing::info!(
+    //!                         session_id = %session.session_id(),
+    //!                         ?setup_response,
+    //!                         "Session started"
+    //!                     );
+    //!                     Ok(())
+    //!                 })
+    //!         },
+    //!         agent_client_protocol::on_receive_request!(),
+    //!     );
+    //! ```
+    //!
+    //! The helper forwards upstream cancellation and the complete setup
+    //! response, and installs session routing before later inbound traffic.
+    //! The callback runs outside that ordering barrier. V2 updates and
+    //! interactive requests remain independent connection traffic.
+    //!
+    //! # Stable v1 alternative: spawning `start_session_proxy`
+    //!
+    //! If you need the linear [`start_session_proxy`] API, move it into a
+    //! spawned task. Awaiting it directly in the request handler would block
+    //! the dispatch loop that must receive the agent's response:
+    //!
+    //! ```
+    //! # use agent_client_protocol::mcp_server::McpServer;
+    //! # use agent_client_protocol_rmcp::McpServerExt;
+    //! # use agent_client_protocol::schema::v1::NewSessionRequest;
+    //! # use agent_client_protocol::{Client, Proxy, Conductor, ConnectTo};
+    //! # async fn run_proxy(transport: impl ConnectTo<Proxy>) -> Result<(), agent_client_protocol::Error> {
+    //!     Proxy.builder()
+    //!         .on_receive_request_from(Client, async |request: NewSessionRequest, responder, connection| {
+    //!             let cwd = request.cwd.clone();
+    //!             let mcp_server = McpServer::builder("tools")
+    //!                 .tool_fn("get_cwd", "Returns working directory", {
+    //!                     async move |_params: (), _cx| Ok(cwd.display().to_string())
+    //!                 }, agent_client_protocol::tool_fn!())
+    //!                 .build();
+    //!
+    //!             let task_connection = connection.clone();
+    //!             connection.spawn(async move {
+    //!                 let session_id = task_connection.build_session_from(request)
+    //!                     .with_mcp_server(mcp_server)?
+    //!                     .block_task()
+    //!                     .start_session_proxy(responder)
+    //!                     .await?;
+    //!
+    //!                 tracing::info!(%session_id, "Session started");
+    //!                 Ok(())
+    //!             })?;
+    //!             Ok(())
+    //!         }, agent_client_protocol::on_receive_request!())
+    //!         .connect_to(transport)
+    //!         .await
+    //! # }
+    //! ```
+    //!
+    //! For patterns where you need to interact with the session before proxying,
+    //! use [`start_session`] + [`proxy_remaining_messages`] instead.
+    //!
+    //! [`start_session`]: agent_client_protocol::SessionBuilder::start_session
+    //! [`proxy_remaining_messages`]: agent_client_protocol::ActiveSession::proxy_remaining_messages
+    //!
+    //! [`NewSessionRequest`]: agent_client_protocol::schema::v1::NewSessionRequest
+    //! [`on_proxy_session_start`]: agent_client_protocol::SessionBuilder::on_proxy_session_start
+    //! [`block_task`]: agent_client_protocol::SessionBuilder::block_task
+    //! [`start_session_proxy`]: agent_client_protocol::SessionBuilder::start_session_proxy
+}
+
+pub mod filtering_tools {
+    //! Pattern: Filtering which tools are available.
+    //!
+    //! Use [`disable_tool`] and [`enable_tool`] to control which tools are
+    //! visible to clients. This is useful when:
+    //!
+    //! - Some tools should only be available in certain configurations
+    //! - You want to conditionally expose tools based on runtime settings
+    //! - You need to restrict access to sensitive tools
+    //!
+    //! # Disabling specific tools (deny-list)
+    //!
+    //! By default, all registered tools are enabled. Use [`disable_tool`] to
+    //! hide specific tools:
+    //!
+    //! ```
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use agent_client_protocol::{Conductor, RunWithConnectionTo};
+    //! use schemars::JsonSchema;
+    //! use serde::Deserialize;
+    //!
+    //! #[derive(Debug, Deserialize, JsonSchema)]
+    //! struct Params {}
+    //!
+    //! fn build_server(enable_admin: bool) -> Result<McpServer<Conductor, impl RunWithConnectionTo<Conductor>>, agent_client_protocol::Error> {
+    //!     let mut builder = McpServer::builder("my-server")
+    //!         .tool_fn("echo", "Echo a message",
+    //!             async |_p: Params, _cx| Ok("echoed"),
+    //!             agent_client_protocol::tool_fn!())
+    //!         .tool_fn("admin", "Admin-only tool",
+    //!             async |_p: Params, _cx| Ok("admin action"),
+    //!             agent_client_protocol::tool_fn!());
+    //!
+    //!     // Conditionally disable the admin tool
+    //!     if !enable_admin {
+    //!         builder = builder.disable_tool("admin")?;
+    //!     }
+    //!
+    //!     Ok(builder.build())
+    //! }
+    //! ```
+    //!
+    //! Disabled tools:
+    //! - Don't appear in `list_tools` responses
+    //! - Return "tool not found" errors if called directly
+    //!
+    //! # Enabling only specific tools (allow-list)
+    //!
+    //! Use [`disable_all_tools`] followed by [`enable_tool`] to create an
+    //! allow-list where only explicitly enabled tools are available:
+    //!
+    //! ```
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use agent_client_protocol::{Conductor, RunWithConnectionTo};
+    //! use schemars::JsonSchema;
+    //! use serde::Deserialize;
+    //!
+    //! #[derive(Debug, Deserialize, JsonSchema)]
+    //! struct Params {}
+    //!
+    //! fn build_restricted_server() -> Result<McpServer<Conductor, impl RunWithConnectionTo<Conductor>>, agent_client_protocol::Error> {
+    //!     McpServer::builder("restricted-server")
+    //!         .tool_fn("safe", "Safe operation",
+    //!             async |_p: Params, _cx| Ok("safe"),
+    //!             agent_client_protocol::tool_fn!())
+    //!         .tool_fn("dangerous", "Dangerous operation",
+    //!             async |_p: Params, _cx| Ok("danger!"),
+    //!             agent_client_protocol::tool_fn!())
+    //!         .tool_fn("experimental", "Experimental feature",
+    //!             async |_p: Params, _cx| Ok("experimental"),
+    //!             agent_client_protocol::tool_fn!())
+    //!         // Start with all tools disabled
+    //!         .disable_all_tools()
+    //!         // Only enable the safe tool
+    //!         .enable_tool("safe")
+    //!         .map(|b| b.build())
+    //! }
+    //! ```
+    //!
+    //! # Error handling
+    //!
+    //! Both [`enable_tool`] and [`disable_tool`] return `Result` and will error
+    //! if the tool name doesn't match any registered tool. This helps catch typos:
+    //!
+    //! ```
+    //! use agent_client_protocol::mcp_server::McpServer;
+    //! use agent_client_protocol_rmcp::McpServerExt;
+    //! use agent_client_protocol::Conductor;
+    //!
+    //! // This will error because "ech" is not a registered tool
+    //! let result = McpServer::<Conductor, _>::builder("server")
+    //!     .disable_tool("ech");  // Typo! Should be "echo"
+    //!
+    //! assert!(result.is_err());
+    //! ```
+    //!
+    //! Calling enable/disable on an already enabled/disabled tool is not an error -
+    //! the operations are idempotent.
+    //!
+    //! [`disable_tool`]: agent_client_protocol_rmcp::McpServerBuilder::disable_tool
+    //! [`enable_tool`]: agent_client_protocol_rmcp::McpServerBuilder::enable_tool
+    //! [`disable_all_tools`]: agent_client_protocol_rmcp::McpServerBuilder::disable_all_tools
+}
+
+pub mod running_proxies_with_conductor {
+    //! Pattern: Running proxies with the conductor.
+    //!
+    //! Proxies don't run standalone. To add an MCP server (or other proxy behavior)
+    //! to an existing agent, you need the **conductor** to orchestrate the connection.
+    //!
+    //! The conductor:
+    //! 1. Accepts connections from clients
+    //! 2. Chains your proxies together
+    //! 3. Connects to the final agent
+    //! 4. Routes messages through the entire chain
+    //!
+    //! # Using the `agent-client-protocol-conductor` binary
+    //!
+    //! The simplest way to run a proxy is with the [`agent-client-protocol-conductor`] binary.
+    //! Pass the proxy commands followed by the final agent command:
+    //!
+    //! ```bash
+    //! agent-client-protocol-conductor agent \
+    //!   "cargo run --bin my-proxy" \
+    //!   "claude-code --agent"
+    //! ```
+    //!
+    //! # Using the conductor as a library
+    //!
+    //! For more control, use [`agent-client-protocol-conductor`] as a library with the `ConductorImpl` type:
+    //!
+    //! ```ignore
+    //! use agent_client_protocol::{AcpAgent, ConnectTo};
+    //! use agent_client_protocol_conductor::{ConductorImpl, ProxiesAndAgent};
+    //!
+    //! // Define your proxy as a ConnectTo<Conductor>
+    //! let my_proxy = MyProxy::new();
+    //!
+    //! // Configure the agent process
+    //! let agent = AcpAgent::from_args(["claude-code", "--agent"])?;
+    //!
+    //! // Create the conductor with your proxy chain
+    //! let conductor = ConductorImpl::new_agent(
+    //!     "my-conductor",
+    //!     ProxiesAndAgent::new(agent).proxy(my_proxy),
+    //! );
+    //!
+    //! // Run the conductor (it will accept client connections on stdin/stdout)
+    //! conductor.connect_to(client_transport).await?;
+    //! ```
+    //!
+    //! # Why can't I just connect my proxy directly to an agent?
+    //!
+    //! ACP uses a message envelope format for proxy chains. When a proxy sends a
+    //! message toward the agent, it gets wrapped in a [`SuccessorMessage`] envelope.
+    //! The conductor handles this wrapping/unwrapping automatically.
+    //!
+    //! If you connected directly to an agent, your proxy would send `SuccessorMessage`
+    //! envelopes that the agent doesn't understand.
+    //!
+    //! # Example: Complete proxy with conductor
+    //!
+    //! See the [`agent-client-protocol-conductor` tests] for complete working examples of proxies
+    //! running with the conductor.
+    //!
+    //! [`agent-client-protocol-conductor`]: https://crates.io/crates/agent-client-protocol-conductor
+    //! [`SuccessorMessage`]: agent_client_protocol::schema::SuccessorMessage
+    //! [`agent-client-protocol-conductor` tests]: https://github.com/agentclientprotocol/rust-sdk/tree/main/src/agent-client-protocol-conductor/tests
+}

@@ -1,0 +1,40 @@
+[package]
+name = "agent-client-protocol-derive"
+version = "2.0.0"
+# FLEET PATCH (2026-08-11): 워크스페이스 상속 제거 — agent-client-protocol/Cargo.toml
+# 상단 주석 참고.
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Zed <hi@zed.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/agentclientprotocol/rust-sdk"
+homepage = "https://github.com/agentclientprotocol/rust-sdk"
+description = "Derive macros for Agent Client Protocol JSON-RPC traits"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = "3"
+
+# FLEET PATCH (2026-08-11): agent-client-protocol/Cargo.toml 상단 주석 참고.
+[lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+let_underscore = "warn"
+missing_debug_implementations = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+wildcard_imports = "allow"

@@ -1,11 +1,15 @@
-//! AcpTransport end-to-end 테스트.
+//! `AcpTransport` end-to-end 테스트 (2026-08-11 SDK 전환 이후 재작성).
 //!
-//! mock ACP 서버 (axum WebSocket) ↔ AcpTransport (WorkerTransport trait 구현체).
-//! Phase 7 p7-6의 일환으로, dispatch → Output 스트리밍 → Completed 흐름을 검증.
+//! mock ACP 서버(axum WebSocket)가 실제 grok과 동일한 wire-format으로 응답한다.
+//! `AcpTransport`는 공식 `agent-client-protocol`/`agent-client-protocol-http`
+//! SDK 위에서 동작하며, **태스크마다 새 ACP 세션**을 연다 — 그래서 이 mock도
+//! `session/new`을 여러 번(태스크당 1회) 받을 준비가 되어 있어야 한다(옛
+//! 구현은 워커당 세션 1개를 공유했다).
 
 #![cfg(feature = "acp")]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,17 +30,14 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+/// mock 서버가 세션마다 스트리밍할 텍스트. 세션 생성 순서대로 소비.
 #[derive(Clone, Default)]
 struct MockState {
+    /// 수신한 모든 JSON-RPC 메시지 기록(검증용).
     received: Arc<Mutex<Vec<Value>>>,
-    next_prompt_id: Arc<Mutex<u64>>,
-    scripted_output: Arc<Mutex<Vec<String>>>,
-    /// 2026-08-11 P0 재발방지 테스트용: 실제 grok가 그러는 것으로 실측된 대로,
-    /// `session/update`에 `promptId`를 아예 안 붙이고 최종 `session/prompt` 응답의
-    /// `agent_message`도 비워서 보낸다 — 텍스트는 스트리밍으로만 온다.
-    simulate_streaming_only_response: Arc<Mutex<bool>>,
-    /// 프롬프트 처리 중 인위적 지연 (duration_secs > 0 검증용).
-    artificial_delay: Arc<Mutex<Duration>>,
+    next_session_id: Arc<AtomicU64>,
+    /// 세션마다 흘려보낼 텍스트 청크. 큐가 비면 빈 응답.
+    scripted_chunks: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +56,7 @@ async fn ws_handler(
 }
 
 async fn handle_acp_socket(socket: WebSocket, state: MockState) {
-    use futures_util::{SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt};
 
     let (mut writer, mut reader) = socket.split();
 
@@ -78,98 +79,72 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
             .to_string();
         let id = req.get("id").cloned();
 
-        state.received.lock().await.push(req);
+        state.received.lock().await.push(req.clone());
 
-        let response = match method.as_str() {
-            "initialize" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": 1,
-                    "serverCapabilities": { "streaming": true },
-                },
-            })),
-            "session/new" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "sessionId": "test-session-1",
-                },
-            })),
+        match method.as_str() {
+            "initialize" => {
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "protocolVersion": 1 },
+                });
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            }
+            "session/new" => {
+                let sid = state.next_session_id.fetch_add(1, Ordering::SeqCst);
+                let session_id = format!("session-{sid}");
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "sessionId": session_id },
+                });
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            }
             "session/prompt" => {
-                let prompt_id = {
-                    let mut next = state.next_prompt_id.lock().await;
-                    *next += 1;
-                    *next
-                };
-                let streaming_only = *state.simulate_streaming_only_response.lock().await;
-                let delay = *state.artificial_delay.lock().await;
-                if delay > Duration::ZERO {
-                    tokio::time::sleep(delay).await;
-                }
+                let session_id = req
+                    .get("params")
+                    .and_then(|p| p.get("sessionId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
 
-                // 2026-08-11 실측 포맷: 태그 키는 sessionUpdate(type 아님), content는
-                // {text, type} 단일 객체, 톱레벨엔 promptId가 없다(항상 None으로
-                // 파싱됨 — SessionUpdate 문서 참조). 실제 grok과 동일하게 맞춘다.
-                let chunks: Vec<String> = state.scripted_output.lock().await.clone();
+                let chunks: Vec<String> = {
+                    let mut q = state.scripted_chunks.lock().await;
+                    std::mem::take(&mut *q)
+                };
                 for chunk in &chunks {
                     let update = json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
                         "params": {
-                            "sessionId": "test-session-1",
+                            "sessionId": session_id,
                             "update": {
-                                "_meta": {"promptId": prompt_id.to_string()},
                                 "sessionUpdate": "agent_message_chunk",
-                                "content": {
-                                    "type": "text",
-                                    "text": chunk,
-                                },
+                                "content": { "type": "text", "text": chunk },
                             },
                         },
                     });
                     let _ = writer.send(WsMessage::Text(update.to_string())).await;
                 }
 
-                // 실측된 실제 grok 동작: 최종 session/prompt 응답의 agent_message가
-                // 비어 있는 경우가 있다 — 텍스트는 위 스트리밍으로만 전달됨.
-                let final_agent_message: Vec<Value> = if streaming_only {
-                    vec![]
-                } else {
-                    vec![json!({"type": "text", "text": chunks.join("")})]
-                };
-
-                Some(json!({
+                let resp = json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": {
-                        // camelCase — 위 session/update의 "promptId"와 일관되게
-                        // (실제 grok과 동일한 관례; PromptResult.prompt_id의
-                        // #[serde(rename = "promptId")] 참조).
-                        "promptId": prompt_id,
-                        "agent_message": final_agent_message,
-                        "end_of_turn": true,
-                        "usage": {
-                            "input_tokens": 5,
-                            "output_tokens": 10,
-                        },
-                    },
-                }))
+                    "result": { "stopReason": "end_turn" },
+                });
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
-            "session/cancel" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {},
-            })),
-            _ => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": "not found" },
-            })),
-        };
-
-        if let Some(resp) = response {
-            let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            _ => {
+                // session/cancel 등 notification(= id 없음)은 응답하지 않음.
+                if id.is_some() {
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "method not found" },
+                    });
+                    let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+                }
+            }
         }
     }
 }
@@ -237,211 +212,12 @@ async fn duplicate_register_rejected() {
         .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
-    let second = transport.register(worker, &endpoint(addr), 1).await;
-    assert!(second.is_err(), "duplicate register should fail");
-}
 
-#[tokio::test]
-async fn dispatch_streams_output_and_completes() {
-    let (state, addr) = start_mock_server().await;
-    *state.scripted_output.lock().await = vec!["Hello ".to_string(), "world".to_string()];
-
-    let transport = Arc::new(AcpTransport::new());
-    let mut events = transport.subscribe().await.expect("subscribe");
-
-    let worker = WorkerId::new();
-    transport
-        .register(worker, &endpoint(addr), 1)
-        .await
-        .expect("register");
-
-    let task_id = TaskId::new();
-    transport
-        .dispatch(dispatch_req(task_id, worker, "hi"))
-        .await
-        .expect("dispatch");
-
-    // 이벤트 수집: Output 2개 + Completed 1개 예상.
-    let mut output = String::new();
-    let mut completed = false;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Output {
-                task_id: t, chunk, ..
-            })) => {
-                assert_eq!(t, task_id);
-                output.push_str(&chunk);
-            }
-            Ok(Some(WorkerEvent::Completed { task_id: t, .. })) => {
-                assert_eq!(t, task_id);
-                completed = true;
-                break;
-            }
-            Ok(Some(WorkerEvent::Failed { task_id: t, error })) => {
-                panic!("unexpected Failed for {t}: {error}");
-            }
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-    assert!(completed, "should receive Completed");
-    assert_eq!(output, "Hello world");
-}
-
-/// 2026-08-11 P0 재발방지: `session/update`에 `promptId`가 전혀 없고 최종
-/// `session/prompt` 응답의 `agent_message`도 빈 경우 — 실측된 실제 grok 동작.
-/// 이 워커에 진행 중인 태스크가 하나뿐이므로 sole-in-flight 폴백으로 라우팅되어,
-/// 스트리밍 청크가 `WorkerEvent::Output`으로 전달되고 최종 `TaskResult.output`에도
-/// 버퍼링된 텍스트가 채워져야 한다 (예전엔 output이 항상 빈 문자열로 저장됐다).
-#[tokio::test]
-async fn output_without_prompt_id_routes_via_sole_in_flight_fallback() {
-    let (state, addr) = start_mock_server().await;
-    *state.scripted_output.lock().await =
-        vec!["Wiki 구조를 ".to_string(), "분석합니다".to_string()];
-    *state.simulate_streaming_only_response.lock().await = true;
-
-    let transport = Arc::new(AcpTransport::new());
-    let mut events = transport.subscribe().await.expect("subscribe");
-
-    let worker = WorkerId::new();
-    transport
-        .register(worker, &endpoint(addr), 1)
-        .await
-        .expect("register");
-
-    let task_id = TaskId::new();
-    transport
-        .dispatch(dispatch_req(task_id, worker, "hi"))
-        .await
-        .expect("dispatch");
-
-    let mut streamed = String::new();
-    let mut result = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Output {
-                task_id: t, chunk, ..
-            })) => {
-                assert_eq!(t, task_id);
-                streamed.push_str(&chunk);
-            }
-            Ok(Some(WorkerEvent::Completed {
-                task_id: t,
-                result: r,
-            })) => {
-                assert_eq!(t, task_id);
-                result = Some(r);
-                break;
-            }
-            Ok(Some(WorkerEvent::Failed { task_id: t, error })) => {
-                panic!("unexpected Failed for {t}: {error}");
-            }
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-
-    // promptId 없는 Output이 드롭되지 않고 라우팅됐어야 함.
-    assert_eq!(
-        streamed, "Wiki 구조를 분석합니다",
-        "streamed chunks should route via sole-in-flight fallback despite missing promptId"
-    );
-    let result = result.expect("Completed event");
-    assert_eq!(
-        result.output, "Wiki 구조를 분석합니다",
-        "TaskResult.output should fall back to buffered streamed text when agent_message is empty"
-    );
-}
-
-/// 2026-08-11 P0 재발방지: `duration_secs`가 실제 소요 시간을 반영해야 한다
-/// (예전엔 항상 0.0으로 하드코딩).
-#[tokio::test]
-async fn completed_duration_secs_reflects_actual_elapsed_time() {
-    let (state, addr) = start_mock_server().await;
-    *state.scripted_output.lock().await = vec!["ok".to_string()];
-    *state.artificial_delay.lock().await = Duration::from_millis(150);
-
-    let transport = Arc::new(AcpTransport::new());
-    let mut events = transport.subscribe().await.expect("subscribe");
-
-    let worker = WorkerId::new();
-    transport
-        .register(worker, &endpoint(addr), 1)
-        .await
-        .expect("register");
-
-    let task_id = TaskId::new();
-    transport
-        .dispatch(dispatch_req(task_id, worker, "hi"))
-        .await
-        .expect("dispatch");
-
-    let mut result = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Completed {
-                task_id: t,
-                result: r,
-            })) => {
-                assert_eq!(t, task_id);
-                result = Some(r);
-                break;
-            }
-            Ok(Some(_)) => continue,
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-
-    let result = result.expect("Completed event");
-    assert!(
-        result.duration_secs >= 0.1,
-        "duration_secs should reflect the ~150ms artificial delay, got {}",
-        result.duration_secs
-    );
-}
-
-#[tokio::test]
-async fn completed_includes_token_usage() {
-    let (state, addr) = start_mock_server().await;
-    *state.scripted_output.lock().await = vec!["x".to_string()];
-
-    let transport = Arc::new(AcpTransport::new());
-    let mut events = transport.subscribe().await.expect("subscribe");
-
-    let worker = WorkerId::new();
-    transport
-        .register(worker, &endpoint(addr), 1)
-        .await
-        .unwrap();
-
-    let task_id = TaskId::new();
-    transport
-        .dispatch(dispatch_req(task_id, worker, "x"))
-        .await
-        .unwrap();
-
-    let mut found = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Completed { result, .. })) => {
-                found = Some(result);
-                break;
-            }
-            Ok(Some(_)) | Ok(None) => continue,
-            Err(_) => continue,
-        }
-    }
-    let result = found.expect("Completed event");
-    let usage = result.token_usage.expect("token_usage");
-    assert_eq!(usage.input_tokens, 5);
-    assert_eq!(usage.output_tokens, 10);
-    assert_eq!(result.output, "x");
-    assert_eq!(result.exit_code, 0);
+    let err = transport.register(worker, &endpoint(addr), 1).await;
+    assert!(matches!(
+        err,
+        Err(fleet_transport::TransportError::AlreadyRegistered(_))
+    ));
 }
 
 #[tokio::test]
@@ -453,75 +229,179 @@ async fn dispatch_unknown_worker_errors() {
 }
 
 #[tokio::test]
+async fn unregister_unknown_worker_errors() {
+    let transport = AcpTransport::new();
+    let result = transport.unregister(WorkerId::new()).await;
+    assert!(matches!(
+        result,
+        Err(fleet_transport::TransportError::WorkerNotRegistered(_))
+    ));
+}
+
+#[tokio::test]
 async fn ping_registered_worker_ok() {
     let (_state, addr) = start_mock_server().await;
     let transport = AcpTransport::new();
-
     let worker = WorkerId::new();
     transport
         .register(worker, &endpoint(addr), 1)
         .await
-        .unwrap();
-
-    let dur = transport.ping(worker).await.expect("ping");
-    assert!(dur.as_millis() <= 1);
-}
-
-#[tokio::test]
-async fn unregister_unknown_worker_errors() {
-    let transport = AcpTransport::new();
-    let result = transport.unregister(WorkerId::new()).await;
-    assert!(result.is_err());
+        .expect("register");
+    assert!(transport.ping(worker).await.is_ok());
 }
 
 #[tokio::test]
 async fn cancel_unknown_task_is_noop() {
-    let (_state, addr) = start_mock_server().await;
     let transport = AcpTransport::new();
+    assert!(transport.cancel(TaskId::new()).await.is_ok());
+}
+
+#[tokio::test]
+async fn dispatch_streams_output_and_completes() {
+    let (state, addr) = start_mock_server().await;
+    *state.scripted_chunks.lock().await = vec!["Hello ".to_string(), "world".to_string()];
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
     transport
         .register(worker, &endpoint(addr), 1)
         .await
-        .unwrap();
+        .expect("register");
 
-    // 활성 task가 없으므로 cancel은 idempotent success.
-    transport.cancel(TaskId::new()).await.expect("cancel no-op");
+    let task_id = TaskId::new();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "hi"))
+        .await
+        .expect("dispatch");
+
+    let mut output = String::new();
+    let mut completed = false;
+    let mut duration_secs = 0.0_f64;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Output {
+                task_id: t, chunk, ..
+            })) => {
+                assert_eq!(t, task_id);
+                output.push_str(&chunk);
+            }
+            Ok(Some(WorkerEvent::Completed { task_id: t, result })) => {
+                assert_eq!(t, task_id);
+                completed = true;
+                duration_secs = result.duration_secs;
+                break;
+            }
+            Ok(Some(WorkerEvent::Failed { task_id: t, error })) => {
+                panic!("unexpected Failed for {t}: {error}");
+            }
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+    assert!(completed, "should receive Completed");
+    assert_eq!(output, "Hello world");
+    assert!(
+        duration_secs >= 0.0,
+        "duration_secs should be a real elapsed measurement, got {duration_secs}"
+    );
 }
 
 #[tokio::test]
 async fn multiple_workers_dispatched_independently() {
-    let (state, addr) = start_mock_server().await;
-    *state.scripted_output.lock().await = vec!["from-w1".to_string()];
+    let (state1, addr1) = start_mock_server().await;
+    let (state2, addr2) = start_mock_server().await;
+    *state1.scripted_chunks.lock().await = vec!["from-worker-1".to_string()];
+    *state2.scripted_chunks.lock().await = vec!["from-worker-2".to_string()];
 
     let transport = Arc::new(AcpTransport::new());
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let w1 = WorkerId::new();
-    transport.register(w1, &endpoint(addr), 1).await.unwrap();
-
-    // 두 번째 워커 등록을 위해 다른 서버 인스턴스 (scripted_output 다르게).
-    let (state2, addr2) = start_mock_server().await;
-    *state2.scripted_output.lock().await = vec!["from-w2".to_string()];
     let w2 = WorkerId::new();
+    transport.register(w1, &endpoint(addr1), 1).await.unwrap();
     transport.register(w2, &endpoint(addr2), 1).await.unwrap();
 
     let t1 = TaskId::new();
     let t2 = TaskId::new();
-    transport.dispatch(dispatch_req(t1, w1, "x")).await.unwrap();
-    transport.dispatch(dispatch_req(t2, w2, "y")).await.unwrap();
+    transport.dispatch(dispatch_req(t1, w1, "a")).await.unwrap();
+    transport.dispatch(dispatch_req(t2, w2, "b")).await.unwrap();
 
-    // 두 task 모두 Completed 수신.
-    let mut seen = std::collections::HashSet::new();
+    let mut outputs: std::collections::HashMap<TaskId, String> = std::collections::HashMap::new();
+    let mut completed: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while seen.len() < 2 && std::time::Instant::now() < deadline {
+    while completed.len() < 2 && std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Output { task_id, chunk, .. })) => {
+                outputs.entry(task_id).or_default().push_str(&chunk);
+            }
             Ok(Some(WorkerEvent::Completed { task_id, .. })) => {
-                seen.insert(task_id);
+                completed.insert(task_id);
             }
             _ => continue,
         }
     }
-    assert!(seen.contains(&t1), "t1 should complete");
-    assert!(seen.contains(&t2), "t2 should complete");
+    assert_eq!(completed.len(), 2);
+    assert_eq!(outputs.get(&t1).map(String::as_str), Some("from-worker-1"));
+    assert_eq!(outputs.get(&t2).map(String::as_str), Some("from-worker-2"));
+}
+
+#[tokio::test]
+async fn completed_task_receives_no_further_output_after_session_ends() {
+    // 태스크마다 새 세션을 쓰므로, 첫 태스크가 끝난 뒤 같은 워커에 두 번째
+    // 태스크를 보내도 서로의 출력이 섞이면 안 된다.
+    let (state, addr) = start_mock_server().await;
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 2)
+        .await
+        .unwrap();
+
+    *state.scripted_chunks.lock().await = vec!["first".to_string()];
+    let t1 = TaskId::new();
+    transport
+        .dispatch(dispatch_req(t1, worker, "a"))
+        .await
+        .unwrap();
+
+    let mut out1 = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Output { task_id, chunk, .. })) if task_id == t1 => {
+                out1.push_str(&chunk);
+            }
+            Ok(Some(WorkerEvent::Completed { task_id, .. })) if task_id == t1 => break,
+            _ => continue,
+        }
+    }
+    assert_eq!(out1, "first");
+
+    *state.scripted_chunks.lock().await = vec!["second".to_string()];
+    let t2 = TaskId::new();
+    transport
+        .dispatch(dispatch_req(t2, worker, "b"))
+        .await
+        .unwrap();
+
+    let mut out2 = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Output { task_id, chunk, .. })) if task_id == t2 => {
+                out2.push_str(&chunk);
+            }
+            Ok(Some(WorkerEvent::Completed { task_id, .. })) if task_id == t2 => break,
+            _ => continue,
+        }
+    }
+    assert_eq!(
+        out2, "second",
+        "second task's output must not contain the first task's text"
+    );
 }

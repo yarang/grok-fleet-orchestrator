@@ -1,0 +1,106 @@
+[package]
+name = "agent-client-protocol-http"
+version = "2.0.0"
+# FLEET PATCH (2026-08-11): 워크스페이스 상속 제거 — agent-client-protocol/Cargo.toml
+# 상단 주석 참고.
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Zed <hi@zed.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/agentclientprotocol/rust-sdk"
+homepage = "https://github.com/agentclientprotocol/rust-sdk"
+description = "HTTP and WebSocket transport for the Agent Client Protocol (ACP)"
+keywords = ["acp", "agent", "protocol", "http", "websocket"]
+categories = ["development-tools", "web-programming::http-server"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = []
+client = [
+    "dep:agent-client-protocol",
+    "dep:eventsource-stream",
+    "dep:futures",
+    "dep:reqwest",
+    "dep:serde_json",
+    "dep:thiserror",
+    "dep:async-tungstenite",
+    "dep:tokio",
+    "tokio/rt",
+    "dep:tracing",
+    "dep:url",
+    # FLEET PATCH (2026-08-11): WebSocket mTLS connector 주입 지원.
+    "dep:tokio-rustls",
+]
+server = [
+    "dep:agent-client-protocol",
+    "dep:async-stream",
+    "dep:axum",
+    "dep:futures",
+    "dep:serde_json",
+    "dep:tokio",
+    "tokio/macros",
+    "tokio/rt",
+    "tokio/sync",
+    "dep:tower-http",
+    "dep:tracing",
+    "dep:uuid",
+]
+[dependencies]
+agent-client-protocol = { path = "../agent-client-protocol", version = "2.0.0", optional = true }
+
+futures = { version = "0.3.32", optional = true }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"], optional = true }
+thiserror = { version = "2.0", optional = true }
+tokio = { version = "1.52", default-features = false, optional = true }
+tracing = { version = "0.1", optional = true }
+
+# Server
+async-stream = { version = "0.3.6", optional = true }
+axum = { version = "0.8", features = ["ws", "macros"], optional = true }
+tower-http = { version = "0.7", features = ["cors"], optional = true }
+uuid = { version = "1.18", features = ["v4"], optional = true }
+
+# Client
+async-tungstenite = { version = "0.35.0", default-features = false, features = ["tokio-rustls-webpki-roots"], optional = true }
+eventsource-stream = { version = "0.2", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"], optional = true }
+url = { version = "2.5", optional = true }
+# FLEET PATCH (2026-08-11): WebSocket mTLS connector 주입 지원 — 상세는
+# client.rs의 HttpClient::with_tls_connector 및 FLEET_PATCHES.md 참고.
+tokio-rustls = { version = "0.26", optional = true }
+
+[dev-dependencies]
+agent-client-protocol-test = { path = "../agent-client-protocol-test" }
+async-stream = "0.3.6"
+axum = { version = "0.8", features = ["ws", "macros"] }
+tokio = { version = "1.52", default-features = false, features = ["macros", "net", "rt", "sync", "time"] }
+async-tungstenite = { version = "0.35.0", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tower = { version = "0.5", features = ["util"] }
+# FLEET PATCH (2026-08-11): with_tls_connector 회귀 테스트용 (실제 rustls::ClientConfig
+# 구성 필요). ring provider 필요.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# FLEET PATCH (2026-08-11): agent-client-protocol/Cargo.toml 상단 주석 참고.
+[lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+let_underscore = "warn"
+missing_debug_implementations = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+wildcard_imports = "allow"

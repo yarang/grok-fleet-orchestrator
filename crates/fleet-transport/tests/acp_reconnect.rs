@@ -12,7 +12,7 @@
 
 #![cfg(feature = "acp")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +40,13 @@ use tokio::time::timeout;
 struct MockState {
     received: Arc<Mutex<Vec<Value>>>,
     next_prompt_id: Arc<Mutex<u64>>,
+    /// 2026-08-11 버그 수정: 예전엔 모든 session/new에 고정 문자열
+    /// "session-1"을 반환했는데, 이 파일의 재설계(태스크당 세션 하나)에서는
+    /// 동시에 2개 이상 dispatch되면 `sessions_map: HashMap<SessionId, _>`의
+    /// 같은 키를 서로 덮어써서 하나의 태스크가 통째로 유실됐다
+    /// (`failed_event_emitted_for_in_flight_task_on_close`가 이걸로 실패했다
+    /// — fail_all()이 count=1만 봄, 원래는 2여야 함). 세션마다 고유 ID 발급.
+    next_session_id: Arc<AtomicU64>,
     /// true로 설정 시 다음 요청 처리 후 WebSocket Close 프레임 전송.
     close_after_next: Arc<AtomicBool>,
     /// prompt 처리를 차단할지 여부. true면 session/prompt 응답 없이 대기.
@@ -54,6 +61,7 @@ impl Default for MockState {
         Self {
             received: Arc::new(Mutex::new(Vec::new())),
             next_prompt_id: Arc::new(Mutex::new(0)),
+            next_session_id: Arc::new(AtomicU64::new(0)),
             close_after_next: Arc::new(AtomicBool::new(false)),
             block_prompt: Arc::new(AtomicBool::new(false)),
             close_now: Arc::new(AtomicBool::new(false)),
@@ -77,7 +85,7 @@ async fn ws_handler(
 }
 
 async fn handle_acp_socket(socket: WebSocket, state: MockState) {
-    use futures_util::{SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt};
     let (mut writer, mut reader) = socket.split();
 
     loop {
@@ -109,45 +117,47 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
             .unwrap_or("")
             .to_string();
         let id = req.get("id").cloned();
-        state.received.lock().await.push(req);
+        state.received.lock().await.push(req.clone());
 
         let response: Option<Value> = match method.as_str() {
             "initialize" => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": {
-                    "protocolVersion": 1,
-                    "serverCapabilities": { "streaming": true },
-                },
+                "result": { "protocolVersion": 1 },
             })),
-            "session/new" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "sessionId": "session-1" },
-            })),
+            "session/new" => {
+                let sid = state.next_session_id.fetch_add(1, Ordering::SeqCst);
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "sessionId": format!("session-{sid}") },
+                }))
+            }
             "session/prompt" => {
                 if state.block_prompt.load(Ordering::SeqCst) {
                     None // 응답 없이 대기 — reader 종료 테스트용.
                 } else {
-                    let prompt_id = {
+                    let _seq = {
                         let mut next = state.next_prompt_id.lock().await;
                         *next += 1;
                         *next
                     };
+                    let session_id = req
+                        .get("params")
+                        .and_then(|p| p.get("sessionId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("session-1")
+                        .to_string();
+                    // 2026-08-11 실측 포맷: sessionUpdate 태그, content는 단일
+                    // {text, type} 객체, 톱레벨 promptId 없음.
                     let update = json!({
                         "jsonrpc": "2.0",
                         "method": "session/update",
                         "params": {
-                            "sessionId": "session-1",
-                            "promptId": prompt_id,
+                            "sessionId": session_id,
                             "update": {
-                                "type": "agent_message_chunk",
-                                "content": {
-                                    "agent_message": [{
-                                        "type": "text",
-                                        "text": "hello",
-                                    }],
-                                },
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": { "type": "text", "text": "hello" },
                             },
                         },
                     });
@@ -155,13 +165,7 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     Some(json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": {
-                            // camelCase — 위 session/update의 "promptId"와 일관되게.
-                            "promptId": prompt_id,
-                            "agent_message": [{"type": "text", "text": "hello"}],
-                            "end_of_turn": true,
-                            "usage": {"input_tokens": 1, "output_tokens": 2},
-                        },
+                        "result": { "stopReason": "end_turn" },
                     }))
                 }
             }
@@ -421,8 +425,17 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
     while std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), rx.recv()).await {
             Ok(Some(WorkerEvent::Failed { task_id, error })) => {
+                // 2026-08-11: 어느 경로가 먼저 이 task를 정리하느냐에 따라 두
+                // 가지 메시지 중 하나가 온다 — (a) supervisor의 fail_all()
+                // ("ACP connection lost..."), 또는 (b) 연결이 끊기면서 SDK가
+                // 내부적으로 보류 중이던 session/prompt 요청을 취소해
+                // dispatch()의 에러 경로가 직접 emit ("session/prompt: ...
+                // canceled"). 중복 emit은 아니다 — 둘 중 먼저 session_id를
+                // 제거하는 쪽만 emit한다(AcpTransport::dispatch 참고).
                 assert!(
-                    error.contains("reader exited") || error.contains("connection"),
+                    error.contains("connection")
+                        || error.contains("canceled")
+                        || error.contains("cancelled"),
                     "unexpected error: {error}"
                 );
                 if task_id == task1 {

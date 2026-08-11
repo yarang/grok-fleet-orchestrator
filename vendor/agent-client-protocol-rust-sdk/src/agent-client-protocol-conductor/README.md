@@ -1,0 +1,65 @@
+# agent-client-protocol-conductor
+
+Binary for orchestrating [ACP](https://agentclientprotocol.com/) proxy chains.
+
+## What is the conductor?
+
+The conductor is a tool that manages proxy chains — it spawns proxy components and the base agent, then routes messages between them. From the editor's perspective, the conductor appears as a single ACP agent.
+
+```
+Editor ← stdio → Conductor → Proxy 1 → Proxy 2 → Agent
+```
+
+## Usage
+
+### Agent Mode
+
+Orchestrate a chain of proxies in front of an agent:
+
+```bash
+# Chain format: proxy1 proxy2 ... agent
+agent-client-protocol-conductor agent "python proxy1.py" "python proxy2.py" "python base-agent.py"
+```
+
+The conductor:
+
+1. Spawns each component as a subprocess
+2. Connects them in a chain
+3. Presents as a single agent on stdin/stdout
+4. Manages the lifecycle of all processes
+
+## How It Works
+
+**Component Communication:**
+
+- Editor talks to conductor via stdio
+- Conductor uses the `_proxy/successor` envelope to route messages
+- Each proxy can intercept, transform, or forward messages
+- Final agent receives standard ACP messages
+
+**Process Management:**
+
+- All components are spawned as child processes
+- When conductor exits, all children are terminated
+- Errors in any component bring down the entire chain
+
+## Building
+
+```bash
+cargo build --release -p agent-client-protocol-conductor
+
+# Include draft ACP v2 proxy initialization
+cargo build --release -p agent-client-protocol-conductor --features unstable_protocol_v2
+```
+
+Binary will be at `target/release/agent-client-protocol-conductor`.
+
+## Related Crates
+
+- **[agent-client-protocol](../agent-client-protocol/)** — Core ACP protocol types and traits
+- **[agent-client-protocol-polyfill](../agent-client-protocol-polyfill/)** — Compatibility proxies, including adapting MCP-over-ACP to HTTP
+- **[agent-client-protocol-trace-viewer](../agent-client-protocol-trace-viewer/)** — Interactive trace visualization
+
+## License
+
+Apache-2.0

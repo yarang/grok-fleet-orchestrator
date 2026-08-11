@@ -10,15 +10,25 @@ repository.workspace = true
 [features]
 default = []
 # ACP (Agent Client Protocol) over WebSocket transport.
-# grok agent serve (port 2419) speaks this protocol.
+# grok agent serve (port 2419)가 이 프로토콜을 사용.
+#
+# 2026-08-11: 손으로 짠 JSON-RPC 파서(옛 acp/*.rs) 대신 공식
+# agent-client-protocol Rust SDK(vendor/agent-client-protocol-rust-sdk)를 사용.
+# 배경: 오늘 하루 wire-format을 잘못 추측한 버그 3건을 실측으로 고쳤는데,
+# grok에 번들된 공식 문서를 보니 이미 정확한 스펙이 있었고 공식 SDK도 있었다.
 acp = [
-    "dep:tokio-tungstenite",
-    "dep:futures-util",
-    "dep:url",
-    "dep:rand",
+    "dep:agent-client-protocol",
+    "dep:agent-client-protocol-http",
+    "dep:futures",
 ]
 # mTLS client support for the ACP WebSocket (Phase 8.5).
 # Enables wss:// endpoints with custom CA + client cert.
+#
+# agent-client-protocol-http은 기본적으로 WebSocket mTLS connector 주입을
+# 지원하지 않아, vendor에 패치를 적용했다 (HttpClient::with_tls_connector —
+# vendor/agent-client-protocol-rust-sdk/FLEET_PATCHES.md 참고). 패치가
+# `client` feature 안에 tokio-rustls를 이미 포함시켜 뒀으므로 별도
+# sub-feature 없이 그대로 재사용한다.
 mtls = [
     "dep:rustls",
     "dep:rustls-pemfile",
@@ -36,13 +46,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
-# ACP-only (optional)
-tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
-futures-util = { version = "0.3", optional = true }
-url = { version = "2", optional = true }
-rand = { version = "0.8", optional = true }
+# ACP-only (optional) — 공식 SDK, vendor/agent-client-protocol-rust-sdk 로컬 경로.
+agent-client-protocol = { path = "../../vendor/agent-client-protocol-rust-sdk/src/agent-client-protocol", optional = true, features = ["unstable_end_turn_token_usage"] }
+agent-client-protocol-http = { path = "../../vendor/agent-client-protocol-rust-sdk/src/agent-client-protocol-http", optional = true, features = ["client"] }
+futures = { workspace = true, optional = true }
 
-# mTLS-only (optional; Phase 8.5)
+# mTLS-only (optional; Phase 8.5). tokio-rustls는 agent-client-protocol-http에
+# HttpClient::with_tls_connector로 전달할 TlsConnector를 만드는 데도 쓰인다.
 rustls = { workspace = true, optional = true, features = ["ring"] }
 rustls-pemfile = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }

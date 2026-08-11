@@ -1,7 +1,12 @@
 //! Phase 8.5.2: MtlsProxy 엔드투엔드 통합 테스트.
 //!
-//! 평문 TCP echo upstream → MtlsProxy → WsConn::connect_mtls 클라이언트.
+//! 평문 TCP echo upstream → MtlsProxy → (mTLS 핸드셰이크 후) 클라이언트.
 //! TLS 종단 + 클라이언트 인증서 검증 + 양방향 복사가 모두 동작하는지 확인.
+//!
+//! 2026-08-11: `MtlsProxy`는 ACP와 무관한 범용 mTLS 종단 프록시(fleet-worker
+//! 쪽에서 사용)라 이번 SDK 전환의 영향을 받지 않는다 — 옛 `WsConn::connect_mtls`
+//! 대신 `rustls` connector로 직접 TLS를 맺고 그 위에 `tokio_tungstenite::client_async`로
+//! WS 핸드셰이크만 하는 방식으로 클라이언트 쪽만 갈아 끼웠다.
 //!
 //! `--features mtls` 필요.
 
@@ -20,7 +25,6 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
-use fleet_transport::acp::transport::WsConn;
 use fleet_transport::mtls_proxy::MtlsProxy;
 use fleet_transport::tls::{ClientTlsConfig, ServerTlsConfig};
 
@@ -245,16 +249,32 @@ async fn mtls_proxy_forwards_websocket_handshake() {
         write_pem(&material.dir, "client.key", &material.client_key_pem),
     );
 
+    // TLS를 먼저 맺고, 그 스트림 위에 WS 핸드셰이크만 얹는다 — 옛
+    // `WsConn::connect_mtls`가 내부적으로 하던 것과 동일한 두 단계를
+    // 이 테스트 파일의 다른 테스트들과 같은 방식(직접 rustls connector)으로 수행.
+    let connector = client_tls.build_connector().unwrap();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr)
+        .await
+        .expect("connect proxy");
+    use rustls::pki_types::ServerName;
+    let server_name = ServerName::try_from("localhost").unwrap();
+    let tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("TLS connect");
+
     let url = format!("wss://localhost:{}/ws?server-key=x", proxy_addr.port());
-    let (ws, mut reader) = WsConn::connect_mtls(&url, &client_tls)
+    let (mut ws, _resp) = tokio_tungstenite::client_async(url, tls_stream)
         .await
-        .expect("mTLS connect through proxy");
+        .expect("ws handshake through proxy");
 
-    ws.send_text(r#"{"jsonrpc":"2.0","method":"ping","id":1}"#)
-        .await
-        .unwrap();
+    ws.send(Message::Text(
+        r#"{"jsonrpc":"2.0","method":"ping","id":1}"#.into(),
+    ))
+    .await
+    .unwrap();
 
-    let msg = tokio::time::timeout(Duration::from_secs(5), reader.next())
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
         .await
         .expect("timeout")
         .expect("stream closed")
@@ -265,7 +285,7 @@ async fn mtls_proxy_forwards_websocket_handshake() {
         other => panic!("expected text, got {other:?}"),
     }
 
-    let _ = ws.close().await;
+    let _ = ws.close(None).await;
     let _ = shutdown_tx.send(true);
     let _ = proxy_handle.await;
 }

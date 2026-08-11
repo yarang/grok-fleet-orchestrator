@@ -1,17 +1,22 @@
-//! AcpTransport 동시 다중 세션 (Phase 8.4) 통합 테스트.
+//! AcpTransport 동시 다중 세션 (Phase 8.4, 2026-08-11 SDK 전환 이후 재작성)
+//! 통합 테스트.
 //!
 //! 시나리오:
 //! 1. 단일 워커를 `max_concurrent=N`으로 등록.
 //! 2. N개의 task를 동시에 dispatch — 모두 정상적으로 Completed 수신.
 //! 3. N+1번째 task는 `WorkerAtCapacity` 에러.
-//! 4. 한 task가 실패해도 다른 task는 계속 진행.
-//! 5. WebSocket 종료 시 in-flight인 모든 task가 Failed로 전환.
+//! 4. `in_flight_count`가 실제 진행 상황을 반영.
 //!
-//! 핵심: promptId 기반 이벤트 라우팅이 정확히 각 task에게 도달하는지 검증.
+//! 핵심: 태스크마다 새 ACP 세션을 여는 설계 덕분에, `session_id`로 스트리밍
+//! 출력이 **완전히 정확하게** 올바른 task로 라우팅됨을 검증한다 — 옛
+//! promptId 기반 설계는 실제 grok가 신뢰할 수 있는 promptId를 안 줘서 2개
+//! 이상 동시 진행 시 "안전하게 드롭"만 보장했지만, 세션 분리 설계는 애초에
+//! 모호함 자체가 없다.
 
 #![cfg(feature = "acp")]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,10 +41,10 @@ use tokio::time::timeout;
 
 #[derive(Clone, Default)]
 struct MockState {
-    /// 서버가 받은 session/prompt 요청의 prompt 텍스트.
-    received_prompts: Arc<Mutex<Vec<String>>>,
-    /// 각 session/prompt가 완료되었는지 추적 (mock은 모두 즉시 완료).
-    completed_count: Arc<std::sync::atomic::AtomicU64>,
+    next_session_id: Arc<AtomicU64>,
+    /// 각 session/prompt를 몇 초 지연시킬지 — 동시성/용량 테스트에서 슬롯을
+    /// 오래 붙잡아두기 위해 사용.
+    prompt_delay: Arc<Mutex<Duration>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,13 +62,11 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_acp_socket(socket, state))
 }
 
-/// mock ACP 서버 — 각 session/prompt 요청에 대해 고유 promptId로 응답.
-/// 동시에 여러 요청이 들어와도 각각 독립적으로 처리.
+/// mock ACP 서버 — 태스크마다 새 session/new를 받고, session_id별로 고유한
+/// echo 텍스트를 스트리밍한다.
 async fn handle_acp_socket(socket: WebSocket, state: MockState) {
-    use futures_util::{SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt};
     let (mut writer, mut reader) = socket.split();
-
-    let mut next_prompt_id: u64 = 0;
 
     while let Some(msg) = reader.next().await {
         let text = match msg {
@@ -71,109 +74,62 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
             Ok(WsMessage::Close(_)) | Err(_) => break,
             _ => continue,
         };
-
         let req: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(_) => continue,
         };
-
-        let method = req
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
         let id = req.get("id").cloned();
 
-        let response: Option<Value> = match method.as_str() {
-            "initialize" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": 1,
-                    "serverCapabilities": { "streaming": true },
-                },
-            })),
-            "session/new" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "sessionId": "session-shared" },
-            })),
+        match method {
+            "initialize" => {
+                let resp = json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1}});
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            }
+            "session/new" => {
+                let sid = state.next_session_id.fetch_add(1, Ordering::SeqCst);
+                let resp = json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "sessionId": format!("session-{sid}") },
+                });
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            }
             "session/prompt" => {
-                next_prompt_id += 1;
-                let prompt_id = next_prompt_id;
-
-                // prompt 텍스트 기록.
-                let prompt_text = req
+                let session_id = req
                     .get("params")
-                    .and_then(|p| p.get("prompt"))
+                    .and_then(|p| p.get("sessionId"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .unwrap_or("unknown")
                     .to_string();
-                state
-                    .received_prompts
-                    .lock()
-                    .await
-                    .push(prompt_text.clone());
 
-                // 2026-08-11 실측 포맷: 태그 키는 sessionUpdate(type 아님), content는
-                // {text, type} 단일 객체, 톱레벨엔 promptId가 없다 — 실제 grok과
-                // 동일하게 맞춘다. 실제 promptId는 update._meta 안에 문자열로만
-                // 있고 우리 코드는 아직 그걸 안 읽는다(SessionUpdate 문서 참조) —
-                // 이 mock도 그 현실을 반영해 문자열 UUID로 채운다.
+                let delay = *state.prompt_delay.lock().await;
+                if delay > Duration::ZERO {
+                    tokio::time::sleep(delay).await;
+                }
+
+                // 세션마다 고유한 echo 텍스트 — 라우팅 정확성 검증용.
                 let update = json!({
                     "jsonrpc": "2.0",
                     "method": "session/update",
                     "params": {
-                        "sessionId": "session-shared",
+                        "sessionId": session_id,
                         "update": {
-                            "_meta": {"promptId": format!("prompt-{prompt_id}")},
                             "sessionUpdate": "agent_message_chunk",
-                            "content": {
-                                "type": "text",
-                                "text": format!("echo:{prompt_id}"),
-                            },
+                            "content": { "type": "text", "text": format!("echo:{session_id}") },
                         },
                     },
                 });
                 let _ = writer.send(WsMessage::Text(update.to_string())).await;
 
-                state
-                    .completed_count
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        // camelCase — 위 session/update의 "promptId"와 일관되게.
-                        // (과거 이 mock은 snake_case "prompt_id"를 썼는데, 마침
-                        // 실제 PromptResult 구조체도 rename 없이 snake_case를
-                        // 기대하던 버그와 우연히 맞아떨어져 여기선 드러나지
-                        // 않았었다 — messages.rs의 PromptResult.prompt_id 참조.)
-                        "promptId": prompt_id,
-                        "agent_message": [{
-                            "type": "text",
-                            "text": format!("echo:{prompt_id}"),
-                        }],
-                        "end_of_turn": true,
-                        "usage": {"input_tokens": 1, "output_tokens": 2},
-                    },
-                }))
+                let resp = json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}});
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
-            "session/cancel" => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {},
-            })),
-            _ => Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": -32601, "message": "not found"},
-            })),
-        };
-
-        if let Some(resp) = response {
-            let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            _ => {
+                if id.is_some() {
+                    let resp = json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"not found"}});
+                    let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+                }
+            }
         }
     }
 }
@@ -186,11 +142,9 @@ async fn start_mock_server() -> (MockState, SocketAddr) {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-
     (state, addr)
 }
 
@@ -217,13 +171,11 @@ async fn concurrent_dispatches_within_capacity_all_complete() {
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
-    // max_concurrent=3 — 3개 동시 dispatch 허용.
     transport
         .register(worker, &endpoint(addr), 3)
         .await
         .expect("register");
 
-    // 3개 task 동시 dispatch.
     let mut task_ids = Vec::new();
     for i in 0..3 {
         let tid = TaskId::new();
@@ -234,20 +186,15 @@ async fn concurrent_dispatches_within_capacity_all_complete() {
             .expect("dispatch");
     }
 
-    // 모든 task가 Completed 수신되어야 함.
     let mut completed: Vec<TaskId> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while completed.len() < 3 && std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Completed { task_id, .. })) => {
-                completed.push(task_id);
-            }
+            Ok(Some(WorkerEvent::Completed { task_id, .. })) => completed.push(task_id),
             _ => continue,
         }
     }
     assert_eq!(completed.len(), 3, "all 3 concurrent tasks should complete");
-
-    // 각 task_id가 dispatch한 것과 일치.
     for tid in &task_ids {
         assert!(completed.contains(tid), "task {tid} should have completed");
     }
@@ -257,103 +204,71 @@ async fn concurrent_dispatches_within_capacity_all_complete() {
 
 #[tokio::test]
 async fn dispatch_beyond_capacity_returns_worker_at_capacity() {
-    let (_state, addr) = start_mock_server().await;
+    let (state, addr) = start_mock_server().await;
+    // 슬롯을 오래 붙잡아 두기 위해 응답을 지연시킨다 — permit은 dispatch()
+    // 호출 시점에 즉시(동기적으로) 획득되므로, 이 지연이 없어도 정상 동작해야
+    // 하지만(레이스 없음이 이번 재설계의 핵심 개선) 지연을 둬서 테스트를
+    // 타이밍에 흔들리지 않게 만든다.
+    *state.prompt_delay.lock().await = Duration::from_millis(300);
+
     let transport = Arc::new(AcpTransport::new());
     let _events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
-    // max_concurrent=1 — 단일 동시만 허용.
     transport
         .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
 
-    // 첫 번째 dispatch는 성공 (서버 응답이 올 때까지 in_flight).
-    // 단, mock 서버는 즉시 응답하므로 약간의 timing 이슈가 있을 수 있음.
-    // 안정적으로 테스트하기 위해, 두 번째 dispatch를 첫 번째가 완료되기 전에 보냄.
-    // → 비동기 dispatch이므로 dispatch() 호출이 즉시 반환.
-
-    // 방식: 빠르게 2개 dispatch — 두 번째는 WorkerAtCapacity여야 함.
     let t1 = TaskId::new();
     transport
         .dispatch(dispatch_req(t1, worker, "first"))
         .await
         .expect("first dispatch within capacity");
 
-    // 서버가 응답하기 전에 두 번째 dispatch 시도.
+    // permit은 dispatch() 호출 시 즉시(non-blocking) 획득되므로, 세션 생성이
+    // 아직 안 끝났어도 두 번째 dispatch는 확정적으로 WorkerAtCapacity여야
+    // 한다 — 옛 구현의 "레이스 조건" 주석은 이제 해당 없음.
     let t2 = TaskId::new();
     let result = transport.dispatch(dispatch_req(t2, worker, "second")).await;
-
-    // 두 가지 가능성:
-    // (a) 서버가 아직 응답 안 함 → WorkerAtCapacity.
-    // (b) 운좋게 첫 번째가 이미 complete → Ok.
-    // 보통은 (a)가 우세 — dispatch는 백그라운드 spawn이므로.
-    match result {
-        Err(TransportError::WorkerAtCapacity(_)) => {
-            // 기대한 경로.
-        }
-        Ok(_) => {
-            // 경쟁 조건에서 첫 번째가 이미 끝난 경우 — 재시도로 검증.
-            let t3 = TaskId::new();
-            let r3 = transport.dispatch(dispatch_req(t3, worker, "third")).await;
-            // 이 시점에는 t1이 이미 끝났으므로 Ok여야 함 (단일 슬롯 다시 가용).
-            assert!(r3.is_ok(), "after first completes, slot is freed");
-        }
-        Err(other) => panic!("expected WorkerAtCapacity or Ok, got {other:?}"),
-    }
+    assert!(
+        matches!(result, Err(TransportError::WorkerAtCapacity(_))),
+        "expected WorkerAtCapacity, got {result:?}"
+    );
 
     transport.unregister(worker).await.unwrap();
 }
 
 #[tokio::test]
-async fn output_events_dropped_safely_when_multiple_tasks_in_flight_without_prompt_id() {
-    // 2026-08-11 재작성: 이 테스트는 원래 "Output이 promptId 기반으로 올바른
-    // task에 라우팅된다"를 검증했으나, 실측 결과 실제 grok는 session/update
-    // 톱레벨에 promptId를 전혀 보내지 않는다(문자열로 update._meta 안에만
-    // 있고, 우리 PromptId는 아직 u64 기반이라 그 값을 상관관계에 못 쓴다 —
-    // messages.rs::SessionUpdate 문서 참조). 즉 **2개 이상 태스크가 동시에
-    // in-flight인 경우, 실제 grok를 상대로는 promptId 기반 라우팅이 원천적으로
-    // 불가능하다** — 이건 이번 수정 이전부터 존재하던 제약이다(이전 코드는
-    // 애초에 모든 notification 파싱에 실패해서 항상 드롭했으므로, 이 제약이
-    // 드러나지 않았을 뿐).
-    //
-    // WorkerSession::sole_in_flight_task 폴백은 in-flight 태스크가 정확히
-    // 하나일 때만 라우팅한다 — 둘 이상이면 모호하므로 안전하게 드롭한다(잘못된
-    // task로 보내는 것보다 안전). 이 테스트는 그 안전 속성(오귀속 없음)을
-    // 검증한다. 진짜 동시 다중 태스크 output 어트리뷰션을 지원하려면
-    // `_meta.promptId`(문자열) 기반 상관관계로 `PromptId` 타입 자체를
-    // 리팩터해야 한다 — 후속 작업으로 남겨둔다.
+async fn concurrent_tasks_stream_output_via_correct_session_routing() {
+    // 태스크마다 새 세션을 열므로, 진짜 동시에 dispatch해도 각자의 출력이
+    // 절대 섞이지 않아야 한다(옛 promptId 기반 설계는 "안전하게 드롭"까지만
+    // 보장했지만, 세션 분리는 애초에 모호함이 없다).
     let (_state, addr) = start_mock_server().await;
     let transport = Arc::new(AcpTransport::new());
     let mut events = transport.subscribe().await.expect("subscribe");
 
     let worker = WorkerId::new();
     transport
-        .register(worker, &endpoint(addr), 3)
+        .register(worker, &endpoint(addr), 5)
         .await
         .expect("register");
 
-    let t1 = TaskId::new();
-    let t2 = TaskId::new();
-    transport
-        .dispatch(dispatch_req(t1, worker, "alpha"))
-        .await
-        .unwrap();
-    transport
-        .dispatch(dispatch_req(t2, worker, "beta"))
-        .await
-        .unwrap();
+    let task_ids: Vec<TaskId> = (0..5).map(|_| TaskId::new()).collect();
+    for (i, tid) in task_ids.iter().enumerate() {
+        transport
+            .dispatch(dispatch_req(*tid, worker, &format!("prompt-{i}")))
+            .await
+            .expect("dispatch");
+    }
 
     let mut outputs: std::collections::HashMap<TaskId, String> = std::collections::HashMap::new();
     let mut completed: std::collections::HashSet<TaskId> = std::collections::HashSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while completed.len() < 2 && std::time::Instant::now() < deadline {
+    while completed.len() < 5 && std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
             Ok(Some(WorkerEvent::Output { task_id, chunk, .. })) => {
-                outputs
-                    .entry(task_id)
-                    .and_modify(|s| s.push_str(&chunk))
-                    .or_insert_with(|| chunk.clone());
+                outputs.entry(task_id).or_default().push_str(&chunk);
             }
             Ok(Some(WorkerEvent::Completed { task_id, .. })) => {
                 completed.insert(task_id);
@@ -361,15 +276,19 @@ async fn output_events_dropped_safely_when_multiple_tasks_in_flight_without_prom
             _ => continue,
         }
     }
-    assert_eq!(completed.len(), 2, "both tasks should still complete");
+    assert_eq!(completed.len(), 5, "all 5 concurrent tasks should complete");
 
-    // 핵심 안전 속성: 모호한 상황(2개 이상 in-flight)에서 output을 못 받는
-    // 건 허용되지만, 서로 다른 task의 output이 뒤섞이면(cross-contamination)
-    // 절대 안 된다. 둘 다 받았다면 반드시 서로 달라야 한다.
-    if let (Some(out1), Some(out2)) = (outputs.get(&t1), outputs.get(&t2)) {
-        assert_ne!(
-            out1, out2,
-            "if both tasks received output, it must not be cross-contaminated"
+    // 각 태스크가 정확히 자기 자신의 echo만 받았는지 확인 — 모두 서로 달라야
+    // 함(mock 서버가 session_id를 echo 텍스트에 포함시키므로).
+    let mut seen = std::collections::HashSet::new();
+    for tid in &task_ids {
+        let out = outputs
+            .get(tid)
+            .unwrap_or_else(|| panic!("task {tid} should have received its own output"));
+        assert!(out.starts_with("echo:session-"), "unexpected output: {out}");
+        assert!(
+            seen.insert(out.clone()),
+            "duplicate/cross-contaminated output detected: {out}"
         );
     }
 
@@ -387,14 +306,11 @@ async fn in_flight_count_reflects_active_dispatches() {
         .await
         .expect("register");
 
-    // 등록 직후 in_flight = 0.
     assert_eq!(
         transport.in_flight_count(worker).await,
         Some(0),
         "freshly registered worker should have 0 in-flight"
     );
-
-    // max_concurrent 조회.
     assert_eq!(transport.max_concurrent(worker).await, Some(4));
 
     transport.unregister(worker).await.unwrap();

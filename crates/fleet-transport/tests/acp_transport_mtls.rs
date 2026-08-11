@@ -1,9 +1,13 @@
 //! Phase 8.5.3: AcpTransport mTLS 통합 테스트.
 //!
-//! `AcpTransport::with_client_tls` 로 구성된 transport 가 `wss://` endpoint 에
-//! 대해 mTLS 핸드셰이크를 수행하고, register 가 성공하는지 검증한다. 서버는
-//! 클라이언트 인증서를 강제하고, ACP 초기화 (`initialize` + `session/new`)
-//! 에 대한 최소한의 JSON-RPC 응답을 반환한다.
+//! `AcpTransport::with_client_tls` 로 구성된 transport(내부적으로는 SDK의
+//! `agent-client-protocol-http::HttpClient::with_tls_connector` — vendor
+//! 패치, `FLEET_PATCHES.md` 참고)가 `wss://` endpoint 에 대해 mTLS 핸드셰이크를
+//! 수행하고, register + 실제 태스크 dispatch가 성공하는지 검증한다. 서버는
+//! 클라이언트 인증서를 강제하고, `initialize`/`session/new`/`session/prompt`
+//! 에 대한 최소한의 JSON-RPC 응답을 반환한다(옛 `WsConn::connect_mtls` 전용
+//! 저수준 테스트였던 `mtls_handshake.rs`는 이 파일이 더 높은 레벨에서
+//! 대체하며 삭제됐다).
 //!
 //! `--features "acp mtls"` 필요.
 
@@ -170,22 +174,41 @@ async fn start_acp_mtls_server(
                 let Ok(mut ws) = tokio_tungstenite::accept_async(tls).await else {
                     return;
                 };
-                // ACP handshake: initialize -> session/new -> 무한 대기.
+                // ACP handshake: initialize -> session/new -> session/prompt.
+                // 2026-08-11: 실제 grok/SDK wire-format에 맞춤 — protocolVersion은
+                // 정수, session/prompt는 stopReason을 포함한 결과를 반환해야
+                // `block_task()`가 끝난다(안 그러면 register()는 성공해도 실제
+                // dispatch 테스트가 영원히 타임아웃한다).
                 while let Some(Ok(msg)) = ws.next().await {
-                    if let Message::Text(t) = msg {
-                        // 간이 JSON-RPC router.
-                        let response = if t.contains("\"initialize\"") {
-                            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-01","capabilities":{}}}"#
-                        } else if t.contains("\"session/new\"") {
-                            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"test-session"}}"#
-                        } else {
-                            // 그 외 메시지는 무시 (응답하지 않음).
-                            continue;
-                        };
-                        if ws.send(Message::Text(response.to_string())).await.is_err() {
+                    let Message::Text(t) = msg else {
+                        if matches!(msg, Message::Close(_)) {
                             break;
                         }
-                    } else if let Message::Close(_) = msg {
+                        continue;
+                    };
+                    let req: serde_json::Value = match serde_json::from_str(&t) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                    let id = req.get("id").cloned();
+
+                    let response = match method {
+                        "initialize" => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": { "protocolVersion": 1 },
+                        }),
+                        "session/new" => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": { "sessionId": "test-session" },
+                        }),
+                        "session/prompt" => serde_json::json!({
+                            "jsonrpc": "2.0", "id": id,
+                            "result": { "stopReason": "end_turn" },
+                        }),
+                        _ => continue, // session/cancel 등 notification은 응답 없음.
+                    };
+                    if ws.send(Message::Text(response.to_string())).await.is_err() {
                         break;
                     }
                 }
@@ -227,6 +250,64 @@ async fn acp_transport_with_client_tls_registers_via_wss() {
     );
 
     // 정리.
+    transport.unregister(worker_id).await.expect("unregister");
+}
+
+/// register 성공만으로는 실제 데이터 경로(session/new + session/prompt)가
+/// mTLS 위에서 끝까지 동작하는지 증명하지 못한다 — 실제 dispatch까지 확인.
+#[tokio::test]
+async fn acp_transport_with_client_tls_dispatches_task_end_to_end() {
+    use fleet_core::TaskId;
+    use fleet_transport::{DispatchRequest, WorkerEvent};
+
+    let material = generate_material();
+    let ca_path = write_pem(&material.dir, "ca.pem", &material.ca_pem);
+    let client_cert_path = write_pem(&material.dir, "client.pem", &material.client_cert_pem);
+    let client_key_path = write_pem(&material.dir, "client.key", &material.client_key_pem);
+
+    let (addr, _server) = start_acp_mtls_server(&material).await;
+    let url = format!("wss://localhost:{}/ws?server-key=test", addr.port());
+
+    let tls = ClientTlsConfig::from_paths(&ca_path, &client_cert_path, &client_key_path);
+    let transport = std::sync::Arc::new(AcpTransport::new().with_client_tls(tls));
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker_id = WorkerId::new();
+    transport
+        .register(worker_id, &url, 1)
+        .await
+        .expect("register via mTLS should succeed");
+
+    let task_id = TaskId::new();
+    transport
+        .dispatch(DispatchRequest {
+            task_id,
+            worker_id,
+            prompt: "ping".to_string(),
+            cwd: None,
+            model: None,
+            max_turns: None,
+            timeout_secs: Some(10),
+        })
+        .await
+        .expect("dispatch over mTLS");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut completed = false;
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Completed { task_id: t, .. })) if t == task_id => {
+                completed = true;
+                break;
+            }
+            Ok(Some(WorkerEvent::Failed { task_id: t, error })) if t == task_id => {
+                panic!("task failed over mTLS: {error}");
+            }
+            _ => continue,
+        }
+    }
+    assert!(completed, "task dispatched over mTLS should complete");
+
     transport.unregister(worker_id).await.expect("unregister");
 }
 

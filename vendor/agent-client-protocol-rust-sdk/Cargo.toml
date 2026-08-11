@@ -1,0 +1,122 @@
+[workspace]
+members = [
+    "src/agent-client-protocol",
+    "src/agent-client-protocol-derive",
+    # Keep polyfill and rmcp before conductor: release-plz currently ignores versioned
+    # dev-dependency edges, but cargo publish still validates them.
+    "src/agent-client-protocol-polyfill",
+    "src/agent-client-protocol-rmcp",
+    "src/agent-client-protocol-conductor",
+    "src/agent-client-protocol-http",
+    "src/agent-client-protocol-test",
+    "src/agent-client-protocol-trace-viewer",
+    "src/yopo",
+    # Keep cookbook last: release-plz currently ignores versioned
+    # dev-dependency edges, but cargo publish still validates them.
+    "src/agent-client-protocol-cookbook",
+]
+resolver = "3"
+
+[workspace.package]
+authors = ["Zed <hi@zed.dev>"]
+edition = "2024"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+repository = "https://github.com/agentclientprotocol/rust-sdk"
+homepage = "https://github.com/agentclientprotocol/rust-sdk"
+
+[workspace.dependencies]
+# Internal crates
+agent-client-protocol = { path = "src/agent-client-protocol", version = "2.0.0" }
+agent-client-protocol-conductor = { path = "src/agent-client-protocol-conductor", version = "2.0.0" }
+agent-client-protocol-derive = { path = "src/agent-client-protocol-derive", version = "2.0.0" }
+agent-client-protocol-http = { path = "src/agent-client-protocol-http", version = "2.0.0" }
+agent-client-protocol-polyfill = { path = "src/agent-client-protocol-polyfill", version = "2.0.0" }
+agent-client-protocol-rmcp = { path = "src/agent-client-protocol-rmcp", version = "3.0.0" }
+agent-client-protocol-test = { path = "src/agent-client-protocol-test" }
+agent-client-protocol-trace-viewer = { path = "src/agent-client-protocol-trace-viewer", version = "2.0.0" }
+yopo = { package = "agent-client-protocol-yopo", path = "src/yopo" }
+
+# Protocol
+agent-client-protocol-schema = { version = "=1.6.0", features = ["tracing"] }
+
+# Core async runtime
+tokio = { version = "1.52", default-features = false }
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+async-tungstenite = { version = "0.35.0", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+# FLEET PATCH (2026-08-11): agent-client-protocol-http의 WebSocket 클라이언트에
+# mTLS connector 주입을 지원하기 위해 추가. Fleet 워크스페이스가 쓰는 버전(0.26)과
+# 동일하게 맞춰 의존성 트리에서 rustls/tokio-rustls가 중복 버전으로 갈라지지 않게 함.
+tokio-rustls = "0.26"
+
+# Serialization
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+schemars = { version = "1.0", features = ["derive"] }
+
+# UUID generation
+uuid = { version = "1.18", features = ["v4"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# MCP SDK
+rmcp = { version = "2.1.0", features = ["server", "transport-io", "schemars"] }
+
+# CLI parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# HTTP
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+eventsource-stream = "0.2"
+url = "2.5"
+async-io = "2"
+async-process = "2"
+async-stream = "0.3.6"
+blocking = "1"
+chrono = "0.4"
+futures = "0.3.32"
+futures-concurrency = "7.6.3"
+open = "5"
+rustc-hash = "2.1.1"
+shell-words = "1.1"
+strip-ansi-escapes = "0.2"
+tower = { version = "0.5", features = ["util"] }
+tower-http = "0.7"
+windows-sys = "0.61"
+
+
+# Proc macros
+quote = "1"
+syn = "3"
+
+# Testing
+expect-test = "1.5"
+regex = "1.12.2"
+
+[workspace.lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+let_underscore = "warn"
+missing_debug_implementations = "warn"
+# missing_docs = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+wildcard_imports = "allow"

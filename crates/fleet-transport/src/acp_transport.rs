@@ -1,72 +1,67 @@
 //! `AcpTransport` — `WorkerTransport` trait의 ACP 구현체.
 //!
-//! per-worker WebSocket 연결. 각 워커는 하나의 `AcpClient` 인스턴스와
-//! 하나의 `SessionId`를 가짐. 워커에서 발생하는 AcpEvent는 fan-in 되어
-//! 하나의 broadcast 채널로 subscriber(dispatcher)에게 전달.
+//! 2026-08-11: 손으로 짠 JSON-RPC/WebSocket 클라이언트(옛 `acp/` 모듈) 대신
+//! 공식 [`agent-client-protocol`](https://github.com/agentclientprotocol/rust-sdk)
+//! Rust SDK를 사용합니다. 배경: 실제 grok의 ACP wire-format을 잘못 추측한 버그
+//! 3건(`session/update`의 태그 키가 `type`가 아니라 `sessionUpdate`, `promptId`가
+//! 톱레벨이 아니라 `update._meta`에 문자열로 존재 등)을 하루 동안 실측으로 고친
+//! 뒤, grok에 번들된 공식 문서가 이미 정확한 스펙을 담고 있었고 공식 SDK도
+//! 존재한다는 것을 발견해 전환을 결정했습니다. SDK는
+//! `vendor/agent-client-protocol-rust-sdk/`에 로컬 vendor되어 있으며, mTLS
+//! WebSocket connector 주입을 위한 소규모 패치가 적용되어 있습니다
+//! (`vendor/agent-client-protocol-rust-sdk/FLEET_PATCHES.md` 참고).
 //!
-//! ## 동시성 모델 (Phase 8.4)
+//! ## 설계: task당 ACP 세션 하나
 //!
-//! 워커당 동시에 실행 중인 프롬프트는 `max_concurrent_tasks`개 (기본 1, 상한은
-//! `register()` 호출 시 결정). dispatch는 다음 규칙을 따릅니다:
+//! 기존 구현은 워커당 세션 하나를 공유하고, 여러 태스크가 동시에 그 세션 위에서
+//! `session/prompt`를 병렬 호출하며 `promptId`로 서로 구분했습니다. 하지만 실제
+//! grok의 `session/update` notification은 (a) 신뢰할 수 있는 톱레벨 `promptId`를
+//! 보내지 않고, (b) 있어도 문자열 UUID라 SDK의 `u64` 기반이 아닌 별도 상관관계
+//! 체계가 필요했습니다.
 //!
-//! - `in_flight.len() >= max_concurrent`인 경우 즉시
-//!   `TransportError::WorkerAtCapacity` 반환 (큐잉 없음).
-//! - 그 외에는 `in_flight`에 `(task_id, InFlightTask { prompt_id: None, ... })`로
-//!   즉시 슬롯을 확보하고 백그라운드에서 `session/prompt`를 보냄.
-//! - `prompt()` 응답이 도착하면 `prompt_id`를 채우고 역색인 `prompt_index`에
-//!   `(prompt_id, task_id)`를 등록 — 이후 들어오는 `Output`/`Completed`/
-//!   `Failed` notification이 정확한 task로 라우팅됨.
-//! - `Output`/`Completed`/`Failed` 이벤트의 `prompt_id`가 `None`인 경우
-//!   (실측: 서버가 `session/update`에 promptId를 아예 안 붙이는 경우가 있음,
-//!   2026-08-11) — 이 워커에 진행 중인 태스크가 정확히 하나뿐이면 그 태스크로
-//!   라우팅(`sole_in_flight_task` 폴백), 둘 이상이면 모호하므로 drop.
+//! 이 구현은 대신 **디스패치된 태스크마다 새 ACP 세션을 만듭니다**
+//! (`session/new`를 태스크당 1회 호출). `SessionNotification`은 ACP 스펙상
+//! 원래 `session_id` 필드를 갖고 있으므로, 세션을 태스크 단위로 분리하면
+//! 스트리밍 출력이 **항상, 모호함 없이** 올바른 태스크로 라우팅됩니다 — 예전의
+//! "동시에 2개 이상 진행 중이면 라우팅 불가" 제약이 구조적으로 사라집니다.
+//! 대가는 태스크당 `session/new` 왕복 1회 추가뿐입니다.
 //!
-//! ## 재연결 (Phase 8.2)
+//! ## 동시성 모델
 //!
-//! 각 워커는 supervisor 태스크를 가짐. supervisor는:
+//! 워커당 WebSocket 연결은 하나([`ConnectionTo`]는 저비용 clone 가능 — SDK가
+//! 명시적으로 보장). `max_concurrent_tasks`는 `tokio::sync::Semaphore`로 강제.
+//! `dispatch()`는 permit을 즉시(non-blocking) 획득 시도하고, 실패 시
+//! [`TransportError::WorkerAtCapacity`]를 반환합니다 (큐잉 없음).
 //!
-//! 1. `AcpClient::connect()` + `open_session()` 으로 초기 연결 확립.
-//! 2. reader 루프가 종료되면 (WebSocket close / I/O 에러):
-//!    - 진행 중인 **모든** `in_flight` 태스크를 `WorkerEvent::Failed`로 emit.
-//!    - 상태를 `Disconnected`로 표시.
-//!    - 지수 백오프 (1s → 2s → ... → 최대 30s) 후 재연결 시도.
-//! 3. unregister 시 `shutdown_rx`로 supervisor를 종료.
+//! ## 재연결
 //!
-//! ```text
-//! [AcpTransport]
-//!   │
-//!   ├── register(worker_id, endpoint, max_concurrent)
-//!   │     └─► spawn supervisor(worker_id, endpoint)
-//!   │           │
-//!   │           ├── loop {
-//!   │           │     connect + open_session
-//!   │           │       └─► reader_loop (event_rx → WorkerEvent)
-//!   │           │     on exit: emit Failed for ALL in_flight tasks, sleep(backoff)
-//!   │           │   }
-//!   │           │
-//!   │           └── shutdown_rx → break
-//!   │
-//!   ├── dispatch(req)
-//!   │     └─► if state != Connected → Err(Connection)
-//!   │     └─► if in_flight.len() >= max_concurrent → Err(WorkerAtCapacity)
-//!   │     └─► insert in_flight entry, spawn prompt
-//!   │
-//!   └── cancel(task_id)
-//!         └─► lookup in_flight, send session/cancel for known prompt_id
-//! ```
+//! 각 워커는 supervisor 태스크를 가짐. supervisor는 연결 실패/종료 시
+//! 진행 중인 모든 태스크를 `WorkerEvent::Failed`로 정리하고, 지수 백오프
+//! (1s → 2s → ... → 최대 30s) 후 재연결을 시도합니다. `unregister()` 호출 시엔
+//! 재연결하지 않고 깔끔하게 종료합니다.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::v1::{
+    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+    SessionId, SessionNotification, SessionUpdate, TextContent,
+};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{Agent, ConnectionTo};
+use agent_client_protocol_http::HttpClient;
 use async_trait::async_trait;
 use chrono::Utc;
 use fleet_core::{TaskId, TaskResult, TokenUsage, WorkerId};
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::acp::{AcpClient, AcpEvent, PromptId, SessionId};
+#[cfg(feature = "mtls")]
+use crate::tls::ClientTlsConfig;
 use crate::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
 
 /// 브로드캐스트 채널 용량.
@@ -84,9 +79,7 @@ pub const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// 재연결 백오프 설정. 테스트 주입을 위해 `AcpTransport`에 보관.
 #[derive(Debug, Clone, Copy)]
 pub struct ReconnectConfig {
-    /// 첫 재연결 대기 시간.
     pub initial: Duration,
-    /// 백오프 상한.
     pub max: Duration,
 }
 
@@ -99,229 +92,101 @@ impl Default for ReconnectConfig {
     }
 }
 
-/// supervisor 명령.
-#[derive(Debug, Clone, Copy)]
-enum SupervisorCmd {
-    /// 정상 종료.
-    Shutdown,
-    /// dispatch/cancel 등에서 보내는 ping (현재는 사용 안 함 — 확장용).
-    #[allow(dead_code)]
-    Ping,
-}
-
 /// 워커 연결 상태.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnState {
-    /// supervisor가 초기 연결 또는 재연결을 시도 중.
     Connecting,
-    /// WebSocket이 열려 있고 세션이 활성.
     Connected,
-    /// reader가 종료됨 — supervisor가 재연결 루프에 진입한 상태.
     Disconnected,
 }
 
-/// 연결된 AcpClient + SessionId 묶음.
-/// supervisor가 소유하며, dispatch/cancel에서 빌려 씀.
-struct ActiveSession {
-    client: Arc<AcpClient>,
-    session_id: SessionId,
-}
-
-/// 워커에서 진행 중인 단일 task의 메타데이터.
-struct InFlightTask {
-    /// `session/prompt` 응답이 도착하기 전에는 `None`.
-    /// 응답 도착 후 `set_prompt_id`로 채워짐 — 이후 Output 이벤트 라우팅에 사용.
-    prompt_id: Option<PromptId>,
-    /// dispatch 시각. 완료 시 `duration_secs` 계산에 사용
-    /// (2026-08-11 버그 수정 전에는 이 값이 있는데도 쓰이지 않고
-    /// `duration_secs`가 항상 0.0으로 하드코딩되어 있었다).
-    started: Instant,
-    /// 스트리밍 `session/update`(AgentMessageChunk) 텍스트 누적 버퍼.
-    /// 최종 `PromptResult.agent_message`가 비어 있을 때(실측: grok가 응답을
-    /// 스트리밍으로만 보내고 최종 RPC 응답에는 텍스트를 채우지 않는 경우가
-    /// 있음) `TaskResult.output`의 폴백으로 쓰인다.
-    output_buf: String,
-}
-
-impl InFlightTask {
-    fn new() -> Self {
-        Self {
-            prompt_id: None,
-            started: Instant::now(),
-            output_buf: String::new(),
-        }
-    }
+/// 진행 중인 단일 태스크(=단일 ACP 세션)의 메타데이터.
+/// `on_receive_notification` 콜백이 `session_id`로 이 맵을 찾아 스트리밍
+/// 출력을 올바른 task로 라우팅한다.
+struct InFlightSession {
+    task_id: TaskId,
+    /// 누적된 스트리밍 텍스트. 최종 `TaskResult.output`으로 쓰인다.
+    output_buf: Arc<Mutex<String>>,
+    /// `WorkerEvent::Output`용 단조 증가 시퀀스.
+    seq: Arc<AtomicU64>,
 }
 
 /// 워커별 세션. supervisor와 dispatch/cancel 양쪽에서 공유.
 struct WorkerSession {
     worker_id: WorkerId,
-    /// 원본 endpoint (재연결용).
     endpoint: String,
-    /// 현재 연결 상태 (supervisor가 갱신).
     state: RwLock<ConnState>,
-    /// 활성 AcpClient / SessionId — Connected 상태에서만 Some.
-    /// supervisor가 spawn한 reader와 수명을 같이 함.
-    inner: Mutex<Option<ActiveSession>>,
-    /// 이 워커의 동시 작업 상한 (register 시 고정).
+    /// 활성 연결 핸들 — Connected 상태에서만 Some. `ConnectionTo`는 저비용
+    /// clone 가능(SDK 설계) — 여러 dispatch가 동시에 빌려 써도 안전.
+    connection: Mutex<Option<ConnectionTo<Agent>>>,
+    /// 이 워커의 동시 작업 상한을 강제하는 세마포어.
+    capacity: Arc<Semaphore>,
     max_concurrent: u32,
-    /// 현재 진행 중인 태스크 맵 (task_id → 메타데이터).
-    /// Phase 8.4 이전에는 단일 `active_task: Option<TaskId>`였으나,
-    /// 이제 N개까지 동시에 추적 가능.
-    in_flight: Mutex<HashMap<TaskId, InFlightTask>>,
-    /// 역색인: prompt_id → task_id. Output/Completed/Failed 이벤트 라우팅용.
-    /// `prompt_id`가 결정된 시점(prompt() 응답 도착)에 삽입됨.
-    prompt_index: Mutex<HashMap<PromptId, TaskId>>,
-    /// prompt_id가 아직 dispatch에 의해 등록되기 전에 도착한 이벤트 버퍼.
-    /// session/update (Output)가 session/prompt 응답보다 먼저 도착하는
-    /// 레이스 윈도우를 커버. set_prompt_id 호출 시 drain되어 emit됨.
-    pending_events: Mutex<HashMap<PromptId, Vec<BufferedEvent>>>,
-    /// supervisor 태스크로 보내는 명령 채널.
-    cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
-    /// supervisor 태스크 핸들 (Drop에서 abort).
+    /// session_id -> in-flight 메타데이터. task당 세션 하나이므로 이 맵의
+    /// 키만으로 스트리밍 출력을 완전히 모호함 없이 라우팅할 수 있다.
+    sessions: Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
+    /// supervisor 종료 신호. `register()` 시 1회만 생성되고 `WorkerSession`의
+    /// 수명 동안 유지된다(oneshot이 아니라 watch를 쓰는 이유 — 2026-08-11
+    /// 버그 수정: 예전엔 supervisor 루프가 돌 때마다 새 oneshot을 만들어서,
+    /// 재연결 백오프로 sleep 중일 때 만들어진 oneshot이 `connect_with` 클로저
+    /// 안에서 이미 소비된 상태라 `unregister()`가 새로 신호를 보낼 채널
+    /// 자체가 없어 최대 backoff 시간만큼 무조건 기다려야 했다 —
+    /// `unregister_during_backoff_exits_cleanly` 테스트로 발견).
+    shutdown: tokio::sync::watch::Sender<bool>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
-}
-
-/// prompt_id 등록 전에 버퍼링되는 이벤트.
-#[derive(Debug, Clone)]
-enum BufferedEvent {
-    Output { seq: u64, chunk: String },
-    Completed { result: crate::acp::PromptResult },
-    Failed { error: String },
+    #[cfg(feature = "mtls")]
+    tls_connector: Option<tokio_rustls::TlsConnector>,
 }
 
 impl WorkerSession {
-    /// 빈 in-flight 상태로 새 세션 생성 (register 호출 시).
     fn new(
         worker_id: WorkerId,
         endpoint: String,
         max_concurrent: u32,
-        cmd_tx: mpsc::UnboundedSender<SupervisorCmd>,
+        #[cfg(feature = "mtls")] tls_connector: Option<tokio_rustls::TlsConnector>,
     ) -> Arc<Self> {
+        let cap = max_concurrent.max(1);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         Arc::new(Self {
             worker_id,
             endpoint,
             state: RwLock::new(ConnState::Connecting),
-            inner: Mutex::new(None),
-            max_concurrent: max_concurrent.max(1),
-            in_flight: Mutex::new(HashMap::new()),
-            prompt_index: Mutex::new(HashMap::new()),
-            pending_events: Mutex::new(HashMap::new()),
-            cmd_tx,
+            connection: Mutex::new(None),
+            capacity: Arc::new(Semaphore::new(cap as usize)),
+            max_concurrent: cap,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            shutdown,
             supervisor: Mutex::new(None),
+            #[cfg(feature = "mtls")]
+            tls_connector,
         })
     }
 
-    /// 현재 in-flight 카운트.
+    /// shutdown이 이미 요청됐거나(즉시 true), 아니면 요청될 때까지 또는
+    /// `backoff`가 지날 때까지 대기. 반환값 true = shutdown이 원인.
+    async fn shutdown_requested_or_backoff_elapsed(&self, backoff: Duration) -> bool {
+        let mut rx = self.shutdown.subscribe();
+        if *rx.borrow() {
+            return true;
+        }
+        tokio::select! {
+            _ = rx.changed() => true,
+            _ = tokio::time::sleep(backoff) => false,
+        }
+    }
+
     async fn in_flight_count(&self) -> usize {
-        self.in_flight.lock().await.len()
+        self.sessions.lock().await.len()
     }
 
-    /// dispatch 시 슬롯 확보. 용량 초과 시 `WorkerAtCapacity` 에러.
-    async fn try_acquire(&self, task_id: TaskId) -> Result<(), TransportError> {
-        let mut guard = self.in_flight.lock().await;
-        if guard.len() >= self.max_concurrent as usize {
-            return Err(TransportError::WorkerAtCapacity(self.worker_id.to_string()));
-        }
-        guard.insert(task_id, InFlightTask::new());
-        Ok(())
-    }
-
-    /// `prompt()` 응답 도착 후 prompt_id 등록.
-    /// in_flight와 prompt_index 양쪽을 갱신하고, prompt_id가 알려지기 전에
-    /// 버퍼링된 이벤트를 drain하여 반환 — 호출자(dispatch)가 emit.
-    async fn set_prompt_id(&self, task_id: TaskId, prompt_id: PromptId) -> Vec<BufferedEvent> {
-        let mut in_flight = self.in_flight.lock().await;
-        if let Some(task) = in_flight.get_mut(&task_id) {
-            task.prompt_id = Some(prompt_id);
-        } else {
-            debug!(
-                %task_id, prompt_id = prompt_id.0,
-                "set_prompt_id: task not in in_flight — likely already completed"
-            );
-            return Vec::new();
-        }
-        drop(in_flight);
-        self.prompt_index.lock().await.insert(prompt_id, task_id);
-        self.pending_events
-            .lock()
-            .await
-            .remove(&prompt_id)
-            .unwrap_or_default()
-    }
-
-    /// prompt_id가 아직 등록되지 않은 경우 이벤트를 버퍼에 추가.
-    /// reader_loop에서 Output/Failed 처리 시 사용.
-    async fn buffer_event(&self, prompt_id: PromptId, event: BufferedEvent) {
-        self.pending_events
-            .lock()
-            .await
-            .entry(prompt_id)
-            .or_default()
-            .push(event);
-    }
-
-    /// task_id를 in_flight와 prompt_index에서 제거. 완료/실패 시 호출.
-    /// 제거된 task의 prompt_id를 반환 (사용처에서 필요시 index 정리용).
-    async fn complete(&self, task_id: TaskId) -> Option<InFlightTask> {
-        let removed = self.in_flight.lock().await.remove(&task_id);
-        if let Some(ref task) = removed {
-            debug!(
-                worker_id = %self.worker_id,
-                %task_id,
-                elapsed_secs = task.started.elapsed().as_secs_f64(),
-                "in-flight task removed"
-            );
-            if let Some(pid) = task.prompt_id {
-                self.prompt_index.lock().await.remove(&pid);
-                // 버퍼링된 이벤트도 함께 정리 — emit 주체가 정해지지 않은 상태에서
-                // task가 종료되었으므로 드롭.
-                self.pending_events.lock().await.remove(&pid);
-            }
-        }
-        removed
-    }
-
-    /// prompt_id로 task_id 역조회 (reader_loop에서 Output/Completed/Failed 처리용).
-    async fn task_for_prompt(&self, prompt_id: PromptId) -> Option<TaskId> {
-        self.prompt_index.lock().await.get(&prompt_id).copied()
-    }
-
-    /// `promptId`가 아예 없는 이벤트를 위한 폴백 라우팅.
-    ///
-    /// 2026-08-11 실측: `grok agent serve`가 보내는 `session/update` notification이
-    /// `promptId`를 전혀 담지 않는 경우가 있다 (session/prompt의 최종 RPC 응답과
-    /// 달리, notification 쪽은 서버가 채워준다는 보장이 없다 — ACP 스펙상
-    /// optional). 이 워커에 진행 중인 태스크가 정확히 하나뿐이면 모호하지 않으므로
-    /// 그 태스크로 라우팅한다. 둘 이상 동시 진행 중이면 어느 것인지 알 수 없으므로
-    /// 안전하게 드롭(호출자가 처리)한다.
-    async fn sole_in_flight_task(&self) -> Option<TaskId> {
-        let guard = self.in_flight.lock().await;
-        if guard.len() == 1 {
-            guard.keys().next().copied()
-        } else {
-            None
-        }
-    }
-
-    /// 스트리밍 청크를 in-flight task의 출력 버퍼에 누적.
-    /// task가 이미 완료되어 in_flight에 없으면 조용히 무시.
-    async fn append_chunk(&self, task_id: TaskId, chunk: &str) {
-        if let Some(task) = self.in_flight.lock().await.get_mut(&task_id) {
-            task.output_buf.push_str(chunk);
-        }
-    }
-
-    /// 진행 중인 모든 task를 한 번에 실패 처리 (연결 끊김 시).
-    /// 각 task마다 `WorkerEvent::Failed`를 emit하고 맵 정리.
-    async fn fail_all(
-        self: &Arc<Self>,
-        broadcaster: &broadcast::Sender<WorkerEvent>,
-        reason: &str,
-    ) {
-        let drained: Vec<TaskId> = {
-            let guard = self.in_flight.lock().await;
-            guard.keys().copied().collect()
+    /// 진행 중인 모든 태스크를 한 번에 실패 처리 (연결 끊김 시).
+    async fn fail_all(&self, broadcaster: &broadcast::Sender<WorkerEvent>, reason: &str) {
+        let drained: Vec<(SessionId, TaskId)> = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .map(|(sid, s)| (sid.clone(), s.task_id))
+                .collect()
         };
         if drained.is_empty() {
             return;
@@ -332,67 +197,33 @@ impl WorkerSession {
             reason,
             "failing all in-flight tasks due to connection loss"
         );
-        for task_id in drained {
-            self.complete(task_id).await;
+        let mut sessions = self.sessions.lock().await;
+        for (session_id, task_id) in drained {
+            sessions.remove(&session_id);
             let _ = broadcaster.send(WorkerEvent::Failed {
                 task_id,
                 error: reason.to_string(),
             });
         }
     }
-
-    /// 활성 세션 정리 (dispatch/cancel이 빌려간 Arc 참조가 떨어지면 자동 close).
-    /// supervisor에서만 호출.
-    async fn clear_active(&self) {
-        // 단순히 Mutex에서 take. Arc<AcpClient>가 drop되면 WebSocket이 닫힘.
-        // 여전히 다른 곳에서 빌려쓰는 경우가 있다면 자연스럽게 close됨.
-        if let Some(active) = self.inner.lock().await.take() {
-            // 명시적 close는 어렵지만 (AcpClient::close가 by-value),
-            // drop에 맡김. Arc strong count가 0이 되면 close 처리.
-            debug!(
-                worker_id = %self.worker_id,
-                session_id = %active.session_id,
-                "clearing active session (WebSocket will close on Arc drop)"
-            );
-            // reader는 supervisor가 별도로 관리하므로 여기서 abort하지 않음.
-        }
-    }
-}
-
-impl Drop for WorkerSession {
-    fn drop(&mut self) {
-        // supervisor에게 shutdown 신호 (채널이 닫혀도 무시).
-        let _ = self.cmd_tx.send(SupervisorCmd::Shutdown);
-        if let Ok(mut guard) = self.supervisor.try_lock() {
-            if let Some(handle) = guard.take() {
-                handle.abort();
-            }
-        }
-    }
 }
 
 /// ACP transport 구현체.
 pub struct AcpTransport {
-    /// worker_id → 워커 세션.
     clients: Arc<RwLock<HashMap<WorkerId, Arc<WorkerSession>>>>,
-    /// 모든 워커의 WorkerEvent를 fan-out.
     event_broadcaster: broadcast::Sender<WorkerEvent>,
-    /// 재연결 백오프 설정.
     reconnect: ReconnectConfig,
-    /// orchestrator 클라이언트 mTLS 구성 (Phase 8.5).
-    /// `Some` 인 경우, `wss://` endpoint 에 대해 `WsConn::connect_mtls` 사용.
-    /// `ws://` endpoint 는 이 값의 유무와 무관하게 일반 TCP 로 연결.
+    /// mTLS 클라이언트 구성 (Phase 8.5). `Some`인 경우 `wss://` endpoint에
+    /// `HttpClient::with_tls_connector`로 사설 CA + 클라이언트 인증서를 적용.
     #[cfg(feature = "mtls")]
-    client_tls: Option<Arc<crate::tls::ClientTlsConfig>>,
+    client_tls: Option<Arc<ClientTlsConfig>>,
 }
 
 impl AcpTransport {
-    /// 새 transport 생성 (기본 재연결 설정).
     pub fn new() -> Self {
         Self::with_reconnect(ReconnectConfig::default())
     }
 
-    /// 재연결 백오프 설정을 지정하여 생성. 테스트용 — 짧은 백오프로 검증 가능.
     pub fn with_reconnect(reconnect: ReconnectConfig) -> Self {
         let (event_broadcaster, _) = broadcast::channel::<WorkerEvent>(EVENT_CHANNEL_CAPACITY);
         Self {
@@ -404,18 +235,15 @@ impl AcpTransport {
         }
     }
 
-    /// orchestrator 클라이언트 mTLS 구성을 지정 (Phase 8.5).
-    ///
-    /// 이후 `register()` 되는 모든 워커에 대해, `wss://` endpoint 인 경우
-    /// `ClientTlsConfig` 로 mTLS 핸드셰이크를 수행. 이미 등록된 워커는
-    /// 재연결 시점부터 새 구성을 사용.
+    /// orchestrator 클라이언트 mTLS 구성을 지정 (Phase 8.5). 이후 `register()`
+    /// 되는 모든 워커에 대해 `wss://` endpoint인 경우 mTLS 핸드셰이크를 수행.
     #[cfg(feature = "mtls")]
-    pub fn with_client_tls(mut self, tls: crate::tls::ClientTlsConfig) -> Self {
+    #[must_use]
+    pub fn with_client_tls(mut self, tls: ClientTlsConfig) -> Self {
         self.client_tls = Some(Arc::new(tls));
         self
     }
 
-    /// 특정 워커의 연결 상태 조회. 미등록 워커면 None.
     pub async fn conn_state(&self, worker_id: WorkerId) -> Option<ConnState> {
         let clients = self.clients.read().await;
         let session = clients.get(&worker_id).cloned()?;
@@ -424,8 +252,6 @@ impl AcpTransport {
         Some(state)
     }
 
-    /// 특정 워커의 현재 in-flight task 수. 미등록 워커면 None.
-    /// 관측/디버그/테스트용 — dispatch 결정은 selector가 미리 수행.
     pub async fn in_flight_count(&self, worker_id: WorkerId) -> Option<usize> {
         let clients = self.clients.read().await;
         let session = clients.get(&worker_id).cloned()?;
@@ -433,7 +259,6 @@ impl AcpTransport {
         Some(session.in_flight_count().await)
     }
 
-    /// 특정 워커의 동시 작업 상한. 미등록 워커면 None.
     pub async fn max_concurrent(&self, worker_id: WorkerId) -> Option<u32> {
         let clients = self.clients.read().await;
         clients.get(&worker_id).map(|s| s.max_concurrent)
@@ -454,7 +279,6 @@ impl WorkerTransport for AcpTransport {
         endpoint: &str,
         max_concurrent_tasks: u32,
     ) -> Result<(), TransportError> {
-        // 중복 등록 체크.
         if self.clients.read().await.contains_key(&worker_id) {
             return Err(TransportError::AlreadyRegistered(worker_id.to_string()));
         }
@@ -467,44 +291,42 @@ impl WorkerTransport for AcpTransport {
             "registering ACP worker"
         );
 
-        // supervisor 명령 채널.
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<SupervisorCmd>();
-        // 초기 연결 결과 전달 채널.
+        #[cfg(feature = "mtls")]
+        let tls_connector = self
+            .client_tls
+            .as_ref()
+            .filter(|_| endpoint.starts_with("wss://"))
+            .map(|tls| {
+                tls.build_connector().map_err(|e| {
+                    TransportError::Connection(format!("mTLS connector build failed: {e}"))
+                })
+            })
+            .transpose()?;
+
+        let session = WorkerSession::new(
+            worker_id,
+            endpoint.to_string(),
+            cap,
+            #[cfg(feature = "mtls")]
+            tls_connector,
+        );
+
         let (first_result_tx, first_result_rx) =
             tokio::sync::oneshot::channel::<Result<(), String>>();
-
-        let session = WorkerSession::new(worker_id, endpoint.to_string(), cap, cmd_tx.clone());
-
-        // supervisor spawn.
         let supervisor_handle = spawn_supervisor(
             session.clone(),
             self.event_broadcaster.clone(),
-            cmd_rx,
-            Some(first_result_tx),
             self.reconnect,
-            #[cfg(feature = "mtls")]
-            self.client_tls.clone(),
+            Some(first_result_tx),
         );
         *session.supervisor.lock().await = Some(supervisor_handle);
 
-        // supervisor를 즉시 clients에 등록 — 최초 연결 시도의 성공 여부와 무관하게.
-        // supervisor는 연결에 실패해도 자체 지수 백오프로 백그라운드 재연결을
-        // 계속하므로(위 모듈 doc의 "재연결" 절 참조), 여기서 등록해 둬야 나중에
-        // 재연결이 성공했을 때 dispatch()가 그 세션을 찾을 수 있다.
-        //
-        // 과거 버그: 이 insert가 (구) `Ok(Ok(()))` 분기에서만 실행됐다. 최초 연결이
-        // 일시적으로 실패하면(401/502/등, 예: 재시작 직후 nginx가 아직 준비되지
-        // 않은 경우) register()는 즉시 Err를 반환하고 insert는 건너뛰었다. 이후
-        // supervisor가 몇 초 안에 재연결에 성공해 하트비트/ACP ping이 정상 응답해도,
-        // clients 맵엔 끝내 등록되지 않아 dispatch()는 영원히
-        // `TransportError::WorkerNotRegistered`로 실패했다 — 워커는 "online"으로 보이지만
-        // 어떤 태스크도 절대 실행되지 않는, 겉보기엔 모순된 상태.
+        // supervisor를 즉시 clients에 등록 — 최초 연결 시도의 성공 여부와 무관하게
+        // (일시적 실패 후 백그라운드 재연결이 성공했을 때 dispatch가 세션을 찾을
+        // 수 있어야 하므로 — 과거 프로덕션 버그: 이 순서를 지키지 않아 워커가
+        // "online"으로 보이는데도 태스크가 영원히 dispatch 안 되는 상태가 있었다).
         self.clients.write().await.insert(worker_id, session);
 
-        // 초기 연결 결과 대기 — 호출자(register_worker 핸들러)에게 즉시 연결 상태를
-        // 알리기 위함일 뿐, 이 결과의 성패가 위 clients 등록 여부에 더 이상 영향을
-        // 주지 않는다. 첫 시도가 실패해도 워커는 이미 추적 중이며, supervisor의
-        // 다음 재연결이 성공하는 즉시 dispatch가 가능해진다.
         match first_result_rx.await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(TransportError::Connection(format!(
@@ -525,8 +347,12 @@ impl WorkerTransport for AcpTransport {
             .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?;
 
         info!(%worker_id, "unregistering ACP worker");
-        // WorkerSession::drop이 shutdown 전송 + supervisor abort 처리.
-        drop(session);
+        let _ = session.shutdown.send(true);
+        if let Some(handle) = session.supervisor.lock().await.take() {
+            // graceful shutdown 신호를 보냈으니 자연 종료를 기다린다.
+            // 무한 대기하지 않도록 상한을 둔다.
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
         Ok(())
     }
 
@@ -550,7 +376,6 @@ impl WorkerTransport for AcpTransport {
                 .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?
         };
 
-        // 연결 상태 확인 — Disconnected/Connecting인 경우 명확한 에러.
         let state = *session.state.read().await;
         if state != ConnState::Connected {
             return Err(TransportError::Connection(format!(
@@ -558,116 +383,143 @@ impl WorkerTransport for AcpTransport {
             )));
         }
 
-        // 용량 검증 후 슬롯 확보 (in_flight에 등록).
-        session.try_acquire(task_id).await?;
+        // 용량 검증 — 즉시(non-blocking) 획득, 큐잉 없음.
+        let permit = Arc::clone(&session.capacity)
+            .try_acquire_owned()
+            .map_err(|_| TransportError::WorkerAtCapacity(worker_id.to_string()))?;
 
-        // 백그라운드에서 prompt 실행.
-        let session_clone = session.clone();
+        let connection = {
+            let guard = session.connection.lock().await;
+            guard.clone().ok_or_else(|| {
+                TransportError::Connection(format!(
+                    "worker {worker_id} session disappeared mid-dispatch"
+                ))
+            })?
+        };
+
         let broadcaster = self.event_broadcaster.clone();
-        let timeout_secs = req.timeout_secs;
+        let sessions_map = session.sessions.clone();
+        let timeout = req
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_PROMPT_TIMEOUT);
+        // req.model / req.max_turns: ACP session/new·session/prompt 스펙에 직접
+        // 대응하는 필드가 없다 (모델은 워커의 grok 프로세스 시작 시점에 고정,
+        // max_turns는 grok 자체 세션 옵션 밖) — 예전 구현도 이 두 필드를
+        // 사용하지 않았으므로 회귀는 아니다. cwd는 이번에 처음으로 실제
+        // session/new에 연결된다(예전엔 워커당 공유 세션이라 무시됐음).
+        let cwd = req
+            .cwd
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let prompt_text = req.prompt.clone();
+
         tokio::spawn(async move {
+            let _permit = permit; // 완료/실패 시 drop되며 슬롯 반환.
             let started = Instant::now();
-            let prompt_str = req.prompt.clone();
 
-            // (client, session_id)를 락 밖에서 빼냄 — await 중 락 유지 방지.
-            let client_session: Option<(Arc<AcpClient>, SessionId)> = {
-                let guard = session_clone.inner.lock().await;
-                guard
-                    .as_ref()
-                    .map(|a| (a.client.clone(), a.session_id.clone()))
-            };
+            let new_session = tokio::time::timeout(
+                timeout,
+                connection
+                    .send_request(NewSessionRequest::new(cwd))
+                    .block_task(),
+            )
+            .await;
 
-            let result = match client_session {
-                Some((client, session_id)) => {
-                    run_prompt_with_timeout(&client, &session_id, &prompt_str, timeout_secs).await
+            let session_id = match new_session {
+                Ok(Ok(resp)) => resp.session_id,
+                Ok(Err(e)) => {
+                    warn!(%task_id, %worker_id, error = %e, "session/new failed");
+                    let _ = broadcaster.send(WorkerEvent::Failed {
+                        task_id,
+                        error: format!("session/new: {e}"),
+                    });
+                    return;
                 }
-                None => Err("worker session disappeared mid-dispatch".to_string()),
+                Err(_) => {
+                    warn!(%task_id, %worker_id, "session/new timed out");
+                    let _ = broadcaster.send(WorkerEvent::Failed {
+                        task_id,
+                        error: format!("session/new timed out after {timeout:?}"),
+                    });
+                    return;
+                }
             };
 
-            match result {
-                Ok(prompt_id) => {
-                    // prompt_id를 in_flight와 prompt_index에 등록.
-                    // 동시에, prompt_id가 알려지기 전에 도착해 버퍼링된
-                    // 이벤트들을 drain하여 emit.
-                    let buffered = session_clone.set_prompt_id(task_id, prompt_id).await;
-                    for event in buffered {
-                        match event {
-                            BufferedEvent::Output { seq, chunk } => {
-                                session_clone.append_chunk(task_id, &chunk).await;
-                                let _ = broadcaster.send(WorkerEvent::Output {
-                                    task_id,
-                                    seq,
-                                    chunk,
-                                });
-                            }
-                            BufferedEvent::Completed { result } => {
-                                // 회귀 수정: Completed 버퍼링 지원 자체가 없어 이
-                                // 레이스(짧은 프롬프트의 응답이 session/prompt RPC
-                                // 응답보다 먼저 도착)에 걸린 태스크는 실행이 실제로는
-                                // 성공했는데도 영원히 "dispatched"에 멈췄었다.
-                                //
-                                // 2026-08-11 버그 수정: complete()를 먼저 호출해
-                                // InFlightTask(dispatch 시각 + 누적된 스트리밍 출력)를
-                                // 회수한 뒤 TaskResult를 구성한다 — 예전에는 이 호출
-                                // 순서가 반대라 duration_secs가 항상 0.0으로,
-                                // output이 최종 RPC 응답이 텍스트를 채워주지 않으면
-                                // 항상 빈 문자열로 저장됐다.
-                                let removed = session_clone.complete(task_id).await;
-                                let duration_secs = removed
-                                    .as_ref()
-                                    .map(|t| t.started.elapsed().as_secs_f64())
-                                    .unwrap_or_else(|| started.elapsed().as_secs_f64());
-                                let buffered_output =
-                                    removed.map(|t| t.output_buf).unwrap_or_default();
-                                let task_result = task_result_from_prompt(
-                                    worker_id,
-                                    result,
-                                    duration_secs,
-                                    buffered_output,
-                                );
-                                let _ = broadcaster.send(WorkerEvent::Completed {
-                                    task_id,
-                                    result: task_result,
-                                });
-                            }
-                            BufferedEvent::Failed { error } => {
-                                let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
-                                // 회귀 수정: 기존엔 여기서 complete()를 호출하지 않아
-                                // in_flight/prompt_index 슬롯이 영구히 새고 있었다.
-                                session_clone.complete(task_id).await;
-                            }
-                        }
-                    }
+            let output_buf = Arc::new(Mutex::new(String::new()));
+            let seq = Arc::new(AtomicU64::new(0));
+            sessions_map.lock().await.insert(
+                session_id.clone(),
+                InFlightSession {
+                    task_id,
+                    output_buf: output_buf.clone(),
+                    seq,
+                },
+            );
+
+            let prompt_result = tokio::time::timeout(
+                timeout,
+                connection
+                    .send_request(PromptRequest::new(
+                        session_id.clone(),
+                        vec![ContentBlock::Text(TextContent::new(prompt_text))],
+                    ))
+                    .block_task(),
+            )
+            .await;
+
+            // 이 턴은 끝났으므로 더 이상 이 session_id로 오는 notification을
+            // 라우팅할 필요가 없다 — 제거해 맵이 무한정 자라는 것을 방지.
+            // 반환값(제거된 엔트리 유무)로 중복 emit을 막는다: 연결이 끊기면
+            // supervisor의 fail_all()도 "같은" session_id를 동시에 정리하며
+            // Failed를 emit할 수 있다 — 이미 fail_all()이 먼저 제거했다면
+            // (반환값 None) 여기서는 emit하지 않는다(2026-08-11 발견 —
+            // 연결 종료 시 Failed가 태스크당 최대 1번만 나가야 함).
+            let already_handled_elsewhere = sessions_map.lock().await.remove(&session_id).is_none();
+
+            let duration_secs = started.elapsed().as_secs_f64();
+            let output = output_buf.lock().await.clone();
+
+            match prompt_result {
+                Ok(Ok(resp)) => {
                     debug!(
                         %task_id, %worker_id,
-                        elapsed_secs = started.elapsed().as_secs_f64(),
-                        "acp prompt accepted by server"
+                        elapsed_secs = duration_secs,
+                        stop_reason = ?resp.stop_reason,
+                        "acp prompt completed"
                     );
-                    // Completed는 background reader가 AcpEvent::Completed에서 emit.
+                    let token_usage = extract_token_usage(&resp);
+                    let result = TaskResult {
+                        output,
+                        exit_code: 0,
+                        duration_secs,
+                        token_usage,
+                        worker_id,
+                        finished_at: Utc::now(),
+                    };
+                    let _ = broadcaster.send(WorkerEvent::Completed { task_id, result });
                 }
-                Err(e) => {
-                    // prompt() 실패. 두 가지 시나리오를 구분:
-                    // (a) 일반적인 prompt 실패 (timeout, malformed response, 서버 에러):
-                    //     즉시 complete + Failed emit.
-                    // (b) ACP 연결 종료로 인한 실패 (에러 메시지에 "ACP connection
-                    //     closed" 포함): supervisor의 fail_all이 "reader exited"
-                    //     에러로 emit할 것이므로 여기서는 in_flight를 그대로 둠.
-                    if e.contains("ACP connection closed") {
-                        debug!(
-                            %task_id, %worker_id, error = %e,
-                            "prompt failed due to ACP close — deferring to supervisor fail_all"
-                        );
-                        // in_flight에 그대로 두어 supervisor가 emit.
-                    } else if session_clone.complete(task_id).await.is_some() {
-                        warn!(%task_id, %worker_id, error = %e, "acp prompt failed");
-                        let _ = broadcaster.send(WorkerEvent::Failed { task_id, error: e });
-                    } else {
-                        // 다른 스레드가 이미 complete — 중복 emit 방지.
-                        debug!(
-                            %task_id, %worker_id, error = %e,
-                            "prompt failure overlapped with concurrent cleanup — skipping emit"
-                        );
-                    }
+                Ok(Err(e)) if !already_handled_elsewhere => {
+                    warn!(%task_id, %worker_id, error = %e, "acp prompt failed");
+                    let _ = broadcaster.send(WorkerEvent::Failed {
+                        task_id,
+                        error: format!("session/prompt: {e}"),
+                    });
+                }
+                Err(_) if !already_handled_elsewhere => {
+                    warn!(%task_id, %worker_id, "acp prompt timed out");
+                    let _ = broadcaster.send(WorkerEvent::Failed {
+                        task_id,
+                        error: format!("session/prompt timed out after {timeout:?}"),
+                    });
+                }
+                Ok(Err(_)) | Err(_) => {
+                    // fail_all()이 이미 이 태스크를 Failed로 emit했음 — 중복 방지.
+                    debug!(
+                        %task_id, %worker_id,
+                        "prompt failure overlapped with concurrent connection-loss cleanup — skipping duplicate emit"
+                    );
                 }
             }
         });
@@ -676,47 +528,30 @@ impl WorkerTransport for AcpTransport {
     }
 
     async fn cancel(&self, task_id: TaskId) -> Result<(), TransportError> {
-        // task_id → (worker_id, prompt_id, session_id, client) 역조회.
-        // 어느 워커에 있는지 모르므로 모든 워커를 순회. 동시에 여러 워커에
-        // 같은 task_id가 있을 수는 없으므로 첫 번째 발견에서 return.
         let clients = self.clients.read().await;
         for (worker_id, session) in clients.iter() {
-            let prompt_id = {
-                let in_flight = session.in_flight.lock().await;
-                match in_flight.get(&task_id) {
-                    Some(t) => t.prompt_id,
-                    None => continue, // 이 워커에 없음 — 다음 워커 시도.
-                }
+            let session_id = {
+                let sessions = session.sessions.lock().await;
+                sessions
+                    .iter()
+                    .find(|(_, s)| s.task_id == task_id)
+                    .map(|(sid, _)| sid.clone())
+            };
+            let Some(session_id) = session_id else {
+                continue;
             };
 
-            // in_flight에서 제거하지 않음 — Completed/Failed 이벤트가 정리.
-            // 여기서 제거하면 서버가 이미 응답을 보낸 후 orphan 상태가 됨.
-            let (client, session_id) = {
-                let guard = session.inner.lock().await;
-                match guard.as_ref() {
-                    Some(a) => (a.client.clone(), a.session_id.clone()),
-                    None => {
-                        debug!(
-                            %task_id, %worker_id,
-                            "cancel: active session missing — likely disconnected, treating as idempotent success"
-                        );
-                        return Ok(());
-                    }
-                }
-            };
-
-            info!(%task_id, %worker_id, ?prompt_id, "sending ACP cancel");
-            if let Some(pid) = prompt_id {
-                client
-                    .cancel(&session_id, pid)
-                    .await
-                    .map_err(|e| TransportError::Connection(format!("acp cancel: {e}")))?;
-            } else {
+            let connection = session.connection.lock().await.clone();
+            let Some(connection) = connection else {
                 debug!(
-                    %task_id,
-                    "prompt_id not yet known — cancel will be applied once prompt is registered"
+                    %task_id, %worker_id,
+                    "cancel: active connection missing — likely disconnected, treating as idempotent success"
                 );
-            }
+                return Ok(());
+            };
+
+            info!(%task_id, %worker_id, session_id = %session_id, "sending ACP cancel");
+            let _ = connection.send_notification(CancelNotification::new(session_id));
             return Ok(());
         }
 
@@ -725,13 +560,12 @@ impl WorkerTransport for AcpTransport {
     }
 
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError> {
-        let session = {
-            let clients = self.clients.read().await;
-            clients
-                .get(&worker_id)
-                .cloned()
-                .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?
-        };
+        let clients = self.clients.read().await;
+        let session = clients
+            .get(&worker_id)
+            .cloned()
+            .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?;
+        drop(clients);
         let state = *session.state.read().await;
         if state != ConnState::Connected {
             return Err(TransportError::Connection(format!(
@@ -769,47 +603,31 @@ impl WorkerTransport for AcpTransport {
 // ─── supervisor ──────────────────────────────────────────────────────
 
 /// supervisor 태스크 spawn. 반환된 핸들을 abort하면 supervisor 종료.
-///
-/// `first_result`가 Some이면 첫 번째 연결 시도의 결과를 전송.
-/// None이면 register()가 이미 동기적으로 처리했거나 외부에서 사용하지 않음.
-#[allow(clippy::too_many_arguments)]
 fn spawn_supervisor(
     session: Arc<WorkerSession>,
     broadcaster: broadcast::Sender<WorkerEvent>,
-    mut cmd_rx: mpsc::UnboundedReceiver<SupervisorCmd>,
-    first_result: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     reconnect: ReconnectConfig,
-    #[cfg(feature = "mtls")] client_tls: Option<Arc<crate::tls::ClientTlsConfig>>,
+    first_result: Option<oneshot::Sender<Result<(), String>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let worker_id = session.worker_id;
-        let endpoint = session.endpoint.clone();
         let mut backoff = reconnect.initial;
-        // 첫 연결 결과 채널 — 한 번만 전송하고 None으로 해제.
         let mut first_result = first_result;
 
         loop {
-            // 1. 상태를 Connecting으로.
             *session.state.write().await = ConnState::Connecting;
 
-            // 2. 연결 + 세션 열기 시도.
-            let (client, session_id, event_rx) = match establish_session(
-                &endpoint,
-                #[cfg(feature = "mtls")]
-                client_tls.as_deref(),
-            )
-            .await
-            {
-                Ok(t) => t,
+            let (ready_tx, mut ready_rx) = oneshot::channel::<Result<(), String>>();
+
+            let ws_client = match build_ws_client(&session) {
+                Ok(c) => c,
                 Err(e) => {
-                    warn!(%worker_id, error = %e, "supervisor connect failed");
+                    warn!(%worker_id, error = %e, "failed to build ACP WebSocket client");
                     *session.state.write().await = ConnState::Disconnected;
-                    // 첫 연결 실패 시 register() 호출자에게 에러 전달.
                     if let Some(tx) = first_result.take() {
                         let _ = tx.send(Err(e));
                     }
-                    if wait_with_shutdown(&mut cmd_rx, backoff).await {
-                        info!(%worker_id, "supervisor received shutdown during backoff");
+                    if session.shutdown_requested_or_backoff_elapsed(backoff).await {
                         return;
                     }
                     backoff = (backoff * 2).min(reconnect.max);
@@ -817,418 +635,179 @@ fn spawn_supervisor(
                 }
             };
 
-            info!(%worker_id, session = %session_id, "ACP session established");
-            *session.state.write().await = ConnState::Connected;
-            backoff = reconnect.initial; // 성공 시 백오프 리셋.
-                                         // 첫 연결 성공 시 register() 호출자에게 Ok 전달.
-            if let Some(tx) = first_result.take() {
-                let _ = tx.send(Ok(()));
-            }
+            let sessions_map = session.sessions.clone();
+            let session_for_conn = session.clone();
+            let notification_broadcaster = broadcaster.clone();
 
-            let client_arc = Arc::new(client);
+            let connect_future = agent_client_protocol::Client
+                .builder()
+                .on_receive_notification(
+                    move |notification: SessionNotification, _cx| {
+                        let sessions_map = sessions_map.clone();
+                        let broadcaster = notification_broadcaster.clone();
+                        async move {
+                            handle_session_notification(&sessions_map, &broadcaster, notification)
+                                .await;
+                            Ok(())
+                        }
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                .connect_with(ws_client, move |connection: ConnectionTo<Agent>| {
+                    let session = session_for_conn.clone();
+                    async move {
+                        let init = connection
+                            .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                            .block_task()
+                            .await;
+                        if let Err(e) = init {
+                            let _ = ready_tx.send(Err(format!("initialize: {e}")));
+                            return Err(e);
+                        }
 
-            // 3. 활성 세션 등록 (reader보다 먼저 — dispatch가 즉시 접근 가능해야 함).
-            *session.inner.lock().await = Some(ActiveSession {
-                client: client_arc.clone(),
-                session_id: session_id.clone(),
-            });
+                        *session.connection.lock().await = Some(connection);
+                        *session.state.write().await = ConnState::Connected;
+                        let _ = ready_tx.send(Ok(()));
 
-            // 4. reader 루프 spawn. 이 핸들을 supervisor가 직접 추적.
-            let reader_session = session.clone();
-            let reader_broadcaster = broadcaster.clone();
-            let reader_handle: JoinHandle<()> = tokio::spawn(async move {
-                run_reader_loop(reader_session, reader_broadcaster, event_rx).await;
-            });
-
-            // 5. reader 종료 또는 shutdown 신호 대기.
-            let reader_exit_reason = tokio::select! {
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        Some(SupervisorCmd::Shutdown) => ReaderExit::Shutdown,
-                        Some(_) => ReaderExit::Other,
-                        None => ReaderExit::Shutdown, // sender drop
+                        // shutdown 신호가 올 때까지 대기 — transport(WS I/O 루프)가
+                        // 먼저 죽으면 이 connect_with 전체가 그쪽 에러로 먼저
+                        // 반환된다(SDK가 select로 경쟁시킴). 우리 쪽이 먼저 끝나면
+                        // graceful shutdown 경로. watch 사용 이유는
+                        // `WorkerSession.shutdown` 필드 문서 참고.
+                        let mut shutdown_rx = session.shutdown.subscribe();
+                        if !*shutdown_rx.borrow() {
+                            let _ = shutdown_rx.changed().await;
+                        }
+                        Ok(())
                     }
+                });
+
+            // 버그 수정(2026-08-11): `connect_with(...).await`는 연결이 끊길
+            // 때까지(=shutdown_rx가 resolve될 때까지) 절대 안 끝난다 — 최초
+            // handshake 결과만 기다리면 되는 register()가 연결 수명 전체
+            // 동안 블록되는 데드락이었다. ready_rx(빠른 handshake 신호)와
+            // connect_future(연결 전체 수명)를 select로 분리해, handshake
+            // 결과가 나오는 즉시 register() 호출자에게 전달하고, 연결
+            // 자체는 계속 백그라운드에서 돈다.
+            tokio::pin!(connect_future);
+            let connect_result = tokio::select! {
+                ready = &mut ready_rx => {
+                    let outcome = ready.unwrap_or_else(|_| Err("ready channel closed before handshake completed".to_string()));
+                    if let Some(tx) = first_result.take() {
+                        let _ = tx.send(outcome);
+                    }
+                    // handshake는 끝났지만 연결 자체는 계속 산다 — 끊길 때까지 대기.
+                    connect_future.await
                 }
-                _ = reader_handle => ReaderExit::ReaderExited,
+                result = &mut connect_future => {
+                    // handshake가 채 끝나기도 전에 연결 자체가 죽은 경우(예: WS
+                    // 핸드셰이크 실패) — first_result는 아직 못 받았을 것.
+                    if let Some(tx) = first_result.take() {
+                        let _ = tx.send(result.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                    }
+                    result
+                }
             };
 
-            match reader_exit_reason {
-                ReaderExit::Shutdown => {
-                    info!(%worker_id, "supervisor received shutdown — closing");
-                    session.clear_active().await;
-                    *session.state.write().await = ConnState::Disconnected;
+            *session.connection.lock().await = None;
+            *session.state.write().await = ConnState::Disconnected;
+            session
+                .fail_all(&broadcaster, "ACP connection lost — will reconnect")
+                .await;
+
+            // shutdown이 true면 unregister()가 이미 요청한 것 — 재연결하지 않음.
+            let should_stop = *session.shutdown.borrow();
+
+            match &connect_result {
+                Ok(()) if should_stop => {
+                    info!(%worker_id, "supervisor shutting down cleanly");
                     return;
                 }
-                ReaderExit::ReaderExited => {
-                    warn!(%worker_id, "ACP reader exited — will reconnect");
-                    // 진행 중인 **모든** 태스크를 Failed로 처리 (Phase 8.4).
-                    session
-                        .fail_all(&broadcaster, "ACP reader exited (connection lost)")
-                        .await;
-                    // 활성 세션 정리.
-                    session.clear_active().await;
-                    *session.state.write().await = ConnState::Disconnected;
-                    // 백오프 후 재시도.
-                    if wait_with_shutdown(&mut cmd_rx, backoff).await {
-                        info!(%worker_id, "supervisor received shutdown during reconnect backoff");
+                Ok(()) => {
+                    // shutdown 요청 없이 정상 종료된 드문 케이스 — 안전하게 재연결 취급.
+                    warn!(%worker_id, "ACP connection ended unexpectedly (clean) — reconnecting");
+                }
+                Err(e) => {
+                    if should_stop {
+                        info!(%worker_id, "supervisor shutting down (connection errored during shutdown, ignoring)");
                         return;
                     }
-                    backoff = (backoff * 2).min(reconnect.max);
-                    continue;
-                }
-                ReaderExit::Other => {
-                    // 기타 신호 — shutdown과 동일하게 처리.
-                    info!(%worker_id, "supervisor received non-shutdown cmd — treating as shutdown");
-                    session.clear_active().await;
-                    *session.state.write().await = ConnState::Disconnected;
-                    return;
+                    warn!(%worker_id, error = %e, "ACP connection error — reconnecting");
                 }
             }
+
+            if session.shutdown_requested_or_backoff_elapsed(backoff).await {
+                return;
+            }
+            backoff = (backoff * 2).min(reconnect.max);
         }
     })
 }
 
-/// reader 종료 이유.
-enum ReaderExit {
-    Shutdown,
-    ReaderExited,
-    Other,
-}
-
-/// endpoint로 AcpClient를 연결하고 초기 세션을 엹.
-/// 실패 시 재시도는 호출자(supervisor) 담당.
-///
-/// Phase 8.5: `client_tls` 가 `Some` 이고 endpoint 가 `wss://` 인 경우 mTLS 핸드셰이크.
-/// `client_tls` 가 `Some` 인데 endpoint 가 `ws://` 인 경우 mTLS 없이 일반 TCP (경고 로그).
-/// `client_tls` 가 `None` 인데 endpoint 가 `wss://` 인 경우 공용 CA (webpki-roots) 사용.
-async fn establish_session(
-    endpoint: &str,
-    #[cfg(feature = "mtls")] client_tls: Option<&crate::tls::ClientTlsConfig>,
-) -> Result<(AcpClient, SessionId, mpsc::UnboundedReceiver<AcpEvent>), String> {
-    #[cfg(feature = "mtls")]
-    let use_mtls = client_tls.is_some() && endpoint.starts_with("wss://");
-    #[cfg(not(feature = "mtls"))]
-    let use_mtls = false;
-
-    let (client, event_rx) = if use_mtls {
-        #[cfg(feature = "mtls")]
-        {
-            let tls = client_tls.expect("checked above");
-            AcpClient::connect_mtls(endpoint, tls)
-                .await
-                .map_err(|e| format!("acp connect (mTLS): {e}"))?
-        }
-        #[cfg(not(feature = "mtls"))]
-        {
-            unreachable!("use_mtls requires the mtls feature")
-        }
-    } else {
-        #[cfg(feature = "mtls")]
-        if client_tls.is_some() && endpoint.starts_with("ws://") {
-            warn!(
-                endpoint = %sanitize_endpoint(endpoint),
-                "client_tls configured but endpoint is ws:// — falling back to plain TCP"
-            );
-        }
-        AcpClient::connect(endpoint)
-            .await
-            .map_err(|e| format!("acp connect: {e}"))?
-    };
-    let session_id = client
-        .open_session(None)
-        .await
-        .map_err(|e| format!("acp open_session: {e}"))?;
-    Ok((client, session_id, event_rx))
-}
-
-/// reader 종료 시 진행 중인 active_task가 있면 WorkerEvent::Failed emit.
-///
-/// Phase 8.4부터 이 함수는 사용되지 않습니다 — `WorkerSession::fail_all`이
-/// 단일 호출로 모든 in-flight task를 실패 처리합니다. 호환성을 위해
-/// #[cfg(test)] 에서만 노출.
-#[cfg(test)]
-#[allow(dead_code)]
-async fn fail_active_task(
-    session: &Arc<WorkerSession>,
+/// `session/update` notification 처리 — session_id로 해당 task를 찾아 텍스트를
+/// 누적하고 `WorkerEvent::Output`을 emit. 등록 안 된 session_id(이미 종료됐거나
+/// 이 워커 소관이 아님)는 조용히 무시.
+async fn handle_session_notification(
+    sessions_map: &Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
     broadcaster: &broadcast::Sender<WorkerEvent>,
-    reason: &str,
+    notification: SessionNotification,
 ) {
-    session.fail_all(broadcaster, reason).await;
-}
-
-/// backoff 대기 중 shutdown 신호가 오면 true 반환.
-async fn wait_with_shutdown(
-    cmd_rx: &mut mpsc::UnboundedReceiver<SupervisorCmd>,
-    backoff: Duration,
-) -> bool {
-    match tokio::time::timeout(backoff, cmd_rx.recv()).await {
-        // shutdown 또는 sender drop — 종료로 간주.
-        Ok(Some(SupervisorCmd::Shutdown)) | Ok(None) => true,
-        // Ping 등 기타 신호 — false.
-        Ok(Some(_)) => false,
-        // 타임아웃 정상 종료.
-        Err(_) => false,
-    }
-}
-
-/// 백그라운드 reader 루프. AcpEvent → WorkerEvent 변환.
-///
-/// Phase 8.4부터 다중 동시 task를 지원 — 각 이벤트는 `prompt_id` 기반으로
-/// `session.prompt_index`에서 올바른 task_id를 찾아 라우팅됨. 단,
-/// session/update notification이 session/prompt 응답보다 먼저 도착하는
-/// 레이스 윈도우에서는 prompt_id가 아직 dispatch에 의해 등록되지 않았을
-/// 수 있음 — 이 경우 이벤트를 버퍼에 넣고, dispatch의 set_prompt_id가
-/// 호출될 때 drain되어 emit.
-async fn run_reader_loop(
-    session: Arc<WorkerSession>,
-    broadcaster: broadcast::Sender<WorkerEvent>,
-    mut event_rx: mpsc::UnboundedReceiver<AcpEvent>,
-) {
-    let worker_id = session.worker_id;
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            AcpEvent::Output {
-                prompt_id,
-                seq,
-                chunk,
-            } => {
-                // prompt_id로 task_id 역조회. None인 경우 (드문 레이스)
-                // 출력을 drop — Phase 8.4 동시성 모델에서는 단일 active_task
-                // 가정이 더 이상 유효하지 않음.
-                let task_id_opt: Option<TaskId> = match prompt_id {
-                    Some(pid) => match session.task_for_prompt(pid).await {
-                        Some(tid) => Some(tid),
-                        None => {
-                            // dispatch가 아직 prompt_id를 등록하지 않음.
-                            // 버퍼에 저장 후 set_prompt_id 호출 시 emit.
-                            session
-                                .buffer_event(
-                                    pid,
-                                    BufferedEvent::Output {
-                                        seq,
-                                        chunk: chunk.clone(),
-                                    },
-                                )
-                                .await;
-                            debug!(
-                                %worker_id, prompt_id = pid.0,
-                                "buffered early Output — will flush on prompt_id register"
-                            );
-                            None
-                        }
-                    },
-                    None => {
-                        // 2026-08-11 버그 수정: 서버(grok agent serve)가 session/update
-                        // notification에 promptId를 전혀 안 붙이는 경우가 실측됨 — 예전
-                        // 코드는 이 경우 무조건 drop해서, 태스크는 completed로 표시되는데
-                        // 실제 응답 텍스트는 task_outputs/대시보드 어디에도 안 남았다.
-                        // 이 워커에 진행 중인 태스크가 하나뿐이면 모호하지 않으므로
-                        // 그 태스크로 라우팅.
-                        match session.sole_in_flight_task().await {
-                            Some(tid) => {
-                                debug!(
-                                    %worker_id, %tid,
-                                    "Output event without prompt_id — routed via sole in-flight fallback"
-                                );
-                                Some(tid)
-                            }
-                            None => {
-                                debug!(
-                                    %worker_id,
-                                    "Output event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
-                                );
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some(task_id) = task_id_opt {
-                    session.append_chunk(task_id, &chunk).await;
-                    let _ = broadcaster.send(WorkerEvent::Output {
-                        task_id,
-                        seq,
-                        chunk,
-                    });
-                }
-            }
-            AcpEvent::Completed { prompt_id, result } => {
-                // prompt_id로 task 역조회. unknown인 경우 이미 complete된 task이거나,
-                // dispatch()가 아직 set_prompt_id를 호출하지 않은 레이스 윈도우.
-                let task_id_opt = match prompt_id {
-                    Some(pid) => session.task_for_prompt(pid).await,
-                    None => {
-                        // 실전에서는 prompt()가 항상 폴백 id를 채워 보내므로
-                        // (acp/mod.rs::prompt) 이 분기는 거의 발생하지 않지만,
-                        // Output과 동일하게 방어적으로 sole-in-flight 폴백을 둔다.
-                        match session.sole_in_flight_task().await {
-                            Some(tid) => Some(tid),
-                            None => {
-                                debug!(
-                                    %worker_id,
-                                    "Completed event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
-                                );
-                                None
-                            }
-                        }
-                    }
-                };
-                match (task_id_opt, prompt_id) {
-                    (Some(task_id), _) => {
-                        // 2026-08-11 버그 수정: complete()를 먼저 호출해 dispatch 시각과
-                        // 누적된 스트리밍 출력을 회수한 뒤 TaskResult를 구성한다.
-                        let removed = session.complete(task_id).await;
-                        let duration_secs = removed
-                            .as_ref()
-                            .map(|t| t.started.elapsed().as_secs_f64())
-                            .unwrap_or(0.0);
-                        let buffered_output = removed.map(|t| t.output_buf).unwrap_or_default();
-                        let task_result = task_result_from_prompt(
-                            worker_id,
-                            result,
-                            duration_secs,
-                            buffered_output,
-                        );
-                        let _ = broadcaster.send(WorkerEvent::Completed {
-                            task_id,
-                            result: task_result,
-                        });
-                    }
-                    (None, Some(pid)) => {
-                        // dispatch()가 prompt_id를 아직 등록하지 않았을 수 있음
-                        // (짧은 프롬프트는 grok의 응답이 session/prompt RPC 응답보다
-                        // 먼저 도착할 수 있다 — Output/Failed와 동일한 레이스).
-                        // Output/Failed처럼 버퍼링해 set_prompt_id가 drain하도록 한다.
-                        // 과거 버그: Completed만 버퍼링 없이 즉시 drop해서, 이 레이스에
-                        // 걸린 태스크는 실제로는 성공했는데도 영원히 "dispatched"
-                        // 상태로 멈췄었다.
-                        session
-                            .buffer_event(pid, BufferedEvent::Completed { result })
-                            .await;
-                        debug!(
-                            %worker_id, prompt_id = pid.0,
-                            "buffered early Completed — will flush on prompt_id register"
-                        );
-                    }
-                    (None, None) => {}
-                }
-            }
-            AcpEvent::Failed { prompt_id, error } => {
-                let task_id_opt: Option<TaskId> = match prompt_id {
-                    Some(pid) => match session.task_for_prompt(pid).await {
-                        Some(tid) => Some(tid),
-                        None => {
-                            // dispatch가 아직 prompt_id를 등록하지 않은 상태에서
-                            // 서버가 Failed update를 보낸 경우 — 버퍼링.
-                            session
-                                .buffer_event(
-                                    pid,
-                                    BufferedEvent::Failed {
-                                        error: error.clone(),
-                                    },
-                                )
-                                .await;
-                            debug!(
-                                %worker_id, prompt_id = pid.0,
-                                "buffered early Failed event"
-                            );
-                            None
-                        }
-                    },
-                    None => {
-                        // Output과 동일한 sole-in-flight 폴백 — 없으면 태스크가
-                        // 영원히 "dispatched" 상태로 멈춘다(complete()가 안 불림).
-                        match session.sole_in_flight_task().await {
-                            Some(tid) => Some(tid),
-                            None => {
-                                debug!(
-                                    %worker_id,
-                                    "Failed event without prompt_id and 0 or >1 in-flight tasks — cannot route, dropping"
-                                );
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some(task_id) = task_id_opt {
-                    let _ = broadcaster.send(WorkerEvent::Failed { task_id, error });
-                    session.complete(task_id).await;
-                }
-            }
-        }
-    }
-    debug!(%worker_id, "ACP reader loop terminated");
-}
-
-/// prompt() 호출을 timeout과 함께 래핑.
-async fn run_prompt_with_timeout(
-    client: &Arc<AcpClient>,
-    session_id: &SessionId,
-    prompt: &str,
-    timeout_secs: Option<u64>,
-) -> Result<PromptId, String> {
-    let timeout = timeout_secs
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_PROMPT_TIMEOUT);
-
-    match tokio::time::timeout(timeout, client.prompt(session_id, prompt)).await {
-        Ok(Ok(pid)) => Ok(pid),
-        Ok(Err(e)) => Err(format!("acp prompt: {e}")),
-        Err(_) => Err(format!("acp prompt timed out after {timeout:?}")),
-    }
-}
-
-/// `PromptResult` → `TaskResult` 변환. reader loop의 즉시 라우팅 경로와
-/// dispatch()의 버퍼드-이벤트 drain 경로가 동일 로직을 공유.
-///
-/// `duration_secs`: 호출자가 `InFlightTask.started`(또는 동등한 dispatch 시각)로
-/// 계산해 넘긴다 — 2026-08-11 이전에는 이 값이 항상 0.0으로 하드코딩되어 있었다
-/// (dispatcher가 계산할 것이라는 옛 주석만 남고 실제 계산은 구현된 적이 없었음).
-///
-/// `buffered_output`: 스트리밍 `session/update`(AgentMessageChunk)로 누적된 텍스트.
-/// `result.agent_message`(최종 RPC 응답)가 비어 있을 때의 폴백 — 2026-08-11 실측:
-/// grok가 응답을 스트리밍으로만 보내고 최종 응답에는 텍스트를 채우지 않는 경우가
-/// 있어, 이 폴백이 없으면 실제로는 응답이 있었는데도 `output`이 항상 빈 문자열로
-/// 저장됐다.
-fn task_result_from_prompt(
-    worker_id: WorkerId,
-    result: crate::acp::PromptResult,
-    duration_secs: f64,
-    buffered_output: String,
-) -> TaskResult {
-    let text = extract_output_text(&result);
-    let output = if text.is_empty() {
-        buffered_output
-    } else {
-        text
+    let text = match &notification.update {
+        SessionUpdate::AgentMessageChunk(chunk) => extract_chunk_text(chunk),
+        _ => None,
     };
-    let token_usage = result.usage.map(|u| TokenUsage {
+    let Some(text) = text else { return };
+
+    let (task_id, seq) = {
+        let sessions = sessions_map.lock().await;
+        let Some(entry) = sessions.get(&notification.session_id) else {
+            return;
+        };
+        entry.output_buf.lock().await.push_str(&text);
+        (entry.task_id, entry.seq.fetch_add(1, Ordering::Relaxed))
+    };
+    let _ = broadcaster.send(WorkerEvent::Output {
+        task_id,
+        seq,
+        chunk: text,
+    });
+}
+
+/// `PromptResponse`에서 토큰 사용량 추출 (`unstable_end_turn_token_usage`
+/// feature가 켜진 경우에만 필드가 존재 — 이 크레이트는 켜서 빌드한다).
+fn extract_token_usage(
+    resp: &agent_client_protocol::schema::v1::PromptResponse,
+) -> Option<TokenUsage> {
+    resp.usage.as_ref().map(|u| TokenUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
-        cache_read_tokens: u.cache_read_input_tokens.unwrap_or(0),
-    });
-    TaskResult {
-        output,
-        exit_code: 0,
-        duration_secs,
-        token_usage,
-        worker_id,
-        finished_at: Utc::now(),
+        cache_read_tokens: u.cached_read_tokens.unwrap_or(0),
+    })
+}
+
+/// `ContentChunk`(AgentMessageChunk)에서 텍스트 추출. 텍스트가 아닌 콘텐츠
+/// (이미지 등)는 무시.
+fn extract_chunk_text(chunk: &agent_client_protocol::schema::v1::ContentChunk) -> Option<String> {
+    match &chunk.content {
+        ContentBlock::Text(text_content) => Some(text_content.text.clone()),
+        _ => None,
     }
 }
 
-/// PromptResult.agent_message에서 텍스트를 추출.
-fn extract_output_text(result: &crate::acp::PromptResult) -> String {
-    let mut out = String::new();
-    for block in &result.agent_message {
-        if let Some(obj) = block.as_object() {
-            if obj.get("type").and_then(|v| v.as_str()) == Some("text") {
-                if let Some(t) = obj.get("text").and_then(|v| v.as_str()) {
-                    out.push_str(t);
-                }
-            }
-        }
-    }
-    out
+/// mTLS 여부에 따라 `HttpClient`를 구성.
+fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
+    let client = HttpClient::with_endpoint(&session.endpoint).map_err(|e| {
+        format!(
+            "invalid endpoint {}: {e}",
+            sanitize_endpoint(&session.endpoint)
+        )
+    })?;
+    #[cfg(feature = "mtls")]
+    let client = match &session.tls_connector {
+        Some(connector) => client.with_tls_connector(connector.clone()),
+        None => client,
+    };
+    Ok(client)
 }
 
 /// endpoint에서 server-key 마스킹 (로깅용).
@@ -1254,68 +833,6 @@ mod tests {
         let s = sanitize_endpoint("ws://h:1/ws?server-key=topsecret");
         assert!(!s.contains("topsecret"));
         assert!(s.contains("<redacted>"));
-    }
-
-    #[test]
-    fn extract_output_text_from_text_blocks() {
-        let result = crate::acp::PromptResult {
-            prompt_id: Some(1),
-            agent_message: vec![
-                serde_json::json!({"type": "text", "text": "foo"}),
-                serde_json::json!({"type": "text", "text": "bar"}),
-            ],
-            end_of_turn: true,
-            usage: None,
-        };
-        assert_eq!(extract_output_text(&result), "foobar");
-    }
-
-    /// 회귀 테스트: 짧은 프롬프트에 대한 grok의 응답이 `session/prompt` RPC
-    /// 응답(→ set_prompt_id 호출)보다 먼저 도착하는 레이스에서, Completed
-    /// 이벤트가 Output/Failed와 동일하게 버퍼링되어 set_prompt_id가 drain할 때
-    /// 함께 나와야 한다. 과거 버그: `BufferedEvent`에 `Completed` variant 자체가
-    /// 없어서 이 레이스에 걸린 태스크는 실행이 실제로는 성공했는데도 영원히
-    /// "dispatched" 상태로 멈췄다 — 프로덕션에서 실제로 관측된 사례.
-    #[tokio::test]
-    async fn buffered_completed_event_flushes_on_prompt_id_registration() {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel::<SupervisorCmd>();
-        let session = WorkerSession::new(WorkerId::new(), "ws://x".into(), 4, cmd_tx);
-        let task_id = TaskId::new();
-        let prompt_id = PromptId(42);
-
-        session.try_acquire(task_id).await.unwrap();
-
-        // grok의 응답이 먼저 도착 — set_prompt_id가 아직 호출되지 않은 시점.
-        let result = crate::acp::PromptResult {
-            prompt_id: Some(42),
-            agent_message: vec![serde_json::json!({"type": "text", "text": "hi"})],
-            end_of_turn: true,
-            usage: None,
-        };
-        session
-            .buffer_event(prompt_id, BufferedEvent::Completed { result })
-            .await;
-
-        // session/prompt RPC 응답이 뒤늦게 도착 — 버퍼가 drain되어야 함.
-        let flushed = session.set_prompt_id(task_id, prompt_id).await;
-        assert_eq!(flushed.len(), 1, "buffered Completed must flush");
-        match &flushed[0] {
-            BufferedEvent::Completed { result } => {
-                assert_eq!(extract_output_text(result), "hi");
-            }
-            other => panic!("expected Completed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn extract_output_text_empty_when_no_text_blocks() {
-        let result = crate::acp::PromptResult {
-            prompt_id: Some(1),
-            agent_message: vec![serde_json::json!({"type": "image", "url": "..."})],
-            end_of_turn: true,
-            usage: None,
-        };
-        assert_eq!(extract_output_text(&result), "");
     }
 
     #[tokio::test]
@@ -1360,29 +877,5 @@ mod tests {
             result,
             Err(TransportError::WorkerNotRegistered(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn wait_with_shutdown_returns_false_on_timeout() {
-        let (_tx, mut rx) = mpsc::unbounded_channel::<SupervisorCmd>();
-        // 10ms 타임아웃 — 즉시 반환.
-        let got = wait_with_shutdown(&mut rx, Duration::from_millis(10)).await;
-        assert!(!got);
-    }
-
-    #[tokio::test]
-    async fn wait_with_shutdown_returns_true_on_shutdown() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<SupervisorCmd>();
-        tx.send(SupervisorCmd::Shutdown).unwrap();
-        let got = wait_with_shutdown(&mut rx, Duration::from_secs(60)).await;
-        assert!(got);
-    }
-
-    #[tokio::test]
-    async fn wait_with_shutdown_returns_true_on_sender_drop() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<SupervisorCmd>();
-        drop(tx);
-        let got = wait_with_shutdown(&mut rx, Duration::from_secs(60)).await;
-        assert!(got);
     }
 }

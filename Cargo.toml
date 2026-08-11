@@ -17,7 +17,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# 2026-08-11: agent-client-protocol(공식 ACP Rust SDK, MSRV 1.88) 도입을 위해
+# 1.75 -> 1.88로 상향. edition은 2021 유지 — Cargo는 의존성 그래프 내 크레이트별
+# 서로 다른 edition을 문제없이 허용하므로 SDK가 2024 edition이어도 상관없다.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yarang/grok-fleet-orchestrator"
 homepage = "https://github.com/yarang/grok-fleet-orchestrator"

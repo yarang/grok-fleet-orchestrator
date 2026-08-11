@@ -1,0 +1,62 @@
+[package]
+name = "agent-client-protocol-test"
+version = "0.11.0"
+# FLEET PATCH (2026-08-11): 워크스페이스 상속 제거 — agent-client-protocol/Cargo.toml
+# 상단 주석 참고. (이 크레이트는 dev-dependency로만 참조되지만, Cargo가 매니페스트를
+# 파싱할 때 dev-dependency도 eager하게 로드해 상속을 시도하므로 여기도 고쳐야 한다.)
+edition = "2024"
+rust-version = "1.88.0"
+authors = ["Zed <hi@zed.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/agentclientprotocol/rust-sdk"
+homepage = "https://github.com/agentclientprotocol/rust-sdk"
+description = "Test utilities and mock implementations for the Agent Client Protocol"
+publish = false
+
+[features]
+default = ["unstable"]
+unstable = ["agent-client-protocol/unstable"]
+unstable_protocol_v2 = ["agent-client-protocol/unstable_protocol_v2"]
+
+[[bin]]
+name = "mcp-echo-server"
+path = "src/bin/mcp_echo_server.rs"
+
+[[bin]]
+name = "testy"
+path = "src/bin/testy.rs"
+
+[dependencies]
+agent-client-protocol = { path = "../agent-client-protocol", version = "2.0.0" }
+anyhow = "1.0"
+http = "1.4.2"
+rmcp = { version = "2.1.0", features = ["server", "transport-io", "schemars", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+schemars = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+tokio = { version = "1.52", default-features = false, features = ["io-std", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1.18", features = ["v4"] }
+
+# FLEET PATCH (2026-08-11): agent-client-protocol/Cargo.toml 상단 주석 참고.
+[lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+let_underscore = "warn"
+missing_debug_implementations = "warn"
+nonstandard_style = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+struct_field_names = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+wildcard_imports = "allow"
