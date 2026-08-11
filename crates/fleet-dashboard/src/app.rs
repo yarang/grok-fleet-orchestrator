@@ -11,6 +11,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use fleet_scheduler::Dispatcher;
 use fleet_store::Store;
 
 use crate::auth::require_session;
@@ -28,27 +29,41 @@ pub struct DashboardState {
     pub smtp_config: Option<crate::email::SmtpConfig>,
     /// 마스터 키 (SSH 키 암호화/복호화용). None이면 프로비저닝 기능 비활성.
     pub master_key: Option<Arc<fleet_credentials::MasterKey>>,
+    /// 태스크 제출(`POST /api/tasks`)용 Dispatcher. `fleet serve`가 fleet-api와 공유하는
+    /// 동일 인스턴스를 주입한다 — None이면 태스크 제출 UI/API가 503을 반환한다(주로 이
+    /// 기능을 다루지 않는 테스트 하네스용).
+    pub dispatcher: Option<Arc<Dispatcher>>,
 }
 
 impl DashboardState {
-    pub fn new(store: Arc<dyn Store>, pool: sqlx::PgPool) -> Self {
+    pub fn new(
+        store: Arc<dyn Store>,
+        pool: sqlx::PgPool,
+        dispatcher: Option<Arc<Dispatcher>>,
+    ) -> Self {
         Self {
             store,
             pool,
             secure_cookies: true,
             smtp_config: crate::email::SmtpConfig::from_env(),
             master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
+            dispatcher,
         }
     }
 
     /// 로컬 개발용 (Secure 쿠키 비활성).
-    pub fn new_insecure(store: Arc<dyn Store>, pool: sqlx::PgPool) -> Self {
+    pub fn new_insecure(
+        store: Arc<dyn Store>,
+        pool: sqlx::PgPool,
+        dispatcher: Option<Arc<Dispatcher>>,
+    ) -> Self {
         Self {
             store,
             pool,
             secure_cookies: false,
             smtp_config: crate::email::SmtpConfig::from_env(),
             master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
+            dispatcher,
         }
     }
 }
@@ -100,6 +115,7 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/", get(handlers::index))
         // ── P1: 페이지 ──
         .route("/tasks", get(handlers::task_queue_page))
+        .route("/tasks/new", get(handlers::task_new_page))
         .route("/tasks/:id", get(handlers::task_detail_page))
         .route("/workers/:id", get(handlers::worker_detail_page))
         .route("/admin/users", get(handlers::admin_users_page))
@@ -125,7 +141,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/overview", get(handlers::overview))
         .route("/api/workers", get(handlers::list_workers))
         .route("/api/workers/:id", get(handlers::get_worker_detail))
-        .route("/api/tasks", get(handlers::list_tasks))
+        .route(
+            "/api/tasks",
+            get(handlers::list_tasks).post(handlers::submit_task_api),
+        )
         .route("/api/tasks/:id", get(handlers::get_task_detail_api))
         .route("/api/events", get(handlers::list_events))
         .route("/api/events/stream", get(crate::sse::events_stream))

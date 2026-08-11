@@ -73,6 +73,53 @@ impl MemStore {
         self
     }
 
+    /// `seed_test_session`과 동일하되 권한을 직접 지정한다 — 권한 부족(403) 경로를
+    /// 테스트할 때 사용.
+    fn seed_test_session_with_perms(self, perm_kinds: &[PermissionKind]) -> (Self, String) {
+        let user = User {
+            id: UserId::new(),
+            username: "test_limited".into(),
+            email: Some("limited@example.com".into()),
+            email_verified: true,
+            password_hash: String::new(),
+            enabled: true,
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+
+        let raw_token = "test-limited-session-token".to_string();
+        let hash = sha256_hex(raw_token.as_bytes());
+        let session = Session {
+            id: SessionId::new(),
+            user_id: user.id,
+            token_hash: hash,
+            created_at: Utc::now(),
+            expires_at: Utc::now() + Duration::hours(8),
+            ip_address: None,
+            user_agent: None,
+        };
+
+        let uid = user.id;
+        self.users.lock().unwrap().insert(uid, user);
+
+        let perms: Vec<Permission> = perm_kinds
+            .iter()
+            .map(|pk| Permission {
+                id: PermissionId::new(),
+                name: pk.as_str().to_string(),
+                description: None,
+            })
+            .collect();
+        self.user_permissions.lock().unwrap().insert(uid, perms);
+
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(sha256_hex(raw_token.as_bytes()), session);
+
+        (self, raw_token)
+    }
+
     /// 테스트용 관리자 사용자 + 유효한 세션을 주입하고,
     /// 세션 쿠키 raw 값을 반환.
     fn seed_test_session(self) -> (Self, String) {
@@ -411,7 +458,11 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
         .connect_lazy("postgres://__test_unused__@localhost/__none__")
         .expect("connect_lazy must not perform I/O");
 
-    let state = Arc::new(DashboardState::new(Arc::new(store) as Arc<dyn Store>, pool));
+    let state = Arc::new(DashboardState::new(
+        Arc::new(store) as Arc<dyn Store>,
+        pool,
+        None,
+    ));
     let app = build_dashboard_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -864,4 +915,122 @@ async fn list_workers_filtering_and_pagination() {
     assert_eq!(resp.status(), 200);
     let workers_paginated: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(workers_paginated.len(), 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  POST /api/tasks — 대시보드 태스크 제출
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 이 하네스는 `DashboardState.dispatcher`를 항상 `None`으로 구성한다(스토어만
+// 검증하는 다른 테스트와의 일관성 유지) — 그래서 여기서는 "요청 검증" 계층
+// (권한/CSRF/빈 프롬프트/dispatcher 미구성)만 검증한다. 실제 워커 선택→dispatch
+// 성공 경로는 이미 `fleet-scheduler/tests/dispatch_e2e.rs`가 다룬다.
+
+const TEST_CSRF: &str = "test-csrf-token-fixed";
+
+fn authed_post_form(
+    client: &reqwest::Client,
+    url: &str,
+    cookie: &str,
+    form: &[(&str, &str)],
+) -> reqwest::RequestBuilder {
+    client
+        .post(url)
+        .header(
+            "cookie",
+            format!("fleet_session={cookie}; fleet_csrf={TEST_CSRF}"),
+        )
+        .form(form)
+}
+
+#[tokio::test]
+async fn submit_task_denies_without_task_create_permission() {
+    // task:create가 없는 세션(TaskList만 보유) — 403이어야 함.
+    let (store, cookie) = MemStore::new().seed_test_session_with_perms(&[PermissionKind::TaskList]);
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[("prompt", "do something"), ("csrf_token", TEST_CSRF)],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_invalid_csrf() {
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    // 폼의 csrf_token이 쿠키(TEST_CSRF)와 일치하지 않음.
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[("prompt", "do something"), ("csrf_token", "wrong-token")],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_empty_prompt() {
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[("prompt", "   "), ("csrf_token", TEST_CSRF)],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_without_dispatcher_returns_unavailable_and_creates_no_task() {
+    // 이 하네스의 DashboardState.dispatcher는 항상 None — "기능 미구성" 경로.
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[("prompt", "do something useful"), ("csrf_token", TEST_CSRF)],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 503);
+
+    // dispatcher 미구성 체크는 태스크 생성 이전에 이뤄지므로, 목록에는 아무것도
+    // 남지 않아야 한다.
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(tasks.is_empty(), "no task should be created: {tasks:?}");
 }

@@ -39,8 +39,13 @@
   <!-- sidebar:end -->
 
   <main>
-    <h1 class="page-title">Task Queue</h1>
-    <p class="page-subtitle">All tasks across the fleet, newest first.</p>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+      <div>
+        <h1 class="page-title">Task Queue</h1>
+        <p class="page-subtitle">All tasks across the fleet, newest first.</p>
+      </div>
+      <a href="/tasks/new" id="new-task-link" class="btn btn-primary" style="white-space:nowrap;">+ New Task</a>
+    </div>
 
     <div class="filter-bar">
       <div class="pill-group">

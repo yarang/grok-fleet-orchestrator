@@ -13,6 +13,8 @@ fleet-store = { workspace = true }
 fleet-credentials = { workspace = true }
 # /api/tools가 MCP 도구 카탈로그를 재선언하지 않고 단일 출처를 참조하기 위함.
 fleet-mcp = { workspace = true }
+# 대시보드에서 태스크 제출(POST /api/tasks) 시 Dispatcher를 직접 호출하기 위함.
+fleet-scheduler = { workspace = true }
 fleet-provisioner = { workspace = true, features = ["ssh"] }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

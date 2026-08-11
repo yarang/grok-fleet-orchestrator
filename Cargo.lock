@@ -1253,6 +1253,7 @@ dependencies = [
  "fleet-credentials",
  "fleet-mcp",
  "fleet-provisioner",
+ "fleet-scheduler",
  "fleet-store",
  "hex",
  "lettre",

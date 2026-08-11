@@ -89,6 +89,20 @@
       });
     });
 
+    // 권한 없는 사용자(viewer)에게는 "+ New Task" 버튼을 숨긴다 — 눌러도 서버가
+    // 403을 반환하겠지만, 애초에 할 수 없는 액션을 보여주지 않는 편이 낫다.
+    async function hideNewTaskIfNoPermission() {
+      try {
+        const resp = await fetch('/api/me');
+        const me = await resp.json();
+        if (!(me.permissions || []).includes('task:create')) {
+          const btn = document.getElementById('new-task-link');
+          if (btn) btn.style.display = 'none';
+        }
+      } catch (e) { console.error('hideNewTaskIfNoPermission', e); }
+    }
+    hideNewTaskIfNoPermission();
+
     // 주기적 새로고침
     fetchTasks();
     setInterval(fetchTasks, 5000);

@@ -240,7 +240,11 @@ async fn spawn_server() -> TestServer {
         .connect_lazy("postgres://__test_unused__@localhost/__none__")
         .expect("connect_lazy must not perform I/O");
 
-    let state = Arc::new(DashboardState::new(store.clone() as Arc<dyn Store>, pool));
+    let state = Arc::new(DashboardState::new(
+        store.clone() as Arc<dyn Store>,
+        pool,
+        None,
+    ));
     let app = build_dashboard_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

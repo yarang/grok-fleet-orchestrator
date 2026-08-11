@@ -395,6 +395,106 @@ pub async fn task_queue_page() -> Response {
     serve_page("tasks.html")
 }
 
+/// GET /tasks/new — 태스크 제출 HTML 페이지.
+pub async fn task_new_page() -> Response {
+    serve_page("task-new.html")
+}
+
+/// `POST /api/tasks` 폼 본문.
+#[derive(Debug, serde::Deserialize)]
+pub struct SubmitTaskForm {
+    pub prompt: String,
+    /// 워커 라벨 `model`과 정확히 일치해야 라우팅됨(비우면 스케줄러가 아무 워커나 선택).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// ACP 프로토콜에는 별도 시스템 프롬프트 필드가 없어, 있으면 실제 프롬프트
+    /// 앞에 구분선과 함께 병합해 전송한다.
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// `"low"` | `"normal"` | `"high"`. 그 외 값은 `normal`로 취급.
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub csrf_token: String,
+}
+
+/// `POST /api/tasks` — 대시보드에서 태스크를 제출한다.
+///
+/// MCP `submit_task` 도구와 동일하게 `Dispatcher::submit`을 직접 호출한다(재조정
+/// 루프가 아니라 즉시 디스패치 시도). 워커 선택/CircuitBreaker/transport 실패로
+/// `submit()`이 `Err`를 반환해도 **태스크 행 자체는 이미 Store에 생성돼 있다**
+/// (실패 사유와 함께 `Failed`로 마킹됨) — 그래서 이 경우도 HTTP 200으로 응답하고
+/// `dispatched: false` + `warning`으로 알린다. 진짜 4xx/5xx는 태스크가 아예
+/// 생성되기 전(권한 없음/빈 프롬프트/CSRF 무효/Dispatcher 미구성)에만 낸다.
+pub async fn submit_task_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    Form(form): Form<SubmitTaskForm>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&principal, PermissionKind::TaskCreate)?;
+
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
+        return Err(ApiError::Forbidden("CSRF token invalid".into()));
+    }
+
+    let prompt = form.prompt.trim();
+    if prompt.is_empty() {
+        return Err(ApiError::BadRequest("prompt must not be empty".into()));
+    }
+
+    let full_prompt = match form.custom_instructions.as_deref().map(str::trim) {
+        Some(instr) if !instr.is_empty() => format!("{instr}\n\n---\n\n{prompt}"),
+        _ => prompt.to_string(),
+    };
+
+    let priority = match form.priority.as_deref() {
+        Some("low") => fleet_core::TaskPriority::Low,
+        Some("high") => fleet_core::TaskPriority::High,
+        _ => fleet_core::TaskPriority::Normal,
+    };
+
+    let dispatcher = state
+        .dispatcher
+        .clone()
+        .ok_or_else(|| ApiError::Unavailable("task submission is not configured".into()))?;
+
+    let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: full_prompt,
+        cwd: form.cwd.filter(|s| !s.is_empty()),
+        model: form.model.filter(|s| !s.is_empty()),
+        server_hint: None,
+        required_labels: vec![],
+        max_turns: form.max_turns,
+        timeout_secs: form.timeout_secs,
+        priority,
+        created_by: principal.user.username.clone(),
+    });
+    let task_id = task.id;
+
+    match dispatcher.submit(task).await {
+        Ok(id) => Ok(Json(serde_json::json!({
+            "task_id": id,
+            "dispatched": true,
+        }))),
+        Err(e) => {
+            debug!(%task_id, error = %e, "dashboard task submission did not dispatch immediately");
+            Ok(Json(serde_json::json!({
+                "task_id": task_id,
+                "dispatched": false,
+                "warning": e.to_string(),
+            })))
+        }
+    }
+}
+
 /// GET /tasks/:id — 태스크 상세 HTML 페이지.
 pub async fn task_detail_page(Path(_id): Path<String>) -> Response {
     serve_page("task-detail.html")
@@ -1966,7 +2066,9 @@ fn csrf_valid(cookie_token: Option<&str>, submitted_token: &str) -> bool {
             matched
         }
         None => {
-            tracing::warn!("CSRF token validation failed — fleet_csrf cookie is missing from request");
+            tracing::warn!(
+                "CSRF token validation failed — fleet_csrf cookie is missing from request"
+            );
             false
         }
         Some(_) => {

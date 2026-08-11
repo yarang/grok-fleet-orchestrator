@@ -470,6 +470,7 @@ pub async fn run_serve(
         let dashboard_state = Arc::new(fleet_dashboard::DashboardState::new(
             store.clone(),
             store.pool().clone(),
+            Some(dispatcher.clone()),
         ));
         tracing::info!(bind = %bind, "dashboard server starting");
         let dash_join = tokio::spawn(async move {
