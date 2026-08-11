@@ -270,9 +270,11 @@ fn session_cookie_header(
     token: &str,
 ) -> Result<axum::http::HeaderValue, axum::http::header::InvalidHeaderValue> {
     // 로그인 시 발급하는 쿠키와 동일한 속성이어야 한다.
+    // FLEET FIX (2026-08-12): 9c7560e에서 로그인 쿠키만 SameSite=Lax로 바꾸고
+    // 이 로테이션 쿠키는 Strict로 남아 있던 누락분을 맞춤.
     let secure = if state.secure_cookies { "; Secure" } else { "" };
     let value =
-        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly{secure}; SameSite=Strict; Max-Age={SESSION_DURATION_SECS}");
+        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly{secure}; SameSite=Lax; Max-Age={SESSION_DURATION_SECS}");
     axum::http::HeaderValue::from_str(&value)
 }
 

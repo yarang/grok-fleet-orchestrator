@@ -983,6 +983,32 @@ async fn submit_task_rejects_invalid_csrf() {
     assert_eq!(resp.status(), 403);
 }
 
+/// FLEET FIX (2026-08-12) 회귀 테스트 — 실제 프로덕션 장애 재현.
+///
+/// `fleet_csrf` 쿠키의 수명이 세션 쿠키(8h)보다 짧게(고정 1h) 잡혀 있으면,
+/// 세션은 아직 유효한데 CSRF 쿠키만 브라우저에서 만료·삭제된 상태로 폼을
+/// 제출하게 된다 — `csrf_valid()`는 쿠키가 아예 없는 `None` 분기를 타
+/// "CSRF token invalid"를 반환한다. `submit_task_rejects_invalid_csrf`는
+/// 쿠키와 폼 값이 "서로 다른" 경우만 검증해 이 실패 모드를 놓쳤었다.
+#[tokio::test]
+async fn submit_task_rejects_missing_csrf_cookie() {
+    let (store, cookie) = MemStore::new().seed_test_session();
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    // fleet_session만 있고 fleet_csrf 쿠키는 없음 — 만료되어 브라우저가
+    // 삭제한 상태를 재현. 폼에는 (이제는 무의미한) 값이 담겨 온다.
+    let resp = client
+        .post(format!("http://{}/api/tasks", server.addr))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .form(&[("prompt", "do something"), ("csrf_token", TEST_CSRF)])
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 403);
+}
+
 #[tokio::test]
 async fn submit_task_rejects_empty_prompt() {
     let (store, cookie) = MemStore::new().seed_test_session();

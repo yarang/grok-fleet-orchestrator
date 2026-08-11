@@ -1130,7 +1130,7 @@ pub async fn login_page(
         .http_only(false) // JS에서 읽을 수 있어야 함 (더블 서밋 패턴)
         .secure(state.secure_cookies)
         .same_site(SameSite::Lax)
-        .max_age(time::Duration::seconds(3600))
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS)) // FLEET FIX (2026-08-12): match session lifetime, not a fixed 1h — the fixed value expired while the 8h session cookie was still valid, causing "CSRF token invalid" on task submission after ~1h
         .build();
     let jar = jar.add(csrf_cookie);
 
@@ -1312,7 +1312,7 @@ pub async fn login(
         .http_only(false)
         .secure(state.secure_cookies)
         .same_site(SameSite::Lax)
-        .max_age(time::Duration::seconds(3600))
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS)) // FLEET FIX (2026-08-12): match session lifetime, not a fixed 1h — the fixed value expired while the 8h session cookie was still valid, causing "CSRF token invalid" on task submission after ~1h
         .build();
     let new_jar = new_jar.add(csrf_cookie);
 
@@ -1560,7 +1560,7 @@ pub async fn resend_verification_page(
         .http_only(false)
         .secure(state.secure_cookies)
         .same_site(SameSite::Lax)
-        .max_age(time::Duration::seconds(3600))
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS)) // FLEET FIX (2026-08-12): match session lifetime, not a fixed 1h — the fixed value expired while the 8h session cookie was still valid, causing "CSRF token invalid" on task submission after ~1h
         .build();
     let jar = jar.add(csrf_cookie);
 
@@ -1712,7 +1712,7 @@ pub async fn forgot_password_page(
         .http_only(false)
         .secure(state.secure_cookies)
         .same_site(SameSite::Lax)
-        .max_age(time::Duration::seconds(3600))
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS)) // FLEET FIX (2026-08-12): match session lifetime, not a fixed 1h — the fixed value expired while the 8h session cookie was still valid, causing "CSRF token invalid" on task submission after ~1h
         .build();
     let jar = jar.add(csrf_cookie);
 
@@ -2178,7 +2178,7 @@ pub async fn bootstrap_page(
         .http_only(false)
         .secure(state.secure_cookies)
         .same_site(SameSite::Lax)
-        .max_age(time::Duration::seconds(3600))
+        .max_age(time::Duration::seconds(SESSION_DURATION_SECS)) // FLEET FIX (2026-08-12): match session lifetime, not a fixed 1h — the fixed value expired while the 8h session cookie was still valid, causing "CSRF token invalid" on task submission after ~1h
         .build();
     let jar = jar.add(csrf_cookie);
 
