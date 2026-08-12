@@ -250,6 +250,30 @@
     `docs/credentials/`는 알려진 특정 이슈만 부분 수정했으며 전체 문서를 절 단위로
     정독하진 않았습니다 — 후속 세션에서 필요 시 이어서 진행합니다.
 
+47. ✅ **HealthChecker↔Task 연동 부재** (P2, 정확성) — 해결됨 (2026-08-13). 워커가
+    `Offline`으로 표시돼도(45초/3회 하트비트 누락) 그 워커에 배정된 `Dispatched`
+    작업은 아무도 실패 처리하지 않아, 워커가 heartbeat만 끊기고 ACP WebSocket
+    연결은 살아있는 애매한 상태에서 작업이 무기한 `Dispatched`로 남을 수 있었습니다
+    (`docs/architecture/overview.md`의 "태스크 모니터링 및 종료 감지 파이프라인"
+    절에서 처음 발견·문서화).
+
+    수정: `Reconciler`(`crates/fleet-scheduler/src/reconcile.rs`)에 세 번째 스윕
+    `reap_stale_dispatched`를 추가했습니다 — 담당 워커가 여전히 등록돼 있지만
+    `Offline`이고 마지막 하트비트로부터 `offline_worker_grace`(기본 **5분**, 신규
+    CLI 플래그 `--reconcile-offline-worker-grace-secs` /
+    `FLEET_RECONCILE_OFFLINE_WORKER_GRACE_SECS`) 이상 지났다면 `Failed(WorkerUnavailable)`로
+    전이합니다. 기존 "워커 row 자체가 사라진" 경로(30초 유예)보다 훨씬 긴 유예를
+    두는 이유는 `Offline`이 되돌릴 수 있는 상태이기 때문입니다. 테스트 3개 추가
+    (유예 초과 시 실패 처리, 유예 이내 방치, `Degraded`는 건드리지 않음 확인).
+
+    ⚠️ **미검증**: 이 세션 환경에 Rust 툴체인이 없어 `cargo test`로 실제 컴파일/
+    테스트 통과를 확인하지 못했습니다 — 다음 빌드 시
+    `cargo test -p fleet-scheduler reconcile::` 로 반드시 재확인 필요합니다.
+    ⚠️ **알려진 한계**: `update_task_status`가 낙관적 잠금을 하지 않아, `Failed`로
+    마킹한 직후 워커가 실제로는 재연결해 뒤늦게 `WorkerEvent::Completed`가
+    도착하면 상태가 덮어써질 수 있는 이론적 경쟁 상태가 남아 있습니다(5분 유예가
+    이 창을 좁힐 뿐 완전히 없애지는 못함).
+
 ---
 
 ## 현재 진행 상황 (2026-08-11 기준)

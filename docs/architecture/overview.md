@@ -956,28 +956,31 @@ MCP로 `fleet_dispatch_task`를 호출한 뒤, 오케스트레이터가 내부�
 `/api/events/stream`는 Postgres `LISTEN/NOTIFY` 기반 SSE로 실시간 push가 되지만, MCP
 경로가 아니라 웹 대시보드 전용입니다.)
 
-### ⚠️ 알려진 빈틈: HealthChecker의 Offline 처리와 태스크 실패는 별개
+### HealthChecker의 Offline 처리와 태스크 실패 연동
 
-`HealthChecker`가 워커를 `Offline`으로 표시하는 것(45초/3회 누락)과, 그 워커에 배정된
-진행 중 태스크를 실패 처리하는 것은 **서로 연결되어 있지 않습니다.**
-`HealthChecker::scan_once()`(`crates/fleet-scheduler/src/health.rs`)는 `Worker.status`
-필드만 갱신할 뿐 **Task 테이블은 전혀 건드리지 않습니다.**
+✅ **해결됨 (2026-08-13)**. `HealthChecker`가 워커를 `Offline`으로 표시하는 것(45초/3회
+누락)과 그 워커에 배정된 진행 중 태스크를 실패 처리하는 것은 원래 **서로 연결되어
+있지 않았습니다** — `HealthChecker::scan_once()`(`crates/fleet-scheduler/src/health.rs`)는
+`Worker.status`만 갱신할 뿐 Task 테이블은 건드리지 않았고, `Reconciler`의 orphan 회수
+경로도 워커 row가 완전히 사라진 경우만 다뤘습니다. 워커가 heartbeat만 끊기고
+WebSocket 연결은 살아있는 애매한 상태라면, 배정된 태스크가 무기한 `Dispatched`로
+남을 수 있었습니다.
 
-진행 중이던 태스크가 실제로 실패 처리되려면 아래 중 하나가 필요합니다:
+`Reconciler`에 세 번째 스윕을 추가해 이 빈틈을 메웠습니다
+(`crates/fleet-scheduler/src/reconcile.rs::reap_stale_dispatched`): 담당 워커가
+`workers` 테이블에 여전히 존재하되 `status == Offline`이고, 마지막 하트비트
+(`last_seen`)로부터 `offline_worker_grace`(기본 **5분**, `--reconcile-offline-worker-
+grace-secs` / `FLEET_RECONCILE_OFFLINE_WORKER_GRACE_SECS`) 이상 지났다면
+`Failed(WorkerUnavailable)`로 전이합니다. 기존 "워커 row가 아예 사라진" 경로
+(`dispatched_worker_check_after`, 기본 30초)보다 훨씬 긴 유예를 두는 이유는
+`Offline`이 되돌릴 수 있는 상태이기 때문입니다 — 워커가 곧 재연결될 수 있는 상황에서
+성급하게 작업을 실패 처리하지 않기 위함입니다.
 
-1. ACP WebSocket 연결이 실제로 끊겨 supervisor의 `fail_all()`이 호출되는 경우
-   (`acp_transport.rs:714-716`).
-2. 프롬프트 자체 타임아웃(기본 10분, `DEFAULT_PROMPT_TIMEOUT`, 또는 태스크의
-   `timeout_secs`)이 만료되는 경우.
-3. 워커 레코드 자체가 삭제/재등록되어 `Reconciler`가 30초 후 orphan `Dispatched` 작업으로
-   잡아채는 경우(`reconcile.rs::reap_orphaned_dispatched`) — 단, 이건 워커 row가
-   **완전히 사라진 경우에만** 동작하고, 단순히 `Offline` 상태인 워커는 명시적으로
-   건너뜁니다(`reconcile.rs`의 "워커는 존재 — 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가
-   담당" 주석 참조).
-
-따라서 **워커가 heartbeat만 끊기고 WebSocket 연결은 살아있는 애매한 상태**라면, 그
-워커에 배정된 태스크는 위 세 경로 중 하나가 실제로 발동할 때까지 `Dispatched`로
-무기한 남을 수 있습니다 — 별도 문서화되지 않았던 실제 동작상의 빈틈입니다.
+⚠️ **남은 한계**: `update_task_status`가 현재 상태를 조건으로 거는 낙관적 잠금을 하지
+않으므로, 이 스윕이 태스크를 `Failed`로 마킹한 직후 워커가 실제로는 재연결에
+성공해서 뒤늦게 `WorkerEvent::Completed`가 도착하면 상태가 다시 덮어써질 수 있는
+이론적 경쟁 상태가 여전히 남아 있습니다. 5분이라는 유예 자체가 이 창을 매우 좁게
+만들 뿐, 완전히 없애지는 못합니다.
 
 ## 동시 실행(멀티 에이전트) 능력
 

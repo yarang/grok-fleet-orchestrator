@@ -22,10 +22,33 @@
 //!
 //! [`Reconciler`]는 [`HealthChecker`](crate::health::HealthChecker) /
 //! [`SessionCleanup`](crate::cleanup::SessionCleanup)과 동일한 "설정 + spawn +
-//! JoinHandle 기반 abort" 패턴을 따르는 백그라운드 루프로, 매 tick마다 두 가지를
+//! JoinHandle 기반 abort" 패턴을 따르는 백그라운드 루프로, 매 tick마다 세 가지를
 //! 스윕한다: `stale_after`보다 오래 `Pending`으로 머문 작업의 재dispatch,
 //! `dispatched_worker_check_after`보다 오래됐는데 담당 워커가 더 이상 존재하지
-//! 않는 `Dispatched` 작업의 `Failed` 전이.
+//! 않는 `Dispatched` 작업의 `Failed` 전이, 그리고 담당 워커가 `offline_worker_grace`
+//! 이상 `Offline` 상태로 남아있는 `Dispatched` 작업의 `Failed` 전이.
+//!
+//! ## 세 번째 스윕: HealthChecker↔Task 연동 (2026-08-13 추가)
+//!
+//! [`HealthChecker`](crate::health::HealthChecker)는 워커가 45초(3회 하트비트
+//! 누락) 동안 응답이 없으면 `Worker.status`를 `Offline`으로 바꾸지만, **Task
+//! 테이블은 전혀 건드리지 않는다.** 그 결과, 워커가 하트비트만 끊기고(예: 헬스체크
+//! 경로만 막힌 네트워크 파티션) ACP WebSocket 연결 자체는 살아있는 애매한 상태라면
+//! — `fail_all()`(연결 끊김 감지)도, 프롬프트 타임아웃(기본 10분)도, 아래 첫 번째
+//! 스윕(워커 row 자체가 사라진 경우)도 발동하지 않아 — 그 워커에 배정된
+//! `Dispatched` 작업이 **영원히 끝나지 않을 수 있었다.**
+//!
+//! 이 스윕은 그 빈틈을 메운다: 담당 워커가 여전히 `workers` 테이블에 존재하되
+//! `status == Offline`이고, 마지막 하트비트(`last_seen`)로부터
+//! `offline_worker_grace`(기본 5분) 이상 지났다면 `Failed(WorkerUnavailable)`로
+//! 전이한다. **의도적으로 45초(HealthChecker의 Offline 판정 기준)보다 훨씬 긴
+//! 유예를 둔다** — `Offline`은 (row 삭제와 달리) 되돌릴 수 있는 상태라, 워커가
+//! 곧 재연결될 수 있는 상황에서 성급하게 작업을 실패 처리하고 싶지 않기 때문이다.
+//! 이 스윕도 워커가 실제로는 재연결에 성공했는데 뒤늦게 `WorkerEvent::Completed`가
+//! 도착해 이미 `Failed`로 마킹된 작업의 상태를 다시 덮어쓰는 이론적 경쟁 상태를
+//! 완전히 막지는 못한다 — `update_task_status`가 현재 상태를 조건으로 거는
+//! 낙관적 잠금을 하지 않기 때문. 다만 5분이라는 유예 자체가 이 경쟁이 실제로
+//! 발생할 창을 매우 좁게 만든다.
 //!
 //! ## 설계 노트
 //!
@@ -45,9 +68,11 @@
 //!   사라졌다"는 훨씬 강한 신호에 대한 최소 유예 시간이므로 `stale_after`보다
 //!   짧게 잡아도 안전하다 (기본값 30초) — 정상적인 `dispatch_existing()`
 //!   호출이 `update_task_status`를 커밋하는 사이의 아주 짧은 순간과만
-//!   경합하면 되기 때문이다. 워커가 존재하되 단순히 응답이 느린 경우는 이
-//!   경로가 건드리지 않는다 — 워커 자체의 헬스체크/CircuitBreaker가 그 경우를
-//!   담당한다.
+//!   경합하면 되기 때문이다.
+//! - `offline_worker_grace`(기본 300초 = 5분)는 위 세 번째 스윕 전용이며,
+//!   워커가 여전히 등록돼 있고 단순히 응답이 느릴 뿐인 흔한 경우(대부분은 수 초
+//!   ~수십 초 내 회복)와, 정말로 죽었거나 네트워크가 갈라진 경우를 구분하기
+//!   위한 훨씬 보수적인 유예 시간이다.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +81,7 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use fleet_core::{FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter};
+use fleet_core::{FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter, WorkerStatus};
 
 use crate::dispatcher::{DispatchError, Dispatcher};
 use crate::state::FleetState;
@@ -80,6 +105,11 @@ pub struct ReconcileConfig {
     /// 사라진 것만 `Failed`로 전이한다. "워커 존재 여부"라는 강한 신호에
     /// 대한 최소 유예 시간이므로 `stale_after`보다 짧게 잡아도 안전하다.
     pub dispatched_worker_check_after: Duration,
+    /// 담당 워커가 `workers` 테이블에는 여전히 존재하지만 `status == Offline`이고
+    /// 마지막 하트비트(`last_seen`)로부터 이 시간 이상 지난 `Dispatched` 작업을
+    /// `Failed`로 전이한다. `Offline`은 되돌릴 수 있는 상태라 `dispatched_worker_
+    /// check_after`보다 훨씬 보수적으로(길게) 잡는다 — 기본값 5분.
+    pub offline_worker_grace: Duration,
 }
 
 impl Default for ReconcileConfig {
@@ -88,6 +118,7 @@ impl Default for ReconcileConfig {
             interval: Duration::from_secs(30),
             stale_after: Duration::from_secs(60),
             dispatched_worker_check_after: Duration::from_secs(30),
+            offline_worker_grace: Duration::from_secs(300),
         }
     }
 }
@@ -103,6 +134,10 @@ pub struct ReconcileSummary {
     pub orphaned_found: u64,
     /// 이번 라운드에 Failed로 전이시킨 orphaned dispatched 작업 수.
     pub orphaned_failed: u64,
+    /// 담당 워커가 `Offline`으로 장기간 남아있어 발견된 stale dispatched 작업 수.
+    pub offline_worker_found: u64,
+    /// 이번 라운드에 Failed로 전이시킨, offline 워커 배정 작업 수.
+    pub offline_worker_failed: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -157,7 +192,8 @@ impl Reconciler {
             interval = ?self.config.interval,
             stale_after = ?self.config.stale_after,
             dispatched_worker_check_after = ?self.config.dispatched_worker_check_after,
-            "task reconciliation loop started (pending redispatch + orphaned dispatched reap)"
+            offline_worker_grace = ?self.config.offline_worker_grace,
+            "task reconciliation loop started (pending redispatch + orphaned/offline dispatched reap)"
         );
 
         loop {
@@ -229,14 +265,16 @@ impl Reconciler {
             }
         }
 
-        self.reap_orphaned_dispatched(&mut summary).await;
+        self.reap_stale_dispatched(&mut summary).await;
 
-        if summary.stale_found > 0 || summary.orphaned_found > 0 {
+        if summary.stale_found > 0 || summary.orphaned_found > 0 || summary.offline_worker_found > 0 {
             info!(
                 stale_found = summary.stale_found,
                 redispatched = summary.redispatched,
                 orphaned_found = summary.orphaned_found,
                 orphaned_failed = summary.orphaned_failed,
+                offline_worker_found = summary.offline_worker_found,
+                offline_worker_failed = summary.offline_worker_failed,
                 "reconciliation sweep completed"
             );
         }
@@ -244,9 +282,11 @@ impl Reconciler {
         summary
     }
 
-    /// `Dispatched` 작업 중 담당 워커가 store에서 완전히 사라진 것을 찾아
-    /// `Failed(WorkerUnavailable)`로 전이한다. `summary`에 결과를 누적한다.
-    async fn reap_orphaned_dispatched(&self, summary: &mut ReconcileSummary) {
+    /// `Dispatched` 작업 중 (a) 담당 워커가 store에서 완전히 사라졌거나,
+    /// (b) 담당 워커가 여전히 존재하지만 `Offline`으로 `offline_worker_grace`
+    /// 이상 남아있는 것을 찾아 `Failed(WorkerUnavailable)`로 전이한다.
+    /// `summary`에 결과를 누적한다.
+    async fn reap_stale_dispatched(&self, summary: &mut ReconcileSummary) {
         let dispatched = match self
             .state
             .store
@@ -267,6 +307,8 @@ impl Reconciler {
         let now = Utc::now();
         let check_after = chrono::Duration::from_std(self.config.dispatched_worker_check_after)
             .unwrap_or_else(|_| chrono::Duration::seconds(30));
+        let offline_grace = chrono::Duration::from_std(self.config.offline_worker_grace)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
 
         for task in dispatched {
             let TaskStatus::Dispatched {
@@ -283,8 +325,8 @@ impl Reconciler {
                 continue;
             }
 
-            let worker_exists = match self.state.store.get_worker(worker_id).await {
-                Ok(w) => w.is_some(),
+            let worker = match self.state.store.get_worker(worker_id).await {
+                Ok(w) => w,
                 Err(e) => {
                     // 조회 자체가 실패하면 판단할 수 없으므로 건드리지 않고 다음 tick에서 재시도.
                     warn!(%worker_id, error = %e, "reconcile: failed to check worker existence, skipping");
@@ -292,27 +334,69 @@ impl Reconciler {
                 }
             };
 
-            if worker_exists {
-                continue; // 워커는 존재 — 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가 담당.
-            }
-
-            summary.orphaned_found += 1;
             let task_id = task.id;
 
-            let failure = TaskFailure {
-                error: format!(
-                    "assigned worker {worker_id} no longer registered (likely restarted with a new worker id)"
-                ),
-                kind: FailureKind::WorkerUnavailable,
-                worker_id: Some(worker_id),
-                attempts: 0,
-            };
-            self.dispatcher.mark_failed(task_id, failure).await;
-            summary.orphaned_failed += 1;
-            warn!(
-                %task_id, %worker_id,
-                "reconciliation: dispatched task's worker no longer exists, marked failed"
-            );
+            match worker {
+                None => {
+                    // (a) 워커 row 자체가 사라짐 — 재시작으로 새 worker_id를 받은
+                    // 경우가 대표적. 강한 신호이므로 짧은 유예(check_after)만 둔다.
+                    summary.orphaned_found += 1;
+                    let failure = TaskFailure {
+                        error: format!(
+                            "assigned worker {worker_id} no longer registered (likely restarted with a new worker id)"
+                        ),
+                        kind: FailureKind::WorkerUnavailable,
+                        worker_id: Some(worker_id),
+                        attempts: 0,
+                    };
+                    self.dispatcher.mark_failed(task_id, failure).await;
+                    summary.orphaned_failed += 1;
+                    warn!(
+                        %task_id, %worker_id,
+                        "reconciliation: dispatched task's worker no longer exists, marked failed"
+                    );
+                }
+                Some(w) if w.status == WorkerStatus::Offline => {
+                    // (b) 워커는 존재하지만 Offline — 되돌릴 수 있는 상태이므로
+                    // 훨씬 긴 유예(offline_worker_grace)를 마지막 하트비트 기준으로 적용.
+                    // `last_seen`이 `None`(한 번도 heartbeat를 받은 적 없음)이면 유예를
+                    // 줄 근거가 없으므로 즉시 대상으로 취급한다.
+                    let past_grace = match w.last_seen {
+                        Some(ls) => now - ls >= offline_grace,
+                        None => true,
+                    };
+                    if !past_grace {
+                        continue; // 아직 유예 기간 내 — 재연결을 기다린다.
+                    }
+                    let offline_for_desc = match w.last_seen {
+                        Some(ls) => format!("{}s", (now - ls).num_seconds()),
+                        None => "never (no heartbeat ever received)".to_string(),
+                    };
+
+                    summary.offline_worker_found += 1;
+                    let failure = TaskFailure {
+                        error: format!(
+                            "assigned worker {worker_id} has been offline for {offline_for_desc} \
+                             (no heartbeat) — assuming the task is lost"
+                        ),
+                        kind: FailureKind::WorkerUnavailable,
+                        worker_id: Some(worker_id),
+                        attempts: 0,
+                    };
+                    self.dispatcher.mark_failed(task_id, failure).await;
+                    summary.offline_worker_failed += 1;
+                    warn!(
+                        %task_id, %worker_id, offline_for = %offline_for_desc,
+                        "reconciliation: dispatched task's worker offline too long, marked failed"
+                    );
+                }
+                Some(_) => {
+                    // 워커는 존재하고 Offline이 아님(Online/Degraded/CircuitOpen) —
+                    // 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가 담당하는 영역이므로
+                    // 건드리지 않는다.
+                    continue;
+                }
+            }
         }
     }
 }
@@ -619,6 +703,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
             },
         );
 
@@ -674,6 +759,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
             },
         );
 
@@ -727,6 +813,7 @@ mod tests {
                 interval: Duration::from_secs(3600),
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
             },
         );
 
@@ -794,6 +881,121 @@ mod tests {
             summary.orphaned_found, 0,
             "fresh dispatched task should not be touched even without a matching worker"
         );
+
+        let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(
+            still_dispatched.status,
+            TaskStatus::Dispatched { .. }
+        ));
+    }
+
+    /// `Offline` 워커를 생성하며 `last_seen`을 지정된 나이(age)로 설정.
+    fn make_offline_worker(name: &str, last_seen_age: chrono::Duration) -> Worker {
+        let mut w = Worker::new(name, format!("wss://{name}/ws"));
+        w.status = WorkerStatus::Offline;
+        w.last_seen = Some(chrono::Utc::now() - last_seen_age);
+        w
+    }
+
+    #[tokio::test]
+    async fn dispatched_task_on_long_offline_worker_is_marked_failed() {
+        // HealthChecker↔Task 연동 빈틈 재현: 워커가 존재하고 Offline 상태이며
+        // 마지막 하트비트로부터 offline_worker_grace(여기선 5초로 줄임) 이상
+        // 지났다면, 담당 Dispatched 작업은 Failed로 전이돼야 한다.
+        let worker = make_offline_worker("ghost-but-registered", chrono::Duration::seconds(10));
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task("stuck task", worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(5), // 짧게 — 테스트용
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.offline_worker_found, 1);
+        assert_eq!(summary.offline_worker_failed, 1);
+        assert_eq!(summary.orphaned_found, 0, "worker still exists — not the orphan path");
+
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        match failed.status {
+            TaskStatus::Failed(failure) => {
+                assert_eq!(failure.kind, FailureKind::WorkerUnavailable);
+                assert_eq!(failure.worker_id, Some(worker_id));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatched_task_on_recently_offline_worker_stays_dispatched_within_grace() {
+        // 워커가 Offline이 된 지 얼마 안 됐다면(offline_worker_grace 이내) —
+        // 곧 재연결될 수 있으므로 성급하게 Failed로 전이하면 안 된다.
+        let worker = make_offline_worker("just-went-offline", chrono::Duration::seconds(2));
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task("still maybe running", worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300), // 기본값 — 2초는 한참 못 미침
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(
+            summary.offline_worker_found, 0,
+            "worker offline for only 2s should still be within the 300s grace period"
+        );
+
+        let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(
+            still_dispatched.status,
+            TaskStatus::Dispatched { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatched_task_on_degraded_worker_is_left_alone() {
+        // Degraded(온라인이지만 저하됨)는 Offline이 아니므로 이 스윕이 건드리면
+        // 안 된다 — 헬스체크/CircuitBreaker의 영역.
+        let mut worker = make_worker("degraded-1");
+        worker.status = WorkerStatus::Degraded;
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task("degraded but alive", worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.offline_worker_found, 0);
+        assert_eq!(summary.orphaned_found, 0);
 
         let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
         assert!(matches!(

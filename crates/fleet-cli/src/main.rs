@@ -131,6 +131,18 @@ enum Command {
         )]
         reconcile_dispatched_check_secs: u64,
 
+        /// 담당 워커가 `workers` 테이블에는 남아있지만 `Offline` 상태로 이
+        /// 시간(초) 이상 남아있는 `Dispatched` 작업을 `Failed`로 전이한다
+        /// (2026-08-13 추가 — HealthChecker가 워커를 Offline 처리해도 Task는
+        /// 건드리지 않던 빈틈을 메운다). `Offline`은 되돌릴 수 있는 상태이므로
+        /// `reconcile-dispatched-check-secs`보다 훨씬 길게 잡는다.
+        #[arg(
+            long,
+            env = "FLEET_RECONCILE_OFFLINE_WORKER_GRACE_SECS",
+            default_value_t = 300
+        )]
+        reconcile_offline_worker_grace_secs: u64,
+
         /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
         /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
         /// 지정하면 워커 등록/하트비트 엔드포인트가 병렬로 serve됩니다.
@@ -855,6 +867,7 @@ async fn main() -> Result<()> {
             reconcile_interval_secs,
             reconcile_stale_secs,
             reconcile_dispatched_check_secs,
+            reconcile_offline_worker_grace_secs,
             http_bind,
             api_tokens,
             cf_audience,
@@ -879,6 +892,7 @@ async fn main() -> Result<()> {
                 reconcile_interval_secs,
                 reconcile_stale_secs,
                 reconcile_dispatched_check_secs,
+                reconcile_offline_worker_grace_secs,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),

@@ -225,6 +225,7 @@ pub async fn run_serve(
     reconcile_interval_secs: u64,
     reconcile_stale_secs: u64,
     reconcile_dispatched_check_secs: u64,
+    reconcile_offline_worker_grace_secs: u64,
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
@@ -344,7 +345,9 @@ pub async fn run_serve(
     // 터미널 상태에 도달하기 전에 프로세스가 죽으면 작업이 영구히 `Pending`에
     // 고아로 남는다 — 이 루프가 주기적으로 그런 작업을 재시도한다. 워커가
     // 재시작해 새 worker_id로 재등록되어 `Dispatched` 작업이 고아가 되는
-    // 케이스도 같은 루프가 회수한다 (자세한 배경은 `reconcile.rs` 모듈 문서 참고).
+    // 케이스, 그리고 워커가 여전히 등록돼 있지만 `Offline`으로 장기간 남아있는
+    // 케이스(HealthChecker는 Worker.status만 바꾸고 Task는 건드리지 않음)도
+    // 같은 루프가 회수한다 (자세한 배경은 `reconcile.rs` 모듈 문서 참고).
     let _reconcile_handle = if !no_reconcile {
         let cfg = ReconcileConfig {
             interval: Duration::from_secs(reconcile_interval_secs.max(1)),
@@ -352,12 +355,16 @@ pub async fn run_serve(
             dispatched_worker_check_after: Duration::from_secs(
                 reconcile_dispatched_check_secs.max(1),
             ),
+            offline_worker_grace: Duration::from_secs(
+                reconcile_offline_worker_grace_secs.max(1),
+            ),
         };
         tracing::info!(
             interval_secs = reconcile_interval_secs,
             stale_secs = reconcile_stale_secs,
             dispatched_check_secs = reconcile_dispatched_check_secs,
-            "task reconciliation loop enabled (pending redispatch + orphaned dispatched reap)"
+            offline_worker_grace_secs = reconcile_offline_worker_grace_secs,
+            "task reconciliation loop enabled (pending redispatch + orphaned/offline dispatched reap)"
         );
         let reconciler = Reconciler::new(state.clone(), dispatcher.clone(), cfg);
         Some(reconciler.spawn())
