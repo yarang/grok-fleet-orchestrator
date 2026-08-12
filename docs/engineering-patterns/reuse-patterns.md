@@ -3,6 +3,21 @@
 > **출처**: grok-build `xai-grok-shell/src/agent/subagent/` 및 `xai-circuit-breaker` 심층 분석.
 > **목적**: `fleet-scheduler` 구현 시 직접 활용할 수 있는 10가지 검증된 패턴 요약.
 
+> ⚠️ **정정 (2026-08-12)**: `docs/index.md`가 이 문서를 "다른 문서에서 미인용, 실제 참고
+> 여부 불명"이라 고아 페이지로 분류하고 있었으나, **이는 부정확합니다.** 실제로
+> `crates/fleet-scheduler/src/dispatcher.rs`의 모듈 doc-comment가 "grok-build의
+> PendingGuard RAII 패턴과 sync_running_gauge 패턴을 차용했습니다"라고 명시적으로
+> 인용하고 있고, `docs/architecture/overview.md` §5도 CircuitBreaker에 대해 동일하게
+> 출처를 credit합니다. 아래 표에 확인된 채택 현황을 추가합니다 (하이퍼링크로 연결된
+> 문서는 없지만 코드 주석 레벨에서 실제로 참조/구현된 상태이므로 고아 판정을 철회합니다).
+>
+> | # | 패턴 | 채택 현황 |
+> |---|---|---|
+> | 1 | RAII PendingGuard | ✅ 확인됨 — `crates/fleet-scheduler/src/dispatcher.rs` 모듈 doc-comment에 명시 |
+> | 3 | sync_running_gauge | ✅ 확인됨 — 동일 doc-comment에 명시, `handle_worker_event()`가 완료/실패 시 running gauge 감소 |
+> | 6 | Per-worker CircuitBreaker | ✅ 확인됨 — `crates/fleet-scheduler/src/breaker.rs`, `docs/architecture/overview.md` §5가 동일하게 credit |
+> | 2, 4, 5, 7, 8, 9, 10 | (미확인) | 이번 검증에서 대응 코드를 grep으로 찾지 못했지만, 다른 이름으로 구현됐을 가능성을 배제하지 않음 — 재검증 필요 |
+
 ## 패턴 요약표
 
 | # | 패턴 | 소스 위치 | 적용 크레이트 | 우선순위 |

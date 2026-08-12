@@ -81,7 +81,7 @@
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) | ⚫ 고아 — 다른 문서에서 미인용, 실제 참고 여부 불명 | 2026-07-18 |
+| [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) — 10종 중 3종(#1,#3,#6)이 `fleet-scheduler` 코드 주석에 명시적으로 채택 근거로 인용됨을 확인 | 🔵 사본 — 실제 채택 근거는 `crates/fleet-scheduler/src/dispatcher.rs`/`breaker.rs` 코드 주석 | 2026-08-12 |
 
 ## 도메인 9. 📖 Agent & Assistant Guidelines
 
@@ -99,9 +99,10 @@
 
 ## 고아 페이지 / 미해결 교차참조
 
-- [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) — 어느 문서에서도 인용되지 않음. 여전히 유효한
-  참고 자료인지 확인 필요 (미조치).
 - [`deployment/historical/2026-07-20-arm2-arm1-deploy-log.md`](./deployment/historical/2026-07-20-arm2-arm1-deploy-log.md) — 역사적 기록으로 유효, 현재
   지침 문서와는 명확히 분리되어 있어 조치 불필요.
+
+_(2026-08-12: `engineering-patterns/reuse-patterns.md`의 고아 판정을 철회함 — 코드
+주석에서 실제 채택 근거를 확인, 위 도메인 8 표 참조.)_
 
 _(마지막 점검: 2026-08-11, [`log.md`](./log.md) 참고.)_
