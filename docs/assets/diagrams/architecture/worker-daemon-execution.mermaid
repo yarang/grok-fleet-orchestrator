@@ -1,5 +1,5 @@
 flowchart TD
-    Start([WorkerRunner::run]) --> Step1[1. GrokRunner::new(config)]
+    Start([WorkerRunner::run]) --> Step1["1. GrokRunner::new(config)"]
     Step1 --> SpawnGrok[tokio::spawn runner.run<br/>spawn grok agent serve<br/>* exit 시 restart_delay_secs 후 재시작 최대 10회]
     Step1 --> StepMtls[1.5 선택: mTLS 활성 시 MtlsProxy 기동<br/>grok bind_addr 폴링 후 spawn]
     StepMtls --> Step2[2. RegistrationClient::register_with_retry]
