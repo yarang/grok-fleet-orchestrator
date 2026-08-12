@@ -36,6 +36,7 @@
 * **역할 기반 권한 제어 (RBAC)**:
   * `Admin`: 부트스트랩 토큰 발급/삭제, 유저 계정 비활성화, 워커 제거 및 CA 인증서 제어.
   * `User`: 작업 목록 보기, 작업 강제 취소, 워커 메트릭 조회만 허용.
+  * ⚠️ **정정 (2026-08-12)**: 위 Admin/User 2역할 서술은 단순화된 예시입니다. 실제로는 **22종으로 세분화된 `PermissionKind`**(`crates/fleet-core/src/auth.rs`) 기반 RBAC이며, 기본 제공 역할도 `Admin`/`Operator`/`Viewer` 3종입니다. 역할은 `RoleCreate`로 확장 가능해 커스텀 역할에 특정 권한만 부여할 수 있습니다. 상세는 [`bootstrap-release-v0.2.md §3.2.2`](./bootstrap-release-v0.2.md)를 참조하세요.
 
 ### 2.2 실시간 데이터 스트리밍 (Server-Sent Events)
 * 웹 브라우저 대시보드의 실시간성(로그 실시간 출력, 시스템 이벤트 타임라인 업데이트)을 확보하기 위해, 폴링(Polling) 대신 **SSE(Server-Sent Events)** 엔드포인트(`/api/events/stream`)를 활용합니다.
