@@ -8,35 +8,21 @@
 
 `fleet serve`는 단일 Rust 바이너리로 기동하며, 내부적으로 멀티스레드 비동기 런타임(Tokio) 상에서 다중 프로토콜 엔드포인트를 병렬 실행합니다.
 
-```
-                         ┌──────────────────────────────┐
-                         │         fleet serve          │
-                         └──────────────┬───────────────┘
-                                        │ (Spawns Loops)
-         ┌──────────────────────────────┼──────────────────────────────┐
-         ▼                              ▼                              ▼
-┌──────────────────┐           ┌──────────────────┐           ┌──────────────────┐
-│   HTTP API Server│           │  MCP stdio Server│           │Background Workers│
-│   (Axum Router)  │           │   (JSON-RPC)     │           │ (Async Loop)     │
-└────────┬─────────┘           └────────┬─────────┘           └────────┬─────────┘
-         │                              │                              │
-         │ - /v1/workers/register       │ - fleet_dispatch_task        │ - Task Dispatcher
-         │ - /v1/workers/heartbeat      │ - fleet_get_task_status      │ - Worker Health
-         │ - /dashboard (Static Assets) │ - fleet_list_workers         │   Checker (15s)
-         └──────────────────────────────┴──────────────────────────────┘
-```
+![fleet serve 모듈 맵 — HTTP API Server / MCP stdio Server / Background Loops 3분기 아키텍처](../assets/diagrams/worker-bootstrap/fleet-serve-module-map.svg)
+
+> 이 다이어그램은 [`bootstrap-release-v0.2.md §1`](./bootstrap-release-v0.2.md)과 공유합니다 — 갱신 시 두 문서 모두 확인하세요. 아래 §1.1 서술은 2026-08-12 코드 대조로 정정되었습니다(원래 "7개 MCP 도구", "1초 폴링 디스패처", "`/dashboard` 정적 자산" 서술이었으나 실제 코드와 달랐습니다 — 상세 근거는 `bootstrap-release-v0.2.md §1` 표 참고).
 
 ### 1.1 주요 모듈 구성
 1. **Axum HTTP Router**:
    * **API 엔드포인트**: 워커의 등록/해제 및 하트비트 통신 처리, 마스터 키 기반의 credentials 암호화 보관/조회 API 제공.
-   * **정적 자산 서빙**: `rust-embed`를 통해 컴파일 시점 바이너리에 포함된 대시보드 리소스(HTML/JS/CSS)를 `/dashboard` 경로로 클라이언트에 전송.
+   * **정적 자산 서빙**: 대시보드는 별도 크레이트 `fleet-dashboard`가 자체 라우터(`/`, `/tasks`, `/hosts`, `/admin/*` 등)로 서빙하며, `fleet serve`가 HTTP API 서버와 함께 기동합니다.
 2. **MCP stdio JSON-RPC 엔진**:
-   * AI 코딩 클라이언트(Cursor, Claude Code 등)가 실행한 서브프로세스 표준 입출력(stdin/stdout) 채널을 통해 JSON-RPC 2.0 규격으로 7개의 MCP 도구를 노출.
+   * AI 코딩 클라이언트(Cursor, Claude Code 등)가 실행한 서브프로세스 표준 입출력(stdin/stdout) 채널을 통해 JSON-RPC 2.0 규격으로 **8개**의 MCP 도구(`fleet_dispatch_task`, `fleet_get_task_status`, `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`, `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results`)를 노출 (`crates/fleet-mcp/src/schema.rs`).
 3. **태스크 디스패처 (Dispatcher Loop)**:
-   * 1초 주기로 PostgreSQL DB의 `fleet_tasks` 테이블을 폴링하며 `Pending` 상태의 작업을 조회.
+   * **이벤트 기반**으로 동작합니다 — `mpsc` 채널로 전달되는 태스크를 즉시 소비해 위임합니다(`crates/fleet-scheduler/src/dispatcher.rs`). 별도로 정체된(`Pending`/`Dispatched`) 태스크를 쓸어가는 **Reconciler**가 **30초** 주기 안전망으로 동작합니다(`crates/fleet-scheduler/src/reconcile.rs`). 테이블명은 `fleet_tasks`가 아니라 `tasks`입니다.
    * `WorkerSelector` 모듈을 통해 `Closed` 상태의 회로차단기를 가졌고 CPU/Memory 여유 용량이 남은 워커를 찾아 ACP(Agent Client Protocol) over WebSocket 채널로 작업을 위임.
 4. **헬스체커 루프 (Health Checker Loop)**:
-   * 15초 간격으로 가동되며, 최근 45초(3회 이상 미수신) 동안 하트비트가 수집되지 않은 온라인 워커 노드들의 상태를 `Offline`으로 변경하고, 해당 워커의 회로차단기를 즉시 강제 개방(Open)하여 태스크 할당을 차단.
+   * 15초 간격으로 가동되며, 최근 45초(3회 이상 미수신) 동안 하트비트가 수집되지 않은 온라인 워커 노드들의 상태를 `Offline`으로 변경하고, 해당 워커의 회로차단기를 즉시 강제 개방(Open)하여 태스크 할당을 차단. (`crates/fleet-scheduler/src/health.rs`, 코드와 일치 확인됨)
 
 ---
 

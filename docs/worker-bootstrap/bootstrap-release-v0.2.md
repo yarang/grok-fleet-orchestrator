@@ -20,24 +20,9 @@
 
 ## 1. `fleet serve` — 코드 대비 검증된 현황
 
-```text
-                         ┌──────────────────────────────┐
-                         │         fleet serve          │
-                         └──────────────┬───────────────┘
-                                         │ (Spawns)
-         ┌──────────────────────────────┼──────────────────────────────┐
-         ▼                              ▼                              ▼
- ┌──────────────────┐           ┌──────────────────┐           ┌──────────────────┐
- │   HTTP API Server │           │  MCP stdio Server │           │ Background Loops  │
- │   (Axum Router)   │           │   (JSON-RPC)      │           │                    │
- └────────┬──────────┘           └────────┬──────────┘           └────────┬──────────┘
-          │                              │                              │
-          │ - /v1/workers/register       │ - MCP 도구 8개 (아래 목록)     │ - Dispatcher (이벤트 기반)
-          │ - /v1/workers/heartbeat      │                              │ - Reconciler (30s 안전망)
-          │ - /v1/bootstrap-tokens       │                              │ - Health Checker (15s)
-          │ - fleet-dashboard 크레이트 별도 마운트 (`/`, `/hosts`, `/admin/*` 등)                       │
-          └──────────────────────────────┴──────────────────────────────┘
-```
+![fleet serve 모듈 맵 — HTTP API Server / MCP stdio Server / Background Loops 3분기 아키텍처](../assets/diagrams/worker-bootstrap/fleet-serve-module-map.svg)
+
+> 이 다이어그램은 [`serve-and-bootstrap-design.md §1`](./serve-and-bootstrap-design.md)과 공유합니다 — 갱신 시 두 문서 모두 확인하세요.
 
 이전 버전(v0.1) 대비 정정된 사실관계:
 
