@@ -26,7 +26,7 @@
 |---|---|---|---|
 | [`architecture/overview.md`](./architecture/overview.md) | Store trait·CircuitBreaker·WorkerSelector·ACP 전송·워커 데몬·mTLS·부트스트랩 토큰 등 내부 설계 마스터 문서 | 🟢 정본 | 2026-08-10 |
 | [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 8종 도구 API 레퍼런스 (2026-08-12 코드 대조로 도구명/개수 정정) | 🟢 정본 | 2026-08-12 |
-| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 8종 도구 연동 스펙 | 🟡 부분 수정됨 — §4 도구 목록 정정 필요 | 2026-08-12 |
+| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 8종 도구 연동 스펙 | 🟢 정본 — §4 도구 목록 정정 완료(2026-08-12) | 2026-08-12 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 
@@ -87,8 +87,8 @@
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`../claude.md`](../claude.md) | 에이전트 문서 작성 시 다이어그램 지향, SVG 레이아웃 활용, 외부 리소스 분리 및 임베딩 수칙 | 🟢 정본 | 2026-08-12 |
-| [`../agent.md`](../agent.md) | 에이전트 문서 작성 시 다이어그램 지향, SVG 레이아웃 활용, 외부 리소스 분리 및 임베딩 수칙 | 🟢 정본 | 2026-08-12 |
+| [`../agent.md`](../agent.md) | Git 정책·로드맵·품질/CI 게이트·LLM-Wiki 규약·다이어그램 및 SVG 리소스 관리 규약(§6) — 에이전트 협업 가이드 전문 | 🟢 정본 | 2026-08-12 |
+| [`../CLAUDE.md`](../CLAUDE.md) | Claude Code 진입점. `@agent.md`를 임포트하고 문서 작성 지침(§6)만 요약 재기술 | 🔵 사본 — `agent.md`의 진입점/요약. 내용이 어긋나면 `agent.md`가 우선 | 2026-08-12 |
 
 ## 하위 디렉토리 (자체 부기 체계 보유)
 

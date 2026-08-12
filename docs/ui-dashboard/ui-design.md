@@ -321,6 +321,14 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 호스트 인벤토리 우측 상단의 `[Import SSH Config]` 버튼을 통해 로컬 설정을 임포트하고 데이터베이스화하는 화면 설계 스펙입니다.
 
+> ⚠️ **정정 (2026-08-12)**: `.ssh/config` 자동 임포트 자체는 아직 미구현 상태이며, 아래
+> 화면 설계는 [`bootstrap-release-v0.2.md §3.2`](../worker-bootstrap/bootstrap-release-v0.2.md)의
+> 최신 결정과 맞춰 다음 두 가지를 정정합니다: (1) 신규 `inventory_hosts` 테이블이 아니라
+> 기존 `hosts` 테이블에 `host_alias`/`identity_file`/`labels` 컬럼을 확장하는 설계로
+> 확정되었고, (2) IdentityFile 자동 수집은 새 암호화 저장소를 만드는 게 아니라 이미
+> 구현되어 있는 SSH 키 금고(`ssh_keys` 테이블, `crates/fleet-dashboard/src/provisioning.rs`)를
+> 재사용하는 것으로 확정되었습니다.
+
 1. **임포트 진입 버튼**:
    - 위치: `/hosts` sub-nav 우측 끝의 primary pill CTA 버튼 옆.
    - 레이블: `Import SSH Config` (Action Blue 배경의 pill button).
@@ -335,11 +343,13 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
    - 체크박스를 제공하여 특정 호스트(예: local loopback 등)는 임포트 대상에서 개별 제외할 수 있도록 지원.
    - 호스트 별칭(Host Alias), 실제 목적지 IP(HostName), SSH 계정명(User), Port, 키 파일(IdentityFile) 경로가 표시됨.
    - **Dynamic Label Column**: 각 호스트 행의 우측에 `+ Add Label` 입력 폼 및 Chip 컨테이너를 두어, 가져오기 실행 전에 웹 UI에서 마우스 클릭과 텍스트 입력만으로 라벨 메타데이터(예: `arch=arm64`, `gpu=true`)를 동적으로 커스텀 주입할 수 있는 인라인 에디터 내장.
-   - 최종 `[Confirm & Import]` (Pill CTA)를 누르면 `inventory_hosts` 테이블에 적재되고, 모달이 닫히며 호스트 목록 테이블이 실시간 리로드됨.
+   - 최종 `[Confirm & Import]` (Pill CTA)를 누르면 `hosts` 테이블(⚠️ 정정: 신규
+     `inventory_hosts` 테이블이 아니라 기존 `hosts` 테이블 확장)에 적재되고, 모달이
+     닫히며 호스트 목록 테이블이 실시간 리로드됨.
 4. **키 파일(IdentityFile) 가져오기 정책 설정**:
    - 모달 하단에 `Private Key Access Option` 라디오 버튼 그룹을 제공하여 보안 취향에 맞춘 수집 레벨을 결정할 수 있도록 설계합니다.
-     - **Option 1: 자동 가져오기 (Auto Import)**: `.ssh/config` 내에 검출된 `IdentityFile` 로컬 경로를 오케스트레이터 백엔드가 자동으로 읽어들여 비밀키의 내용을 데이터베이스에 암호화하여 즉시 등록합니다. (추가 수동 액션 없이 100% 원클릭 프로비저닝 가능)
-     - **Option 2: 수동 선택적 허용 (Manual Upload On Provision)**: 가져오기 시점에는 키 경로 텍스트만 기록하고, 이후 `/hosts` 페이지에서 실제 프로비저닝 버튼을 누르는 순간 브라우저 모달로 해당 SSH 개인키 파일을 사용자가 수동 지목/업로드하여 연동을 완료하도록 제어합니다.
+     - **Option 1: 자동 가져오기 (Auto Import, 기본값)**: `.ssh/config` 내에 검출된 `IdentityFile` 로컬 경로를 오케스트레이터 백엔드가 자동으로 읽어들여, ⚠️ 정정: 별도의 새 암호화 저장소가 아니라 **기존 SSH 키 금고**(`ssh_keys` 테이블, `MasterKey` AES-256-GCM 암호화 — `bootstrap-release-v0.2.md §3.2.2` 참조)에 등록합니다. `hosts.identity_file` 컬럼에는 로컬 경로가 아니라 이 금고의 키 이름이 저장됩니다. (추가 수동 액션 없이 원클릭 프로비저닝 가능)
+     - **Option 2: 수동 선택적 허용 (Manual Upload On Provision)**: 가져오기 시점에는 키 경로 텍스트만 기록하고, 이후 `/hosts` 페이지에서 실제 프로비저닝 버튼을 누르는 순간 브라우저 모달로 해당 SSH 개인키 파일을 사용자가 수동 지목/업로드하여 연동을 완료하도록 제어합니다(이 경로도 최종적으로는 같은 SSH 키 금고에 등록됩니다).
 
 #### 빈 상태
 
