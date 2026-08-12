@@ -1,6 +1,6 @@
 # LLM 게이트웨이 및 프록시 위키 (LLM Gateway Wiki)
 
-> 최종 업데이트: 2026-08-07.
+> 최종 업데이트: 2026-08-13.
 
 이 디렉토리는 Grok Fleet Orchestrator에서 멀티 LLM 공급업체(OpenAI, Anthropic, Gemini 등)를 단일 API 규격으로 수용하고 통제하기 위한 **LLM Gateway (LLM Proxy)** 관련 설계 결정을 짓고 유지관리하는 위키다. 매번 원본 논의를 재검색하는 대신, 한 번 정리된 결론을 지속적으로 갱신하며 쌓아 올린다 — [Karpathy의 "LLM Wiki" 패턴](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)을 따른다.
 
@@ -25,12 +25,21 @@
 
 ---
 
-## 🚀 로드맵 정렬 & 자율 엔진 연동
-본 위키의 설계는 공식 개발 로드맵 **[34번 마일스톤: liteLLM 중앙 게이트웨이 통합 및 연동]**과 1:1로 매핑됩니다. 특히, 오케스트레이터의 자율 동작을 제어하는 **[Autonomic Self-Healing Engine (Autonomy)](../architecture/overview.md#autonomic-self-healing-engine-autonomy)**과의 긴밀한 연동 설계가 반영되어 있습니다:
+## 🚀 로드맵 정렬 & 자율 엔진 연동 (설계 구상 — 미구현)
 
-1. **쿼터 인식 기반 자율 라우팅 (Quota-aware Autonomous Routing)**:
+> ⚠️ **정정 (2026-08-13)**: 이 절이 서술하는 `AutonomicEngine` 연동은 **구현된 적이
+> 없으며, 그 근거였던 `crates/fleet-scheduler/src/autonomic.rs`는 컴파일 불가 상태로
+> 방치되어 있다가 2026-08-13 삭제되었습니다** ([`docs/roadmap/roadmap.md`](../roadmap/roadmap.md)
+> #43, [`docs/architecture/overview.md`](../architecture/overview.md)의 "Autonomic
+> Self-Healing Engine" 절 참고). 아래 내용은 **미래 설계 구상(design draft)**으로만
+> 읽어야 하며, 현재 liteLLM 프록시와 스케줄러 사이에 이런 자동 연동은 존재하지 않습니다.
+> 쿼터 소진 시 CircuitBreaker가 물리 워커를 격리하는 문제는 여전히 미해결 상태입니다.
+
+본 위키의 설계는 공식 개발 로드맵 **[34번 마일스톤: liteLLM 중앙 게이트웨이 통합 및 연동]**과 1:1로 매핑되는 것을 목표로 했습니다. 향후 오케스트레이터에 자율 동작 엔진이 재구현된다면, 다음과 같은 연동 설계가 후보입니다:
+
+1. **쿼터 인식 기반 자율 라우팅 (Quota-aware Autonomous Routing)** — 구상 단계:
    - OpenRouter(일 50회)나 Groq(낮은 TPM 한도)와 같은 무료 티어 API 사용 시, 쿼터 소진으로 인해 `429 Too Many Requests`나 `413 Payload Too Large` 에러가 발생할 수 있습니다.
-   - `AutonomicEngine`은 이를 모니터링하여 "워커 하드웨어 장애"와 "API 쿼터 소진"을 분석으로 구별해내고, 쿼터가 고갈된 모델 라벨을 가진 워커 노드들을 스케줄러 선택 후보에서 일시 배제하거나 유료/Fallback 공급자로 트래픽을 자동 우회(Self-Adaptive Routing)시킵니다.
-   - 이를 통해, API 쿼터 소진이 불필요하게 `CircuitBreaker`를 동작시켜 정상 작동 가능한 물리 워커 노드를 통째로 격리하는 문제를 사전에 자율 방어합니다.
-2. **중앙 집중식 Fallback 및 장애 제어**:
-   - 특정 LLM 공급자 백엔드가 장애를 일으킬 때, `AutonomicEngine`이 이를 인지하고 liteLLM 프록시 게이트웨이와 상호 작용하여 사전에 수립된 모델 폴백 경로로 에이전트 요청을 다이내믹하게 스위칭합니다.
+   - (구상) 자율 엔진이 이를 모니터링하여 "워커 하드웨어 장애"와 "API 쿼터 소진"을 분석으로 구별해내고, 쿼터가 고갈된 모델 라벨을 가진 워커 노드들을 스케줄러 선택 후보에서 일시 배제하거나 유료/Fallback 공급자로 트래픽을 자동 우회(Self-Adaptive Routing)시키는 것을 목표로 합니다.
+   - 이를 통해, API 쿼터 소진이 불필요하게 `CircuitBreaker`를 동작시켜 정상 작동 가능한 물리 워커 노드를 통째로 격리하는 문제를 사전에 자율 방어하는 것이 최종 목표이나, 아직 착수되지 않았습니다.
+2. **중앙 집중식 Fallback 및 장애 제어** — 구상 단계:
+   - 특정 LLM 공급자 백엔드가 장애를 일으킬 때, (구상) 자율 엔진이 이를 인지하고 liteLLM 프록시 게이트웨이와 상호 작용하여 사전에 수립된 모델 폴백 경로로 에이전트 요청을 다이내믹하게 스위칭하는 것을 목표로 합니다.

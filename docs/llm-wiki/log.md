@@ -197,3 +197,33 @@
   - `crates/fleet-scheduler/src/lib.rs` 및 `crates/fleet-cli/src/runtime.rs`를 갱신하여 `fleet serve` 기동 시 자율 엔진이 백그라운드 태스크로 자동 기동하도록 파이프라인을 완전히 결합했습니다.
   - `docs/architecture/overview.md`에 자율 엔진 아키텍처 다이어그램 및 설계 명세를 추가했습니다.
   - `docs/llm-wiki/README.md` 및 `index.md`를 갱신하여 무료 티어(OpenRouter, Groq) API 쿼터 소진(429/413) 시, 자율 엔진이 이를 "하드웨어 고장"과 구별하여 "API 쿼터 한도 도달"로 진단하고, 해당 워커 노드의 동적 우회(Self-Adaptive Routing) 및 Fallback 제어를 자율 수행하는 연동 설계를 반영했습니다.
+
+## 2026-08-13 — lint — 코드 대조 정합성 점검 (AutonomicEngine 삭제 반영 + 배포 방식 재정정)
+
+- **발단**: `crates/fleet-scheduler/src/autonomic.rs`가 컴파일 불가 상태로 방치되어
+  있던 것을 2026-08-13에 삭제하기로 결정(`docs/roadmap/roadmap.md` #43). 이 위키의
+  2026-08-12 항목이 아직 존재하지 않는 `AutonomicEngine` 연동을 현재형으로 서술하고
+  있어 코드와 어긋남을 발견 — 전체 위키 페이지를 코드와 재대조했다.
+- **조치**:
+  - `README.md`의 "로드맵 정렬 & 자율 엔진 연동" 절을 미구현 설계 구상으로 재작성하고
+    정정 배너를 추가. 최종 업데이트 날짜 갱신.
+  - `multi_provider_llm_proxy_analysis.md` §3.2/§4에 정정 배너 추가 — Postgres
+    DB-backed 컨테이너 배포 결론은 이후 `litellm_integration_plan.md`에서
+    DB 없는 venv+systemd 방식으로 뒤집혔음을 명시 (§1의 정본/사본 우선순위 규칙에
+    따라 인프라 스펙은 그 문서가 우선).
+  - `litellm_integration_plan.md` §3에 nginx `proxy_read_timeout` 불일치 발견 기록
+    (`nginx-gateway.md`는 600s+`proxy_buffering off`, 이 문서는 300s) — 실서버 값을
+    이 세션에서 확인할 수 없어 **미확인**으로 표시, 다음 배포 시 정본 갱신 필요.
+  - `litellm_integration_plan.md` §7의 `examples/litellm-config.yaml` 서술 오류 정정
+    — 실제 파일은 Claude/GPT-4o가 아니라 Gemini-3.5+Groq 무료 3종이며, `database_url`+
+    평문 `master_key`가 남아 있음. 이 파일은 "폐기된 설계"가 아니라
+    **로컬 개발용 `docker-compose.yml`에서 여전히 사용 중**인 별도 경로임을 명시
+    (`orchestrator` 서비스가 `FLEET_LLM_GATEWAY_URL: http://litellm:4000`로 참조).
+  - `free_tier_providers_analysis.md`에 정정 배너 추가 — §1.3/§1.4/§5가
+    2026-08-11 항목에서 스스로 인정한 "TPM이 아니라 schema 검증이 진짜 블로커"라는
+    결론 변경을 아직 반영하지 못한 상태임을 명시. `index.md` 상태를 🟢→🟡로 하향.
+  - `index.md` 표 갱신(최종 개정일, 상태 플래그) 및 고아 페이지 점검일 갱신.
+  - `docs/ui-dashboard/ui-design.md`도 같은 세션에서 함께 코드 대조 정정(별도 커밋) —
+    StatusPill/HostStatus enum, 호스트 인벤토리 "예정"→"구현됨" 재분류 등.
+- **미착수**: `docs/credentials/registry.md`에 누락된 `FLEET_API_TOKENS`/
+  `FLEET_CF_AUDIENCE`, Gmail SMTP, `ssh_keys` 볼트 항목 — 다음 항목에서 처리 예정.

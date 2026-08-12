@@ -7,6 +7,16 @@
 > 어떻게 편입할지 설계한 문서다. [`multi_provider_llm_proxy_analysis.md`](./multi_provider_llm_proxy_analysis.md)(게이트웨이 선택의 정본)를
 > 보완하는 문서이며, "무료 공급자를 쓸 것인가/어떻게 쓸 것인가"에 대한 정본이다.
 
+> ⚠️ **알려진 미갱신 (staleness, 2026-08-13 재확인)**: [`log.md`](./log.md)의
+> 2026-08-11 "Groq strict-schema 호환 훅 도입" 항목이 스스로 인정하듯, Groq의 실제
+> 블로커는 **TPM 한도가 아니라 `model_id`/`model_fingerprint` 필드에 대한 엄격
+> 스키마 검증**이었음이 이후 밝혀졌다(→ `examples/groq-compat/` 훅으로 해결). 이
+> 사실이 아래 **§1.3, §1.4, §5의 "TPM이 진짜 블로커"라는 결론에는 아직 반영되지
+> 않았다** — 원 저자가 로그에 직접 "후속 갱신이 필요하다"고 남긴 채 미착수 상태다.
+> §1.3/§1.4/§5를 읽을 때는 groq-compat 훅 도입 이후의 최신 상황을
+> [`litellm_integration_plan.md`](./litellm_integration_plan.md) §6(검증 결과)과
+> 함께 대조해야 한다.
+
 ---
 
 ## 1. 검증 결과

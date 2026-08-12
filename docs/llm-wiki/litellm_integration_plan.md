@@ -133,6 +133,14 @@ location /api-gateway/ {
 `proxy_read_timeout 300s`는 grok-build의 긴 에이전틱 턴(툴 호출 다수)이 liteLLM
 기본 타임아웃보다 오래 걸릴 수 있어 넉넉히 잡았다.
 
+> ⚠️ **불일치 발견 (2026-08-13, 미확인)**: [`docs/deployment/nginx-gateway.md`](../deployment/nginx-gateway.md)의
+> `/api-gateway/` 블록은 `proxy_read_timeout 600s`와 `proxy_buffering off`를 추가로
+> 명시하고 있어 위 값(`300s`, buffering 지시자 없음)과 다릅니다. 이 문서가 §9 표시상
+> nginx 스펙의 정본이지만, 실제 arm2 서버에 배포된 `/etc/nginx/sites-available/fleet`의
+> 현재 값을 이 세션에서 직접 확인하지 못했으므로 **어느 쪽이 실배포 값과 일치하는지는
+> 미확인**입니다. 다음 배포 시 실서버 설정을 확인해 정본을 갱신하고 사본을 동기화해야
+> 합니다.
+
 ---
 
 ## 4. `config.yaml` 상세 (정본)
@@ -308,12 +316,26 @@ curl(ec1에서 실행) 양쪽으로 검증:
 3. **`examples/litellm-config.yaml`의 모델 목록이 실제 채택 프로바이더와 다름** —
    원 설계는 Claude/GPT-4o를 예시로 들었으나, 실제로 Fleet이 쓰는 프로바이더는
    Gemini/GLM(z.ai)/Groq다. `examples/litellm-config.yaml` 파일 자체는 여전히
-   프로젝트에 남아 있지만 **더 이상 배포 정본이 아니며 예시 템플릿일 뿐**이다 —
-   실제 정본은 본 문서 §4의 `config.yaml`.
+   프로젝트에 남아 있지만 **더 이상 arm2 프로덕션 배포 정본이 아니며 예시
+   템플릿일 뿐**이다 — 실제 arm2 배포 정본은 본 문서 §4의 `config.yaml`.
+
+   > ⚠️ **정정 (2026-08-13)**: 위 서술은 부정확했다. 실제 `examples/litellm-config.yaml`을
+   > 확인한 결과, 모델 목록은 **Claude/GPT-4o가 아니라 `gemini-3.5-flash`/`gemini-3.5-pro`
+   > + Groq 무료 티어 3종**이며(GLM-5.1은 없음), `general_settings`에 여전히
+   > `database_url`(postgres)과 평문 `master_key: sk-litellm-master-key`가 남아 있어
+   > §4.3에서 서술한 "DB 없음" 프레이밍과도 다르다. 이 파일은 **Docker Compose
+   > 로컬 개발 환경(`docker-compose.yml`)에서 실제로 계속 사용 중**이며 — 아래
+   > `litellm` 서비스 정의가 `docker-compose.yml`에 살아있고 `orchestrator` 서비스는
+   > `FLEET_LLM_GATEWAY_URL: http://litellm:4000`로 이를 참조한다 — "폐기된 설계"가
+   > 아니라 **로컬 개발용으로 병행 사용되는 별도 경로**로 재분류해야 한다. arm2
+   > 프로덕션(venv+systemd, DB 없음)과 로컬 개발(Docker, DB 있음)이 서로 다른
+   > `config.yaml`을 쓰는 두 갈래 배포임을 명시하지 않은 것이 이 절의 원래 오류다.
 
 이 결정을 뒤집을 만한 조건(예: 여러 서버에 동일 게이트웨이를 반복 배포해야 하는
 경우, 또는 DB-backed 예산 관리를 본격 도입하며 Prisma까지 들이는 경우)이 생기면
-Docker Compose 방식을 재검토할 수 있다 — 그 전까지는 venv + systemd가 정본이다.
+Docker Compose 방식을 재검토할 수 있다 — 그 전까지는 **arm2 프로덕션 배포**는
+venv + systemd가 정본이다 (로컬 개발용 `docker-compose.yml`의 `litellm` 서비스는
+이 결정과 무관하게 계속 유지된다).
 
 ---
 
