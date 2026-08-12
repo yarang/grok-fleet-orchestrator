@@ -174,7 +174,53 @@
 39. ⏳ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) — 대규모 배포 시 첫 SSH 연결의 MITM 방어를 위해 `fleet provision` 도구 실행 시 SSH 호스트 키 사전 수집/검증 기능 구현.
 40. ⏳ **`xai-circuit-breaker` 기반 고성능 회로 차단기 도입** (P2, 성능/안정성) — `grok-build` 분석에 따라 슬라이딩 윈도우 실패율 측정, `AtomicU8/AtomicBool`을 이용한 lock-free `is_open()` 핫패스 최적화 및 `probe_claimed_at_millis`를 이용한 Lost Probe 캔슬 안전장치 설계 도입.
 41. ⏳ **WebSocket Demuxer 패턴을 적용한 동시 다중 세션 고도화** (P2, 네트워크) — `xai-computer-hub-sdk` 분석에 근거해 단일 WebSocket 연결 상에서 ACP 프롬프트 세션의 순서 보장 및 Head-of-Line Blocking 방지를 위한 RPC Frame Demultiplexer 구현.
+
+    **2026-08-12 정정**: 이 항목이 서술하는 "단일 WebSocket 연결 위에서 여러 ACP 세션을
+    다중화" 구조는 이미 구현되어 있습니다 — `crates/fleet-transport/src/acp_transport.rs`가
+    2026-08-11 SDK 마이그레이션으로 태스크당 세션(`sessions: Arc<Mutex<HashMap<SessionId,
+    InFlightSession>>>`)을 `SessionId` 기준으로 라우팅하며, `acp_concurrent.rs`의 3개
+    테스트로 검증됨(`docs/architecture/overview.md §동시 실행` 참조). 이 항목이 실제로
+    추가하려는 것은 **Head-of-Line Blocking 방지**(현재는 단일 WS 커넥션 위에서 순차
+    프레임 처리이므로, 한 세션의 대형 응답이 다른 세션의 스트리밍을 지연시킬 가능성) —
+    항목 설명을 좁혀서 남깁니다.
+
 42. ⏳ **워커 노드 연동 분산 OTLP Tracing Context Propagation 구축** (P2, 모니터링) — `xai-tracing` 기법을 차용해 오케스트레이터와 `fleet-worker` 간 WebSocket 통신 시 `traceparent` 스팬 캐리어를 전파하여 E2E 분산 추적 시각화 완성.
+
+## 신규 항목 (2026-08-12 추가 — `docs/` 전체 코드 대조 검증 중 발견)
+
+43. ⏳ **Autonomic Self-Healing Engine (MAPE-K)이 비연결·컴파일 불가 상태** (P2, 안정성) —
+    `crates/fleet-scheduler/src/autonomic.rs`(172줄)가 현재 타입(`Worker.metrics`,
+    `FleetEvent::WorkerLeft`, `BreakerRegistry::get` 시그니처 등)과 어긋나 컴파일되지
+    않으며, `lib.rs`/`runtime.rs`에서 모듈 자체가 주석 처리되어 있어 **어떤 릴리스
+    바이너리에도 포함되지 않습니다.** `docs/architecture/overview.md`가 한때 이를
+    "탑재되어 있습니다"라고 현재형으로 서술해 문서 정정을 완료했습니다(2026-08-12) —
+    이 항목은 실제 코드 재연결/타입 정합 작업 자체를 추적합니다.
+
+44. ⏳ **CircuitBreaker HalfOpen이 1회 프로브 제한을 실제로 강제하지 않음** (P2, 정확성) —
+    `crates/fleet-scheduler/src/breaker.rs`의 `check()`는 `HalfOpen` 상태에서 무조건
+    허용하도록 "단순화"되어 있다는 코드 주석이 있고, `half_open_max_probes` 설정
+    필드(기본값 1)는 어디에서도 읽히지 않습니다. 즉 회복 중인 워커에 동시 요청이
+    몰리면 1건이 아니라 전부 통과되어, 막 복구 중인 워커를 다시 과부하시킬 수
+    있습니다. 참고로 쿨다운 기본값도 문서가 오래 서술해온 30초가 아니라 실제로는
+    **10초**입니다(`CircuitBreakerConfig::default().open_duration_secs`). #40(고성능
+    회로차단기 재작성)과 함께 처리하는 것을 권장합니다.
+
+45. 🔵 **`MemStore`가 `fleet-store` 밖에 6개 이상 독립 중복 정의로 흩어짐** (P3, 기술 부채) —
+    `fleet-api`/`fleet-dashboard`의 `#[cfg(test)]` 코드마다 각자 `struct MemStore`를
+    따로 구현하고 있어(`fleet-api/src/test_support.rs`, `fleet-api/tests/*.rs`,
+    `fleet-dashboard/src/app.rs` 등), 한 곳을 고쳐도 나머지가 갈라질 위험이 있습니다.
+    `fleet-store`에 단일 `MemStore` 구현을 두고 재사용하는 리팩터링 권고. 낮은
+    우선순위 — 테스트 전용 코드라 프로덕션 영향 없음.
+
+46. ✅ **`docs/` 전체 코드 대조 검증 및 문서 구조 정리** (P2, 문서화) — 진행 중
+    (2026-08-12, 이 세션). `docs/architecture/*.md`(overview.md 9개 절 + 신규 2개 절,
+    api-reference.md, mcp-specification.md), `docs/worker-bootstrap/*.md`(5개 문서)를
+    전면 코드 대조해 다수의 사실 오류(MCP 도구 이름 전체가 허구였음, 디스패처가
+    "1초 폴링"이 아니라 이벤트 기반, ACP 전송 계층 3개 절이 2026-08-11에 이미 대체된
+    구세대 구현을 서술 중이었음 등)를 정정했습니다. 다이어그램 리소스를
+    `docs/assets/diagrams/<domain>/*.mermaid`로 단일화(30여 개 파일 통합, 확장자
+    통일)하고, `agent.md`/`CLAUDE.md`의 정본/사본 관계를 명확히 했습니다. `docs/
+    deployment/*.md`는 별도 검증 진행 중 — 완료 시 이 항목을 ✅로 전환합니다.
 
 ---
 
@@ -186,7 +232,7 @@
 | 담당 | 항목 |
 |---|---|
 | security | #32 (`/admin/*` RBAC — 3개 페이지 일괄) |
-| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42 |
+| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42, #43~#45 |
 
 ### 호환성 주의 — `/api/audit` 의미 변경 (`8755c0d`)
 `/api/audit`가 반환하는 데이터가 **바뀌었다**. 기존에는 작업·워커 생명주기 이벤트(`events`
