@@ -7,7 +7,13 @@
 
 ## TL;DR
 
-- **8개 페이지** 제안: 운영 코어 3 + 인증 2 + 관리 2 + 고급 1
+> ⚠️ **정정 (2026-08-13)**: 아래 "8개 페이지"는 실측과 크게 어긋납니다. 실제
+> `crates/fleet-dashboard/src/app.rs`의 HTML 페이지 라우트는 **18개**이고, 이 문서가
+> 다루는 것도 실제로는 10개 절(§3.2.5/§3.2.6 포함)입니다. 또한 §3.2.5~§3.2.6·§10.3
+> (호스트 인벤토리)은 "P1.5 제안"으로 서술돼 있지만 **이미 마이그레이션·API·라우트가
+> 전부 구현되어 배포된 상태**입니다 — 아래 각 절에 정정 배너를 추가했습니다.
+
+- **8개 페이지** 제안: 운영 코어 3 + 인증 2 + 관리 2 + 고급 1 (⚠️ 위 정정 참고 — 실제는 18개 라우트)
 - **단일 디자인 시스템**: Apple Design System(white/parchment/dark tiles, Action Blue, SF Pro, pill CTA)
 - **3개 핵심 흐름**: 온보딩(Bootstrap → Login → Overview), 일반 운영
   (Login → Overview → Worker → Task), 관리자(User Mgmt → Audit Log)
@@ -19,29 +25,51 @@
 
 ## 1. 정보 아키텍처
 
+⚠️ **정정 (2026-08-13)**: 아래 트리는 2026-07-20 작성 당시의 제안이며, 실제
+`app.rs` 라우터에는 이 트리에 없는 라우트가 7개 더 있습니다: `/tasks/new`,
+`/hosts/provision`, `/admin/ssh-keys`, `/verify-email`, `/forgot-password`,
+`/reset-password`, `/resend-verification`. `/workers`는 실제로 존재하지 않는
+라우트입니다(Overview에 통합됐다는 각주만 있고 실제 경로 자체가 없음 — IA
+트리에서 항목으로 나열할 게 아니라 각주로만 남겨야 합니다).
+
 ```
 fleet.agentthread.dev/
 │
 ├── /                          # 메인 대시보드 (Overview)        [P0]
 ├── /login                     # 로그인                          [P0]
 ├── /bootstrap                 # 최초 관리자 설정                [P0]
+├── /verify-email              # 이메일 인증                     [P0] (⚠️ 신규 추가, 실제 존재)
+├── /forgot-password           # 비밀번호 재설정 요청            [P0] (⚠️ 신규 추가, 실제 존재)
+├── /reset-password            # 비밀번호 재설정                 [P0] (⚠️ 신규 추가, 실제 존재)
+├── /resend-verification       # 인증 메일 재발송                [P0] (⚠️ 신규 추가, 실제 존재)
 │
-├── /hosts                     # 호스트 인벤토리                 [P1.5]
-├── /hosts/:hostname           # 호스트 상세 (히스토리)          [P1.5]
+├── /hosts                     # 호스트 인벤토리                 [구현됨 — 아래 §3.2.5 정정 참고]
+├── /hosts/:hostname           # 호스트 상세 (히스토리)          [구현됨]
+├── /hosts/provision           # 호스트 프로비저닝                [구현됨] (⚠️ 신규 추가, 실제 존재)
 │
-├── /workers                   # 워커 목록 (Overview에 통합)
+├── (`/workers` 경로 자체는 없음 — 워커 목록은 Overview에 통합)
 ├── /workers/:id               # 워커 상세                       [P1]
 │
 ├── /tasks                     # 태스크 큐                       [P1]
 ├── /tasks/:id                 # 태스크 상세 (큐에 통합)
+├── /tasks/new                 # 새 태스크 생성                  [P1] (⚠️ 신규 추가, 실제 존재)
 │
-├── /admin/users               # 사용자 관리                     [P1]
-├── /admin/activity            # 활동 로그 (작업·워커 이벤트)     [P2]
-│
-└── /admin/tools               # MCP 도구 탐색기                 [P2]
+├── /admin/users                # 사용자 관리                     [P1]
+├── /admin/activity             # 활동 로그 (작업·워커 이벤트)     [P2]
+├── /admin/tools                # MCP 도구 탐색기                 [P2]
+└── /admin/ssh-keys             # SSH 키 금고 관리                 [구현됨] (⚠️ 신규 추가, 실제 존재)
 ```
 
 ### 라우트 가드 매트릭스
+
+⚠️ **정정 (2026-08-13)**: `/admin/tools`의 실제 권한 검사는 `operator`가 아니라
+`DashboardView`(viewer도 보유)입니다 — `admin_tools_page`/`list_tools_api` 둘 다
+`PermissionKind::DashboardView`만 검사합니다(`crates/fleet-dashboard/src/
+handlers.rs`). 실제 도구 실행(MCP 프로토콜 자체)에는 RBAC 검사가 전혀 없습니다
+— "도구 호출은 operator 이상"이라는 서술은 현재 코드에 대응하는 강제 로직이
+없습니다. 또한 표의 `administrator` 역할명은 실제 코드의 역할 식별자와 다릅니다
+— 실제로는 `admin`/`operator`/`viewer`(`Role::as_str()`, `crates/fleet-core/src/
+auth.rs`)입니다.
 
 | 라우트           | 인증 | 최소 권한    | 비고                          |
 | ---------------- | ---- | ------------ | ----------------------------- |
@@ -50,11 +78,14 @@ fleet.agentthread.dev/
 | `/`              | ✓    | viewer       | 기본 랜딩                    |
 | `/hosts`         | ✓    | viewer       | 읽기 전용                     |
 | `/hosts/:hostname` | ✓  | viewer       | 읽기 전용                     |
+| `/hosts/provision` | ✓  | admin        | `HostProvision` 권한 필요(기본 admin 전용) |
 | `/workers/:id`   | ✓    | viewer       | 읽기 전용                     |
 | `/tasks`         | ✓    | viewer       | 읽기 전용                     |
-| `/admin/users`   | ✓    | administrator| 관리자 전용                   |
-| `/admin/activity`| ✓    | viewer       | events:list — 전 역할 열람    |
-| `/admin/tools`   | ✓    | operator     | 도구 호출은 operator 이상     |
+| `/tasks/new`     | ✓    | viewer(+ `TaskCreate` for 생성) | 목록은 viewer, 생성 API는 `TaskCreate` |
+| `/admin/users`   | ✓    | admin        | `UserRead` 권한 필요(기본 admin 전용) |
+| `/admin/activity`| ✓    | viewer       | `EventsList` — 전 역할 열람   |
+| `/admin/tools`   | ✓    | viewer       | ⚠️ 정정: `DashboardView`만 검사, operator+ 강제 없음 |
+| `/admin/ssh-keys`| ✓    | admin        | `HostProvision` 권한 필요(기본 admin 전용) |
 
 ---
 
@@ -211,12 +242,22 @@ fleet.agentthread.dev/
 | --------------------- | --------------------------------------------- |
 | Heartbeat 그래프      | 1h / 6h / 24h / 7d 범위 토글                  |
 | Circuit state 노드    | 각 상태(closed/open/half-open) 설명 툴팁      |
-| "Force reconnect" 버튼 | operator+ 권한 필요, 확인 다이얼로그         |
+| "Force reconnect" 버튼 | ⚠️ 미구현 — `fleet-dashboard`/`fleet-scheduler`에 대응하는 엔드포인트/핸들러 없음(2026-08-13 확인). 설계 제안으로만 유지. |
 | Recent Events 행 클릭 | Audit Log의 해당 이벤트로 딥링크              |
 
 ---
 
 ### 3.2.5 페이지 #2.5 — 호스트 인벤토리 (Host Inventory)
+
+> ✅ **정정 (2026-08-13): "P1.5 제안"이 아니라 이미 구현·배포된 기능입니다.**
+> `007_hosts.sql` 마이그레이션, `/hosts`·`/hosts/:hostname` 라우트, `/api/hosts`·
+> `/api/hosts/:hostname` API, 하트비트를 통한 `grok_version`/`fleet_worker_version`/
+> `os_info` 갱신, 프로비저닝 성공/실패 시 `host_events` INSERT까지 전부 실측
+> 확인됐습니다(`crates/fleet-store/migrations/007_hosts.sql`, `crates/fleet-core/
+> src/host.rs`, `crates/fleet-dashboard/src/app.rs`·`handlers.rs`,
+> `crates/fleet-worker/src/registration.rs`, `crates/fleet-dashboard/src/
+> provisioning.rs`). 다만 **아래 §"필요 스키마 변경" DDL은 제안 당시 초안이고,
+> 실제로 구현된 스키마와 컬럼 구성이 다릅니다** — 상세는 그 절 하단의 정정 참고.
 
 **라우트**: `/hosts`  **권한**: viewer+  **스타일**: Apple tile system
 
@@ -224,7 +265,7 @@ fleet.agentthread.dev/
 grok CLI 설치 여부/버전, 프로비저닝 이력을 한눈에.
 
 > **핵심 차이**: `workers` 테이블은 "현재 등록된 워커"만 추적한다.
-> 이 페이지는 `hosts` 테이블(신규)을 기반으로, 등록 여부와 무관하게
+> 이 페이지는 `hosts` 테이블을 기반으로, 등록 여부와 무관하게
 > 인벤토리에 등록된 모든 호스트를 표시한다.
 
 #### 데이터 소스
@@ -282,6 +323,19 @@ CREATE TABLE host_events (
 CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 ```
 
+> ⚠️ **정정 (2026-08-13)**: 위 DDL은 2026-07-20 제안 초안이며, 실제 구현된
+> `hosts` 테이블(`crates/fleet-store/migrations/007_hosts.sql`)은 컬럼 구성이
+> 다릅니다 — **`name`/`labels`/`region` 컬럼은 없습니다.** 실제 컬럼:
+> `id, hostname(UNIQUE), worker_id, status(provisioned|online|offline|failed),
+> ssh_host, ssh_port, ssh_user, grok_version, fleet_worker_version,
+> os_info(JSONB — 위 제안의 TEXT가 아님), load_avg, mem_available_mb,
+> disk_free_mb, last_heartbeat_at, provisioned_at, created_at, updated_at`.
+> `host_events`는 실제로 `id UUID`(제안의 `BIGSERIAL seq`가 아님) +
+> `severity` 컬럼이 추가돼 있습니다. 라벨/리전으로 인벤토리를 필터링하려면
+> [`bootstrap-release-v0.2.md §3.2.1`](../worker-bootstrap/bootstrap-release-v0.2.md)의
+> `host_alias`/`identity_file`/`labels` 확장 제안(아직 미구현)을 참조하세요 —
+> 이 문서의 `labels`/`region` 제안과 목적은 비슷하지만 별도 트랙입니다.
+
 #### 레이아웃 (SVG wireframe)
 
 <svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
@@ -299,12 +353,12 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
   <line x1="60" y1="350" x2="820" y2="350" stroke="#e0e0e0" />
   <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Total 4</text>
   <text x="260" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Online 3</text>
-  <text x="460" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Ready 1</text>
+  <text x="460" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Provisioned 1</text>
   <text x="660" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Failed 0</text>
   <text x="60" y="216" font-family="Inter, sans-serif" font-size="14" fill="#444">Host table</text>
   <text x="60" y="256" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.10 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [12 ev]</text>
   <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.11 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [8 ev]</text>
-  <text x="60" y="336" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.2.20 • — • — • ready • us-west • [3 ev]</text>
+  <text x="60" y="336" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.2.20 • — • — • provisioned • us-west • [3 ev]</text>
 </svg>
 
 #### 인터랙션
@@ -314,7 +368,7 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 | Host 행 클릭      | `/hosts/:hostname` 상세 페이지 이동                 |
 | History [N ev] 클릭 | `/hosts/:hostname#events` 이벤트 섹션으로 스크롤    |
 | ↻ Refresh 버튼    | 즉시 폴링 트리거                                     |
-| Status pill       | online(green) / ready(amber) / failed(red) / unknown(gray) |
+| Status pill       | online(green) / provisioned(amber) / offline(gray) / failed(red) ⚠️ 정정(2026-08-13): 실제 `hosts.status` 값은 `provisioned\|online\|offline\|failed` 4가지이며, "ready"/"unknown"은 존재하지 않음 |
 | 데이터 갱신 주기  | 10s 폴링                                             |
 
 #### SSH Config 자동 임포트 UI 흐름 (New in v0.2)
@@ -360,6 +414,8 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.2.6 페이지 #2.6 — 호스트 상세 (Host Detail)
 
+> ✅ **정정 (2026-08-13)**: §3.2.5와 동일하게 이미 구현·배포된 기능입니다.
+
 **라우트**: `/hosts/:hostname`  **권한**: viewer+  **스타일**: Apple tile system
 
 **목적**: 단일 호스트의 전체 히스토리 — 프로비저닝, grok 설치/업그레이드,
@@ -395,15 +451,16 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 | 데이터            | 방법                              | 트리거                     |
 | ----------------- | --------------------------------- | -------------------------- |
-| grok 버전         | 하트비트에 `grok_version` 필드 추가 | 워커 하트비트 (15s)        |
-| fleet-worker 버전 | 하트비트에 `worker_version` 필드   | 워커 하트비트 (15s)        |
-| OS 정보           | 하트비트에 `os_info` 필드          | 워커 등록 시 1회           |
+| grok 버전         | 하트비트의 `grok_version` 필드 | 워커 하트비트 (15s)        |
+| fleet-worker 버전 | 하트비트의 `fleet_worker_version` 필드(⚠️ 정정: `worker_version` 아님) | 워커 하트비트 (15s) |
+| OS 정보           | 하트비트의 `os_info` 필드          | 워커 등록 시 1회           |
 | 프로비저닝 이력   | `fleet provision` 실행 시 `host_events` INSERT | 프로비저닝 실행 |
 | grok 설치 이력    | 프로비저닝 스크립트 실행 시 이벤트 기록 | 프로비저닝 시 1회    |
 
-> **하트비트 확장**: 현재 워커 하트비트는 load_avg, mem, disk만 전송.
-> `grok_version`, `fleet_worker_version`, `os_info` 필드를 추가하여
-> 별도 SSH 프로브 없이도 소프트웨어 버전을 추적.
+> ✅ **정정 (2026-08-13)**: "하트비트 확장" 절이 미래형으로 서술돼 있었지만
+> 이미 구현되어 있습니다 — `WorkerHeartbeat`(`crates/fleet-core/src/worker.rs`)에
+> `grok_version`/`fleet_worker_version`/`os_info` 필드가 있고,
+> `crates/fleet-worker/src/registration.rs`가 실제로 수집해 전송합니다.
 
 ---
 
@@ -469,9 +526,9 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 | 요소                | 동작                                                    |
 | ------------------- | ------------------------------------------------------- |
-| Sign in 버튼        | POST `/api/auth/login`, 성공 시 `/`로 리다이렉트        |
+| Sign in 버튼        | POST `/login`(⚠️ 정정: `/api/auth/login`이 아닙니다 — `app.rs`), 성공 시 `/`로 리다이렉트 |
 | 실패 응답           | 입력 아래 적색 텍스트, 흔들림 애니메이션                |
-| 5회 실패            | 15분 쿨다운, "Try again later" 메시지                   |
+| 5회 실패            | ⚠️ 정정: 15분이 아니라 **60초** 쿨다운입니다(`MAX_FAILED_ATTEMPTS=5`, `FAILED_ATTEMPT_WINDOW_SECS=60`, `crates/fleet-dashboard/src/auth.rs`), "Try again later" 메시지 |
 | 비밀번호 👁          | 평문 토글                                               |
 | bootstrap 링크      | `/bootstrap` 이동                                       |
 | Enter 키            | 폼 제출                                                  |
@@ -511,8 +568,8 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 | 요소                  | 동작                                                  |
 | --------------------- | ----------------------------------------------------- |
 | OTP 입력 박스         | 자동 포커스 이동(6개 박스), 붙여넣기 시 자동 분산     |
-| 비밀번호 강도         | zxcvbn 기반 4단계 게이지, 3단계 이상 필요             |
-| Activate 버튼         | POST `/api/bootstrap/activate`, 성공 시 `/`로         |
+| 비밀번호 강도         | ⚠️ 미구현 — `fleet-dashboard`에 zxcvbn 의존성이나 강도 채점 로직 없음(2026-08-13 확인). 설계 제안으로만 유지. |
+| Activate 버튼         | POST `/bootstrap`(⚠️ 정정: `/api/bootstrap/activate`가 아닙니다 — `app.rs`), 성공 시 `/`로 |
 | 이미 활성화된 경우    | `/login`으로 자동 리다이렉트 + 안내 토스트            |
 | OTP 만료/오용         | "Token invalid or expired. Issue a new one."          |
 
@@ -520,7 +577,7 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.6 페이지 #6 — 사용자 관리 (User Management)
 
-**라우트**: `/admin/users`  **권한**: administrator  **스타일**: Apple auth surface
+**라우트**: `/admin/users`  **권한**: `admin`(⚠️ 정정: 코드상 실제 역할 식별자는 `administrator`가 아니라 `admin` — `Role::as_str()`, `crates/fleet-core/src/auth.rs`)  **스타일**: Apple auth surface
 
 **목적**: RBAC 관리 패널.
 
@@ -535,7 +592,7 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
   <rect x="40" y="424" width="820" height="90" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Total 3 • Active 2 • Admins 1 • Pending 0</text>
   <text x="60" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">User table</text>
-  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">YA • Yarang • administrator • active • 2m ago</text>
+  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">YA • Yarang • admin • active • 2m ago</text>
   <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">JK • Jikang • operator • active • 1h ago</text>
   <text x="60" y="334" font-family="Inter, sans-serif" font-size="13" fill="#111">MS • Minsu • viewer • inactive • 3d ago</text>
   <text x="60" y="456" font-family="Inter, sans-serif" font-size="14" fill="#444">Permission matrix</text>
@@ -592,7 +649,10 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 3.8 페이지 #8 — MCP 도구 탐색기 (MCP Tools)
 
-**라우트**: `/admin/tools`  **권한**: operator+  **스타일**: Apple auth surface
+**라우트**: `/admin/tools`  **권한**: ⚠️ 정정: 실제로는 `viewer`도 접근 가능(`DashboardView`
+권한만 검사, `crates/fleet-dashboard/src/handlers.rs`) — "operator+"를 강제하는
+코드는 없습니다. MCP 프로토콜 자체(도구 실행 경로)에도 RBAC 검사가 없습니다.
+**스타일**: Apple auth surface
 
 **목적**: MCP 도구 자가발견성, AI 클라이언트 연동 가이드.
 
@@ -607,13 +667,20 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
   <rect x="320" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <rect x="600" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <rect x="40" y="332" width="820" height="160" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">7 tools exposed via JSON-RPC 2.0 stdio</text>
-  <text x="60" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">workers.list</text>
-  <text x="340" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">workers.inspect</text>
-  <text x="620" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">tasks.dispatch</text>
-  <text x="60" y="364" font-family="Inter, sans-serif" font-size="14" fill="#444">Detail panel: fleet.tasks.dispatch</text>
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">8 tools exposed via JSON-RPC 2.0 stdio</text>
+  <text x="60" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_list_workers</text>
+  <text x="340" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_get_task_status</text>
+  <text x="620" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_dispatch_task</text>
+  <text x="60" y="364" font-family="Inter, sans-serif" font-size="14" fill="#444">Detail panel: fleet_dispatch_task</text>
   <text x="60" y="400" font-family="Inter, sans-serif" font-size="13" fill="#111">Input schema • usage example • metrics</text>
 </svg>
+
+> ⚠️ **정정 (2026-08-13)**: 실제 도구는 8개이며 전부 `fleet_` 접두사가 붙은
+> snake_case 이름입니다(`fleet_dispatch_task`, `fleet_get_task_status`,
+> `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`,
+> `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results` —
+> `crates/fleet-mcp/src/schema.rs`). 위 목업의 `workers.list` 같은 점(dot) 표기
+> 네이밍은 실재하지 않습니다.
 
 ---
 
@@ -674,7 +741,7 @@ Apple tile 기반 페이지 상단에 고정 헤더:
 
 - **로고 클릭**: 항상 `/`로 복귀
 - **주요 링크**: Overview, Workers, Tasks (viewer+)
-- **Admin 메뉴**: 드롭다운 (Users, Audit, Tools) — administrator/operator만 표시
+- **Admin 메뉴**: 드롭다운 (Users, Audit, Tools) — admin/operator만 표시 (⚠️ 역할 식별자 정정: `administrator`→`admin`)
 - **Avatar/Sign out**: 우측 고정
 
 ### 5.2 브레드크럼
@@ -709,20 +776,24 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 상태 표시용 작은 둥근 배지. Apple 스타일은 색상보다는 명확한 레이블과 아이콘을 우선한다.
 
+> ✅ **정정 (2026-08-13)**: 실제 `WorkerStatus` enum(`crates/fleet-core/src/worker.rs`)은
+> `Online | Degraded | Offline | CircuitOpen` 4가지뿐이다. 아래 `pending`/`active`/`inactive`는
+> 존재하지 않는 상태이며, CircuitBreaker에 의한 자동 차단 상태인 `circuit_open`이 누락되어 있었다.
+
 ```text
-[● online]      ← green dot + text
-[● degraded]    ← amber
-[● offline]     ← red
-[● pending]     ← amber, blinking
+[● online]        ← green dot + text
+[● degraded]      ← amber
+[● offline]       ← red
+[● circuit_open]  ← purple/violet, CircuitBreaker에 의해 자동 차단됨
 ```
 
-**Props**: `status: online|degraded|offline|pending|active|inactive`, `label?: string`
+**Props**: `status: online|degraded|offline|circuit_open`, `label?: string`
 
 ### 6.2 Badge (역할/카테고리)
 
 | 타입 | 스타일 | 용도 |
 | --- | --- | --- |
-| Role-admin | Action Blue pill, white text | administrator |
+| Role-admin | Action Blue pill, white text | admin (⚠️ 정정: `administrator` 아님) |
 | Role-other | parchment surface, 1px hairline | operator/viewer |
 | Category | tint chip on parchment | Audit categories |
 
@@ -900,20 +971,23 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 ### 10.3 P1.5 — 호스트 인벤토리 (Host Inventory)
 
+> ✅ **정정 (2026-08-13)**: 아래 "선행 작업" 3가지는 **전부 완료되어 배포된
+> 상태**입니다. 이 절은 더 이상 계획이 아니라 완료 기록으로 읽어야 합니다.
+
 | 페이지                    | 이유                                                                 |
 | ------------------------- | -------------------------------------------------------------------- |
 | #2.5 호스트 인벤토리      | grok 설치 여부·버전 일관성, 미등록 호스트 발견                       |
 | #2.6 호스트 상세          | 호스트 단위 히스토리(프로비저닝/하트비트/장애) 타임라인, 일원화 진단 |
 
-**배경**: 기존 `workers` 테이블은 "등록된 워커"만 추적한다. 프로비저닝 직후·하트비트 끊김·grok 미설치 등 **호스트 단위 가시성**이 부족하여, P1.5에서 `hosts` + `host_events` 스키마를 신규 도입한다.
+**배경**: 기존 `workers` 테이블은 "등록된 워커"만 추적한다. 프로비저닝 직후·하트비트 끊김·grok 미설치 등 **호스트 단위 가시성**이 부족하여, `hosts` + `host_events` 스키마를 도입했다(실제 컬럼 구성은 §3.2.5의 정정 참고 — 제안 초안과 다름).
 
-**선행 작업**:
+**완료된 작업** (⚠️ 원래 "선행 작업"으로 서술, 전부 완료 확인됨):
 
-1. 마이그레이션 `007_hosts.sql` (hosts, host_events 테이블 — §3.2.5 참조)
-2. fleet-worker 하트비트 확장: `grok_version` / `fleet_worker_version` / `os_info` 필드 전송
-3. fleet-provisioner 이벤트 훅: 프로비저닝 성공/실패 시 `host_events` INSERT
+1. ✅ 마이그레이션 `007_hosts.sql` (hosts, host_events 테이블 — §3.2.5 참조)
+2. ✅ fleet-worker 하트비트 확장: `grok_version` / `fleet_worker_version` / `os_info` 필드 전송 (`crates/fleet-worker/src/registration.rs`)
+3. ✅ fleet-provisioner 이벤트 훅: 프로비저닝 성공/실패 시 `host_events` INSERT (`crates/fleet-dashboard/src/provisioning.rs`)
 
-**예상 LOC**: ~1,000 (스키마 + heartbeat 확장 + 페이지 2종 + API)
+**예상 LOC**: ~1,000 (스키마 + heartbeat 확장 + 페이지 2종 + API) — 참고용, 실측 안 함.
 
 ### 10.4 P2 — 확장 (Phase 9.3+)
 
@@ -926,38 +1000,47 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 
 ---
 
-## 11. 파일 구조 제안
+## 11. 파일 구조
+
+⚠️ **정정 (2026-08-13)**: 아래는 2026-07-20 시점의 제안이었고, `styles/`·`scripts/`
+하위 디렉토리 분리나 `auth.rs`/`bootstrap.rs`/`templates.rs` 분리는 실제로
+채택되지 않았습니다. 실제 `crates/fleet-dashboard/assets/`는 **평평한 구조**로,
+`.html`마다 동일 이름의 `.js`가 짝을 이루고 공용 스타일시트 하나(`styles.css`)와
+로그인 전용 `login.css`만 별도로 있습니다. `worker.html`이 아니라
+**`worker-detail.html`**입니다. `src/`도 `app.rs`/`handlers.rs`/`auth.rs`/
+`provisioning.rs`/`sse.rs`/`error.rs`/`schema.rs`/`assets.rs` 등으로 구성되며
+`bootstrap.rs`/`templates.rs`라는 별도 모듈은 없습니다(부트스트랩·로그인 라우트도
+`handlers.rs`/`auth.rs`에 있음).
 
 ```
 crates/fleet-dashboard/
-├── assets/
-│   ├── index.html              # P0: Overview (#1)
-│   ├── login.html              # P0: Login (#4)
-│   ├── bootstrap.html          # P0: Bootstrap (#5)
-│   ├── worker.html             # P1: Worker Detail (#2)
-│   ├── tasks.html              # P1: Task Queue (#3)
-│   ├── admin-users.html        # P1: User Mgmt (#6)
-│   ├── hosts.html              # P1.5: Host Inventory (#2.5)
-│   ├── host-detail.html        # P1.5: Host Detail (#2.6)
-│   ├── admin-activity.html     # P2: Activity Log (#7)
-│   ├── admin-tools.html        # P2: MCP Tools (#8)
-│   ├── styles/
-│   │   ├── tokens.css          # 디자인 토큰 (색상, 타이포, 라디우스)
-│   │   ├── surfaces.css        # tile / surface variants
-│   │   ├── auth.css            # auth-specific surface styles
-│   │   └── components.css      # 공통 컴포넌트
-│   └── scripts/
-│       ├── app.js              # 공통 (세션 관리, fetch 래퍼)
-│       ├── overview.js         # #1
-│       ├── login.js            # #4
-│       ├── bootstrap.js        # #5
-│       └── ...
+├── assets/                     # 실제 구조 — 평평함, .html:.js 1:1 페어
+│   ├── index.html / (app.js가 공용)
+│   ├── login.html / login.css
+│   ├── bootstrap.html
+│   ├── verify-email.html
+│   ├── forgot-password.html / reset-password.html / resend-verification.html
+│   ├── worker-detail.html / worker-detail.js
+│   ├── tasks.html / tasks.js
+│   ├── task-new.html / task-new.js
+│   ├── task-detail.html / task-detail.js
+│   ├── admin-users.html / admin-users.js
+│   ├── admin-activity.html / admin-activity.js
+│   ├── admin-tools.html / admin-tools.js
+│   ├── admin-ssh-keys.html / admin-ssh-keys.js
+│   ├── hosts.html / hosts.js
+│   ├── host-detail.html / host-detail.js
+│   ├── provision.html / provision.js
+│   └── styles.css              # 공용 스타일시트 (토큰/서피스/컴포넌트 통합)
 ├── src/
-│   ├── app.rs                  # 라우터 구성 (로그인/부트스트랩 추가)
-│   ├── handlers.rs             # 기존 핸들러
-│   ├── auth.rs                 # 신규: /api/auth/*
-│   ├── bootstrap.rs            # 신규: /api/bootstrap/*
-│   └── templates.rs            # 신규: HTML 템플릿 렌더링
+│   ├── app.rs                  # 라우터 구성
+│   ├── handlers.rs             # 페이지/일반 API 핸들러
+│   ├── auth.rs                 # 세션/RBAC/로그인
+│   ├── provisioning.rs         # 호스트 프로비저닝 + SSH 키 금고
+│   ├── sse.rs                  # /api/events/stream
+│   ├── schema.rs               # 응답 타입
+│   ├── error.rs                # ApiError
+│   └── assets.rs               # rust-embed 정적 자산
 └── tests/
 ```
 
