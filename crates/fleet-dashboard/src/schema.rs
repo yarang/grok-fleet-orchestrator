@@ -87,6 +87,12 @@ pub struct TaskSummary {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<TokenStats>,
+    /// 이 태스크가 속한 스레드(연속 대화)의 루트 id. 스레드 자체가 태스크
+    /// 1개짜리(=자기 자신)면 이어가기 히스토리가 없다는 뜻.
+    pub thread_id: String,
+    /// "이어가기(Reply)"라면 직전 태스크의 id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════

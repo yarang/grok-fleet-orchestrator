@@ -60,6 +60,24 @@ pub trait Store: Send + Sync {
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError>;
 
+    /// 스레드(연속 대화) 전체를 시간순(오름차순)으로 조회 — 대화를 읽는 순서.
+    ///
+    /// 기본 구현은 `list_tasks`를 넉넉한 limit으로 호출한 뒤 클라이언트 측에서
+    /// `thread_id`로 필터링/정렬한다 — 목 스토어(테스트)는 재정의 없이도
+    /// 정확하게 동작한다. [`PgStore`]는 인덱스(`idx_tasks_thread_id`)를 타는
+    /// SQL로 재정의한다.
+    async fn list_thread_tasks(&self, thread_id: TaskId) -> Result<Vec<Task>, StoreError> {
+        let mut tasks = self
+            .list_tasks(&TaskFilter {
+                limit: 10_000,
+                ..Default::default()
+            })
+            .await?;
+        tasks.retain(|t| t.thread_id == thread_id);
+        tasks.sort_by_key(|t| t.created_at);
+        Ok(tasks)
+    }
+
     // ── Worker ──────────────────────────────────────────────────────
 
     /// 워커를 upsert (id 기준). 같은 name의 기존 워커는 덮어씀.

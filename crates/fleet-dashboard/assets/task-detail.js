@@ -4,6 +4,11 @@
       return parts[parts.length - 1];
     }
 
+    function getCsrf() {
+      const m = document.cookie.match('(^|;)\\s*fleet_csrf\\s*=\\s*([^;]+)');
+      return m ? m.pop() : '';
+    }
+
     function fmtTime(iso) {
       if (!iso) return '—';
       return new Date(iso).toLocaleString();
@@ -67,6 +72,7 @@
         } else {
           document.getElementById('task-output').textContent = '(task is ' + t.phase + ' — output will appear here when available)';
         }
+        loadThread(id);
       } catch(e) {
         document.getElementById('task-id').textContent = 'Task not found';
         document.getElementById('task-output').textContent = '';
@@ -78,6 +84,80 @@
       d.textContent = s;
       return d.innerHTML;
     }
+
+    // 이 태스크가 속한 스레드(연속 대화) 히스토리를 불러온다. 태스크 하나뿐인
+    // (아직 이어간 적 없는) 스레드는 섹션 자체를 숨긴다 — 매번 "히스토리
+    // 없음"을 보여주는 건 잡음이라 판단.
+    async function loadThread(currentId) {
+      try {
+        const resp = await fetch('/api/tasks/' + encodeURIComponent(currentId) + '/thread');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const thread = data.thread || [];
+        if (thread.length < 2) return;
+
+        const section = document.getElementById('task-thread-section');
+        const grid = document.getElementById('task-thread');
+        section.style.display = '';
+        grid.innerHTML = thread.map(function (t, i) {
+          const isCurrent = t.id === currentId;
+          const label = (i === 0 ? 'Root' : 'Reply ' + i) + (isCurrent ? ' (viewing)' : '');
+          const promptPreview = (t.prompt || '').slice(0, 80);
+          return '<div class="detail-item">'
+            + '<div class="label">' + escapeHtml(label) + '</div>'
+            + '<div class="value">'
+            + (isCurrent
+                ? escapeHtml(promptPreview)
+                : '<a href="/tasks/' + encodeURIComponent(t.id) + '">' + escapeHtml(promptPreview) + '</a>')
+            + ' <span style="opacity:0.6;">(' + escapeHtml(t.phase) + ')</span>'
+            + '</div></div>';
+        }).join('');
+      } catch (e) { console.error('loadThread', e); }
+    }
+
+    document.getElementById('reply-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const currentId = getTaskId();
+      const form = e.target;
+      const status = document.getElementById('reply-status');
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const promptEl = document.getElementById('reply-prompt');
+
+      const data = new URLSearchParams();
+      data.set('prompt', promptEl.value);
+      data.set('parent_task_id', currentId);
+      data.set('csrf_token', getCsrf());
+
+      status.textContent = 'Submitting…';
+      status.style.color = 'var(--ink-muted-48)';
+      submitBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/tasks', {
+          method: 'POST',
+          body: data,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+        const rawText = await resp.text();
+        let body = null;
+        try { body = JSON.parse(rawText); } catch (_) { /* not JSON */ }
+
+        if (!resp.ok) {
+          const msg = (body && body.error && body.error.message) || rawText || ('HTTP ' + resp.status);
+          status.textContent = 'Error: ' + msg;
+          status.style.color = 'var(--badge-failed, #c0392b)';
+          submitBtn.disabled = false;
+          return;
+        }
+        status.textContent = 'Sent — redirecting…';
+        status.style.color = 'var(--badge-online, #1a7f37)';
+        window.location.href = '/tasks/' + encodeURIComponent(body.task_id);
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+        status.style.color = 'var(--badge-failed, #c0392b)';
+        submitBtn.disabled = false;
+      }
+    });
 
     loadTask();
 

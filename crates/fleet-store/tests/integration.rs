@@ -83,6 +83,7 @@ fn sample_task(prompt: &str, created_by: &str) -> Task {
         timeout_secs: Some(600),
         priority: TaskPriority::Normal,
         created_by: created_by.into(),
+        parent_task_id: None,
     };
     Task::from_request(req)
 }

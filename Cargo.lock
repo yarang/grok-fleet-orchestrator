@@ -1725,6 +1725,7 @@ dependencies = [
  "fleet-provisioner",
  "fleet-scheduler",
  "fleet-store",
+ "fleet-transport",
  "hex",
  "lettre",
  "mime_guess",

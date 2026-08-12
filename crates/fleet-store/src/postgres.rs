@@ -167,9 +167,10 @@ impl Store for PgStore {
             r#"
             INSERT INTO tasks
                 (id, prompt, cwd, model, server_hint, required_labels,
-                 max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at)
+                 max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                 thread_id, parent_task_id, project_id)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             "#,
         )
         .bind(task.id.as_uuid())
@@ -185,6 +186,9 @@ impl Store for PgStore {
         .bind(priority_str)
         .bind(status_json)
         .bind(task.dispatched_at)
+        .bind(task.thread_id.as_uuid())
+        .bind(task.parent_task_id.map(|id| id.as_uuid()))
+        .bind(task.project_id.map(|id| id.as_uuid()))
         .execute(&self.pool)
         .await?;
 
@@ -194,7 +198,8 @@ impl Store for PgStore {
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
-                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at
+                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                      thread_id, parent_task_id, project_id
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -202,6 +207,20 @@ impl Store for PgStore {
         .await?;
 
         row.map(row_to_task).transpose()
+    }
+
+    async fn list_thread_tasks(&self, thread_id: TaskId) -> Result<Vec<Task>, StoreError> {
+        let rows = sqlx::query(
+            r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                      thread_id, parent_task_id, project_id
+               FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
+        )
+        .bind(thread_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(row_to_task).collect()
     }
 
     async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError> {
@@ -240,7 +259,8 @@ impl Store for PgStore {
         //   {"Completed": {"worker_id": "..."}}
         //   {"Failed": {"worker_id": "..."}}
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
-                          max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at
+                          max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                          thread_id, parent_task_id, project_id
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -1734,6 +1754,9 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let priority_str: String = row.try_get("priority")?;
     let status_json: serde_json::Value = row.try_get("status")?;
     let dispatched_at: Option<DateTime<Utc>> = row.try_get("dispatched_at")?;
+    let thread_id: Uuid = row.try_get("thread_id")?;
+    let parent_task_id: Option<Uuid> = row.try_get("parent_task_id")?;
+    let project_id: Option<Uuid> = row.try_get("project_id")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
@@ -1753,6 +1776,9 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         priority,
         status,
         dispatched_at,
+        thread_id: TaskId::from(thread_id),
+        parent_task_id: parent_task_id.map(TaskId::from),
+        project_id: project_id.map(fleet_core::ProjectId::from),
     })
 }
 

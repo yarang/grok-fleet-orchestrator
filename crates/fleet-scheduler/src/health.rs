@@ -271,7 +271,7 @@ mod tests {
             let workers = self.workers.lock().unwrap();
             let out: Vec<Worker> = workers
                 .values()
-                .filter(|w| f.status.map_or(true, |s| w.status == s))
+                .filter(|w| f.status.is_none_or(|s| w.status == s))
                 .cloned()
                 .collect();
             Ok(out)

@@ -50,6 +50,23 @@
 
     <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Output</h2>
     <pre class="json-view" id="task-output" style="min-height:100px;">No output available.</pre>
+
+    <div id="task-thread-section" style="display:none;">
+      <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Thread</h2>
+      <p class="page-subtitle" style="margin-bottom:12px;">이 태스크는 이어지는 대화의 일부입니다. 이전 turn들은 매 dispatch마다 새 prompt 앞에 자동으로 이어붙습니다.</p>
+      <div class="detail-grid" id="task-thread"></div>
+    </div>
+
+    <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Reply</h2>
+    <p class="page-subtitle" style="margin-bottom:12px;">이 태스크를 이어서 새 요청을 보냅니다 — 이전 대화 내용이 자동으로 문맥에 포함됩니다.</p>
+    <form id="reply-form">
+      <textarea id="reply-prompt" name="prompt" rows="4" placeholder="이어서 무엇을 할까요?" required style="width:100%;box-sizing:border-box;resize:vertical;"></textarea>
+      <input type="hidden" name="csrf_token" id="reply-csrf" />
+      <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+        <button type="submit" class="btn btn-primary">Reply</button>
+        <span id="reply-status" class="page-subtitle"></span>
+      </div>
+    </form>
   </main>
 
   <script src="/static/app.js"></script>

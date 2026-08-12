@@ -343,10 +343,15 @@ impl Dispatcher {
             .await;
 
         // 6. Transport로 dispatch
+        let prompt = if task.parent_task_id.is_some() {
+            self.build_threaded_prompt(&task).await
+        } else {
+            task.prompt.clone()
+        };
         let req = DispatchRequest {
             task_id,
             worker_id,
-            prompt: task.prompt.clone(),
+            prompt,
             cwd: task.cwd.clone(),
             model: task.model.clone(),
             max_turns: task.max_turns,
@@ -400,6 +405,43 @@ impl Dispatcher {
 
         info!(%task_id, %worker_id, "task dispatched");
         Ok(())
+    }
+
+    /// 스레드(연속 대화)의 이전 turn들을 새 prompt 앞에 이어붙인다.
+    ///
+    /// ACP에는 세션을 넘나드는 대화 연속 기능이 없다(태스크마다 새
+    /// `session/new`) — 그래서 매 dispatch마다 스레드 히스토리를 텍스트로
+    /// 재구성해 보낸다. `list_thread_tasks`는 조상뿐 아니라 스레드 전체를
+    /// 반환하므로, 이 태스크보다 먼저 생성된 것만, 그리고 실제로 출력이 있는
+    /// (`Completed`) 것만 골라 문맥으로 사용한다 — 실패한 turn은 이어붙일
+    /// 유의미한 출력이 없으므로 건너뛴다.
+    ///
+    /// 저장된 `task.prompt` 자체는 건드리지 않는다 — 태스크 목록/상세 화면에는
+    /// 사용자가 실제로 입력한 새 메시지만 보여야 한다. 재구성된 전체 문맥은
+    /// dispatch 시점에만 조립되어 워커로 전송된다.
+    async fn build_threaded_prompt(&self, task: &Task) -> String {
+        let history = self
+            .state
+            .store
+            .list_thread_tasks(task.thread_id)
+            .await
+            .unwrap_or_default();
+
+        let mut context = String::new();
+        for ancestor in &history {
+            if ancestor.id == task.id || ancestor.created_at >= task.created_at {
+                continue;
+            }
+            if let TaskStatus::Completed(result) = &ancestor.status {
+                context.push_str(&format!("Q: {}\nA: {}\n\n", ancestor.prompt, result.output));
+            }
+        }
+
+        if context.is_empty() {
+            task.prompt.clone()
+        } else {
+            format!("{context}Q: {}", task.prompt)
+        }
     }
 
     /// 작업을 실패로 마킹하고 이벤트 발행.

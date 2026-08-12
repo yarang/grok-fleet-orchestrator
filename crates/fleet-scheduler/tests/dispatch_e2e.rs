@@ -121,7 +121,7 @@ impl Store for InMemoryStore {
         let workers = self.workers.lock().await;
         let mut out: Vec<Worker> = workers
             .values()
-            .filter(|w| filter.status.map_or(true, |s| w.status == s))
+            .filter(|w| filter.status.is_none_or(|s| w.status == s))
             .filter(|w| {
                 filter
                     .labels
@@ -367,6 +367,70 @@ async fn dispatch_completes_successfully() {
         }
         other => panic!("expected Completed, got {:?}", other),
     }
+}
+
+/// 부모 태스크가 완료된 뒤 "이어가기" 태스크를 dispatch하면, 실제로 워커에
+/// 전송되는 prompt에 부모의 Q/A가 이어붙어 있어야 한다 — MockTransport는
+/// 받은 prompt를 그대로 에코하므로, 완료된 출력을 검사하면 dispatch 시점에
+/// 무슨 텍스트가 실제로 전송됐는지 확인할 수 있다.
+#[tokio::test]
+async fn threaded_reply_dispatch_includes_parent_context() {
+    let worker = make_worker("w1");
+    let worker_id = worker.id;
+    let (state, dispatcher) = setup(
+        vec![worker],
+        vec![MockWorker::new(worker_id, "wss://w1/ws")],
+    )
+    .await;
+
+    let parent = Task::from_request(TaskRequest {
+        prompt: "1부터 5까지 더해줘".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let parent_id = parent.id;
+    dispatcher.submit(parent).await.unwrap();
+    let parent = wait_until_terminal(&state, parent_id).await;
+    assert!(
+        matches!(parent.status, TaskStatus::Completed(_)),
+        "parent must complete for this test to be meaningful"
+    );
+
+    let mut reply = Task::from_request(TaskRequest {
+        prompt: "거기에 10을 더하면?".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    reply.inherit_from_parent(&parent);
+    assert_eq!(reply.thread_id, parent.thread_id);
+    assert_eq!(reply.parent_task_id, Some(parent.id));
+
+    let reply_id = reply.id;
+    dispatcher.submit(reply).await.unwrap();
+    let completed = wait_until_terminal(&state, reply_id).await;
+
+    match completed.status {
+        TaskStatus::Completed(result) => {
+            // MockTransport가 에코하는 output에 재구성된 전체 prompt가
+            // 그대로 담겨 있어야 한다 — 부모의 Q/A와 새 질문 둘 다.
+            assert!(
+                result.output.contains("1부터 5까지 더해줘"),
+                "parent question missing from dispatched prompt: {}",
+                result.output
+            );
+            assert!(
+                result.output.contains("거기에 10을 더하면?"),
+                "new question missing from dispatched prompt: {}",
+                result.output
+            );
+        }
+        other => panic!("expected Completed, got {:?}", other),
+    }
+
+    // 저장된 reply.prompt 자체는 재구성 없이 사용자가 입력한 새 메시지만
+    // 담고 있어야 한다 — 목록/상세 화면에 전체 문맥이 노출되면 안 된다.
+    let stored_reply = state.store.get_task(reply_id).await.unwrap().unwrap();
+    assert_eq!(stored_reply.prompt, "거기에 10을 더하면?");
 }
 
 #[tokio::test]

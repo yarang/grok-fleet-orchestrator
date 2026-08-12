@@ -476,6 +476,60 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
     }
 }
 
+/// 실제 `Dispatcher`(+ `MockTransport`)를 연결한 서버 — `submit_task_api`가
+/// dispatcher 부재로 503을 내지 않고 실제 dispatch 경로까지 타야 하는
+/// (예: parent_task_id 상속) 테스트 전용. 반환된 `(TestServer, String)`의
+/// 문자열은 `session_cookie`.
+async fn spawn_server_with_dispatcher(store: MemStore, worker: Worker) -> (TestServer, String) {
+    let (store, cookie) = store.seed_test_session();
+    let store = Arc::new(store) as Arc<dyn Store>;
+    store.upsert_worker(&worker).await.unwrap();
+
+    let transport = fleet_transport::MockTransport::new();
+    transport
+        .add_worker(fleet_transport::MockWorker::new(
+            worker.id,
+            worker.endpoint.clone(),
+        ))
+        .await;
+    let event_rx = fleet_transport::WorkerTransport::subscribe(&transport)
+        .await
+        .unwrap();
+    let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+
+    let fleet_state = Arc::new(fleet_scheduler::FleetState::new(
+        store.clone(),
+        transport,
+        fleet_core::CircuitBreakerConfig::default(),
+    ));
+    let dispatcher = Arc::new(fleet_scheduler::Dispatcher::new(fleet_state));
+    dispatcher.attach_event_receiver(event_rx).await;
+    let bg = dispatcher.clone();
+    tokio::spawn(async move {
+        bg.run_event_loop().await;
+    });
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(store, pool, Some(dispatcher)));
+    let app = build_dashboard_app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+    )
+}
+
 /// 세션 쿠키를 포함한 GET 요청.
 fn authed_get(client: &reqwest::Client, url: &str, cookie: &str) -> reqwest::RequestBuilder {
     client
@@ -1103,6 +1157,146 @@ async fn submit_task_rejects_empty_prompt() {
     .unwrap();
 
     assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_unknown_parent_task_id() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie) = spawn_server_with_dispatcher(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let bogus_parent = TaskId::new().to_string();
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "이어서 해줘"),
+            ("parent_task_id", &bogus_parent),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 400);
+}
+
+/// FLEET (2026-08-12): 대시보드 "Reply" 기능의 HTTP 레벨 통합 테스트.
+///
+/// `Task::inherit_from_parent`의 순수 로직은 fleet-core에서, dispatch 시점
+/// 문맥 재구성은 fleet-scheduler에서 이미 검증했다 — 여기서는 그 사이,
+/// `submit_task_api`가 폼의 `parent_task_id` 문자열을 실제로 파싱해 부모를
+/// 조회하고 상속을 호출하는 HTTP 핸들러 레이어 자체를 검증한다.
+#[tokio::test]
+async fn submit_task_reply_inherits_thread_from_parent() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie) = spawn_server_with_dispatcher(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    // 1. 부모 태스크 제출.
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[("prompt", "1부터 5까지 더해줘"), ("csrf_token", TEST_CSRF)],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let parent_id = body["task_id"].as_str().unwrap().to_string();
+
+    // 2. 완료될 때까지 폴링 (MockTransport는 거의 즉시 완료).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let resp = authed_get(
+            &client,
+            &format!("http://{}/api/tasks/{parent_id}", server.addr),
+            &cookie,
+        )
+        .send()
+        .await
+        .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        if body["task"]["phase"] == "completed" {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("parent task did not complete in time: {body:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // 3. 이어가기 제출 — parent_task_id로 방금 완료된 태스크를 지정.
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "거기에 10을 더하면?"),
+            ("parent_task_id", &parent_id),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let reply_id = body["task_id"].as_str().unwrap().to_string();
+
+    // 4. reply가 parent와 같은 thread_id, parent_task_id를 갖는지 확인.
+    let parent_detail: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/tasks/{parent_id}", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let reply_detail: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/tasks/{reply_id}", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    assert_eq!(
+        reply_detail["task"]["thread_id"],
+        parent_detail["task"]["thread_id"]
+    );
+    assert_eq!(reply_detail["task"]["parent_task_id"], parent_id);
+
+    // 5. /api/tasks/:id/thread가 두 태스크 모두 시간순으로 반환하는지 확인.
+    let thread: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/tasks/{reply_id}/thread", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let ids: Vec<&str> = thread["thread"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![parent_id.as_str(), reply_id.as_str()]);
 }
 
 #[tokio::test]

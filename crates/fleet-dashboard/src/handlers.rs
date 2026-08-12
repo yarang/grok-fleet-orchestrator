@@ -322,6 +322,8 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
         duration_secs,
         model: t.model.clone(),
         token_usage,
+        thread_id: t.thread_id.to_string(),
+        parent_task_id: t.parent_task_id.map(|id| id.to_string()),
     }
 }
 
@@ -407,6 +409,10 @@ pub struct SubmitTaskForm {
     /// 워커 라벨 `model`과 정확히 일치해야 라우팅됨(비우면 스케줄러가 아무 워커나 선택).
     #[serde(default)]
     pub model: Option<String>,
+    /// 특정 워커 이름으로 하드 핀. 해당 워커가 오프라인/circuit-open이면
+    /// 폴백 없이 실패한다(`WorkerSelector` 동작).
+    #[serde(default)]
+    pub server_hint: Option<String>,
     /// ACP 프로토콜에는 별도 시스템 프롬프트 필드가 없어, 있으면 실제 프롬프트
     /// 앞에 구분선과 함께 병합해 전송한다.
     #[serde(default)]
@@ -420,6 +426,12 @@ pub struct SubmitTaskForm {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// 이 태스크가 "이어가기(Reply)"라면, 직전 태스크의 id (문자열 UUID).
+    /// 부모 태스크가 있으면 thread_id를 물려받고, host/cwd/model 중 이 폼에서
+    /// 명시하지 않은 값은 부모 값을 상속한다 — 우선순위:
+    /// 사용자가 명시한 값 > 부모 태스크 값 > None.
+    #[serde(default)]
+    pub parent_task_id: Option<String>,
     #[serde(default)]
     pub csrf_token: String,
 }
@@ -466,17 +478,40 @@ pub async fn submit_task_api(
         .clone()
         .ok_or_else(|| ApiError::Unavailable("task submission is not configured".into()))?;
 
-    let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+    // parent_task_id가 있으면 먼저 부모를 조회 — 없거나 파싱 실패 시 태스크
+    // 자체를 생성하지 않고 4xx로 거절한다("이어가기"가 실제로 이어지지 않는
+    // 상태로 조용히 새 스레드를 시작하면 사용자가 눈치채기 어렵다).
+    let parent_task = match form.parent_task_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let parent_id: fleet_core::TaskId = raw
+                .parse()
+                .map_err(|_| ApiError::BadRequest("invalid parent_task_id".into()))?;
+            let parent = state
+                .store
+                .get_task(parent_id)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .ok_or_else(|| ApiError::BadRequest("parent task not found".into()))?;
+            Some(parent)
+        }
+        None => None,
+    };
+
+    let mut task = fleet_core::Task::from_request(fleet_core::TaskRequest {
         prompt: full_prompt,
         cwd: form.cwd.filter(|s| !s.is_empty()),
         model: form.model.filter(|s| !s.is_empty()),
-        server_hint: None,
+        server_hint: form.server_hint.filter(|s| !s.is_empty()),
         required_labels: vec![],
         max_turns: form.max_turns,
         timeout_secs: form.timeout_secs,
         priority,
         created_by: principal.user.username.clone(),
+        parent_task_id: None, // inherit_from_parent가 아래서 채운다.
     });
+    if let Some(parent) = &parent_task {
+        task.inherit_from_parent(parent);
+    }
     let task_id = task.id;
 
     match dispatcher.submit(task).await {
@@ -535,6 +570,43 @@ pub async fn get_task_detail_api(
         "task": summary,
         "output": output,
     })))
+}
+
+/// GET /api/tasks/:id/thread — 이 태스크가 속한 스레드 전체를 시간순으로 조회.
+///
+/// "이어가기(Reply)" UI가 이전 turn들을 보여주기 위해 사용한다. 단일 태스크
+/// (스레드 루트뿐이고 아직 이어간 적 없음)여도 배열엔 그 태스크 하나가
+/// 담겨서 온다 — 프런트가 "히스토리 없음"과 "아직 안 불러옴"을 구분할 필요가
+/// 없게.
+pub async fn get_task_thread_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&principal, PermissionKind::TaskRead)?;
+
+    let task_id: fleet_core::TaskId = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("invalid task id: {id}")))?;
+
+    let task = state
+        .store
+        .get_task(task_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("task {id}")))?;
+
+    let thread = state
+        .store
+        .list_thread_tasks(task.thread_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_task_thread: failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    let summaries: Vec<TaskSummary> = thread.iter().map(task_to_summary).collect();
+    Ok(Json(serde_json::json!({ "thread": summaries })))
 }
 
 // ── P1: Worker Detail ────────────────────────────────────────────────

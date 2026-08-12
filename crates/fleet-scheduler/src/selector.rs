@@ -196,7 +196,7 @@ mod tests {
             let workers = self.workers.lock().unwrap();
             let mut out: Vec<Worker> = workers
                 .iter()
-                .filter(|w| filter.status.map_or(true, |s| w.status == s))
+                .filter(|w| filter.status.is_none_or(|s| w.status == s))
                 .cloned()
                 .collect();
             out.sort_by_key(|w| w.registered_at);

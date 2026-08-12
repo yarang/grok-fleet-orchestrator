@@ -704,8 +704,9 @@ mod tests {
             worker_id: WorkerId::new(),
             finished_at: chrono::Utc::now(),
         };
+        let id = TaskId::new();
         let task = Task {
-            id: TaskId::new(),
+            id,
             prompt: "cargo build".into(),
             cwd: None,
             model: None,
@@ -718,6 +719,9 @@ mod tests {
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
             dispatched_at: None,
+            thread_id: id,
+            parent_task_id: None,
+            project_id: None,
         };
         let summary = task_summary_with_options(&task, true);
         assert_eq!(summary["phase"], "completed");
@@ -742,8 +746,9 @@ mod tests {
             worker_id: WorkerId::new(),
             finished_at: chrono::Utc::now(),
         };
+        let id = TaskId::new();
         let task = Task {
-            id: TaskId::new(),
+            id,
             prompt: "test".into(),
             cwd: None,
             model: None,
@@ -756,6 +761,9 @@ mod tests {
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
             dispatched_at: None,
+            thread_id: id,
+            parent_task_id: None,
+            project_id: None,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["token_usage"]["input_tokens"], 100);
@@ -775,8 +783,9 @@ mod tests {
             worker_id: WorkerId::new(),
             finished_at: chrono::Utc::now(),
         };
+        let id = TaskId::new();
         let task = Task {
-            id: TaskId::new(),
+            id,
             prompt: "cargo build".into(),
             cwd: None,
             model: None,
@@ -789,6 +798,9 @@ mod tests {
             priority: fleet_core::TaskPriority::Normal,
             status: TaskStatus::Completed(result),
             dispatched_at: None,
+            thread_id: id,
+            parent_task_id: None,
+            project_id: None,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["phase"], "completed");

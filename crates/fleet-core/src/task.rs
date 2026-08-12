@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{TaskId, WorkerId};
+use crate::ids::{ProjectId, TaskId, WorkerId};
 
 /// 작업 우선순위. 스케줄러 큐 정렬에 사용.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,6 +46,10 @@ pub struct TaskRequest {
     pub priority: TaskPriority,
     #[serde(default)]
     pub created_by: String,
+    /// 이 태스크가 "이어가기(Reply)"라면, 직전 태스크의 id.
+    /// `None`이면 새 스레드의 루트 태스크.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<TaskId>,
 }
 
 /// 작업 엔티티 (Store에 영속화되는 형태).
@@ -71,13 +75,32 @@ pub struct Task {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_at: Option<DateTime<Utc>>,
+    /// 스레드(연속 대화) 전체를 한 번에 조회하기 위한 평평한 키.
+    /// 스레드 루트 태스크는 자기 자신의 `id`를 그대로 갖고, 이어지는 모든
+    /// 자식 태스크는 부모의 `thread_id`를 그대로 물려받는다 — `parent_task_id`를
+    /// 재귀로 거슬러 올라가지 않고 `WHERE thread_id = ?` 한 번으로 스레드 전체를
+    /// 구하기 위함.
+    pub thread_id: TaskId,
+    /// 이 태스크가 "이어가기(Reply)"라면, 직전 태스크의 id. `None`이면 스레드 루트.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<TaskId>,
+    /// 예약 필드 — project 그룹화 기능 도입 전까지는 항상 `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
 }
 
 impl Task {
     /// `TaskRequest`에서 새 작업을 생성합니다. `id`와 `created_at`은 자동 발급.
+    ///
+    /// `thread_id`는 일단 자기 자신의 `id`로 채워진다 — 스레드 루트라고 가정한
+    /// 기본값이다. `parent_task_id`가 채워진 "이어가기" 요청이라면, 호출자가
+    /// 부모 태스크를 조회해 `thread_id`(부모의 것으로 교체)와 host/cwd/model
+    /// 상속을 직접 반영해야 한다 — 이 함수는 DB 접근이 없는 순수 함수라서
+    /// 부모 조회 자체는 할 수 없다.
     pub fn from_request(req: TaskRequest) -> Self {
+        let id = TaskId::new();
         Self {
-            id: TaskId::new(),
+            id,
             prompt: req.prompt,
             cwd: req.cwd,
             model: req.model,
@@ -90,6 +113,27 @@ impl Task {
             priority: req.priority,
             status: TaskStatus::Pending,
             dispatched_at: None,
+            thread_id: id,
+            parent_task_id: req.parent_task_id,
+            project_id: None,
+        }
+    }
+
+    /// 부모 태스크로부터 스레드 정보(`thread_id`)와 host/cwd/model 기본값을
+    /// 상속시킨다. 우선순위(높은 것부터): 사용자가 명시적으로 지정한 값,
+    /// 부모 태스크 값, `None`. `submit_task_api`(대시보드) 등 "이어가기"
+    /// 제출 경로에서 `Task::from_request` 직후 호출한다.
+    pub fn inherit_from_parent(&mut self, parent: &Task) {
+        self.parent_task_id = Some(parent.id);
+        self.thread_id = parent.thread_id;
+        if self.server_hint.is_none() {
+            self.server_hint = parent.server_hint.clone();
+        }
+        if self.cwd.is_none() {
+            self.cwd = parent.cwd.clone();
+        }
+        if self.model.is_none() {
+            self.model = parent.model.clone();
         }
     }
 
@@ -281,6 +325,7 @@ mod tests {
             timeout_secs: None,
             priority: TaskPriority::Normal,
             created_by: "admin@org".into(),
+            parent_task_id: None,
         };
         let task = Task::from_request(req);
         assert!(matches!(task.status, TaskStatus::Pending));
@@ -313,8 +358,9 @@ mod tests {
             worker_id: WorkerId::new(),
             finished_at: Utc::now(),
         };
+        let id = TaskId::new();
         let t = Task {
-            id: TaskId::new(),
+            id,
             prompt: "x".into(),
             cwd: None,
             model: None,
@@ -327,9 +373,77 @@ mod tests {
             priority: TaskPriority::Normal,
             status: TaskStatus::Completed(result),
             dispatched_at: None,
+            thread_id: id,
+            parent_task_id: None,
+            project_id: None,
         };
         assert!(t.is_terminal());
         assert!(!t.is_running());
+    }
+
+    #[test]
+    fn fresh_task_is_root_of_its_own_thread() {
+        let task = Task::from_request(TaskRequest {
+            prompt: "start".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        assert_eq!(task.thread_id, task.id);
+        assert!(task.parent_task_id.is_none());
+    }
+
+    #[test]
+    fn inherit_from_parent_adopts_thread_id_and_unset_fields() {
+        let mut parent = Task::from_request(TaskRequest {
+            prompt: "parent prompt".into(),
+            created_by: "admin@org".into(),
+            server_hint: Some("worker-arm1".into()),
+            cwd: Some("/home/worker/repo".into()),
+            model: Some("gemini".into()),
+            ..Default::default()
+        });
+        // 부모 자신도 스레드 루트이므로 thread_id == parent.id.
+        parent.thread_id = parent.id;
+
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "이어서 해줘".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(reply.parent_task_id, Some(parent.id));
+        assert_eq!(reply.thread_id, parent.thread_id);
+        assert_eq!(reply.server_hint, parent.server_hint);
+        assert_eq!(reply.cwd, parent.cwd);
+        assert_eq!(reply.model, parent.model);
+    }
+
+    #[test]
+    fn inherit_from_parent_preserves_explicit_override() {
+        let parent = Task::from_request(TaskRequest {
+            prompt: "parent prompt".into(),
+            created_by: "admin@org".into(),
+            server_hint: Some("worker-arm1".into()),
+            cwd: Some("/home/worker/repo".into()),
+            model: Some("gemini".into()),
+            ..Default::default()
+        });
+
+        // 사용자가 폼에서 명시적으로 다른 host를 지정한 경우 — 부모 값으로
+        // 덮어써지면 안 된다.
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "다른 워커로 이어가줘".into(),
+            created_by: "admin@org".into(),
+            server_hint: Some("worker-ec1".into()),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(reply.server_hint, Some("worker-ec1".into()));
+        // cwd/model은 명시하지 않았으므로 부모에서 상속.
+        assert_eq!(reply.cwd, parent.cwd);
+        assert_eq!(reply.model, parent.model);
     }
 
     #[test]

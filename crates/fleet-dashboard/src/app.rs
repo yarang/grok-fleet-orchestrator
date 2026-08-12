@@ -146,6 +146,7 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             get(handlers::list_tasks).post(handlers::submit_task_api),
         )
         .route("/api/tasks/:id", get(handlers::get_task_detail_api))
+        .route("/api/tasks/:id/thread", get(handlers::get_task_thread_api))
         .route("/api/events", get(handlers::list_events))
         .route("/api/events/stream", get(crate::sse::events_stream))
         .route("/api/me", get(handlers::me))
