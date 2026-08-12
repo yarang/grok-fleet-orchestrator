@@ -139,13 +139,20 @@ hosts:
   gpu-box-1:
     arch: x86_64
     gpu: "true"
+# 예: .ssh/config에는 있지만 여기 정의되지 않은 `db-01`(HostName db-01.seoul.example.com)은
+# labels.yaml 매칭 실패 → 아래 폴백 규칙에 따라 {"host": "db-01", "domain": "seoul.example.com"}로 자동 등록됨
 ```
 
-- `.ssh/config`의 `Host` 별칭과 `labels.yaml`의 키가 매칭되지 않는 호스트는 **임포트를 실패시키지 말고 라벨 없이(빈 `{}`) 등록하되, 경고 로그를 남기는 것**을 기본 동작으로 제안합니다.
+- `.ssh/config`의 `Host` 별칭과 `labels.yaml`의 키가 매칭되지 않는 호스트는 **임포트를 실패시키지 않고, 빈 `{}` 대신 호스트 자체 정보에서 유도(derive)한 폴백 라벨을 자동 부여**하는 것을 기본 동작으로 제안합니다:
+  1. `host: <host_alias>` — 항상 부여합니다. `labels.yaml`에 정의가 없어도 스케줄러가 `required_labels`로 특정 호스트 하나를 직접 지목할 수 있는 최소 식별자입니다.
+  2. `HostName`(`hosts.hostname` 컬럼)이 FQDN 형태(`.` 포함)라면, 첫 세그먼트를 제외한 나머지를 `domain` 라벨로 조합해 함께 부여합니다. 예: `HostName gpu01.seoul.example.com` → `host: gpu01`, `domain: seoul.example.com`. `HostName`이 순수 IP거나 `.`이 없는 짧은 이름이면 `domain`은 생략합니다.
+  - `labels.yaml`에 명시적으로 정의된 라벨은 이 폴백 라벨보다 항상 우선합니다(explicit > derived) — 동일 키가 있으면 명시값이 폴백값을 덮어씁니다.
+  - 매칭 실패는 예외 상황이 아니라 정상 폴백 경로이므로 경고(warn)가 아닌 정보(info) 로그로 기록해 추적성만 남깁니다.
+  - `host`/`domain` 라벨 키는 `crates/fleet-scheduler/src/selector.rs`의 `required_labels`(키 존재 여부 매칭) 방식과 그대로 호환되며, 기존 예약 키인 `model`(값 일치 매칭)과 충돌하지 않습니다.
 - 대시보드 인라인 라벨 편집 UI는 [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md)의 "SSH Config 자동 임포트 UI 흐름" 절을 정본으로 참조하세요.
 
 ---
 
 ## 변경 이력
 
-- **2026-08-12**: v0.2 최초 작성분을 코드 대비 검증 후 요약/색인 문서로 축소. MCP 도구 개수·디스패처 동작 방식 정정, SSH 프로비저닝을 "구현됨(§3.1)"과 "신규 제안(§3.2)"으로 명확히 분리, `inventory_hosts` 신규 테이블 제안을 기존 `hosts` 테이블 확장안으로 변경, IdentityFile 처리 기본값(수동 허용)을 명시, 실패 경로 보완. `ssh-provisioning.md`/`token-delivery.md`에 정정 배너 추가(연동 패치).
+- **2026-08-12**: v0.2 최초 작성분을 코드 대비 검증 후 요약/색인 문서로 축소. MCP 도구 개수·디스패처 동작 방식 정정, SSH 프로비저닝을 "구현됨(§3.1)"과 "신규 제안(§3.2)"으로 명확히 분리, `inventory_hosts` 신규 테이블 제안을 기존 `hosts` 테이블 확장안으로 변경, IdentityFile 처리 기본값(수동 허용)을 명시, 실패 경로 보완. `ssh-provisioning.md`/`token-delivery.md`에 정정 배너 추가(연동 패치). §3.3 `labels.yaml` 매칭 실패 시 동작을 "빈 라벨 등록"에서 "`host`(+FQDN이면 `domain`) 폴백 라벨 자동 유도"로 변경.
