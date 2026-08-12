@@ -12,14 +12,14 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
-// FLEET NOTE (2026-08-12): `autonomic` 모듈은 커밋되지 않은 미완성 상태로
-// 발견됨 — `Worker.metrics`(존재하지 않는 필드), `FleetEvent::WorkerLeft`의
-// `id`/`name`(실제 변형은 `worker_id`/`at`만 가짐), `BreakerRegistry::get`
-// 시그니처(`&str` 하나가 아니라 `WorkerId, CircuitState` 두 인자)가 모두
-// 현재 타입과 어긋나 컴파일이 안 된다. 이 세션의 스레드 기능과는 무관하고
-// 의도를 알 수 없어 직접 고치지 않고, 빌드를 막지 않도록 모듈 연결만
-// 잠시 해제해둔다 — 파일 자체(`autonomic.rs`)는 지우지 않았다.
-// pub mod autonomic;
+// FLEET NOTE (2026-08-13): `autonomic` 모듈(MAPE-K 자가치유 엔진)은 삭제되었다.
+// 커밋되지 않은 미완성 상태였고(`Worker.metrics` 존재하지 않는 필드,
+// `FleetEvent::WorkerLeft`/`BreakerRegistry::get` 시그니처 불일치로 컴파일 불가),
+// 재연결에는 하드웨어 메트릭 저장 위치(`hosts` 테이블 join 또는 `Worker`
+// 필드 추가)부터 설계해야 하는 별도 기능 개발이 필요해 단순 타입 수정 범위를
+// 넘어섰다. 설계 의도는 `docs/architecture/overview.md`의 "Autonomic
+// Self-Healing Engine" 절에 보존되어 있으며, git 이력(이 커밋 이전)에서 원본
+// 코드를 그대로 복원할 수 있다. 재구현 시 참고: `docs/roadmap/roadmap.md` #43.
 pub mod breaker;
 pub mod cleanup;
 pub mod dispatcher;
@@ -29,7 +29,6 @@ pub mod selector;
 pub mod state;
 pub mod sync;
 
-// pub use autonomic::{AutonomicConfig, AutonomicEngine, AutonomicEngineHandle};
 pub use breaker::{BreakerRegistry, BreakerState};
 pub use cleanup::{CleanupConfig, CleanupSummary, SessionCleanup, SessionCleanupHandle};
 pub use dispatcher::{CancelError, DispatchError, Dispatcher, WaitError};

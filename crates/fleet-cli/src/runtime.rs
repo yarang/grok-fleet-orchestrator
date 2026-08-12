@@ -313,19 +313,11 @@ pub async fn run_serve(
         None
     };
 
-    // 자율 자가치유 제어 엔진 (Autonomic Self-Healing Engine).
-    // FLEET NOTE (2026-08-12): `fleet_scheduler::autonomic` 모듈이 커밋되지
-    // 않은 미완성 상태(현재 타입과 어긋나 컴파일 불가)로 발견되어 임시로
-    // 연결을 해제했다 — 자세한 사유는 fleet-scheduler/src/lib.rs 참고.
-    // let _autonomic_handle = if !no_health_check {
-    //     let cfg = AutonomicConfig::default();
-    //     tracing::info!("autonomic self-healing engine enabled");
-    //     let engine = AutonomicEngine::new(state.clone(), cfg);
-    //     Some(engine.spawn())
-    // } else {
-    //     tracing::info!("autonomic self-healing engine disabled (follows no-health-check)");
-    //     None
-    // };
+    // 자율 자가치유 제어 엔진 (Autonomic Self-Healing Engine, MAPE-K)은
+    // 2026-08-13에 삭제되었다 — 재연결에는 단순 타입 수정이 아니라 하드웨어
+    // 메트릭 저장 위치부터 다시 설계해야 하는 별도 기능 개발이 필요했다.
+    // 설계 의도는 `docs/architecture/overview.md`에 보존, 재구현 시
+    // `docs/roadmap/roadmap.md` #43 참고.
 
     // 만료 세션/오래된 로그인 시도 정리 루프 (옵션). 로드맵 P1 #18 — 이전에는
     // `delete_expired_sessions`를 프로덕션 어디서도 호출하지 않아 `sessions`

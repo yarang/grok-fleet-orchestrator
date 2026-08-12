@@ -188,22 +188,42 @@
 
 ## 신규 항목 (2026-08-12 추가 — `docs/` 전체 코드 대조 검증 중 발견)
 
-43. ⏳ **Autonomic Self-Healing Engine (MAPE-K)이 비연결·컴파일 불가 상태** (P2, 안정성) —
-    `crates/fleet-scheduler/src/autonomic.rs`(172줄)가 현재 타입(`Worker.metrics`,
-    `FleetEvent::WorkerLeft`, `BreakerRegistry::get` 시그니처 등)과 어긋나 컴파일되지
-    않으며, `lib.rs`/`runtime.rs`에서 모듈 자체가 주석 처리되어 있어 **어떤 릴리스
-    바이너리에도 포함되지 않습니다.** `docs/architecture/overview.md`가 한때 이를
-    "탑재되어 있습니다"라고 현재형으로 서술해 문서 정정을 완료했습니다(2026-08-12) —
-    이 항목은 실제 코드 재연결/타입 정합 작업 자체를 추적합니다.
+43. ⚫ **Autonomic Self-Healing Engine (MAPE-K) — 삭제됨** (2026-08-13) —
+    `crates/fleet-scheduler/src/autonomic.rs`(172줄)가 컴파일되지 않는 미완성 상태로
+    방치되어 있었습니다(`Worker.metrics` — 애초에 존재하지 않는 필드, `FleetEvent::
+    WorkerLeft`/`BreakerRegistry::get` 시그니처 불일치 등). 재연결을 검토한 결과 단순
+    타입 수정이 아니라 **하드웨어 메트릭을 어디에 저장할지부터 다시 설계해야 하는
+    별도 기능 개발**(예: `hosts` 테이블 join, 또는 `Worker`에 필드 추가)이 필요했고,
+    온도/스톨 감지 로직 자체도 코드 주석이 스스로 "시뮬레이션"이라 밝힌 자리표시자여서
+    당장 재연결해도 실질적 가치가 없었습니다. 파일을 삭제하고 `lib.rs`/`runtime.rs`의
+    주석 처리된 배선 코드도 함께 정리했습니다. **설계 의도는
+    [`docs/architecture/overview.md`](../architecture/overview.md)의 "Autonomic
+    Self-Healing Engine" 절에 보존**했고, 원본 구현은 이 삭제 이전 git 이력에서
+    복원 가능합니다. 재구현하려면: (1) 워커별 하드웨어 메트릭 저장 위치 결정,
+    (2) `FleetEvent::WorkerLeft{worker_id, reason, at}` 시그니처로 재작성,
+    (3) `BreakerRegistry::get(worker_id, initial_state)` 시그니처로 재작성,
+    (4) 온도/스톨 감지에 쓸 실제 신호원 확보(현재는 없음) — 이 4가지가 선결 과제입니다.
 
-44. ⏳ **CircuitBreaker HalfOpen이 1회 프로브 제한을 실제로 강제하지 않음** (P2, 정확성) —
-    `crates/fleet-scheduler/src/breaker.rs`의 `check()`는 `HalfOpen` 상태에서 무조건
-    허용하도록 "단순화"되어 있다는 코드 주석이 있고, `half_open_max_probes` 설정
-    필드(기본값 1)는 어디에서도 읽히지 않습니다. 즉 회복 중인 워커에 동시 요청이
-    몰리면 1건이 아니라 전부 통과되어, 막 복구 중인 워커를 다시 과부하시킬 수
-    있습니다. 참고로 쿨다운 기본값도 문서가 오래 서술해온 30초가 아니라 실제로는
-    **10초**입니다(`CircuitBreakerConfig::default().open_duration_secs`). #40(고성능
-    회로차단기 재작성)과 함께 처리하는 것을 권장합니다.
+44. ✅ **CircuitBreaker HalfOpen이 1회 프로브 제한을 실제로 강제하지 않음** — 해결됨
+    (2026-08-13). `crates/fleet-scheduler/src/breaker.rs`의 `check()`가 `HalfOpen`
+    상태에서 무조건 허용하도록 "단순화"되어 있었고, `half_open_max_probes` 설정
+    필드(기본값 1)가 어디에서도 읽히지 않아, 복구 중인 워커에 동시 요청이 몰리면
+    전부 통과되어 다시 과부하시킬 수 있는 상태였습니다.
+
+    수정: `BreakerInner`에 `half_open_probes: VecDeque<Instant>`(발급된 프로브
+    슬롯의 발급 시각)를 추가해 `check()`가 `half_open_max_probes`를 실제로 강제하도록
+    했습니다. `record()`가 호출되면 슬롯을 해제합니다. 호출자가 `record()`를 영영
+    호출하지 않는 "lost probe" 상황(크래시 등)을 대비해, `open_duration_secs` 이상
+    미해결인 슬롯은 `check()`가 스스로 회수하도록 안전장치를 넣었습니다(로드맵
+    #40이 언급한 `probe_claimed_at_millis` lost-probe 캔슬 아이디어와 같은 방향).
+    새 테스트 4개 추가(동시 프로브 상한 강제, `half_open_max_probes>1` 케이스,
+    프로브 실패 시 재개방, lost-probe 회수). 참고: 쿨다운 기본값도 문서가 오래
+    서술해온 30초가 아니라 실제로는 **10초**입니다
+    (`CircuitBreakerConfig::default().open_duration_secs`).
+
+    ⚠️ **미검증**: 이 세션 환경에 Rust 툴체인이 없어 `cargo test`로 실제 컴파일/
+    테스트 통과를 확인하지 못했습니다 — 코드 리뷰로 타입/문법을 검증했으나, 다음
+    빌드 시 `cargo test -p fleet-scheduler breaker::` 로 반드시 재확인 필요합니다.
 
 45. 🔵 **`MemStore`가 `fleet-store` 밖에 6개 이상 독립 중복 정의로 흩어짐** (P3, 기술 부채) —
     `fleet-api`/`fleet-dashboard`의 `#[cfg(test)]` 코드마다 각자 `struct MemStore`를
@@ -240,7 +260,7 @@
 | 담당 | 항목 |
 |---|---|
 | security | #32 (`/admin/*` RBAC — 3개 페이지 일괄) |
-| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42, #43~#45 |
+| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42, #45 |
 
 ### 호환성 주의 — `/api/audit` 의미 변경 (`8755c0d`)
 `/api/audit`가 반환하는 데이터가 **바뀌었다**. 기존에는 작업·워커 생명주기 이벤트(`events`
