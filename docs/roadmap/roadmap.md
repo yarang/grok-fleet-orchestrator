@@ -246,9 +246,26 @@
     관계를 명확히 했으며, `engineering-patterns/reuse-patterns.md`의 고아 판정을
     코드 근거로 철회했습니다. `docs/server-management/*`(명시적 미구현 제안),
     `docs/security/findings.md`(기존 내용과 이번 세션 재확인 결과 일치)는 별도
-    수정 불필요로 판단했습니다. `docs/ui-dashboard/ui-design.md`·`docs/llm-wiki/`·
-    `docs/credentials/`는 알려진 특정 이슈만 부분 수정했으며 전체 문서를 절 단위로
-    정독하진 않았습니다 — 후속 세션에서 필요 시 이어서 진행합니다.
+    수정 불필요로 판단했습니다.
+
+    **후속 (2026-08-13, 동일 세션 연속 진행)**: `docs/ui-dashboard/ui-design.md`,
+    `docs/llm-wiki/*.md`, `docs/credentials/registry.md`까지 절 단위로 마저 정독·
+    정정 완료. 주요 발견: ui-design.md는 "8개 페이지"라 서술했지만 실제 HTML
+    라우트는 18개(7개 누락), 호스트 인벤토리(§3.2.5/§3.2.6/§10.3)를 "예정"으로
+    서술했지만 `007_hosts.sql`/heartbeat 확장/`host_events` 훅 모두 이미 구현·
+    배포 완료 상태였음, `WorkerStatus`/host `status` enum이 실제 코드와 다른
+    값(`pending`/`ready`/`unknown` 등 존재하지 않는 상태)을 나열하고 있었음.
+    llm-wiki에서는 `README.md`가 이미 삭제된 `AutonomicEngine` 연동을 현재형으로
+    서술 중이었던 것을 발견해 미구현 설계 구상으로 재분류(항목 #43 삭제와의
+    직접적 정합성 문제), `multi_provider_llm_proxy_analysis.md`의 Postgres
+    DB-backed 배포 결론이 이후 문서에서 뒤집혔음을 명시, `litellm_integration_plan.md`
+    §7의 `examples/litellm-config.yaml` 서술 오류 정정 및 nginx timeout 값
+    불일치(300s vs 600s, 미확인) 기록, `free_tier_providers_analysis.md`의 부분
+    노후(§1.3/§1.4/§5)를 `index.md`에 상태 하향으로 반영.
+    `docs/credentials/registry.md`에는 코드에는 이미 구현돼 있었지만 레지스트리에
+    누락돼 있던 자격증명 3종(`FLEET_API_TOKENS`/`FLEET_CF_AUDIENCE`,
+    `FLEET_GMAIL_USER`/`FLEET_GMAIL_APP_PASS`, `ssh_keys` 프로비저닝 키 금고)을
+    신규 등재했습니다(실배포 값 저장 위치는 미확인).
 
 47. ✅ **HealthChecker↔Task 연동 부재** (P2, 정확성) — 해결됨 (2026-08-13). 워커가
     `Offline`으로 표시돼도(45초/3회 하트비트 누락) 그 워커에 배정된 `Dispatched`
