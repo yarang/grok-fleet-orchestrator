@@ -20,7 +20,12 @@
 
 ## 2. 단일 서버 배포용 Nginx 설정 (`/etc/nginx/sites-available/fleet`)
 
-단일 서버에서 오케스트레이터 API(`fleet serve` 포트 `8082`)와 대시보드 페이지를 서빙하기 위한 하드닝된 설정입니다.
+단일 서버에서 오케스트레이터 API(`fleet serve --http-bind` 포트 `8081`)와 대시보드
+(`--dashboard-bind` 포트 `8082`)를 함께 서빙하기 위한 하드닝된 설정입니다. 이 둘은
+서로 다른 HTTP 서버입니다 — ⚠️ **정정 (2026-08-12)**: 이전 판은 8082를 "오케스트레이터
+API"라고 잘못 표기했고, 아래 설정에도 `/v1/` 경로를 8081로 라우팅하는 블록이 아예
+빠져 있었습니다. 이 상태로 배포하면 `POST /v1/workers/join`(셀프 서비스 워커 등록)을
+포함한 오케스트레이터 API 전체가 외부에서 접근 불가능해집니다.
 Nginx가 프록시하는 헤더들을 올바르게 주입하여, 우리가 구축한 `extract_client_ip`가 외부 클라이언트의 실제 IP를 온전히 인식할 수 있도록 구성했습니다.
 
 ```nginx
@@ -69,7 +74,37 @@ server {
     # 업로드 크기 제한 (패키지 및 에이전트 아티팩트 배포 고려)
     client_max_body_size 50M;
 
-    # 대시보드 및 API 통합 프록시 경로
+    # ⚠️ 정정 (2026-08-12) — 이전 판에 누락되어 있던 오케스트레이터 API 라우팅.
+    # 워커 등록/조인(`POST /v1/workers/join`)·하트비트·부트스트랩 토큰 발급 등이
+    # 전부 여기로 들어옵니다. `location /`보다 먼저 두어 더 구체적인 프리픽스가
+    # 우선 매치되도록 합니다(nginx는 최장 프리픽스 매치이므로 순서 자체는 필수는
+    # 아니지만, 가독성을 위해 구체적인 블록을 위에 둡니다).
+    location /v1/ {
+        limit_req zone=fleet_limit burst=20 nodelay;
+
+        proxy_pass http://127.0.0.1:8081;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    # /metrics는 fleet-api가 인증 없이 서빙 — 내부망/모니터링 전용이면 allow/deny로
+    # 별도 접근 제한을 추가하는 것을 권장합니다 (아래는 최소 예시, IP 제한 미포함).
+    location /metrics {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+    }
+
+    # 대시보드 및 대시보드 API 통합 프록시 경로
     location / {
         # Rate Limit 적용 (버스트 허용, 지연 없이 즉시 처리)
         limit_req zone=fleet_limit burst=20 nodelay;
@@ -90,6 +125,22 @@ server {
         proxy_connect_timeout 60s;
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
+    }
+
+    # SSE 스트림은 버퍼링을 꺼야 실시간 전달됩니다 (fleet-dashboard의
+    # /api/events/stream). location /가 이미 이 경로를 프록시하지만, 버퍼링
+    # 설정만 이 경로에 한해 오버라이드합니다.
+    location /api/events/stream {
+        limit_req zone=fleet_limit burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8082;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
     }
 
     # 3. liteLLM API 게이트웨이 라우팅 (litellm_integration_plan.md 연동)

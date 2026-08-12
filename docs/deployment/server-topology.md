@@ -29,11 +29,22 @@
     *   **역할**: MCP stdio/HTTP 서버 구동, 스케줄러 루프 및 웹 대시보드 호스팅.
     *   **특징**: 단일 Rust 바이너리로 로컬 리눅스에 직접 설치되며, `fleet.service` 시스템 유닛으로 무중단 자동 재시작됩니다.
 2.  **`PostgreSQL 16` (Docker Container)**:
-    *   **역할**: 작업 큐, 워커 인벤토리 및 감사 로그 영속화. 아울러 liteLLM 게이트웨이의 비용 모니터링 로그도 논리 독립 DB(`litellm`)로 함께 저장합니다.
+    *   **역할**: 작업 큐, 워커 인벤토리 및 감사 로그 영속화.
     *   **특징**: 데이터를 호스트 볼륨에 마운트하여 컨테이너로 실행하므로 DB 관리(백업, 마이그레이션)가 간편합니다.
-3.  **`liteLLM Gateway` (Docker Container)**:
+3.  **`liteLLM Gateway`**:
     *   **역할**: 외부 API 게이트웨이 및 비용 추적(Spend Control) 제어.
-    *   **특징**: 워커 노드들의 LLM 완성 API 요청을 단일 대상을 통해 라우팅하며, 별도의 Redis 없이 기존 PostgreSQL 서버 내 독립 DB만을 바인딩하여 심플하게 운영합니다.
+    *   **특징**: 워커 노드들의 LLM 완성 API 요청을 단일 대상을 통해 라우팅합니다.
+
+    > ⚠️ **정정 (2026-08-12)**: 이 절이 "Docker Container"이자 "PostgreSQL 내 독립
+    > 논리 DB(`litellm`) 사용"이라고 서술하던 원래 설계는 **2026-08-11에 의도적으로
+    > 폐기되었습니다.** 정본은 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md)이며
+    > 실제 배포 방식은 다음과 같습니다:
+    > - **Docker Compose가 아니라 Python venv + systemd**(`litellm-gateway.service`)로
+    >   구동됩니다.
+    > - **DB 백엔드가 없습니다** — `master_key` 단일 인증 기반 stateless 모드이며,
+    >   PostgreSQL에 `litellm` 논리 DB를 만들지 않습니다.
+    > - 외부에는 포트 4000을 직접 노출하지 않고, nginx가 `/api-gateway/` 경로로
+    >   `127.0.0.1:4000`에 리버스 프록시합니다.
 4.  **`Nginx` (Reverse Proxy & TLS)**:
     *   **역할**: 외부 유입 경로에 대한 SSL 종단 및 HTTP/WebSocket 트래픽 포워딩. SSE(Server-Sent Events) 스트리밍 최적화 및 Real IP 추출 관리.
 5.  **`Cloudflared` (Daemon)**:
@@ -91,6 +102,13 @@ WantedBy=multi-user.target
 ```
 
 ### 5.2 메인 서버 Docker Compose (`docker-compose.yml` 예시)
+
+> ⚠️ **정정 (2026-08-12)**: 아래 `litellm` 서비스 블록은 **폐기된 설계**입니다 —
+> 실제로는 Docker가 아니라 Python venv + systemd(`litellm-gateway.service`)로
+> 구동됩니다. 정본은 [`docs/llm-wiki/litellm_integration_plan.md`](../llm-wiki/litellm_integration_plan.md)이며,
+> Postgres에 담기지도 않습니다(stateless `master_key` 모드). 아래는 원래 설계를
+> 참고용으로만 남겨둔 것으로, 실제로 이 블록을 배포에 사용하지 마세요.
+
 ```yaml
 version: '3.8'
 
@@ -108,6 +126,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # ⚠️ 폐기된 설계 (참고용) — 실제로는 Docker가 아니라 Python venv + systemd로 구동됨.
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: fleet-litellm-gateway

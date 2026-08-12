@@ -148,7 +148,7 @@ server {
 }
 ```
 
-오케스트레이터 기동 시에는 `FLEET_LLM_GATEWAY_URL` 환경변수(예: `https://fleet.yourdomain.com/api-gateway`)를 설정해야 하며, 미설정 시 Fail-Fast로 기동이 거부됩니다. `FLEET_TRUSTED_PROXIES`도 함께 설정해 Nginx 뒤에서 Real Client IP가 올바르게 추출되도록 합니다(정본: [`docs/deployment.md`](./deployment.md) §2.3, [`docs/security-findings.md`](../security/findings.md) S3).
+`FLEET_LLM_GATEWAY_URL` 환경변수(예: `https://fleet.yourdomain.com/api-gateway`)를 설정하면 워커의 LLM 호출을 liteLLM 게이트웨이로 라우팅합니다. ⚠️ **정정 (2026-08-12)**: 이 변수는 필수가 아니라 **선택**입니다 — 미설정 시 기동이 거부되지 않습니다. 다만 **설정했다면** 형식이 유효한 HTTP/HTTPS URL이어야 하며, 아니면 Fail-Fast로 기동이 거부됩니다(`crates/fleet-core/src/config.rs`의 `env_validation_accepts_minimal_valid_config` 테스트가 `DATABASE_URL`만으로도 기동 가능함을 검증합니다). `FLEET_TRUSTED_PROXIES`도 함께 설정해 Nginx 뒤에서 Real Client IP가 올바르게 추출되도록 합니다(정본: [`docs/deployment.md`](./deployment.md) §2.3, [`docs/security-findings.md`](../security/findings.md) S3).
 
 ---
 

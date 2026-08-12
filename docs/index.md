@@ -32,10 +32,10 @@
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`deployment/deployment.md`](./deployment/deployment.md) | 설치부터 프로덕션까지 전 과정 배포 가이드. §2.3이 Nginx 리버스 프록시의 정본 | 🟢 정본 | 2026-08-06 |
-| [`deployment/server-topology.md`](./deployment/server-topology.md) | 오케스트레이터-대시보드-워커 물리/논리 망 구성도 (Nginx 게이트웨이 반영 최종안) | 🟢 정본 — 토폴로지 | 2026-08-06 |
-| [`deployment/nginx-gateway.md`](./deployment/nginx-gateway.md) | Caddy→Nginx 전환 결정서 (비교표, nginx.conf, 전환 절차) | 🟢 정본 — 결정 기록 | 2026-08-06 |
-| [`deployment/single-server.md`](./deployment/single-server.md) | 단일 VM Docker Compose 배포 가이드 | 🔵 사본 — liteLLM 절은 `llm-wiki/`, 리버스 프록시 절은 `nginx-gateway.md` 인용 (2026-08-11 Caddy→Nginx 동기화 완료) | 2026-08-11 |
+| [`deployment/deployment.md`](./deployment/deployment.md) | 설치부터 프로덕션까지 전 과정 배포 가이드. §2.3이 Nginx 리버스 프록시의 정본 (2026-08-12 코드 대조로 install.sh 기본 경로·systemd stdin 워크어라운드 등 정정) | 🟢 정본 | 2026-08-12 |
+| [`deployment/server-topology.md`](./deployment/server-topology.md) | 오케스트레이터-대시보드-워커 물리/논리 망 구성도 (2026-08-12 코드 대조로 liteLLM 폐기된 Docker 설계 서술 정정) | 🟢 정본 — 토폴로지 | 2026-08-12 |
+| [`deployment/nginx-gateway.md`](./deployment/nginx-gateway.md) | Caddy→Nginx 전환 결정서 (비교표, nginx.conf, 전환 절차) — 2026-08-12에 단일 서버 예시의 누락된 `/v1/` API 라우팅 블록 추가 | 🟢 정본 — 결정 기록 | 2026-08-12 |
+| [`deployment/single-server.md`](./deployment/single-server.md) | 단일 VM Docker Compose 배포 가이드 | 🔵 사본 — liteLLM 절은 `llm-wiki/`, 리버스 프록시 절은 `nginx-gateway.md` 인용 (2026-08-12에 `FLEET_LLM_GATEWAY_URL` 필수 여부 정정) | 2026-08-12 |
 | [`deployment/historical/2026-07-20-arm2-arm1-deploy-log.md`](./deployment/historical/2026-07-20-arm2-arm1-deploy-log.md) | 실제 arm1/arm2 배포 시점 기록(Caddy 시절, ACP 인증 디버깅) | ⚪ 역사적 기록 | 2026-07-20 |
 
 ## 도메인 3. 🔑 Worker Bootstrap & Join Auth — [`worker-bootstrap/README.md`](./worker-bootstrap/README.md)

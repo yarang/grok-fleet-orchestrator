@@ -21,7 +21,7 @@ curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/dow
 1. OS · 아키텍처 자동 감지 (Linux/macOS × x86_64/aarch64).
 2. GitHub Release 에서 미리 빌드된 tarball 다운로드 (`fleet-v<ver>-<target>.tar.gz`).
 3. `sha256sum` 으로 무결성 검증 (`fleet-v<ver>-checksums.txt`).
-4. `fleet` + `fleet-worker` 바이너리를 `~/.local/bin` (또는 `--bin-dir`)에 설치.
+4. `fleet` + `fleet-worker` 바이너리를 `/usr/local/bin` (또는 `--bin-dir`)에 설치.
 5. `~/.zshrc` / `~/.bashrc` 에 `PATH` 추가 (이미 있으면 skip).
 
 주요 플래그:
@@ -29,8 +29,8 @@ curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/dow
 | 플래그               | 용도                                                |
 |----------------------|-----------------------------------------------------|
 | `--version <tag>`    | 특정 릴리스 설치 (예: `v0.1.0`). 미지정 시 latest. |
-| `--bin-dir <path>`   | 설치 경로 오버라이드 (기본 `~/.local/bin`).         |
-| `--user`             | 시스템 전역(`/usr/local/bin`) 대신 사용자 디렉토리. |
+| `--bin-dir <path>`   | 설치 경로 오버라이드 (⚠️ 정정: 기본값은 `~/.local/bin`이 아니라 **`/usr/local/bin`**, `install.sh`). |
+| `--user`             | 시스템 전역(`/usr/local/bin`) 대신 사용자 디렉토리(`~/.local/bin`)에 설치. |
 | `--no-modify-path`   | 셸 rc 파일 수정하지 않음.                           |
 | `--build`            | tarball 대신 `cargo build --release` 폴백.          |
 | `--dry-run`          | 다운로드/설치 단계 출력만 하고 실제 실행은 skip.    |
@@ -52,9 +52,14 @@ fleet doctor   # 아직 DB 없으면 실패 — 다음 단계 참조
 ```bash
 curl -fsSL https://github.com/yarang/grok-fleet-orchestrator/releases/latest/download/uninstall.sh \
   | bash
+# --purge 를 붙이면 /etc/fleet, ~/.config/fleet 도 함께 제거
+# (⚠️ 정정: --purge는 uninstall.sh 전용 플래그입니다)
+
 # 또는
 install.sh --uninstall
-# --purge 를 붙이면 /etc/fleet, ~/.config/fleet 도 함께 제거
+# ⚠️ 정정: install.sh --uninstall --purge 는 동작하지 않습니다 — install.sh의
+# 인자 파서에는 --purge 케이스가 없어 "unknown argument" 오류로 종료됩니다.
+# 완전 제거가 필요하면 반드시 위 uninstall.sh를 사용하세요.
 ```
 
 ### (B) cargo-binstall — cargo 패키지 매니저 통합
@@ -154,7 +159,9 @@ cargo build
 확인:
 ```bash
 curl http://127.0.0.1:8081/v1/health
-# {"status":"ok","version":"0.1.0","heartbeat_interval_secs":15}
+# {"status":"ok","version":"0.1.0"}
+# ⚠️ 정정: heartbeat_interval_secs는 이 응답에 없습니다 — 그 필드는
+# POST /v1/workers/heartbeat 응답(HeartbeatResponse) 소속입니다.
 
 curl http://127.0.0.1:8081/metrics
 # Prometheus 텍스트 포맷 출력
@@ -231,17 +238,27 @@ Environment=FLEET_API_TOKENS=<token1>,<token2>
 Environment=FLEET_GMAIL_USER=your-address@gmail.com
 Environment=FLEET_GMAIL_APP_PASS=xxxx xxxx xxxx xxxx
 Environment=FLEET_BASE_URL=https://fleet.agentthread.dev
-ExecStart=/opt/fleet/bin/fleet serve \
+# ⚠️ 정정 (2026-08-12): 아래처럼 stdin 워크어라운드 없이 ExecStart하면 systemd
+# 환경에서 stdin이 /dev/null이라 즉시 EOF가 발생 → MCP stdio 서버가 종료되며
+# fleet serve 메인 프로세스 전체가 함께 종료 → 서비스가 1초 만에 죽고
+# Restart=on-failure로 재시작 루프에 빠집니다. `bash -c '... < <(sleep infinity)'`
+# 로 stdin을 영원히 열어둬야 데몬처럼 동작합니다(상세: `examples/fleet.service`).
+ExecStart=/usr/bin/bash -c 'exec /opt/fleet/bin/fleet serve \
   --http-bind 127.0.0.1:8081 \
   --dashboard-bind 127.0.0.1:8082 \
   --db-max-conn 20 \
-  --health-interval-secs 15
+  --health-interval-secs 15 \
+  < <(exec sleep infinity)'
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> 실전 배포에는 이 예시보다 `examples/fleet.service`(보안 하드닝 옵션 포함,
+> `EnvironmentFile=-/etc/fleet/fleet.env` 패턴)를 그대로 복사해 쓰는 것을
+> 권장합니다.
 
 ### 2.3 Nginx 리버스 프록시 (권장 게이트웨이 표준)
 
@@ -802,9 +819,14 @@ summary: 8 OK, 0 WARN, 0 FAIL (total 8)
 
 | 증상                                | 원인 / 해결                                    |
 |-------------------------------------|------------------------------------------------|
-| `submit_task`가 pending에만 남음     | 워커가 온라인이 아님. `workers list` 확인       |
+| `fleet_dispatch_task`가 pending에만 남음 | 워커가 온라인이 아님. `workers list` 확인   |
 | MCP 클라이언트에서 "tool not found"  | `fleet` 바이너리 경로 오류. mcp.json 확인        |
-| `/metrics` 401                      | bearer auth 켜져 있는데 토큰 누락                |
+
+⚠️ **정정 (2026-08-12)**: "`/metrics` 401" 항목은 삭제했습니다 — 실제로는 발생할 수
+없는 증상입니다. `/metrics`는 `/v1` 인증 미들웨어 바깥에 별도로 마운트되어 있어
+bearer 토큰 여부와 무관하게 항상 인증 없이 응답합니다(위 §3.2의 "헬스체크(`/v1/
+health`, `/health`, `/metrics`)는 예외적으로 인증 없이 허용됩니다"와 동일한 내용 —
+이 문서 안에서 서로 모순되는 서술이었습니다).
 | SSE가 끊김                           | 중간 프록시 버퍼링. `proxy_buffering off` 설정  |
 | 워커가 등록 안 됨                    | `--api-tokens` 와 워커의 `Authorization` 헤더 불일치 |
 | Cloudflare Access 403               | AUD 값 불일치. `--cf-audience` 재확인           |
