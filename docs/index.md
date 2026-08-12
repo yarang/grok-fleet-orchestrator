@@ -45,7 +45,7 @@
 | [`worker-bootstrap/token-delivery.md`](./worker-bootstrap/token-delivery.md) | 토큰 전달 3가지 방식 비교(SSH 자동주입/수동 CLI/cloud-init), SSH 자동주입 권장 | 🟢 정본 | 2026-08-06 |
 | [`worker-bootstrap/ssh-provisioning.md`](./worker-bootstrap/ssh-provisioning.md) | SSH 자동 프로비저닝 구현 명세 (시퀀스 다이어그램 + Rust 의사코드) | 🟢 정본 | 2026-08-06 |
 | [`worker-bootstrap/serve-and-bootstrap-design.md`](./worker-bootstrap/serve-and-bootstrap-design.md) | `fleet serve` 모듈 설계(Axum/MCP/디스패처/헬스체커) + 대시보드 RBAC/SSE + 부트스트랩 시퀀스 | 🟢 정본 | 2026-08-06 |
-| [`worker-bootstrap/DEPRECATED-bootstrap-and-worker-features.md`](./worker-bootstrap/DEPRECATED-bootstrap-and-worker-features.md) | (폐기) SSH 부트스트랩 재서술 + `fleet-worker` 기능 카탈로그 | ⚫ 폐기 — `architecture/overview.md`의 Worker Daemon(Phase 8.1) 절 및 위 4개 문서와 중복 | 2026-08-06 |
+| [`worker-bootstrap/bootstrap-release-v0.2.md`](./worker-bootstrap/bootstrap-release-v0.2.md) | 워커 설치/조인/프로비저닝 구현 현황 요약·색인 (코드 대비 검증, 상세는 위 4개 문서로 위임) | 🟢 정본 | 2026-08-12 |
 
 ## 도메인 4. 🛠️ Server Management & Self-Healing (로드맵 제안서, 미구현) — [`server-management/README.md`](./server-management/README.md)
 
@@ -72,7 +72,7 @@
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`ui-dashboard/ui-design.md`](./ui-dashboard/ui-design.md) | 8개 대시보드 페이지 IA·플로우·컴포넌트 카탈로그. §2 디자인 시스템은 2026-08-11 배너로 정정 | 🟡 부분 수정됨 | 2026-08-11 |
+| [`ui-dashboard/ui-design.md`](./ui-dashboard/ui-design.md) | 8개 대시보드 페이지 IA·플로우·컴포넌트 카탈로그. SSH Config 자동 임포트 UI 흐름 추가 | 🟡 부분 수정됨 | 2026-08-12 |
 | [`../DESIGN-apple.md`](../DESIGN-apple.md) | 실제 적용된 Apple Design System 토큰(Action Blue, SF Pro, parchment, pill CTA) | 🟢 정본 — 루트 문서 | 2026-07-27 |
 | [`../DESIGN-notion.md`](../DESIGN-notion.md) | 이전 Notion 테마 원안 분석 (폐기, 현재는 Apple 정본으로 대체) | ⚫ 폐기(미채택) — 루트 문서 | 2026-07-20 |
 
@@ -91,8 +91,6 @@
 
 ## 고아 페이지 / 미해결 교차참조
 
-- [`worker-bootstrap/DEPRECATED-bootstrap-and-worker-features.md`](./worker-bootstrap/DEPRECATED-bootstrap-and-worker-features.md) — `architecture/overview.md` 및
-  워커 부트스트랩 문서군과 내용 중복. 파일명에 폐기 표시만 해두었고 병합/삭제는 미조치.
 - [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) — 어느 문서에서도 인용되지 않음. 여전히 유효한
   참고 자료인지 확인 필요 (미조치).
 - [`deployment/historical/2026-07-20-arm2-arm1-deploy-log.md`](./deployment/historical/2026-07-20-arm2-arm1-deploy-log.md) — 역사적 기록으로 유효, 현재
