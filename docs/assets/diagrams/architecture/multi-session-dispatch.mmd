@@ -1,19 +1,17 @@
 flowchart TD
-    Start([dispatch req]) --> GetSession[session = sessions.get worker_id]
-    GetSession --> TryAcquire{session.try_acquire task_id<br/>max_concurrent 검사}
-    TryAcquire -->|용량 초과| RetCapacity[Err WorkerAtCapacity 반환]
-    TryAcquire -->|획득 성공| SpawnPrompt[spawn 비동기 작업]
-    SpawnPrompt --> ReturnOk[Ok 반환]
-    
-    subgraph Spawned Task [스폰된 비동기 태스크]
-        DoPrompt[acp.prompt 실행] --> MatchResult{결과 판정}
-        MatchResult -->|Ok prompt_id| SetPromptId[session.set_prompt_id task_id, prompt_id]
-        SetPromptId --> DrainBuffered[버퍼된 이벤트 emit]
-        
-        MatchResult -->|Err e| CheckConnClosed{e.contains 'ACP connection closed'?\nreader_loop 드레인 에러}
-        CheckConnClosed -- Yes --> DelegateSupervisor[supervisor의 fail_all에 처리를 위임]
-        CheckConnClosed -- No --> CompleteTask[session.complete task_id 호출]
-        CompleteTask --> CheckEmitOwner{Some 반환?\n내가 emit 소유권 획득}
-        CheckEmitOwner -- Yes --> EmitFailed[emit Failed error: e]
-        CheckEmitOwner -- No --> NormalExit[이미 fail_all이 처리함 - 종료]
+    Start([dispatch 요청]) --> TryAcquire{"capacity.try_acquire_owned()<br/>워커의 Semaphore, max_concurrent_tasks로 사이징"}
+    TryAcquire -->|실패: 용량 초과| RetCapacity[Err WorkerAtCapacity 반환]
+    TryAcquire -->|획득 성공| NewSession["session/new 요청<br/>(태스크마다 새 세션 - 워커당 1개 아님)"]
+    NewSession --> RegisterSession["sessions: Mutex&lt;HashMap&lt;SessionId, InFlightSession&gt;&gt;에 등록"]
+    RegisterSession --> SendPrompt[session/prompt 전송]
+    SendPrompt --> ReturnOk[Ok 반환 - 스트리밍은 비동기 계속]
+
+    subgraph Streaming [세션 진행 중]
+        Notify["session/update 알림 수신"] --> RouteBySession["SessionId로 sessions 직접 조회<br/>(promptId 아님)"]
+        RouteBySession --> EmitOutput[해당 세션의 WorkerEvent::Output emit]
+    end
+
+    subgraph ConnLoss [연결 손실 시]
+        Detect[reader/supervisor가 연결 끊김 감지] --> FailAll["WorkerSession::fail_all 호출<br/>sessions 전체 drain"]
+        FailAll --> EmitFailed["각 세션에 WorkerEvent::Failed<br/>'ACP connection lost — will reconnect' 브로드캐스트"]
     end

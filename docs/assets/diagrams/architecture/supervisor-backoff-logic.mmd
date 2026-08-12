@@ -1,20 +1,20 @@
 flowchart TD
-    Start([Supervisor 루프 시작]) --> SetConnecting[state = Connecting]
+    Start([Supervisor 루프 시작<br/>backoff = initial 1s]) --> SetConnecting[state = Connecting]
     SetConnecting --> Connect[establish_session 시도]
     Connect -->|실패| SetDisconnected[state = Disconnected]
     SetDisconnected --> CheckFirstFail{첫 연결인가?}
     CheckFirstFail -- Yes --> ReturnErr[register 에 Err 전파]
-    CheckFirstFail -- No --> WaitBackoff[wait_with_shutdown backoff<br/>* shutdown 수신 시 종료]
+    CheckFirstFail -- No --> WaitBackoff[wait_with_shutdown backoff<br/>* 종료 신호 수신 시 즉시 종료]
     ReturnErr --> WaitBackoff
-    WaitBackoff --> CalcBackoff[backoff = min backoff * 2, 30s]
+    WaitBackoff --> CalcBackoff["backoff = min(backoff * 2, 30s)<br/>⚠️ 실패할 때만 증가 — 재연결 성공해도 리셋되지 않음"]
     CalcBackoff --> SetConnecting
-    
-    Connect -->|성공| SetConnected[state = Connected<br/>backoff = 1s 리셋]
+
+    Connect -->|성공| SetConnected["state = Connected<br/>⚠️ backoff 값은 그대로 유지됨(리셋 안 함)"]
     SetConnected --> CheckFirstSuccess{첫 연결인가?}
     CheckFirstSuccess -- Yes --> ReturnOk[register 에 Ok 전파]
-    CheckFirstSuccess -- No --> SpawnReader[spawn reader_loop<br/>event_rx -> WorkerEvent broadcast]
-    ReturnOk --> SpawnReader
-    SpawnReader --> Select{tokio::select!}
-    Select -->|cmd_rx 수신 Shutdown| Exit([루프 탈출 & 종료])
-    Select -->|reader_handle 종료 ReaderExited| ClearActive[fail_active_task 실행]
+    CheckFirstSuccess -- No --> Continue[다음 태스크 dispatch 대기]
+    ReturnOk --> Continue
+    Continue --> Select{tokio::select!}
+    Select -->|종료 신호 watch::Receiver true| Exit([루프 탈출 & 종료])
+    Select -->|연결 손실 감지| ClearActive[fail_all 실행<br/>모든 in-flight 세션에 WorkerEvent::Failed 브로드캐스트]
     ClearActive --> SetConnecting

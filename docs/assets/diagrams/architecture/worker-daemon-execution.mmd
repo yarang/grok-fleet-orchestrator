@@ -1,10 +1,12 @@
 flowchart TD
     Start([WorkerRunner::run]) --> Step1[1. GrokRunner::new(config)]
     Step1 --> SpawnGrok[tokio::spawn runner.run<br/>spawn grok agent serve<br/>* exit 시 restart_delay_secs 후 재시작 최대 10회]
-    Step1 --> Step2[2. RegistrationClient::register_with_retry]
+    Step1 --> StepMtls[1.5 선택: mTLS 활성 시 MtlsProxy 기동<br/>grok bind_addr 폴링 후 spawn]
+    StepMtls --> Step2[2. RegistrationClient::register_with_retry]
+    Step1 --> Step2
     Step2 --> RegisterAPI[POST /v1/workers/register<br/>5초 간격 무한 재시도<br/>-> worker_id, heartbeat_interval_secs 획득]
     RegisterAPI --> Step3[3. tokio::spawn run_heartbeat_loop]
     Step3 --> HeartbeatLoop[주기마다 반복:<br/>• TCP health_check 1초 타임아웃<br/>• sysinfo 메트릭 수집<br/>• POST /v1/workers/heartbeat]
     RegisterAPI --> Step4[4. wait_for_signal SIGINT/SIGTERM]
     Step4 --> Shutdown[shutdown_tx 및 grok_shutdown_tx 송신]
-    Shutdown --> Cleanup[• grok 서브프로세스 SIGTERM 5s timeout -> SIGKILL<br/>• heartbeat 루프 종료<br/>• POST DELETE /v1/workers/:id best-effort deregister]
+    Shutdown --> Cleanup["• grok 서브프로세스 종료: 최대 5초 대기 후 SIGKILL<br/>  (실제 SIGTERM 신호는 보내지 않음 - 자진 종료 대기만)<br/>  전체 과정은 10초 타임아웃으로 감쌈<br/>• mTLS 프록시 정지 (활성 시)<br/>• heartbeat 루프 종료<br/>• POST DELETE /v1/workers/:id best-effort deregister"]

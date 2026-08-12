@@ -1,7 +1,8 @@
 stateDiagram-v2
     [*] --> Pending
     Pending --> Dispatched
+    Pending --> Failed : 제출 시점 워커 선택/dispatch 실패
+    Pending --> Cancelled : 디스패치 전 취소
     Dispatched --> Completed
     Dispatched --> Failed
     Dispatched --> Cancelled
-    Completed --> Cancelled

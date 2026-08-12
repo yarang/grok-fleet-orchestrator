@@ -3,31 +3,42 @@ graph TD
         Client[grok build / Claude Code / Cursor / Codex / Gemini CLI / ...]
     end
 
-    subgraph Orchestrator [Orchestrator - 단일 Rust 바이너리]
+    subgraph Orchestrator [Orchestrator - 단일 Rust 바이너리 `fleet serve`]
         subgraph Components [진입점]
-            MCP[fleet-mcp<br/>7 tools]
+            MCP[fleet-mcp<br/>8 tools]
             API[fleet-api<br/>REST + auth /metrics]
-            Dash[fleet-dash<br/>HTML + SSE]
-            CLI[fleet-cli<br/>workers/tasks/...]
+            Dash[fleet-dashboard<br/>별도 크레이트, HTML + SSE]
+            CLI[fleet-cli<br/>workers/tasks/provision/mtls/...]
         end
-        
-        Scheduler[fleet-scheduler<br/>• WorkerSelector hint+labels<br/>• CircuitBreaker 3-state<br/>• Dispatcher event loop<br/>• HealthChecker]
+
+        Scheduler[fleet-scheduler<br/>• WorkerSelector hint+labels+model<br/>• CircuitBreaker 3-state<br/>• Dispatcher 이벤트 기반<br/>• Reconciler 30s 안전망<br/>• SessionCleanup<br/>• HealthChecker 15s]
+        Transport[fleet-transport<br/>AcpTransport - ACP over WebSocket/mTLS]
+        Credentials[fleet-credentials<br/>AES-256-GCM 마스터 키 암호화]
         Store[fleet-store Store trait<br/>• PgStore<br/>• migrations sqlx<br/>• LISTEN/NOTIFY]
-        
+
         Components --> Scheduler
         Scheduler --> Store
+        Scheduler --> Transport
+        Scheduler --> Credentials
     end
 
-    DB[(PostgreSQL<br/>fleet_dev DB)]
-    
+    DB[(PostgreSQL)]
+
     Client -->|MCP JSON-RPC stdio 또는 HTTP| Components
     Store --> DB
 
+    subgraph Provisioning [프로비저닝 - 관리자 로컬 실행]
+        Provisioner[fleet-provisioner<br/>russh 기반 SSH 자동 설치]
+    end
+    CLI --> Provisioner
+
     subgraph Workers [워커 노드]
-        WorkerA[Worker A Linux<br/>grok serve + cloudflared]
-        WorkerN[Worker N Linux<br/>grok serve + cloudflared]
+        WorkerA[fleet-worker 데몬<br/>grok agent serve 관리 + (선택)mTLS proxy + cloudflared]
+        WorkerN[fleet-worker 데몬 N]
     end
 
-    WorkerA -->|HTTP heartbeat| API
-    WorkerN -->|HTTP heartbeat| API
-    DB -.->|heartbeat status sync| Workers
+    Provisioner -.->|SSH 최초 설치/등록| Workers
+    Transport <-->|ACP over WebSocket - 태스크 디스패치| WorkerA
+    Transport <-->|ACP over WebSocket| WorkerN
+    WorkerA -->|HTTP heartbeat + 메트릭| API
+    WorkerN -->|HTTP heartbeat + 메트릭| API

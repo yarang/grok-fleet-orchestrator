@@ -69,13 +69,22 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 
 ### 7. 비동기 장기 실행 작업 모델
 
-작업은 4단계 상태머신을 따릅니다:
+작업은 `TaskStatus` 5개 상태(`Pending`/`Dispatched`/`Completed`/`Failed`/`Cancelled`,
+`crates/fleet-core/src/task.rs`)를 따르는 상태머신입니다(⚠️ 2026-08-12 정정: 이전
+판은 "4단계"라 서술했으나 실제로는 5개 상태입니다):
 
 ![Scheduler Task State Diagram](../assets/diagrams/architecture/scheduler-task-state.mmd)
 
-- `submit_task`는 `TaskId`만 반환하고 즉시 리턴 (non-blocking)
-- `wait_for_task` (또는 `stream_task_output`)로 결과를 폴링
-- `cancel_task`로 사용자 주도 취소
+⚠️ 위 다이어그램은 2026-08-12에 정정되었습니다. 이전 판은 `Completed → Cancelled`
+전이를 표시했으나, `Dispatcher::cancel()`은 이미 종료 상태(`is_terminal()` —
+`Completed`/`Failed`/`Cancelled` 포함)인 작업에 대해 `CancelError::AlreadyTerminal`을
+반환해 이 전이를 명시적으로 거부합니다(`dispatcher.rs`). 반대로 `Pending → Failed`
+(제출 시점 워커 선택/dispatch 자체가 실패하는 경우)와 `Pending → Cancelled`
+(디스패치 전 취소)는 실제로 발생하는 전이인데 이전 판 다이어그램에는 없었습니다.
+
+- `fleet_dispatch_task`는 `task_id`만 반환하고 즉시 리턴 (non-blocking)
+- `fleet_wait_for_task` (또는 `fleet_stream_task_output`)로 결과를 폴링
+- `fleet_cancel_task`로 사용자 주도 취소
 - 워커 장애 시 Dispatcher가 `Failed(kind=WorkerUnavailable)`로 표시
 - `submit()`은 제출 시점에 딱 한 번만 워커 선택/dispatch를 시도하므로, 그
   시도가 터미널 상태에 도달하기 전에 오케스트레이터가 재시작되면 작업이
@@ -87,12 +96,20 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 
 ### 테이블 (PostgreSQL 스키마)
 
-| 테이블          | 용도                                            |
+⚠️ **정정 (2026-08-12)**: 아래 표는 실제 테이블명과 다르고(`fleet_` 접두사 없음이 코드
+전반의 컨벤션 — 예: `workers`, `tasks`, `hosts`, `ssh_keys`, `bootstrap_tokens`),
+개수도 크게 과소 서술되어 있습니다. `crates/fleet-store/migrations/`에는
+`001`~`013`까지 13개 마이그레이션이 존재하며 RBAC(역할/권한), 호스트 인벤토리,
+이메일 인증, 비밀번호 재설정, SSH 키 금고, 감사 로그, 태스크 스레드 등을 추가로
+다룹니다. 아래 표는 핵심 4종만 남겨두되 이름을 정정합니다 — `events`/`output` 계열의
+정확한 테이블명은 재검증이 필요합니다.
+
+| 테이블(추정 — 재검증 필요)          | 용도                                            |
 |-----------------|-------------------------------------------------|
-| `fleet_workers` | 등록된 워커 (id, name, endpoint, status, labels)|
-| `fleet_tasks`   | 작업 (id, prompt, status, server_hint)          |
-| `fleet_events`  | append-only 이벤트 로그 (seq, event JSONB)      |
-| `fleet_output`  | 작업 stdout/stderr 청크 (task_id, seq, chunk)   |
+| `workers`       | 등록된 워커 (id, name, endpoint, status, labels, circuit_state) |
+| `tasks`         | 작업 (id, prompt, status, server_hint)          |
+| (이벤트 로그 테이블) | append-only 이벤트 로그 (seq, event JSONB)  — 정확한 테이블명 재검증 필요 |
+| (출력 청크 테이블)   | 작업 stdout/stderr 청크 (task_id, seq, chunk) — 정확한 테이블명 재검증 필요 |
 
 모든 마이그레이션은 `crates/fleet-store/migrations/`에 idempotent SQL 파일로
 존재하며, `fleet migrate` 또는 서버 시작 시 자동 적용됩니다.
@@ -147,14 +164,29 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 - 작업 우선순위 큐 +抢占 스케줄링
 - 워커 오토스케일링 (로드 기반)
 - 다중 리전 페더레이션
+- **Autonomic Self-Healing Engine (MAPE-K) 재연결** — `crates/fleet-scheduler/src/autonomic.rs`가
+  현재 타입과 어긋나 컴파일되지 않아 `lib.rs`/`runtime.rs`에서 비활성화된 상태(아래
+  "Autonomic Self-Healing Engine" 절 참조). 타입 정합 후 재배선 필요.
 
 ## ACP Transport (Phase 7)
+
+> ⚠️ **정정 (2026-08-12)**: 이 절과 이어지는 [§WebSocket Reconnection (Phase 8.2)](#websocket-reconnection-phase-82), [§동시 다중 세션 (Phase 8.4)](#동시-다중-세션-phase-84)는 **2026-08-11 이전** 설계를 서술합니다. 그날 `crates/fleet-transport/src/acp_transport.rs`가 손수 작성한 JSON-RPC/WebSocket 클라이언트에서 공식 [`agent-client-protocol`](https://github.com/Zed-Industries/agent-client-protocol) Rust SDK 기반으로 **전면 마이그레이션**되었습니다. 아래 세 절에 등장하는 `AcpClient`, `ClientInner`, `active_task`, `reader_loop()`, `AcpEvent`, promptId 기반 라우팅, `WorkerSession{in_flight, prompt_index, pending_events}` 구조체는 **더 이상 코드에 존재하지 않습니다.**
+>
+> **현재 구현 요약** (`crates/fleet-transport/src/acp_transport.rs`, 정본):
+> - 세션은 **워커당 1개가 아니라 태스크당 1개**입니다 — `register()`는 WebSocket 연결 + `initialize` 핸드셰이크 + supervisor 태스크 기동(`spawn_supervisor()`)만 수행하고, `session/new`는 각 태스크가 `dispatch()`될 때마다 개별적으로 발급됩니다.
+> - 동시성은 `capacity: Arc<Semaphore>`(워커의 `max_concurrent_tasks`로 사이징)로 제어하고, 진행 중 세션은 `sessions: Arc<Mutex<HashMap<SessionId, InFlightSession>>>`로 추적합니다.
+> - 스트리밍 이벤트 라우팅은 promptId가 아니라 **`SessionId` 기반**입니다(`handle_session_notification`).
+> - 연결 손실 시 `WorkerSession::fail_all()`이 모든 in-flight 세션을 드레인하며 `WorkerEvent::Failed`(메시지: `"ACP connection lost — will reconnect"`)를 브로드캐스트합니다 — 이전 판이 서술한 `fail_active_task()`/`active_task: Option<TaskId>`는 존재하지 않습니다.
+> - 종료(`unregister()`)는 `tokio::sync::watch::Sender<bool>`로 신호를 보내고 최대 5초 `timeout`으로 대기합니다 — `supervisor.abort()` 호출은 없습니다.
+> - 지수 백오프는 **연결 성공 후에도 초기값으로 리셋되지 않습니다** — 실패할 때만 2배씩 증가하는 단조 증가 카운터입니다(아래 §WebSocket Reconnection의 서술과 반대).
+>
+> 세 절 모두 "Phase N에서 왜 이렇게 설계했는가"를 보여주는 역사적 기록으로서 원문을 보존하되, 개별 오류는 아래에 인라인으로 표시합니다.
 
 `AcpTransport`는 `WorkerTransport` trait의 실제 구현체로, [Agent Client Protocol](https://github.com/Zed-Industries/agent-client-protocol) (ACP) over WebSocket을 사용해 각 워커의 `grok agent serve`와 통신합니다.
 
 ### 아키텍처
 
-![ACP Transport Lifecycle Sequence Diagram](../assets/diagrams/architecture/acp-transport-lifecycle.mmd)
+![ACP Transport Lifecycle Sequence Diagram](../assets/diagrams/architecture/acp-transport-lifecycle.mermaid)
 
 ### ACP 메서드 지원
 
@@ -168,7 +200,12 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 
 ### 동시성 모델
 
-grok agent serve의 MvpAgent는 직렬 프롬프트 처리를 가정합니다. 따라서 `AcpTransport`는 워커당 동시에 1개의 진행 중 task를 추적 (`active_task: RwLock<Option<TaskId>>`). Phase 8에서 세션 풀링으로 동시성을 늘릴 예정.
+⚠️ **정정 (2026-08-12)**: 이 절은 Phase 7 시점(단일 세션/워커) 서술입니다. 2026-08-11 SDK
+마이그레이션 이후 실제 동시성 모델은 `capacity: Arc<Semaphore>`(워커의
+`max_concurrent_tasks`로 사이징) + 태스크당 1개 세션(`sessions: Arc<Mutex<HashMap<SessionId,
+InFlightSession>>>`)입니다. `active_task: RwLock<Option<TaskId>>` 필드는 존재하지
+않습니다. 상세는 위 배너와 [§동시 다중 세션](#동시-다중-세션-phase-84)의 정정 내용을
+참조하세요.
 
 ### 왜 `xai-computer-hub-sdk`가 아닌가
 
@@ -195,9 +232,14 @@ crates/fleet-worker/
   ├── src/config.rs         ← worker.toml 파서 + WorkerConfigBuilder
   ├── src/grok_process.rs   ← GrokRunner: spawn / health_check / restart loop
   ├── src/registration.rs   ← RegistrationClient: register / heartbeat / deregister
-  ├── src/runner.rs         ← WorkerRunner: 위 두 모듈 조립 + 신호 처리
+  ├── src/join.rs           ← fleet-worker join: 셀프 서비스 등록 (Phase 8.3, 아래 절 참조)
+  ├── src/runner.rs         ← WorkerRunner: 위 모듈 조립 + (선택)mTLS 프록시 기동 + 신호 처리
   └── src/error.rs          ← WorkerError enum
 ```
+
+⚠️ **정정 (2026-08-12)**: 위 목록은 Phase 8.1 시점 기준이라 이후 추가된 `src/join.rs`(Phase 8.3)가
+빠져 있었고, `runner.rs`가 Phase 8.5에서 mTLS 프록시(`MtlsProxy`) 기동/종료 책임까지
+맡게 된 것도 반영돼 있지 않았습니다.
 
 ### `worker.toml` 형식
 
@@ -286,11 +328,40 @@ supervisor 태스크**를 도입해 자동 복구를 제공합니다.
 | 5        | 16s       |
 | 6+       | 30s (상한) |
 
-연결이 한 번이라도 성공하면 `backoff`는 다시 1s로 리셋됩니다. 상수
-`RECONNECT_INITIAL` (1s), `RECONNECT_MAX` (30s) 와 `ReconnectConfig` 구조체로
-테스트에서 임의 값을 주입 가능 (`AcpTransport::with_reconnect`).
+⚠️ **정정 (2026-08-12)**: 이 문단의 "연결 성공 시 backoff 1s 리셋" 서술은 **사실이 아닙니다.**
+`spawn_supervisor()` 루프에서 `backoff` 변수는 오직 실패할 때만 2배씩 증가하며(`(backoff *
+2).min(reconnect.max)`), 재연결에 성공해도 초기값으로 되돌리는 코드는 없습니다
+(`crates/fleet-transport/src/acp_transport.rs` 전체 검색으로 확인). 즉 여러 번 실패 후
+재연결에 성공해 한동안 잘 붙어 있다가 다시 끊기면, 1s가 아니라 이전에 도달했던 backoff
+값(예: 8s/16s)부터 재시작합니다. 상수 `RECONNECT_INITIAL` (1s), `RECONNECT_MAX` (30s) 와
+`ReconnectConfig` 구조체로 테스트에서 임의 값을 주입 가능 (`AcpTransport::with_reconnect`) —
+이 부분은 정확합니다.
 
 ### 진행 중 태스크 처리
+
+⚠️ **정정 (2026-08-12)**: 아래 3개 하위 절(진행 중 태스크 처리 / Shutdown 시퀀스 /
+Reader 종료 감지 핵심)은 2026-08-11 SDK 마이그레이션 이전의 손수 작성 클라이언트
+내부 구현을 서술합니다. `ClientInner`, `reader_loop()`, `close_event_channel()`,
+`AcpEvent`, `active_task`, `active_prompt`, `fail_active_task()`, `cmd_tx`/`cmd_rx`는
+현재 `crates/fleet-transport/src/acp_transport.rs`에 **존재하지 않습니다**(전체 검색
+결과 0건). 원문은 설계 이력 보존을 위해 남겨두되, 실제 동작은 다음과 같습니다:
+
+- 연결 손실 시 워커당 1개가 아니라 **`WorkerSession::fail_all()`이 모든 in-flight
+  세션을 `sessions: Arc<Mutex<HashMap<SessionId, InFlightSession>>>`에서 드레인**하며,
+  각각에 대해 `WorkerEvent::Failed`(메시지: `"ACP connection lost — will reconnect"`)를
+  브로드캐스트합니다.
+- 종료(`unregister()`)는 `tokio::sync::watch::Sender<bool>`로 신호를 보내고
+  `tokio::time::timeout(Duration::from_secs(5), handle)`으로 최대 5초 대기합니다.
+  `.abort()` 호출은 없습니다.
+- Reader 종료 감지는 SDK가 제공하는 연결 상태 관리에 위임되며, `ClientInner`/
+  `AcpEvent` 기반의 수동 채널 종료 메커니즘은 SDK 마이그레이션과 함께 제거되었습니다.
+
+이후 재연결 시 동일한 `task_id`가 재실행되지는 않습니다 — dispatcher/사용자가 새로
+`fleet_dispatch_task`를 해야 합니다 (idempotent 재시도는 상위 레이어에서 담당) —
+이 결론 자체는 여전히 유효합니다.
+
+<details>
+<summary>원문 (Phase 8.2 시점, 2026-08-11 이전 구현 기준 — 참고용, 현재와 다름)</summary>
 
 reader가 종료되면 (WebSocket Close 프레임, I/O 에러, `grok agent serve` 종료 등)
 supervisor는 `fail_active_task()`를 호출합니다:
@@ -299,16 +370,9 @@ supervisor는 `fail_active_task()`를 호출합니다:
 - `WorkerEvent::Failed { task_id, error: "ACP reader exited (connection lost)" }` 를 broadcast.
 - `active_prompt`도 초기화.
 
-이후 재연결 시 동일한 `task_id`가 재실행되지는 않습니다 — dispatcher/사용자가 새로
-`submit_task`를 해야 합니다 (idempotent 재시도는 상위 레이어에서 담당).
-
-### Shutdown 시퀀스
-
 `unregister(worker_id)` → `WorkerSession::drop` → `cmd_tx.send(Shutdown)` +
 `supervisor.abort()`. 백오프 도중에도 `cmd_rx.recv()`를 `tokio::time::timeout`으로
 경쟁시키기 때문에 최대 `backoff` 이내로 종료됩니다 (테스트 `unregister_during_backoff_exits_cleanly`).
-
-### Reader 종료 감지 핵심
 
 `ClientInner.event_tx`를 `std::sync::Mutex<Option<UnboundedSender<AcpEvent>>>`로
 변경했습니다. `reader_loop()` 종료 시점에 `close_event_channel()`을 호출해 내부
@@ -316,6 +380,8 @@ sender를 drop하면, supervisor가 소유한 외부 `event_rx`의 `recv()`가 `
 반환하며 reader 태스크가 자연스럽게 끝납니다. 이렇게 하면 WebSocket Close
 프레임 감지에만 의존하지 않고, AcpClient 내부의 어떤 종료 경로(`close()` 호출,
 에러 전파, drop)에도 supervisor가 반응할 수 있습니다.
+
+</details>
 
 ## Bootstrap Token & Worker Join (Phase 8.3)
 
@@ -439,12 +505,28 @@ fleet-worker join \
 
 ## 동시 다중 세션 (Phase 8.4)
 
+> ⚠️ **정정 (2026-08-12)**: 아래 "WorkerSession 데이터 모델"·"dispatch 흐름"·"Reader
+> 라우팅"·"fail_all 시맨틱" 절은 Phase 8.4 시점(2026-08-11 SDK 마이그레이션 이전) 구현을
+> 서술합니다. 이 구조체·필드·에러 코드는 현재 코드에 **존재하지 않습니다.** "용량 강제",
+> "Selector 용량 필터", "API/관측 지원" 절은 여전히 유효합니다(아래 계속).
+>
+> **현재 구현**: `WorkerSession { capacity: Arc<Semaphore>, sessions: Arc<Mutex<HashMap<SessionId,
+> InFlightSession>>>, ... }` — `in_flight`/`prompt_index`/`pending_events`/`InFlightTask`/
+> `BufferedEvent` 타입은 사라졌습니다. 라우팅은 `promptId`가 아니라 **`SessionId`** 기준이고
+> (`handle_session_notification`), `fail_all`이 사용하는 에러 코드로 서술된 `RpcError {
+> code: ACP_ERR_CONNECTION_CLOSED (-32001) }`는 코드 전체 검색 결과 **어디에도 없습니다**
+> (완전히 지어낸 값입니다).
+
 Phase 7/8.2의 `AcpTransport`는 워커당 **단일 활성 세션**만 유지했습니다. 즉,
 워커에서 처리 중인 `session/prompt` 응답이 도착하기 전에는 두 번째 dispatch를
 시도할 수 없었고, 캐퍼시티가 큰 워커의 자원을 활용할 수 없었습니다. Phase 8.4는
-**per-worker 동시 다중 세션**을 추가합니다.
+**per-worker 동시 다중 세션**을 추가했고, 이후 SDK 마이그레이션이 아래 데이터 모델을
+`Semaphore` 기반으로 다시 단순화했습니다.
 
-### WorkerSession 데이터 모델
+<details>
+<summary>원문 (Phase 8.4 시점 데이터 모델 — 참고용, 현재와 다름)</summary>
+
+### WorkerSession 데이터 모델 (Phase 8.4, 폐기됨)
 
 ```rust
 struct WorkerSession {
@@ -475,13 +557,15 @@ enum BufferedEvent {
   응답보다 먼저 도착하는 race를 흡수. `set_prompt_id` 호출 시점에 drain되어
   dispatch가 처리합니다.
 
+</details>
+
 ### dispatch 흐름
 
 ![Multi-Session Task Dispatch Flowchart](../assets/diagrams/architecture/multi-session-dispatch.mmd)
 
-- `try_acquire`가 `max_concurrent` 검사 후 `TaskId` 슬롯을 사전에 점유합니다.
-- `complete()`가 `Option<InFlightTask>`를 반환하는 atomic 패턴으로 dispatch와
-  supervisor `fail_all` 사이의 Failed emit 소유권 경쟁을 해소합니다.
+- 현재 구현: `capacity.try_acquire_owned()`(세마포어)가 `max_concurrent` 검사 후 슬롯을
+  사전에 점유합니다. 아래 "atomic `complete()`" 서술은 Phase 8.4 시점의 `HashMap` 기반
+  구현에 대한 것으로, 세마포어 기반 구현에서는 `Semaphore` 자체가 이 경쟁을 흡수합니다.
 
 ### 용량 강제 (WorkerAtCapacity)
 
@@ -499,7 +583,16 @@ WorkerAtCapacity(String),
 - `MockTransport`도 동일한 `max_concurrent_tasks` 시맨틱을 흉내내어 테스트가
   실제 transport와 동일한 계약을 검증합니다.
 
-### Reader 라우팅 (promptId 기반)
+### Reader 라우팅 — ⚠️ 정정: promptId 아닌 SessionId 기반
+
+⚠️ **정정 (2026-08-12)**: 아래는 Phase 8.4 시점 서술입니다(원문 보존). 현재 코드는
+`promptId`가 아니라 **`session_id`**로 라우팅합니다 — `handle_session_notification`이
+수신 알림의 `notification.session_id`로 `sessions: HashMap<SessionId, InFlightSession>`을
+직접 조회합니다. `prompt_index`/`pending_events`/`run_reader_loop`라는 이름의 함수·필드는
+존재하지 않습니다.
+
+<details>
+<summary>원문 (Phase 8.4 시점 — 참고용, 현재와 다름)</summary>
 
 `run_reader_loop`는 WebSocket에서 읽은 각 메시지의 `promptId`를 `prompt_index`로
 역조회하여 대상 `TaskId`를 찾습니다.
@@ -510,7 +603,21 @@ WorkerAtCapacity(String),
 - `complete()`는 `in_flight`에서 제거하면서 동시에 `prompt_index`에서도
   `prompt_id` 매핑을 정리합니다.
 
+</details>
+
 ### fail_all 시맨틱 (연결 손실)
+
+⚠️ **정정 (2026-08-12)**: 아래 원문이 인용하는 에러 코드 `RpcError { code:
+ACP_ERR_CONNECTION_CLOSED (-32001), message: "ACP connection closed" }`는 **코드
+전체 검색 결과 어디에도 존재하지 않습니다** — 완전히 지어낸 값입니다. 실제로는
+`WorkerSession::fail_all(self: &Arc<Self>, broadcaster, reason)`가 `sessions`
+맵 전체를 drain하며 각 세션에 `WorkerEvent::Failed`(메시지: `"ACP connection
+lost — will reconnect"`)를 브로드캐스트합니다. 아래 두 경쟁 상태 서술 자체의
+구조(에러 코드로 소유권을 구분한다는 아이디어)가 현재 구현과 대응되는지는
+검증되지 않았습니다.
+
+<details>
+<summary>원문 (Phase 8.4 시점 — 참고용, 현재와 다름)</summary>
 
 `AcpClient::reader_loop`가 종료되면 supervisor는 모든 in-flight task를 실패로
 처리해야 합니다. 이 과정에서 두 가지 경쟁 상태가 발생합니다.
@@ -525,6 +632,8 @@ WorkerAtCapacity(String),
 
 `WorkerSession::fail_all(self: &Arc<Self>, broadcaster, reason)`는
 `in_flight.drain()` 후 각 task에 대해 `Failed { reason }`을 emit합니다.
+
+</details>
 
 ### Selector 용량 필터
 
@@ -587,6 +696,14 @@ Phase 7/8.1의 ACP 연결은 평문 WebSocket (`ws://`) + URL 쿼리로 전달�
   shutdown 시 heartbeat/grok 과 함께 cleanup.
 
 ### 인증서 발급 흐름 (Phase 8.5.3)
+
+⚠️ **정정 (2026-08-12)**: 아래 `fleet mtls` 서브커맨드 전체와 `--mtls-*` CLI 플래그는
+**기본 빌드에 포함되지 않는 opt-in Cargo feature**입니다 — `crates/fleet-cli/Cargo.toml`의
+`default = ["acp"]`에 `mtls`는 없고, `crates/fleet-cli/src/mtls.rs`도
+`#![cfg(feature = "mtls")]`로 가드되어 있습니다. `cargo build --release`(기본 피처만)로는
+`fleet mtls init-ca` 등이 빌드되지 않으며 `cargo build --release --features mtls`가
+필요합니다. 반대로 `fleet-worker`는 `Cargo.toml`에서 `fleet-transport`를 항상 `mtls`
+피처와 함께 의존하므로, 워커 측 프록시 코드는 항상 컴파일됩니다.
 
 ```bash
 # 1. 사설 CA 발급 (1회성).
@@ -713,22 +830,43 @@ fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
 - 해시된 호스트명(`|1|<salt>|<hash> ...` 형식)은 `russh-keys`가 처리하므로
   그대로 지원되지만, TOFU `learn` 은 평문 호스트명으로 추가한다.
 
-## Autonomic Self-Healing Engine (Autonomy)
+## Autonomic Self-Healing Engine (Autonomy) — 🔴 미구현·비연결 상태 (설계 초안)
 
-오케스트레이터의 안정적이고 지속적인 자율 운영을 보장하기 위해, 실시간으로 하드웨어 상태 및 메트릭을 감시하고 자가치유를 수행하는 **Autonomic Engine**이 탑재되어 있습니다.
+> ⚠️ **정정 (2026-08-12)**: 이 절 전체가 "탑재되어 있습니다" 등 현재형으로 서술되어
+> 있지만, **실제로는 컴파일조차 되지 않는 미완성 코드**이며 어떤 바이너리에도
+> 연결되어 있지 않습니다.
+>
+> - `crates/fleet-scheduler/src/lib.rs`에 다음과 같은 날짜가 박힌 코드 주석이 있습니다:
+>   *"FLEET NOTE (2026-08-12): `autonomic` 모듈은 커밋되지 않은 미완성 상태로 발견됨 —
+>   `Worker.metrics`(존재하지 않는 필드), `FleetEvent::WorkerLeft`의 `id`/`name`(실제
+>   변형은 `worker_id`/`at`만 가짐), `BreakerRegistry::get` 시그니처... 가 모두 현재
+>   타입과 어긋나 컴파일이 안 된다."*
+> - `pub mod autonomic;`과 그 재노출(`pub use`)이 `lib.rs`에서 **주석 처리**되어 있습니다.
+> - `crates/fleet-cli/src/runtime.rs`에서 `fleet serve`가 `AutonomicEngine`을 기동하는
+>   배선 코드도 동일한 날짜의 동일한 사유로 **주석 처리**되어 있습니다.
+> - 즉 `crates/fleet-scheduler/src/autonomic.rs`(172줄)는 어떤 릴리스 바이너리에도
+>   포함되지 않습니다.
+>
+> 아래는 **설계 의도(초안)**로 읽어야 하며, "지금 이렇게 동작한다"가 아니라
+> "구현이 완료되고 재연결되면 이렇게 동작할 예정이었다"로 해석하세요. `WorkerStatus::
+> Degraded`/`Offline`과 `BreakerRegistry`/`CircuitBreaker` 강제 개방 자체는 실제
+> 코드에 존재하는 타입이므로, 이 설계가 완전히 근거 없는 것은 아닙니다 — 다만
+> `AutonomicEngine`이 그것들을 실제로 구동하는 경로는 현재 끊겨 있습니다.
 
-### MAPE-K 제어 루프 아키텍처
+오케스트레이터의 안정적이고 지속적인 자율 운영을 보장하기 위해, 실시간으로 하드웨어 상태 및 메트릭을 감시하고 자가치유를 수행하는 **Autonomic Engine**을 설계했습니다(미구현).
+
+### MAPE-K 제어 루프 아키텍처 (설계)
 
 ![MAPE-K Self-Healing Control Loop Diagram](../assets/diagrams/architecture/mape-k-control-loop.mmd)
 
-### 작동 메커니즘
+### 작동 메커니즘 (설계 — 미구현)
 
-1. **상태 감시 (Monitor)**: `AutonomicEngine`은 백그라운드 스레드에서 설정된 interval 마다 가동되며, `Store`로부터 활성 워커들의 메트릭 정보 및 동작 데이터를 폴링하여 관측합니다.
-2. **동적 분석 (Analyze)**: 워커가 전달한 하드웨어 로드 지표를 바탕으로 오작동 여부를 판단합니다:
+1. **상태 감시 (Monitor)**: `AutonomicEngine`이 백그라운드 스레드에서 설정된 interval 마다 가동되어, `Store`로부터 활성 워커들의 메트릭 정보 및 동작 데이터를 폴링하여 관측하도록 설계되었습니다.
+2. **동적 분석 (Analyze)**: 워커가 전달한 하드웨어 로드 지표를 바탕으로 오작동 여부를 판단하도록 설계되었습니다:
    - CPU 로드율 과부하 지속 (>95%)
    - VRAM 메모리 부족 또는 GPU 스톨(Stall) 누적
    - API 응답 실패율 누적 및 지연 시간 임계치 초과
-3. **치유 계획 (Plan)**: 진단된 위반 사항에 대해 자율 복구 계획을 결정합니다. 경미한 과부하 시 워커를 `Degraded` 상태로 하향하여 스케줄러 분배 비중을 조절하고, 심각한 고장이나 순단 시 `CircuitBreaker`를 강제 개방하여 유입되는 작업을 원천 차단합니다.
-4. **치유 실행 (Execute)**: `Store` 상태에 `Degraded`/`Offline` 등의 상태를 자율 커밋하고, 메모리 내의 `BreakerRegistry`와 연동하여 해당 워커로 향하는 dispatch 요청을 즉각 정지시킵니다.
+3. **치유 계획 (Plan)**: 진단된 위반 사항에 대해 자율 복구 계획을 결정하도록 설계되었습니다. 경미한 과부하 시 워커를 `Degraded` 상태로 하향하여 스케줄러 분배 비중을 조절하고, 심각한 고장이나 순단 시 `CircuitBreaker`를 강제 개방하여 유입되는 작업을 원천 차단하는 것이 목표입니다.
+4. **치유 실행 (Execute)**: `Store` 상태에 `Degraded`/`Offline` 등의 상태를 자율 커밋하고, 메모리 내의 `BreakerRegistry`와 연동하여 해당 워커로 향하는 dispatch 요청을 즉각 정지시키는 것이 목표입니다.
 
 
