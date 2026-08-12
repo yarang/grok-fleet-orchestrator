@@ -25,9 +25,15 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
 ### 3. Store trait 추상화
 
 `fleet-store::Store` trait이 모든 영속화를 추상화합니다:
-- 현재 구현: `PgStore` (PostgreSQL + sqlx)
-- 테스트용: `MemStore` (crate-private)
-- 향후 가능: SQLite (싱글노드), DynamoDB (AWS)
+- 현재 구현: `PgStore` (PostgreSQL + sqlx) — `fleet-store` 크레이트 내 유일한 `impl Store`.
+- 테스트용: `MemStore` — ⚠️ **정정 (2026-08-12)**: "crate-private"라는 서술은 부정확합니다.
+  `fleet-store` 크레이트 안에 정식으로 사는 단일 타입이 아니라, `fleet-api`/
+  `fleet-dashboard` 등 여러 크레이트의 `#[cfg(test)]` 전용 테스트 코드에 **독립적으로
+  중복 정의된 6개 이상의 각기 다른 `struct MemStore`**입니다(예: `fleet-api/src/
+  test_support.rs`, `fleet-api/tests/*.rs`, `fleet-dashboard/src/app.rs` 등). 프로덕션
+  빌드에는 전혀 포함되지 않습니다.
+- 향후 가능: SQLite (싱글노드), DynamoDB (AWS) — 코드 전수 검색 결과 관련 구현 0건,
+  순수 아이디어 단계입니다.
 
 이 추상화 덕분에 (a) 단위 테스트가 Postgres 없이 동작하고 (b) 다른 백엔드로의
 교체가 비교적 쉽습니다.
@@ -38,18 +44,31 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
 다른 admin에게도 즉시 전파되어야 합니다. 트랜잭션 범위 밖에서 pub/sub 채널을
 사용하면 이 동기화를 최소 지연으로 달성할 수 있습니다.
 
-구체적 메커니즘:
-1. Admin A가 `circuit_opened` 이벤트를 `fleet_events`에 INSERT
-2. Postgres 트리거가 `NOTIFY fleet_events` 실행
-3. Admin B의 `LISTEN fleet_events`가 즉시 알림 수신
-4. Admin B의 로컬 CircuitBreakerRegistry가 강제 open 전환
+구체적 메커니즘 (⚠️ 2026-08-12 정정 — 핵심 주장은 정확하지만 세부 명칭이 틀렸습니다):
+
+1. Admin A가 `worker_circuit_changed` 이벤트(⚠️ `circuit_opened`가 아닙니다 — 실제
+   `FleetEvent` variant의 `event_type()`은 `"worker_circuit_changed"`)를 `events`
+   테이블(⚠️ `fleet_events`가 아닙니다 — `fleet_events`는 테이블명이 아니라 NOTIFY
+   **채널명**입니다)에 INSERT
+2. `events` 테이블의 `AFTER INSERT` 트리거가 `pg_notify('fleet_events', NEW.seq::text)`
+   실행 (`migrations/001_init.sql`)
+3. Admin B의 `PgListener::listen("fleet_events")`가 즉시 알림 수신
+4. Admin B의 로컬 `CircuitBreaker::force_open()`이 호출되어 강제 open 전환
+   (`crates/fleet-scheduler/src/sync.rs`의 `MultiAdminSync::apply_one_to()` —
+   테스트 `circuit_open_event_forces_local_breaker_open`로 검증됨)
 
 ### 5. CircuitBreaker 3-state 머신
 
 각 워커마다 독립적인 회로차단기:
 - **Closed**: 정상. 모든 dispatch 시도 통과.
 - **Open**: 최근 N회 연속 실패. dispatch 즉시 거부 (`CircuitOpen` 에러).
-- **HalfOpen**: 쿨다운(기본 30초) 후 1회 프로브 허용. 성공 시 Closed, 실패 시 Open 복귀.
+- **HalfOpen**: 쿨다운(⚠️ 정정: 기본 30초가 아니라 **10초** —
+  `CircuitBreakerConfig::default().open_duration_secs`, `crates/fleet-core/src/config.rs`)
+  후 프로브 허용. ⚠️ **정정 (2026-08-12)**: "1회 프로브만 허용"은 사실이 아닙니다 —
+  `breaker.rs`의 `check()`는 `HalfOpen` 상태에서 **무조건 허용**합니다(코드 주석: "단순화:
+  HalfOpen에서는 항상 허용"). `half_open_max_probes` 설정 필드(기본값 1)는 존재하지만
+  `breaker.rs` 어디에서도 실제로 읽히지 않아 — HalfOpen 동안 동시 요청이 와도 1개로
+  제한되지 않습니다. 성공 시 Closed, 실패 시 Open 복귀는 정확합니다.
 
 이 패턴은 [Grok Build의 `CircuitBreakerRegistry`](https://github.com/xai-org/grok-build)에서
 차용했지만, 워커별로 키를 관리하도록 재구현했습니다.
@@ -116,11 +135,16 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 
 ### 이벤트 로그가 곧 감사 로그
 
-`fleet_events` 테이블이 감사 로그 역할을 동시에 수행합니다:
+`events` 테이블(⚠️ 정정: `fleet_events`가 아닙니다 — 그건 NOTIFY 채널명, 위 §4 참조)이
+감사 로그 역할을 동시에 수행합니다:
 - 모든 상태 변화는 트랜잭션과 함께 이벤트로 기록
-- `fleet events list` CLI로 조회
+- `fleet events list --after-seq <N> --limit <N> [--json]` CLI로 조회 (확인됨,
+  `crates/fleet-cli/src/main.rs`)
 - 대시보드의 `/api/events/stream` SSE가 LISTEN/NOTIFY로 실시간 푸시
-- Prometheus `fleet_events_written_total` 메트릭이 단조 증가 카운터 노출
+- Prometheus `fleet_events_written_total` 메트릭 노출. ⚠️ 정정: "단조 증가 카운터"라고
+  서술했지만 Prometheus **타입은 `gauge`**입니다(`# TYPE fleet_events_written_total
+  gauge`, `crates/fleet-api/src/metrics.rs`) — 값 자체(관측된 최대 seq)는 단조 증가
+  하는 게 맞지만, 메트릭 타입 라벨은 counter가 아닙니다.
 
 ## 인증 모델 (3계층)
 
@@ -128,7 +152,18 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 |-----------------------|-----------------------------------|----------------------------|
 | Cloudflare Access     | CF-Access-Jwt-Assertion (JWT)     | 외부망 → 오케스트레이터     |
 | Bearer Token (API)    | `Authorization: Bearer <token>`   | 오케스트레이터 내부 API     |
-| No-auth (dev mode)    | 없음                              | `--allow-no-auth` 시        |
+| No-auth (dev mode)    | 없음                              | `--api-tokens`/`--cf-audience` 둘 다 미지정 시 |
+
+⚠️ **정정 (2026-08-12)**: `--allow-no-auth`라는 CLI 플래그는 **존재하지 않습니다.**
+no-auth는 명시적으로 켜는 플래그가 아니라, `--api-tokens`와 `--cf-audience`를 둘 다
+지정하지 않았을 때의 **암묵적 기본값**입니다(`AppState.allow_no_auth`가 기본 `true`이며
+`.with_tokens()`/`.with_cf_audience()` 호출 시에만 `false`로 전환, `runtime.rs`에서
+이 경우 "NO-AUTH mode (dev only)" 경고 로그를 남김).
+
+Cloudflare Access의 JWT 서명/체인 검증은 실제로 구현되어 있습니다 —
+`crates/fleet-api/src/cloudflare.rs`가 Cloudflare JWKS를 가져와 캐싱하고
+`jsonwebtoken::decode`로 RS256 서명과 audience를 검증합니다. Bearer 토큰은 CLI
+플래그명 `--api-tokens`(환경변수 `FLEET_API_TOKENS`)로 지정합니다.
 
 운영 환경에서는 Cloudflare Access가 1차 방어선이고, bearer 토큰은
 대시보드/모니터링 등 내부 시스템을 위한 2차 인증입니다.
@@ -146,14 +181,22 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 ```
 
 각 클라이언트 세션은 독립적이지만, 같은 워커 풀과 작업 큐를 공유합니다.
-한 클라이언트가 제출한 작업을 다른 클라이언트가 `get_task_status`로 조회할 수도 있습니다.
+한 클라이언트가 제출한 작업을 다른 클라이언트가 `fleet_get_task_status`로 조회할
+수도 있습니다.
 
 ## 성능 특성
 
-- **동시 워커**: 이론적으로 PostgreSQL 커넥션 풀 크기(~100)까지 확장
-- **작업 처리량**: 워커 당 `max_concurrent`(기본 4) × 워커 수
-- **이벤트 로그**: LISTEN/NOTIFY로 ~1ms 전파 지연
-- **바이너리 크기**: release LTO + strip 시 ~15MB (모든 정적 자산 포함)
+- **동시 워커**: ⚠️ **정정 (2026-08-12)**: "PostgreSQL 커넥션 풀 크기(~100)까지 확장"은
+  틀렸습니다 — 실제 기본 풀 크기는 **10**입니다(`PoolConfig::default().max_connections`,
+  `crates/fleet-store/src/postgres.rs`; CLI `--db-max-conn` 플래그 기본값도 10,
+  `fleet-cli/src/main.rs`). ~100이라는 수치의 근거는 코드 어디에도 없습니다.
+- **작업 처리량**: 워커 당 `max_concurrent`(기본 4) × 워커 수 — 별도의 글로벌 세마포어가
+  없으므로(§동시 실행 참조) 이 곱셈 프레이밍 자체는 타당합니다.
+- **이벤트 로그**: LISTEN/NOTIFY 전파 지연 — ⚠️ "~1ms"라는 수치를 뒷받침하는 벤치마크나
+  테스트를 코드에서 찾지 못했습니다. 검증되지 않은/근거 없는 수치로 표시합니다.
+- **바이너리 크기**: release 프로필에 LTO(`lto = "thin"`)와 `strip = true`,
+  `codegen-units = 1` 설정은 실제로 존재합니다(`Cargo.toml`). 다만 "~15MB"라는 구체
+  수치를 측정/기록한 CI 단계나 문서는 찾지 못했습니다 — 검증되지 않은 수치로 표시합니다.
 
 ## 향후 로드맵
 
@@ -484,7 +527,11 @@ fleet-worker join \
 1. `validate_worker_name` 로 DNS-safe 검증.
 2. `--grok-secret` 미지정 시 32바이트 CSPRNG 난수 생성.
 3. `--agent-endpoint` 미지정 시 orchestrator 호스트 기반으로 자동 유도
-   (`ws://<orchestrator-host>/ws?server-key=<secret>`).
+   (⚠️ 정정: `ws://<orchestrator-host>/ws?server-key=<secret>`가 아니라
+   **`{scheme}://<orchestrator-host>/ws/<worker-name>?server-key=<secret>`** —
+   경로에 워커 이름이 들어가 같은 터널 뒤 여러 워커의 엔드포인트 충돌을 방지하고,
+   scheme도 orchestrator 자체의 ws/wss를 따라갑니다. `derive_agent_endpoint`,
+   `crates/fleet-worker/src/join.rs`).
 4. `POST /v1/workers/join` 호출.
 5. 응답의 `worker_config_toml` 을 `--config-out` 경로에 **atomic** 으로 기록
    (tmp 파일 작성 후 rename).
