@@ -81,6 +81,7 @@
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) | ⚫ 고아 — 다른 문서에서 미인용, 실제 참고 여부 불명 | 2026-07-18 |
+| [`assets/diagrams/README.md`](./assets/diagrams/README.md) | 문서용 다이어그램/SVG 리소스 저장 규약 및 디렉토리 구조 (정본: `/CLAUDE.md`, `/agent.md` §6) | 🟢 정본 | 2026-08-12 |
 
 ## 하위 디렉토리 (자체 부기 체계 보유)
 
