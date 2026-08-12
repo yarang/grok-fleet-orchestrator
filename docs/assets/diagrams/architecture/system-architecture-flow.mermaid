@@ -33,7 +33,7 @@ graph TD
     CLI --> Provisioner
 
     subgraph Workers [워커 노드]
-        WorkerA["fleet-worker 데몬<br/>grok agent serve 관리 + (선택)mTLS proxy + cloudflared"]
+        WorkerA["fleet-worker 데몬<br/>grok agent serve 관리 + mTLS proxy + cloudflared"]
         WorkerN[fleet-worker 데몬 N]
     end
 

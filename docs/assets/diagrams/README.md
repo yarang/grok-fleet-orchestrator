@@ -16,7 +16,7 @@ docs/assets/diagrams/
 
 | 도메인 | 대응 문서 디렉토리 | 리소스 수 |
 |---|---|---|
-| `architecture/` | `docs/architecture/` | 10 (`.mermaid`) |
+| `architecture/` | `docs/architecture/` | 12 (`.mermaid`) |
 | `deployment/` | `docs/deployment/` | 4 (`.mermaid`) |
 | `llm-wiki/` | `docs/llm-wiki/` | 2 (`.mermaid`) |
 | `server-management/` | `docs/server-management/` | 4 (`.mermaid`) |

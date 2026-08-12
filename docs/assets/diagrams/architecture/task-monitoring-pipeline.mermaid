@@ -1,0 +1,41 @@
+sequenceDiagram
+    autonumber
+    participant Client as MCP 클라이언트
+    participant MCP as fleet-mcp
+    participant Disp as Dispatcher
+    participant Store as fleet-store
+    participant AT as AcpTransport
+    participant Worker as 워커 (grok agent serve)
+
+    Client->>MCP: fleet_dispatch_task
+    MCP->>Disp: submit(task)
+    Disp->>Store: insert_task (Pending)
+    Disp->>Disp: WorkerSelector::select + CircuitBreaker 확인
+    Disp->>Store: update_task_status (Dispatched)
+    Disp->>AT: dispatch(req)
+    AT->>AT: capacity.try_acquire_owned() - 즉시, 큐잉 없음
+    AT-->>Disp: 반환 (실행은 tokio::spawn된 백그라운드 태스크로 이관)
+    Disp-->>MCP: task_id, status="dispatched"
+    MCP-->>Client: 응답 (hint: fleet_get_task_status로 폴링)
+
+    Note over AT,Worker: 아래는 dispatch() 반환과 무관하게 진행되는 백그라운드 태스크
+
+    AT->>Worker: session/new (태스크마다 신규 세션)
+    Worker-->>AT: session_id
+    AT->>Worker: session/prompt
+
+    loop 스트리밍 출력 (선택)
+        Worker-->>AT: session/update (agent_message_chunk)
+        AT->>Disp: WorkerEvent::Output (broadcast -> mpsc 채널)
+        Disp->>Store: append_output
+    end
+
+    Worker-->>AT: session/prompt 응답 (성공 또는 에러/타임아웃)
+    AT->>Disp: WorkerEvent::Completed 또는 Failed (broadcast -> mpsc 채널)
+    Disp->>Store: update_task_status (Completed/Failed)
+
+    Note over Client,Store: 여기까지는 전부 이벤트 기반 - 오케스트레이터는 폴링하지 않음
+
+    Client->>MCP: fleet_get_task_status (1회 조회) / fleet_wait_for_task (50ms 폴링) / fleet_stream_task_output (poll_interval_secs 폴링)
+    MCP->>Store: read
+    Store-->>Client: 최종 상태 또는 진행 스냅샷

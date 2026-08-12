@@ -869,4 +869,115 @@ fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
 3. **치유 계획 (Plan)**: 진단된 위반 사항에 대해 자율 복구 계획을 결정하도록 설계되었습니다. 경미한 과부하 시 워커를 `Degraded` 상태로 하향하여 스케줄러 분배 비중을 조절하고, 심각한 고장이나 순단 시 `CircuitBreaker`를 강제 개방하여 유입되는 작업을 원천 차단하는 것이 목표입니다.
 4. **치유 실행 (Execute)**: `Store` 상태에 `Degraded`/`Offline` 등의 상태를 자율 커밋하고, 메모리 내의 `BreakerRegistry`와 연동하여 해당 워커로 향하는 dispatch 요청을 즉각 정지시키는 것이 목표입니다.
 
+## 태스크 모니터링 및 종료 감지 파이프라인
+
+MCP로 `fleet_dispatch_task`를 호출한 뒤, 오케스트레이터가 내부적으로 어떻게 진행 상황을
+추적하고 종료를 감지하는지, 그리고 MCP 클라이언트가 실제로 쓸 수 있는 모니터링 수단은
+무엇인지 정리합니다(2026-08-12 코드 대조).
+
+![Task Monitoring & Completion Detection Pipeline](../assets/diagrams/architecture/task-monitoring-pipeline.mermaid)
+
+### 디스패치는 논블로킹이다
+
+`Dispatcher::submit()`(`crates/fleet-scheduler/src/dispatcher.rs`)은 워커 선택,
+회로차단기 확인, `Dispatched` 상태 기록, `session/new`+`session/prompt` 전송까지만
+동기적으로 수행하고 **즉시 반환**합니다. 실제 에이전트 턴 실행은
+`AcpTransport::dispatch()`가 `tokio::spawn`한 백그라운드 태스크에서 별도로 진행됩니다
+(`crates/fleet-transport/src/acp_transport.rs:418`). `fleet_dispatch_task`의 응답
+`hint` 필드 자체가 "`fleet_get_task_status`로 폴링하라"고 명시합니다.
+
+### 내부는 이벤트 기반, MCP 외부 인터페이스는 폴링 전용
+
+| 단계 | 메커니즘 |
+|---|---|
+| 진행 중 출력 감지 | `session/update`(`agent_message_chunk`) 수신마다 `WorkerEvent::Output`을 broadcast 채널에 emit (`acp_transport.rs:750-774`) |
+| 종료 감지 | `session/prompt` 응답 수신 시 `WorkerEvent::Completed` 또는 `Failed`를 emit (`acp_transport.rs:485-516`). ⚠️ `stop_reason` 값으로 분기하지 않습니다 — 정상 응답이면 무조건 완료 처리, 로그만 남깁니다. |
+| 상태 커밋 | `Dispatcher::run_event_loop()`이 `mpsc` 채널로 이 이벤트를 **구독**해 `Store::update_task_status()`를 호출 (`dispatcher.rs:59-189`) — **폴링이 아니라 채널 수신**입니다. |
+
+즉 **오케스트레이터 내부의 종료 확인은 이벤트 구독**이지만, **MCP로 접근하는 클라이언트가
+쓸 수 있는 도구는 전부 폴링/블로킹폴링**입니다:
+
+- `fleet_get_task_status` — 1회성 스냅샷 조회.
+- `fleet_stream_task_output` — `max_polls`(기본 60)회까지 `poll_interval_secs`(기본 1초)
+  간격으로 반복 조회하는 유한 폴링 루프.
+- `fleet_wait_for_task` — **50ms 고정 간격**으로 `is_terminal()`을 반복 확인하는 블로킹
+  폴링(`dispatcher.rs:565`), 기본 타임아웃 300초.
+
+**MCP를 통한 push/알림 경로는 존재하지 않습니다.** `fleet-mcp`의 stdio 루프는 "단일
+스레드, 한 번에 하나의 요청만 처리"하는 단방향(클라이언트→서버) 구조이며(`server.rs:9`),
+서버가 클라이언트에 알림을 먼저 보내는 코드는 없습니다. (참고: 대시보드의
+`/api/events/stream`는 Postgres `LISTEN/NOTIFY` 기반 SSE로 실시간 push가 되지만, MCP
+경로가 아니라 웹 대시보드 전용입니다.)
+
+### ⚠️ 알려진 빈틈: HealthChecker의 Offline 처리와 태스크 실패는 별개
+
+`HealthChecker`가 워커를 `Offline`으로 표시하는 것(45초/3회 누락)과, 그 워커에 배정된
+진행 중 태스크를 실패 처리하는 것은 **서로 연결되어 있지 않습니다.**
+`HealthChecker::scan_once()`(`crates/fleet-scheduler/src/health.rs`)는 `Worker.status`
+필드만 갱신할 뿐 **Task 테이블은 전혀 건드리지 않습니다.**
+
+진행 중이던 태스크가 실제로 실패 처리되려면 아래 중 하나가 필요합니다:
+
+1. ACP WebSocket 연결이 실제로 끊겨 supervisor의 `fail_all()`이 호출되는 경우
+   (`acp_transport.rs:714-716`).
+2. 프롬프트 자체 타임아웃(기본 10분, `DEFAULT_PROMPT_TIMEOUT`, 또는 태스크의
+   `timeout_secs`)이 만료되는 경우.
+3. 워커 레코드 자체가 삭제/재등록되어 `Reconciler`가 30초 후 orphan `Dispatched` 작업으로
+   잡아채는 경우(`reconcile.rs::reap_orphaned_dispatched`) — 단, 이건 워커 row가
+   **완전히 사라진 경우에만** 동작하고, 단순히 `Offline` 상태인 워커는 명시적으로
+   건너뜁니다(`reconcile.rs`의 "워커는 존재 — 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가
+   담당" 주석 참조).
+
+따라서 **워커가 heartbeat만 끊기고 WebSocket 연결은 살아있는 애매한 상태**라면, 그
+워커에 배정된 태스크는 위 세 경로 중 하나가 실제로 발동할 때까지 `Dispatched`로
+무기한 남을 수 있습니다 — 별도 문서화되지 않았던 실제 동작상의 빈틈입니다.
+
+## 동시 실행(멀티 에이전트) 능력
+
+**결론: 있습니다 — 단, 범위가 "오케스트레이터의 세션 북키핑 계층"으로 한정됩니다.**
+
+![Concurrency Scope Diagram](../assets/diagrams/architecture/concurrency-scope.mermaid)
+
+### 워커 1대 내부의 동시성
+
+`WorkerSession.capacity: Arc<Semaphore>`가 `max_concurrent_tasks`(기본값 4 — worker
+config·`fleet_core::Worker`·DB 스키마 `max_concurrent INTEGER NOT NULL DEFAULT 4` 세
+군데 모두 일치)로 사이징되어 있고, 태스크마다 별도 ACP 세션(`session/new`)을 발급해
+`session_id` 기준으로 라우팅합니다(§동시 다중 세션 참조). **초과 시 큐잉 없이 즉시
+`WorkerAtCapacity` 에러**를 반환합니다 — 대기열이 아니라 즉시 거부입니다. 이는
+`crates/fleet-transport/tests/acp_concurrent.rs`의 `concurrent_dispatches_within_
+capacity_all_complete`(워커 1대에 태스크 3개 동시 디스패치, 독립 완료 확인),
+`dispatch_beyond_capacity_returns_worker_at_capacity`(용량 초과 시 즉시 거부 확인),
+`concurrent_tasks_stream_output_via_correct_session_routing`(태스크 5개 동시 디스패치,
+출력 미혼선 확인) 세 테스트로 검증돼 있습니다.
+
+### 워커 여러 대 사이의 동시성
+
+디스패치 경로 전체를 잠그는 전역 락이 없습니다 — `FleetState`(`crates/fleet-scheduler/
+src/state.rs`)는 `Mutex`/`RwLock`으로 감싸여 있지 않고, `Dispatcher::submit()`/
+`dispatch_existing()`은 모두 `&self`라 `Arc<Dispatcher>`를 여러 tokio 태스크에서
+동시에 호출할 수 있습니다. 회로차단기도 워커별 개별 `Mutex`(`breaker.rs`)라 워커 A/B
+간 경합이 없습니다. 구조적으로 여러 워커에 동시 디스패치가 가능하지만, ⚠️ **"서로 다른
+워커 N대에 동시에 디스패치해서 독립적으로 완료되는지"를 직접 검증하는 전용 테스트는
+찾지 못했습니다** — 아키텍처상 지원되는 것은 확실하나, 같은-워커 케이스만큼 테스트로
+못박혀 있진 않습니다.
+
+### ⚠️ 확인 불가 영역: `grok agent serve` 자체의 진짜 병렬성
+
+위 동시성은 전부 **오케스트레이터 쪽 세션 관리 계층**의 이야기입니다. 실제
+`grok agent serve` 서브프로세스가 여러 세션의 추론 요청을 진짜 병렬로 처리하는지,
+아니면 내부적으로 직렬화하는지는 **이 저장소 코드만으로는 확인할 수 없습니다.**
+`fleet-worker`(`grok_process.rs`)는 `grok agent serve`를 외부 바이너리로 spawn/재시작
+할 뿐 내부 동작에 관여하지 않고, `acp_concurrent.rs`의 테스트들도 실제 grok이 아니라
+mock WebSocket 서버를 상대로 돌기 때문에 증명하는 것은 "오케스트레이터가 여러 세션을
+올바르게 라우팅한다"는 것이지 "grok이 진짜 병렬 추론을 한다"는 것이 아닙니다.
+
+### 전체 fleet 상한
+
+별도의 글로벌 세마포어는 없습니다. 순수하게 Σ(온라인이고 회로차단기 Closed인 워커의
+`max_concurrent`)가 실질 상한입니다. MCP stdio 루프 자체는 한 커넥션당 요청을 하나씩
+순차 처리하지만(파이프라이닝 불가, `server.rs:9`), `fleet_dispatch_task`가 프롬프트를
+"넘기기만 하고" 즉시 반환하므로 여러 태스크를 연달아 빠르게 dispatch 호출하는 것 자체는
+문제없고, 실제 실행은 백그라운드에서 병렬로 진행됩니다.
+
 

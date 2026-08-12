@@ -1,0 +1,19 @@
+graph TD
+    subgraph FleetScope ["전역 상한 = Σ 온라인+Closed 워커의 max_concurrent - 전역 세마포어/락 없음"]
+        subgraph WA ["워커 A - Semaphore capacity = max_concurrent 기본값 4"]
+            SA1["세션 1"]
+            SA2["세션 2"]
+            SA3["세션 3"]
+            SA4["세션 4"]
+        end
+        subgraph WB ["워커 B - 독립적인 별도 Semaphore"]
+            SB1["세션 1"]
+            SB2["세션 2"]
+        end
+    end
+
+    Overflow["capacity 초과 dispatch 시도<br/>→ 큐잉 없이 즉시 WorkerAtCapacity 에러 반환"]
+    Caveat["경고: 이 동시성은 오케스트레이터 세션 북키핑 계층의 범위입니다.<br/>grok agent serve 서브프로세스 자체가 내부적으로 진짜 병렬 추론을 하는지는<br/>외부 바이너리라 이 저장소 코드로는 확인할 수 없습니다."]
+
+    WA -.->|용량 초과 시| Overflow
+    FleetScope -.-> Caveat
