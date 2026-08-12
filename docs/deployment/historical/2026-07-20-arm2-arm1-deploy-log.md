@@ -6,7 +6,7 @@
 
 ## 인프라 토폴로지
 
-![Historical Deploy Infrastructure Topology](../../assets/diagrams/deployment/historical-deploy-topology.mmd)
+![Historical Deploy Infrastructure Topology](../../assets/diagrams/deployment/historical-deploy-topology.mermaid)
 
 ## 현재 상태 (동작)
 

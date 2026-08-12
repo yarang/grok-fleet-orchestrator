@@ -10,7 +10,7 @@
 
 Grok Fleet Orchestrator는 특정 상용 에이전트의 내부 API에 얽매이지 않고, 독자적인 **MCP stdio 서버** 역할을 자처하여 시스템 가용성과 상호운용성(Interoperability)을 확보합니다.
 
-![MCP Architecture Diagram](../assets/diagrams/architecture/mcp-architecture.mmd)
+![MCP Architecture Diagram](../assets/diagrams/architecture/mcp-architecture.mermaid)
 
 ---
 

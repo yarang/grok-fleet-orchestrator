@@ -4,7 +4,7 @@
 > 제안서이며 아직 구현되지 않았다** — 상태는 [`../roadmap/roadmap.md`](../roadmap/roadmap.md)와
 > [`../roadmap/conflict-analysis.md`](../roadmap/conflict-analysis.md)에서 추적한다.
 
-![Server Management Flowchart](../assets/diagrams/server-management/overview-flowchart.mmd)
+![Server Management Flowchart](../assets/diagrams/server-management/overview-flowchart.mermaid)
 
 | 문서 | 다루는 범위 |
 |---|---|

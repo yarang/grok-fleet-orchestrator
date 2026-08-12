@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-![System Architecture Flowchart](../assets/diagrams/architecture/system-architecture-flow.mmd)
+![System Architecture Flowchart](../assets/diagrams/architecture/system-architecture-flow.mermaid)
 
 ## 핵심 설계 결정
 
@@ -56,7 +56,7 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
 
 ### 6. WorkerSelector: hint + label + model + least-loaded
 
-![Worker Selector Logic Diagram](../assets/diagrams/architecture/worker-selector-logic.mmd)
+![Worker Selector Logic Diagram](../assets/diagrams/architecture/worker-selector-logic.mermaid)
 
 grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바꿀 수 없으므로
 (`session/new`/`session/prompt`에 `model` 파라미터 없음), 모델 선택은 오직
@@ -73,7 +73,7 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 `crates/fleet-core/src/task.rs`)를 따르는 상태머신입니다(⚠️ 2026-08-12 정정: 이전
 판은 "4단계"라 서술했으나 실제로는 5개 상태입니다):
 
-![Scheduler Task State Diagram](../assets/diagrams/architecture/scheduler-task-state.mmd)
+![Scheduler Task State Diagram](../assets/diagrams/architecture/scheduler-task-state.mermaid)
 
 ⚠️ 위 다이어그램은 2026-08-12에 정정되었습니다. 이전 판은 `Completed → Cancelled`
 전이를 표시했으나, `Dispatcher::cancel()`은 이미 종료 상태(`is_terminal()` —
@@ -263,7 +263,7 @@ cwd = "/var/lib/fleet-worker"        # 선택
 
 ### 시작 시퀀스
 
-![Worker Daemon Execution Flowchart](../assets/diagrams/architecture/worker-daemon-execution.mmd)
+![Worker Daemon Execution Flowchart](../assets/diagrams/architecture/worker-daemon-execution.mermaid)
 
 ### 프로비저닝 통합
 
@@ -304,7 +304,7 @@ supervisor 태스크**를 도입해 자동 복구를 제공합니다.
 각 워커는 `register()` 시점에 전용 supervisor `tokio::task`를 얻습니다. supervisor는
 다음 루프를 반복합니다:
 
-![Supervisor Backoff Logic Flowchart](../assets/diagrams/architecture/supervisor-backoff-logic.mmd)
+![Supervisor Backoff Logic Flowchart](../assets/diagrams/architecture/supervisor-backoff-logic.mermaid)
 
 ### 상태 머신 (`ConnState`)
 
@@ -561,7 +561,7 @@ enum BufferedEvent {
 
 ### dispatch 흐름
 
-![Multi-Session Task Dispatch Flowchart](../assets/diagrams/architecture/multi-session-dispatch.mmd)
+![Multi-Session Task Dispatch Flowchart](../assets/diagrams/architecture/multi-session-dispatch.mermaid)
 
 - 현재 구현: `capacity.try_acquire_owned()`(세마포어)가 `max_concurrent` 검사 후 슬롯을
   사전에 점유합니다. 아래 "atomic `complete()`" 서술은 Phase 8.4 시점의 `HashMap` 기반
@@ -659,7 +659,7 @@ Phase 7/8.1의 ACP 연결은 평문 WebSocket (`ws://`) + URL 쿼리로 전달�
 
 ### 아키텍처
 
-![mTLS Proxy Architecture Diagram](../assets/diagrams/architecture/mtls-proxy-architecture.mmd)
+![mTLS Proxy Architecture Diagram](../assets/diagrams/architecture/mtls-proxy-architecture.mermaid)
 
 `grok agent serve`는 외부 바이너리라 mTLS를 직접 지원할 수 없다. 그래서
 `fleet-worker`가 proxy 모드로 동작해 **TLS 종단 + 클라이언트 인증서 검증**을
@@ -857,7 +857,7 @@ fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
 
 ### MAPE-K 제어 루프 아키텍처 (설계)
 
-![MAPE-K Self-Healing Control Loop Diagram](../assets/diagrams/architecture/mape-k-control-loop.mmd)
+![MAPE-K Self-Healing Control Loop Diagram](../assets/diagrams/architecture/mape-k-control-loop.mermaid)
 
 ### 작동 메커니즘 (설계 — 미구현)
 

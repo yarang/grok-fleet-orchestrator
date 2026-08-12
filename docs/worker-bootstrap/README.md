@@ -5,7 +5,7 @@
 새 워커가 오케스트레이터 클러스터에 안전하게 조인하는 전체 절차는 아래 4개 정본 문서가
 서로 다른 관점에서 다룬다 — 순서대로 읽으면 전체 흐름이 이어진다.
 
-![Worker Join Flow Overview Diagram](../assets/diagrams/worker-bootstrap/join-flow-overview.mmd)
+![Worker Join Flow Overview Diagram](../assets/diagrams/worker-bootstrap/join-flow-overview.mermaid)
 
 | 문서 | 정본 범위 |
 |---|---|

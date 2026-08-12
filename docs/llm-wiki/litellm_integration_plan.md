@@ -67,7 +67,7 @@ liteLLM 게이트웨이를 중앙에 두고 워커의 `base_url`만 게이트웨
 
 ## 2. 아키텍처 개요 (실제 배포)
 
-![liteLLM Integration Architecture Diagram](../assets/diagrams/llm-wiki/litellm-integration-architecture.mmd)
+![liteLLM Integration Architecture Diagram](../assets/diagrams/llm-wiki/litellm-integration-architecture.mermaid)
 
 핵심 설계 결정 세 가지:
 

@@ -8,7 +8,7 @@
 
 ## 1. SSH 프로비저닝 워크플로우 다이어그램 (Mermaid)
 
-![SSH Provisioning Workflow Diagram](../assets/diagrams/worker-bootstrap/ssh-provisioning-sequence.mmd)
+![SSH Provisioning Workflow Diagram](../assets/diagrams/worker-bootstrap/ssh-provisioning-sequence.mermaid)
 
 ---
 

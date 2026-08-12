@@ -8,7 +8,7 @@
 
 워커 에이전트는 다양한 리눅스 배포판(Ubuntu/Debian, CentOS/RHEL)을 지원해야 하므로, OS 버전을 자동 감지하여 적절한 패키지 래퍼(Wrapper) 명령을 수행합니다.
 
-![패키지 관리 기능 아키텍처 다이어그램](../assets/diagrams/server-management/package-management-flow.mmd)
+![패키지 관리 기능 아키텍처 다이어그램](../assets/diagrams/server-management/package-management-flow.mermaid)
 
 ---
 

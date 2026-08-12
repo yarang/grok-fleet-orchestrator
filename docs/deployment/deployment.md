@@ -397,7 +397,7 @@ FLEET_API_CORS_ORIGINS="https://console.agentthread.dev,https://ops.agentthread.
 
 ### 3.1 아키텍처
 
-![Cloudflare Tunnel Architecture Diagram](../assets/diagrams/deployment/cloudflare-tunnel-architecture.mmd)
+![Cloudflare Tunnel Architecture Diagram](../assets/diagrams/deployment/cloudflare-tunnel-architecture.mermaid)
 
 ### 3.2 Cloudflare 설정
 
@@ -536,7 +536,7 @@ Phase 8.3부터는 orchestrator 측에서 발급한 **bootstrap 토큰** 한 번
 
 #### 워크플로
 
-![Self-service Worker Join Flowchart](../assets/diagrams/deployment/self-service-worker-join.mmd)
+![Self-service Worker Join Flowchart](../assets/diagrams/deployment/self-service-worker-join.mermaid)
 
 #### 1) 토큰 발급 (오케스트레이터 머신)
 

@@ -16,7 +16,7 @@
 
 ## 2. 서버 아키텍처 및 트래픽 흐름 (Mermaid)
 
-![Distributed Infrastructure Server Topology Diagram](../assets/diagrams/deployment/server-topology.mmd)
+![Distributed Infrastructure Server Topology Diagram](../assets/diagrams/deployment/server-topology.mermaid)
 
 ---
 

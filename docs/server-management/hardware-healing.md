@@ -11,7 +11,7 @@
 
 NVIDIA GPU 환경에서 직접적인 온도 조절이 불가능한 클라우드 가상 서버를 위해, **물리 온도 센서 의존성을 낮추고 하드웨어 클럭 스로틀링(Throttling) 및 작업 지연(Stall)을 간접 감지**하는 모델을 채택합니다.
 
-![하드웨어 자가 치유 아키텍처 다이어그램](../assets/diagrams/server-management/hardware-healing.mmd)
+![하드웨어 자가 치유 아키텍처 다이어그램](../assets/diagrams/server-management/hardware-healing.mermaid)
 
 ---
 

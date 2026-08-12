@@ -611,33 +611,33 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 4.1 온보딩 플로우 (최초 설치 직후)
 
-![Onboarding Flowchart](../assets/diagrams/ui-dashboard/onboarding-flow.mmd)
+![Onboarding Flowchart](../assets/diagrams/ui-dashboard/onboarding-flow.mermaid)
 
 ### 4.2 일반 로그인 플로우
 
-![Login Flowchart](../assets/diagrams/ui-dashboard/login-flow.mmd)
+![Login Flowchart](../assets/diagrams/ui-dashboard/login-flow.mermaid)
 
 ### 4.3 일반 운영 플로우 (모니터링 → 디버깅)
 
-![Operational Flowchart](../assets/diagrams/ui-dashboard/operational-flow.mmd)
+![Operational Flowchart](../assets/diagrams/ui-dashboard/operational-flow.mermaid)
 
 ### 4.4 관리자 플로우 (신규 사용자 초대 → 권한 검증)
 
-![Admin Flowchart](../assets/diagrams/ui-dashboard/admin-flow.mmd)
+![Admin Flowchart](../assets/diagrams/ui-dashboard/admin-flow.mermaid)
 
 ### 4.5 에지 케이스 플로우
 
 #### 세션 만료 (SSE 연결 중)
 
-![Session Timeout Sequence Diagram](../assets/diagrams/ui-dashboard/session-timeout-sequence.mmd)
+![Session Timeout Sequence Diagram](../assets/diagrams/ui-dashboard/session-timeout-sequence.mermaid)
 
 #### 권한 부족 (403 Forbidden)
 
-![Permission Denied Sequence Diagram](../assets/diagrams/ui-dashboard/permission-denied-sequence.mmd)
+![Permission Denied Sequence Diagram](../assets/diagrams/ui-dashboard/permission-denied-sequence.mermaid)
 
 #### CF Access 연동 시나리오 (이중 인증)
 
-![CF Access Flowchart](../assets/diagrams/ui-dashboard/cf-access-flow.mmd)
+![CF Access Flowchart](../assets/diagrams/ui-dashboard/cf-access-flow.mermaid)
 
 ---
 

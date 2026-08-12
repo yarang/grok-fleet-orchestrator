@@ -6,7 +6,7 @@
 
 ## 1. 5대 고급 서버 관리 기능 제안
 
-![5대 고급 서버 관리 기능 제안 다이어그램](../assets/diagrams/server-management/advanced-proposals-overview.mmd)
+![5대 고급 서버 관리 기능 제안 다이어그램](../assets/diagrams/server-management/advanced-proposals-overview.mermaid)
 
 ---
 

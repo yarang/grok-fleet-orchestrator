@@ -48,7 +48,7 @@
 
 워커가 최초로 오케스트레이터에 인프라 노드로 조인하고 자동 구성 설정(worker.toml)을 받아 가동되는 절차입니다.
 
-![Worker Bootstrap Sequence Diagram](../assets/diagrams/worker-bootstrap/bootstrap-sequence.mmd)
+![Worker Bootstrap Sequence Diagram](../assets/diagrams/worker-bootstrap/bootstrap-sequence.mermaid)
 
 ---
 
@@ -56,4 +56,4 @@
 
 워커가 구동된 후 일상적인 하트비트 송신, 작업 수신/실행, 로그 청크 스트리밍 및 장애 감지 시의 회로차단기 동작을 보여주는 종합 운영 시퀀스입니다.
 
-![Worker Lifecycle Sequence Diagram](../assets/diagrams/worker-bootstrap/operational-lifecycle-sequence.mmd)
+![Worker Lifecycle Sequence Diagram](../assets/diagrams/worker-bootstrap/operational-lifecycle-sequence.mermaid)
