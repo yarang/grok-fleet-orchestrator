@@ -212,15 +212,23 @@
     `fleet-store`에 단일 `MemStore` 구현을 두고 재사용하는 리팩터링 권고. 낮은
     우선순위 — 테스트 전용 코드라 프로덕션 영향 없음.
 
-46. ✅ **`docs/` 전체 코드 대조 검증 및 문서 구조 정리** (P2, 문서화) — 진행 중
+46. ✅ **`docs/` 전체 코드 대조 검증 및 문서 구조 정리** — 해결됨
     (2026-08-12, 이 세션). `docs/architecture/*.md`(overview.md 9개 절 + 신규 2개 절,
-    api-reference.md, mcp-specification.md), `docs/worker-bootstrap/*.md`(5개 문서)를
-    전면 코드 대조해 다수의 사실 오류(MCP 도구 이름 전체가 허구였음, 디스패처가
-    "1초 폴링"이 아니라 이벤트 기반, ACP 전송 계층 3개 절이 2026-08-11에 이미 대체된
-    구세대 구현을 서술 중이었음 등)를 정정했습니다. 다이어그램 리소스를
-    `docs/assets/diagrams/<domain>/*.mermaid`로 단일화(30여 개 파일 통합, 확장자
-    통일)하고, `agent.md`/`CLAUDE.md`의 정본/사본 관계를 명확히 했습니다. `docs/
-    deployment/*.md`는 별도 검증 진행 중 — 완료 시 이 항목을 ✅로 전환합니다.
+    api-reference.md, mcp-specification.md), `docs/worker-bootstrap/*.md`(5개 문서),
+    `docs/deployment/*.md`(5개 문서)를 전면 코드 대조해 다수의 사실 오류를 정정했습니다:
+    MCP 도구 이름 전체가 허구였음, 디스패처가 "1초 폴링"이 아니라 이벤트 기반, ACP
+    전송 계층 3개 절이 2026-08-11에 이미 대체된 구세대 구현을 서술 중이었음,
+    `install.sh` 기본 설치 경로 오기재, nginx 단일 서버 예시에 오케스트레이터 API
+    라우팅(`/v1/`)이 통째로 빠져 배포 시 워커 셀프 서비스 등록이 불가능했을 것,
+    `server-topology.md`가 2026-08-11에 폐기된 liteLLM Docker 설계를 최신으로
+    서술 중이었음 등. 다이어그램 리소스를 `docs/assets/diagrams/<domain>/*.mermaid`로
+    단일화(30여 개 파일 통합, 확장자 통일)하고, `agent.md`/`CLAUDE.md`의 정본/사본
+    관계를 명확히 했으며, `engineering-patterns/reuse-patterns.md`의 고아 판정을
+    코드 근거로 철회했습니다. `docs/server-management/*`(명시적 미구현 제안),
+    `docs/security/findings.md`(기존 내용과 이번 세션 재확인 결과 일치)는 별도
+    수정 불필요로 판단했습니다. `docs/ui-dashboard/ui-design.md`·`docs/llm-wiki/`·
+    `docs/credentials/`는 알려진 특정 이슈만 부분 수정했으며 전체 문서를 절 단위로
+    정독하진 않았습니다 — 후속 세션에서 필요 시 이어서 진행합니다.
 
 ---
 
