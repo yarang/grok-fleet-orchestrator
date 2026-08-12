@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant U as 사용자
+    participant B as 브라우저
+    participant S as Server
+    U->>B: 대시보드 조회 중
+    B->>S: GET /api/overview (cookie)
+    S-->>B: 401 Unauthorized
+    B->>B: 전역 인터셉터 감지
+    B->>U: "세션이 만료되었습니다" 모달
+    U->>B: 다시 로그인 클릭
+    B->>S: GET /login
+    Note over B,S: 원래 URL을 ?next= 파라미터로 보존
+    B->>S: POST /api/auth/login (성공)
+    S-->>B: 302 → ?next= 원래 경로

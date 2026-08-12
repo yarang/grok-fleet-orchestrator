@@ -1,0 +1,16 @@
+flowchart TD
+    A[브라우저: fleet.agentthread.dev/] --> B{세션 쿠키}
+    B -->|유효| C[/ 대시보드 렌더]
+    B -->|없음/만료| D[/login 리다이렉트]
+    D --> E[이메일 + 비밀번호]
+    E --> F[POST /api/auth/login]
+    F --> G{응답}
+    G -->|200 + 쿠키| C
+    G -->|401| H[에러 표시 + 시도 카운트]
+    H --> I{5회 실패?}
+    I -->|Yes| J[15분 쿨다운]
+    I -->|No| E
+    G -->|429 rate limit| K[15분 대기]
+    J --> L[시간 경과]
+    K --> L
+    L --> E

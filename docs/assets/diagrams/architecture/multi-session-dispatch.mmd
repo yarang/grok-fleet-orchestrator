@@ -1,0 +1,19 @@
+flowchart TD
+    Start([dispatch req]) --> GetSession[session = sessions.get worker_id]
+    GetSession --> TryAcquire{session.try_acquire task_id<br/>max_concurrent 검사}
+    TryAcquire -->|용량 초과| RetCapacity[Err WorkerAtCapacity 반환]
+    TryAcquire -->|획득 성공| SpawnPrompt[spawn 비동기 작업]
+    SpawnPrompt --> ReturnOk[Ok 반환]
+    
+    subgraph Spawned Task [스폰된 비동기 태스크]
+        DoPrompt[acp.prompt 실행] --> MatchResult{결과 판정}
+        MatchResult -->|Ok prompt_id| SetPromptId[session.set_prompt_id task_id, prompt_id]
+        SetPromptId --> DrainBuffered[버퍼된 이벤트 emit]
+        
+        MatchResult -->|Err e| CheckConnClosed{e.contains 'ACP connection closed'?\nreader_loop 드레인 에러}
+        CheckConnClosed -- Yes --> DelegateSupervisor[supervisor의 fail_all에 처리를 위임]
+        CheckConnClosed -- No --> CompleteTask[session.complete task_id 호출]
+        CompleteTask --> CheckEmitOwner{Some 반환?\n내가 emit 소유권 획득}
+        CheckEmitOwner -- Yes --> EmitFailed[emit Failed error: e]
+        CheckEmitOwner -- No --> NormalExit[이미 fail_all이 처리함 - 종료]
+    end

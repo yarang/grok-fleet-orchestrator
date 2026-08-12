@@ -1,0 +1,20 @@
+flowchart TD
+    A[관리자: fleet CLI 실행] --> B[fleet admin bootstrap]
+    B --> C[OTP 6세그먼트 발급<br/>+ 부트스트랩 URL 출력]
+    C --> D[브라우저: fleet.agentthread.dev/bootstrap]
+    D --> E{시스템 상태}
+    E -->|이미 활성화| F[/login 으로 리다이렉트]
+    E -->|미활성화| G[OTP 입력]
+    G -->|유효| H[이메일 + 비밀번호 입력]
+    G -->|무효/만료| I[에러 + 새 OTP 안내]
+    I --> B
+    H --> J{비밀번호 강도}
+    J -->|< 3단계| K[강도 부족 에러]
+    K --> H
+    J -->|>= 3단계| L[Activate 버튼 활성화]
+    L --> M[POST /api/bootstrap/activate]
+    M --> N{서버 응답}
+    N -->|201 Created| O[세션 쿠키 발급]
+    N -->|400| I
+    O --> P[자동 로그인 → / 대시보드]
+    P --> Q[관리자 패널 사용 가능]

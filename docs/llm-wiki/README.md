@@ -25,5 +25,12 @@
 
 ---
 
-## 🚀 로드맵 정렬
-본 위키의 설계는 공식 개발 로드맵 **[34번 마일스톤: liteLLM 중앙 게이트웨이 통합 및 연동]**과 1:1로 매핑된다. 본 프록시 구조가 안착되면, 3단계의 [하드웨어 자가 치유] 및 에이전트 자동 추론 작업 시 벤더 사정에 얽매이지 않고 회복 탄력적인 LLM 공급 체인을 확보한다.
+## 🚀 로드맵 정렬 & 자율 엔진 연동
+본 위키의 설계는 공식 개발 로드맵 **[34번 마일스톤: liteLLM 중앙 게이트웨이 통합 및 연동]**과 1:1로 매핑됩니다. 특히, 오케스트레이터의 자율 동작을 제어하는 **[Autonomic Self-Healing Engine (Autonomy)](../architecture/overview.md#autonomic-self-healing-engine-autonomy)**과의 긴밀한 연동 설계가 반영되어 있습니다:
+
+1. **쿼터 인식 기반 자율 라우팅 (Quota-aware Autonomous Routing)**:
+   - OpenRouter(일 50회)나 Groq(낮은 TPM 한도)와 같은 무료 티어 API 사용 시, 쿼터 소진으로 인해 `429 Too Many Requests`나 `413 Payload Too Large` 에러가 발생할 수 있습니다.
+   - `AutonomicEngine`은 이를 모니터링하여 "워커 하드웨어 장애"와 "API 쿼터 소진"을 분석으로 구별해내고, 쿼터가 고갈된 모델 라벨을 가진 워커 노드들을 스케줄러 선택 후보에서 일시 배제하거나 유료/Fallback 공급자로 트래픽을 자동 우회(Self-Adaptive Routing)시킵니다.
+   - 이를 통해, API 쿼터 소진이 불필요하게 `CircuitBreaker`를 동작시켜 정상 작동 가능한 물리 워커 노드를 통째로 격리하는 문제를 사전에 자율 방어합니다.
+2. **중앙 집중식 Fallback 및 장애 제어**:
+   - 특정 LLM 공급자 백엔드가 장애를 일으킬 때, `AutonomicEngine`이 이를 인지하고 liteLLM 프록시 게이트웨이와 상호 작용하여 사전에 수립된 모델 폴백 경로로 에이전트 요청을 다이내믹하게 스위칭합니다.

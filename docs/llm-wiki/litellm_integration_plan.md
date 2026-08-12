@@ -67,33 +67,7 @@ liteLLM 게이트웨이를 중앙에 두고 워커의 `base_url`만 게이트웨
 
 ## 2. 아키텍처 개요 (실제 배포)
 
-```
-                         ┌─────────────────────────────┐
-   grok CLI (워커 호스트) │  ~/.grok/config.toml         │
-   예: ec1                │  base_url = fleet.agentthread│
-                          │  .dev/api-gateway            │
-                          │  api_key = LITELLM_MASTER_KEY│
-                          └───────────────┬──────────────┘
-                                          │ HTTPS
-                                          ▼
-                          ┌──────────────────────────────┐
-   arm2 (오케스트레이터    │ nginx (fleet.agentthread.dev) │
-   호스트)                 │  /api-gateway/ → 127.0.0.1:4000│
-                          └───────────────┬──────────────┘
-                                          │ 내부 루프백만
-                                          ▼
-                          ┌──────────────────────────────┐
-                          │ litellm-gateway.service        │
-                          │  (venv, systemd, 127.0.0.1:4000)│
-                          │  config.yaml: model_list +      │
-                          │  groq_compat 콜백                │
-                          └──┬─────────┬─────────┬─────────┘
-                             │         │         │
-                     gemini/ │  GLM-5.1│  groq/  │
-                     ...     │  (z.ai) │  llama.. │
-                             ▼         ▼         ▼
-                        Gemini API   z.ai API   Groq API
-```
+![liteLLM Integration Architecture Diagram](../assets/diagrams/llm-wiki/litellm-integration-architecture.mmd)
 
 핵심 설계 결정 세 가지:
 

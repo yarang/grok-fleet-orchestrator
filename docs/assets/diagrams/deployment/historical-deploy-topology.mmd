@@ -1,0 +1,27 @@
+graph TD
+    subgraph Local [Mac 로컬]
+        LocalMac[Local Mac<br/>• CLOUDFLARE_API_TOKEN<br/>• cargo-zigbuild aarch64]
+    end
+
+    subgraph CF [Cloudflare]
+        DNS[agentthread.dev zone 2ea31993...<br/>A: fleet.agentthread.dev -> 168.107.38.139 DNS-only]
+    end
+
+    subgraph OrchServer [oci-yarangdev-arm2 orchestrator 168.107.38.139]
+        DB[(PostgreSQL 16 fleet DB)]
+        FleetServ[fleet.service /usr/local/bin/fleet]
+        Caddy[Caddy TLS 종단<br/>/ws, /ws/* -> 127.0.0.1:2419<br/>/* -> 127.0.0.1:8081]
+    end
+
+    subgraph WorkerServer [oci-yarangdev-arm1 worker]
+        WorkerServ[fleet-worker.service]
+        TunnelServ[fleet-tunnel.service<br/>autossh -R 2419:127.0.0.1:2419 arm2]
+        GrokAgent[grok agent serve<br/>bind 0.0.0.0:2419<br/>secret: hex]
+    end
+
+    LocalMac -->|DNS 관리 Cloudflare API| DNS
+    DNS -->|fleet.agentthread.dev| Caddy
+    Caddy -->|/* HTTP API| FleetServ
+    Caddy -->|/ws ACP WebSocket| TunnelServ
+    TunnelServ -->|Reverse SSH Tunnel autossh -R 2419| Caddy
+    OrchServer -->|SSH trust: arm2 ubuntu 키 등록| WorkerServer

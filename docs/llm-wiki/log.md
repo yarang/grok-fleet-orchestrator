@@ -189,3 +189,11 @@
   `examples/groq-compat/` ↔ 배포본(`/opt/litellm-gateway/groq_compat/`) 수동 동기화
   자동화 미착수. Phase 2(DB-backed 예산 관리, Fallback 라우팅)는 `litellm_integration_plan.md`
   §8에 로드맵으로만 기록.
+
+## 2026-08-12 — ingest — 자율 자가치유 제어 엔진(AutonomicEngine) 구현 및 LLM Gateway 쿼터 연동 설계
+
+- **조치**:
+  - `crates/fleet-scheduler/src/autonomic.rs`를 신설하여 MAPE-K 피드백 루프 기반의 자율 동작 및 자가치유 엔진(`AutonomicEngine`)을 구현했습니다.
+  - `crates/fleet-scheduler/src/lib.rs` 및 `crates/fleet-cli/src/runtime.rs`를 갱신하여 `fleet serve` 기동 시 자율 엔진이 백그라운드 태스크로 자동 기동하도록 파이프라인을 완전히 결합했습니다.
+  - `docs/architecture/overview.md`에 자율 엔진 아키텍처 다이어그램 및 설계 명세를 추가했습니다.
+  - `docs/llm-wiki/README.md` 및 `index.md`를 갱신하여 무료 티어(OpenRouter, Groq) API 쿼터 소진(429/413) 시, 자율 엔진이 이를 "하드웨어 고장"과 구별하여 "API 쿼터 한도 도달"로 진단하고, 해당 워커 노드의 동적 우회(Self-Adaptive Routing) 및 Fallback 제어를 자율 수행하는 연동 설계를 반영했습니다.

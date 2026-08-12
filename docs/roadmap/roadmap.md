@@ -165,9 +165,20 @@
     
     **구현 완료 (2026-08-07)**: `crates/fleet-core/src/config.rs`에 `FLEET_LLM_GATEWAY_URL`의 유효한 HTTP/HTTPS URL 스킴 검증 필터를 추가하고 단위 테스트 2개를 작성하여 무결성을 확보했습니다. 또한 `docker-compose.yml`에 포트 4000번 기반의 `litellm` 컨테이너 서비스를 추가하고, 오케스트레이터 서비스가 기동 시 이를 자동 바인딩하도록 연동시켰으며, `examples/litellm-config.yaml` 템플릿 설정을 구축했습니다.
 
+## 신규 항목 (2026-08-11 추가)
+
+35. ✅ **docs 디렉토리 내 다이어그램 Mermaid 변환 및 문서 정합성 개선** (P2, 문서화) — 해결됨 (2026-08-11). docs 내 ASCII 다이어그램 16개를 Mermaid로 마이그레이션하고, `/api-gateway/` Nginx 설정 누락 해결 및 `single-server.md` 내 폐기된 Docker 스펙 정리 완료.
+36. ⏳ **mTLS 인증서 자동 회전(Auto-Rotation) 정책 도입** (P1/P2, 보안/운영) — 사설 CA 기반 mTLS 인증서 만료 시 서비스 중단 없이 교체하기 위해 TLS 컨텍스트 동적 리로드(File Watcher) 또는 중앙 인증서 자동 배포 설계.
+37. ⏳ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — `--inventory` 모드에서 `InventoryWorker` 스키마 확장을 적용하여 mTLS 설정 및 인증서 자동 주입 파이프라인 구현.
+38. ⏳ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) — 네트워크 일시 순단 시 태스크가 즉시 Failed로 유실되지 않도록 자동 재스케줄러 큐 및 Stale 상태 격리를 위한 DLQ 메커니즘 도입.
+39. ⏳ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) — 대규모 배포 시 첫 SSH 연결의 MITM 방어를 위해 `fleet provision` 도구 실행 시 SSH 호스트 키 사전 수집/검증 기능 구현.
+40. ⏳ **`xai-circuit-breaker` 기반 고성능 회로 차단기 도입** (P2, 성능/안정성) — `grok-build` 분석에 따라 슬라이딩 윈도우 실패율 측정, `AtomicU8/AtomicBool`을 이용한 lock-free `is_open()` 핫패스 최적화 및 `probe_claimed_at_millis`를 이용한 Lost Probe 캔슬 안전장치 설계 도입.
+41. ⏳ **WebSocket Demuxer 패턴을 적용한 동시 다중 세션 고도화** (P2, 네트워크) — `xai-computer-hub-sdk` 분석에 근거해 단일 WebSocket 연결 상에서 ACP 프롬프트 세션의 순서 보장 및 Head-of-Line Blocking 방지를 위한 RPC Frame Demultiplexer 구현.
+42. ⏳ **워커 노드 연동 분산 OTLP Tracing Context Propagation 구축** (P2, 모니터링) — `xai-tracing` 기법을 차용해 오케스트레이터와 `fleet-worker` 간 WebSocket 통신 시 `traceparent` 스팬 캐리어를 전파하여 E2E 분산 추적 시각화 완성.
+
 ---
 
-## 현재 진행 상황 (2026-08-01 기준)
+## 현재 진행 상황 (2026-08-11 기준)
 
 > **P0·P1은 전부 해소됐다.** 남은 항목은 모두 P2 이하다.
 
@@ -175,7 +186,7 @@
 | 담당 | 항목 |
 |---|---|
 | security | #32 (`/admin/*` RBAC — 3개 페이지 일괄) |
-| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31 |
+| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42 |
 
 ### 호환성 주의 — `/api/audit` 의미 변경 (`8755c0d`)
 `/api/audit`가 반환하는 데이터가 **바뀌었다**. 기존에는 작업·워커 생명주기 이벤트(`events`

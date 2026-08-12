@@ -4,20 +4,7 @@
 > 제안서이며 아직 구현되지 않았다** — 상태는 [`../roadmap/roadmap.md`](../roadmap/roadmap.md)와
 > [`../roadmap/conflict-analysis.md`](../roadmap/conflict-analysis.md)에서 추적한다.
 
-```mermaid
-flowchart LR
-    subgraph 감지
-        M1[UFW/방화벽 드리프트] --> T[중앙 이상 신호 수집]
-        M2[GPU 스로틀링/스톨] --> T
-        M3[설정파일 드리프트] --> T
-        M4[SMART/디스크 수명] --> T
-        M5[네트워크 레이턴시 편차] --> T
-    end
-    T --> J{서킷 브레이커 트립?}
-    J -->|Yes| K[worker_status DB 갱신 + 오케스트레이터 동기화]
-    J -->|No| L[대시보드 경고만 표시]
-    K --> N[환경별 자가치유 액션]
-```
+![Server Management Flowchart](../assets/diagrams/server-management/overview-flowchart.mmd)
 
 | 문서 | 다루는 범위 |
 |---|---|

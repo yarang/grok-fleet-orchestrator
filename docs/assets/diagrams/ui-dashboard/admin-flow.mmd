@@ -1,0 +1,11 @@
+flowchart TD
+    A[관리자 로그인] --> B[/admin/users]
+    B --> C[+ Invite user]
+    C --> D[이메일 + 역할 선택]
+    D --> E[OTP 발급 → 클립보드]
+    E --> G[초대 이메일/Slack 전송]
+    G --> H[신규 사용자 /bootstrap 접속]
+    H --> I[OTP + 본인 정보 입력]
+    I --> J[계정 생성]
+    J --> K[/admin/activity에서 이벤트 확인]
+    K --> L[세션 활성 모니터링]

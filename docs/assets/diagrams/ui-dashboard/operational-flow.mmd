@@ -1,0 +1,13 @@
+flowchart LR
+    A[/ Overview] -->|워커 카드 클릭| B[/workers]
+    A -->|Worker 행 클릭| C[/workers/:id]
+    C -->|heartbeat 이상 발견| D[Transport 카드 검사]
+    D -->|mTLS 만료 임박| E[인증서 갱신 절차]
+    D -->|정상| F[과거 태스크 확인]
+    A -->|failed 태스크 발견| G[/tasks?status=failed]
+    G --> H[행 확장 → 타임라인]
+    H -->|payload 확인| I[원인 진단]
+    I -->|재시도 필요| J[재시도 액션]
+    J -->|operator+ 권한| K[재실행]
+    J -->|viewer 권한| L[403 — 관리자 요청]
+    A -->|이벤트 클릭| M[/admin/activity 딥링크]

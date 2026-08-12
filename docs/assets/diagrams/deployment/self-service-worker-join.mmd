@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    actor Admin as Orchestrator Admin
+    participant Orch as Orchestrator Server
+    actor Worker as Worker Machine (New)
+
+    Admin->>Orch: fleet token issue (--max-uses 1, --expires-in-secs 3600)
+    Orch-->>Admin: bootstrap_token 발급 (fleet_xxxx...)
+    Admin->>Worker: 슬랙/이메일 등으로 토큰 전달 (secure channel)
+    
+    Note over Worker: fleet-worker join \<br/>--orchestrator-url https://...\<br/>--token fleet_xxxx...\<br/>--config-out /etc/fleet/worker.toml\<br/>--start
+    Worker->>Orch: POST /v1/workers/join (token, name, labels, dynamic config)
+    Orch->>Orch: Token atomic 검증 및 use_count 갱신
+    Orch-->>Worker: 200 OK + worker_config_toml
+    
+    Note over Worker: worker.toml atomic 기록 (tmp write & rename)<br/>exec fleet-worker --config /etc/fleet/worker.toml
+    Worker->>Orch: /v1/workers/register or heartbeat (Heartbeat 루프 가동)

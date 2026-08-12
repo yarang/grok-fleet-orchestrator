@@ -91,6 +91,19 @@ server {
         proxy_read_timeout 120s;
         proxy_send_timeout 120s;
     }
+
+    # 3. liteLLM API 게이트웨이 라우팅 (litellm_integration_plan.md 연동)
+    location /api-gateway/ {
+        proxy_pass http://127.0.0.1:4000/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # 스트리밍 응답 지원을 위해 버퍼 비활성화 (Gemini 등 LLM 응답 실시간 전송)
+        proxy_buffering off;
+        proxy_read_timeout 600s; # 긴 추론 세션 대비
+    }
 }
 ```
 

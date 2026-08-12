@@ -282,22 +282,30 @@ CREATE TABLE host_events (
 CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 ```
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Hosts                               [↻ Refresh]      │
-│ Inventory + agent health                            │
-├──────────────────────────────────────────────────────┤
-│ Metric cards: Total 4 | Online 3 | Ready 1 | Failed 0 │
-├──────────────────────────────────────────────────────┤
-│ Host table                                          │
-│ host | grok | worker | status | region | history   │
-│ 10.0.1.10 | 0.2.112 | v0.1.0 | online | ap-ne-2 | [12 ev] │
-│ 10.0.1.11 | 0.2.112 | v0.1.0 | online | ap-ne-2 | [8 ev] │
-│ 10.0.2.20 | — | — | ready | us-west | [3 ev]       │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Hosts / Inventory + agent health</text>
+  <rect x="40" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="240" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="440" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="640" y="112" width="220" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="198" width="820" height="240" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <line x1="60" y1="230" x2="820" y2="230" stroke="#e0e0e0" />
+  <line x1="60" y1="270" x2="820" y2="270" stroke="#e0e0e0" />
+  <line x1="60" y1="310" x2="820" y2="310" stroke="#e0e0e0" />
+  <line x1="60" y1="350" x2="820" y2="350" stroke="#e0e0e0" />
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Total 4</text>
+  <text x="260" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Online 3</text>
+  <text x="460" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Ready 1</text>
+  <text x="660" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Failed 0</text>
+  <text x="60" y="216" font-family="Inter, sans-serif" font-size="14" fill="#444">Host table</text>
+  <text x="60" y="256" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.10 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [12 ev]</text>
+  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.11 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [8 ev]</text>
+  <text x="60" y="336" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.2.20 • — • — • ready • us-west • [3 ev]</text>
+</svg>
 
 #### 인터랙션
 
@@ -308,6 +316,30 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 | ↻ Refresh 버튼    | 즉시 폴링 트리거                                     |
 | Status pill       | online(green) / ready(amber) / failed(red) / unknown(gray) |
 | 데이터 갱신 주기  | 10s 폴링                                             |
+
+#### SSH Config 자동 임포트 UI 흐름 (New in v0.2)
+
+호스트 인벤토리 우측 상단의 `[Import SSH Config]` 버튼을 통해 로컬 설정을 임포트하고 데이터베이스화하는 화면 설계 스펙입니다.
+
+1. **임포트 진입 버튼**:
+   - 위치: `/hosts` sub-nav 우측 끝의 primary pill CTA 버튼 옆.
+   - 레이블: `Import SSH Config` (Action Blue 배경의 pill button).
+2. **Import Configuration 모달**:
+   - 모달 활성화 시 흐릿한 백드롭 필터(backdrop-filter: blur) 처리.
+   - **File Selector**: 드래그 앤 드롭이 가능한 파일 업로드 영역(`Drop ~/.ssh/config here or click to upload`).
+   - **Text Area**: 복사-붙여넣기 탭을 누르면 나타나는 평문 텍스트 입력창.
+   - **YAML Metadata Selector (Optional)**: 호스트별 작업 매칭용 라벨을 결합하기 위해 `labels.yaml` 메타데이터 파일을 추가로 첨부할 수 있는 보조 업로드 영역 제공.
+   - **동작**: 사용자가 설정을 첨부하거나 붙여넣은 후 `[Parse & Preview]` 버튼을 클릭.
+3. **가져오기 미리보기 (Pre-import Preview)**:
+   - 파싱 완료 시 모달 내에 동적으로 파싱된 호스트 목록 테이블을 렌더링.
+   - 체크박스를 제공하여 특정 호스트(예: local loopback 등)는 임포트 대상에서 개별 제외할 수 있도록 지원.
+   - 호스트 별칭(Host Alias), 실제 목적지 IP(HostName), SSH 계정명(User), Port, 키 파일(IdentityFile) 경로가 표시됨.
+   - **Dynamic Label Column**: 각 호스트 행의 우측에 `+ Add Label` 입력 폼 및 Chip 컨테이너를 두어, 가져오기 실행 전에 웹 UI에서 마우스 클릭과 텍스트 입력만으로 라벨 메타데이터(예: `arch=arm64`, `gpu=true`)를 동적으로 커스텀 주입할 수 있는 인라인 에디터 내장.
+   - 최종 `[Confirm & Import]` (Pill CTA)를 누르면 `inventory_hosts` 테이블에 적재되고, 모달이 닫히며 호스트 목록 테이블이 실시간 리로드됨.
+4. **키 파일(IdentityFile) 가져오기 정책 설정**:
+   - 모달 하단에 `Private Key Access Option` 라디오 버튼 그룹을 제공하여 보안 취향에 맞춘 수집 레벨을 결정할 수 있도록 설계합니다.
+     - **Option 1: 자동 가져오기 (Auto Import)**: `.ssh/config` 내에 검출된 `IdentityFile` 로컬 경로를 오케스트레이터 백엔드가 자동으로 읽어들여 비밀키의 내용을 데이터베이스에 암호화하여 즉시 등록합니다. (추가 수동 액션 없이 100% 원클릭 프로비저닝 가능)
+     - **Option 2: 수동 선택적 허용 (Manual Upload On Provision)**: 가져오기 시점에는 키 경로 텍스트만 기록하고, 이후 `/hosts` 페이지에서 실제 프로비저닝 버튼을 누르는 순간 브라우저 모달로 해당 SSH 개인키 파일을 사용자가 수동 지목/업로드하여 연동을 완료하도록 제어합니다.
 
 #### 빈 상태
 
@@ -323,27 +355,21 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 **목적**: 단일 호스트의 전체 히스토리 — 프로비저닝, grok 설치/업그레이드,
 워커 시작/중지, 헬스체크 결과를 타임라인으로 표시.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ ← Hosts / worker-ec1 (10.0.1.10)   [● online]       │
-├──────────────────────────────────────────────────────┤
-│ Identity                                            │
-│ worker-ec1 • 10.0.1.10 • ubuntu:22 • ap-northeast-2 │
-├──────────────────────────────────────────────────────┤
-│ Software versions                                   │
-│ grok CLI 0.2.112 | fleet-worker v0.1.0             │
-├──────────────────────────────────────────────────────┤
-│ Worker registration                                 │
-│ Worker ID ... | Circuit closed | Active tasks 0/4   │
-├──────────────────────────────────────────────────────┤
-│ Event history                                       │
-│ • 2026-07-27 14:30:12 worker_started                │
-│ • 2026-07-27 14:28:05 grok_upgraded                 │
-│ • 2026-07-27 14:15:33 provisioned                   │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Hosts / worker-ec1 (10.0.1.10) • online</text>
+  <rect x="40" y="112" width="820" height="84" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="214" width="500" height="180" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="560" y="214" width="300" height="180" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="414" width="820" height="90" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="150" font-family="Inter, sans-serif" font-size="14" fill="#444">Identity / software versions / registration details</text>
+  <text x="60" y="252" font-family="Inter, sans-serif" font-size="14" fill="#444">Worker heartbeat / circuit state</text>
+  <text x="580" y="252" font-family="Inter, sans-serif" font-size="14" fill="#444">Connection / current task panel</text>
+  <text x="60" y="451" font-family="Inter, sans-serif" font-size="14" fill="#444">Event history timeline</text>
+</svg>
 
 #### 인터랙션
 
@@ -377,23 +403,23 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: 태스크 생명주기 추적, 실패 디버깅.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Tasks                     [filters]      [↻]         │
-├──────────────────────────────────────────────────────┤
-│ Stats: pending 3 | dispatched 1 | completed 47 | failed 2 │
-├──────────────────────────────────────────────────────┤
-│ Task list                                           │
-│ b7e2 | arm2 | done | normal | 14:22 | 3.4s         │
-│ a8f3 | arm2 | done | normal | 14:21 | 4.2s         │
-│ 8d33 | —    | pending | normal | 14:19 | —        │
-├──────────────────────────────────────────────────────┤
-│ Selected task detail                                │
-│ timeline • payload • output • logs                  │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Tasks / filters / refresh</text>
+  <rect x="40" y="112" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="188" width="280" height="250" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="340" y="188" width="520" height="250" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Stats: pending 3 • dispatched 1 • completed 47 • failed 2</text>
+  <text x="60" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Task list</text>
+  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">b7e2 • arm2 • done • 14:22 • 3.4s</text>
+  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">a8f3 • arm2 • done • 14:21 • 4.2s</text>
+  <text x="60" y="334" font-family="Inter, sans-serif" font-size="13" fill="#111">8d33 • — • pending • 14:19 • —</text>
+  <text x="360" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Selected task detail</text>
+  <text x="360" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">Timeline • payload • output • logs</text>
+</svg>
 
 #### 인터랙션
 
@@ -412,21 +438,22 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: 쿠키 세션 발급.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ [Warm canvas]                                      │
-│ [F logo]                                           │
-│ Sign in to Fleet                                   │
-│ Email                                              │
-│ [admin@... ]                                       │
-│ Password                                           │
-│ [••••••••] [👁]                                    │
-│ [Sign in]                                          │
-│ Need access? Use bootstrap token                   │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="280" y="80" width="340" height="360" rx="18" fill="#ffffff" stroke="#e0e0e0" />
+  <circle cx="450" cy="140" r="36" fill="#0066cc" />
+  <text x="430" y="148" font-family="Inter, sans-serif" font-size="24" fill="#ffffff">F</text>
+  <text x="390" y="196" font-family="Inter, sans-serif" font-size="18" fill="#111">Sign in to Fleet</text>
+  <rect x="320" y="220" width="260" height="44" rx="8" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="320" y="286" width="260" height="44" rx="8" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="320" y="352" width="260" height="44" rx="9999px" fill="#0066cc" />
+  <text x="340" y="246" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Email</text>
+  <text x="340" y="312" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Password</text>
+  <text x="430" y="380" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" fill="#ffffff">Sign in</text>
+  <text x="346" y="418" font-family="Inter, sans-serif" font-size="12" fill="#0066cc">Need access? Use bootstrap token</text>
+</svg>
 
 #### 인터랙션
 
@@ -447,21 +474,27 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: 최초 관리자 계정 등록. 1회성.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Hero: Activate your control plane                  │
-├──────────────────────────────────────────────────────┤
-│ Bootstrap token                                    │
-│ [A7] [K2] [9X] [..] [..] [..]                      │
-├──────────────────────────────────────────────────────┤
-│ Email / Password                                   │
-│ [admin@agentthread.dev] [••••••••]                 │
-│ Role: administrator                                │
-│ [Activate control plane]                          │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="240" y="80" width="420" height="360" rx="18" fill="#ffffff" stroke="#e0e0e0" />
+  <text x="260" y="124" font-family="Inter, sans-serif" font-size="20" fill="#111">Activate your control plane</text>
+  <rect x="260" y="148" width="380" height="48" rx="8" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="260" y="220" width="40" height="40" rx="6" fill="#0066cc" />
+  <rect x="312" y="220" width="40" height="40" rx="6" fill="#0066cc" />
+  <rect x="364" y="220" width="40" height="40" rx="6" fill="#0066cc" />
+  <rect x="416" y="220" width="40" height="40" rx="6" fill="#d9d9d9" />
+  <rect x="468" y="220" width="40" height="40" rx="6" fill="#d9d9d9" />
+  <rect x="520" y="220" width="40" height="40" rx="6" fill="#d9d9d9" />
+  <rect x="260" y="290" width="380" height="44" rx="8" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="260" y="350" width="380" height="44" rx="8" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="260" y="410" width="380" height="44" rx="9999px" fill="#0066cc" />
+  <text x="274" y="176" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Bootstrap token</text>
+  <text x="274" y="316" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Email</text>
+  <text x="274" y="376" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Password</text>
+  <text x="450" y="438" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" fill="#ffffff">Activate control plane</text>
+</svg>
 
 #### 인터랙션
 
@@ -481,24 +514,22 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: RBAC 관리 패널.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Fleet Orchestrator       [Avatar YA] [Sign out]     │
-├──────────────────────────────────────────────────────┤
-│ Users & Roles                                      │
-│ [Total 3] [Active 2] [Admins 1] [Pending 0]        │
-├──────────────────────────────────────────────────────┤
-│ User table                                         │
-│ YA | Yarang | administrator | active | 2m ago      │
-│ JK | Jikang | operator | active | 1h ago          │
-│ MS | Minsu  | viewer | inactive | 3d ago          │
-├──────────────────────────────────────────────────────┤
-│ Permission matrix                                   │
-│ users:read | users:write | tasks:dispatch | ...    │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Fleet Orchestrator / Users &amp; Roles</text>
+  <rect x="40" y="112" width="820" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="188" width="820" height="220" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="424" width="820" height="90" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Total 3 • Active 2 • Admins 1 • Pending 0</text>
+  <text x="60" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">User table</text>
+  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">YA • Yarang • administrator • active • 2m ago</text>
+  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">JK • Jikang • operator • active • 1h ago</text>
+  <text x="60" y="334" font-family="Inter, sans-serif" font-size="13" fill="#111">MS • Minsu • viewer • inactive • 3d ago</text>
+  <text x="60" y="456" font-family="Inter, sans-serif" font-size="14" fill="#444">Permission matrix</text>
+</svg>
 
 #### 인터랙션
 
@@ -520,22 +551,21 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: 보안 컴플라이언스, 침해 탐지, 운영 회귀 분석.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Audit Log                                          │
-│ Filters: time | user | category | search           │
-├──────────────────────────────────────────────────────┤
-│ Metrics: events 1,247 | failed logins 3 | perm changes 1 │
-├──────────────────────────────────────────────────────┤
-│ Event list                                         │
-│ 02:09:37 | yaran | auth | session | ...           │
-│ 02:08:14 | syst  | tasks | task.dispatch | ...    │
-├──────────────────────────────────────────────────────┤
-│ Detail pane: JSON payload                          │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Audit Log / Filters</text>
+  <rect x="40" y="112" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="188" width="420" height="260" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="480" y="188" width="380" height="260" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Metrics: events 1,247 • failed logins 3 • perm changes 1</text>
+  <text x="60" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Event list</text>
+  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">02:09:37 • yaran • auth • session</text>
+  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">02:08:14 • syst • tasks • task.dispatch</text>
+  <text x="500" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Detail pane / JSON payload</text>
+</svg>
 
 #### 카테고리 컬러 코딩
 
@@ -556,21 +586,24 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 **목적**: MCP 도구 자가발견성, AI 클라이언트 연동 가이드.
 
-#### 레이아웃 (간소화된 ASCII)
+#### 레이아웃 (SVG wireframe)
 
-```text
-┌──────────────────────────────────────────────────────┐
-│ Fleet Orchestrator          [Sign out]              │
-├──────────────────────────────────────────────────────┤
-│ MCP Tools                                          │
-│ 7 tools exposed via JSON-RPC 2.0 stdio            │
-├──────────────────────────────────────────────────────┤
-│ Tool cards: workers.list | workers.inspect | tasks.dispatch │
-├──────────────────────────────────────────────────────┤
-│ Detail panel: fleet.tasks.dispatch                 │
-│ input schema | usage example | metrics            │
-└──────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Fleet Orchestrator / MCP Tools</text>
+  <rect x="40" y="112" width="820" height="64" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="320" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="600" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="40" y="332" width="820" height="160" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">7 tools exposed via JSON-RPC 2.0 stdio</text>
+  <text x="60" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">workers.list</text>
+  <text x="340" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">workers.inspect</text>
+  <text x="620" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">tasks.dispatch</text>
+  <text x="60" y="364" font-family="Inter, sans-serif" font-size="14" fill="#444">Detail panel: fleet.tasks.dispatch</text>
+  <text x="60" y="400" font-family="Inter, sans-serif" font-size="13" fill="#111">Input schema • usage example • metrics</text>
+</svg>
 
 ---
 
@@ -578,135 +611,33 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ### 4.1 온보딩 플로우 (최초 설치 직후)
 
-```mermaid
-flowchart TD
-    A[관리자: fleet CLI 실행] --> B[fleet admin bootstrap]
-    B --> C[OTP 6세그먼트 발급<br/>+ 부트스트랩 URL 출력]
-    C --> D[브라우저: fleet.agentthread.dev/bootstrap]
-    D --> E{시스템 상태}
-    E -->|이미 활성화| F[/login 으로 리다이렉트]
-    E -->|미활성화| G[OTP 입력]
-    G -->|유효| H[이메일 + 비밀번호 입력]
-    G -->|무효/만료| I[에러 + 새 OTP 안내]
-    I --> B
-    H --> J{비밀번호 강도}
-    J -->|< 3단계| K[강도 부족 에러]
-    K --> H
-    J -->|>= 3단계| L[Activate 버튼 활성화]
-    L --> M[POST /api/bootstrap/activate]
-    M --> N{서버 응답}
-    N -->|201 Created| O[세션 쿠키 발급]
-    N -->|400| I
-    O --> P[자동 로그인 → / 대시보드]
-    P --> Q[관리자 패널 사용 가능]
-```
+![Onboarding Flowchart](../assets/diagrams/ui-dashboard/onboarding-flow.mmd)
 
 ### 4.2 일반 로그인 플로우
 
-```mermaid
-flowchart TD
-    A[브라우저: fleet.agentthread.dev/] --> B{세션 쿠키}
-    B -->|유효| C[/ 대시보드 렌더]
-    B -->|없음/만료| D[/login 리다이렉트]
-    D --> E[이메일 + 비밀번호]
-    E --> F[POST /api/auth/login]
-    F --> G{응답}
-    G -->|200 + 쿠키| C
-    G -->|401| H[에러 표시 + 시도 카운트]
-    H --> I{5회 실패?}
-    I -->|Yes| J[15분 쿨다운]
-    I -->|No| E
-    G -->|429 rate limit| K[15분 대기]
-    J --> L[시간 경과]
-    K --> L
-    L --> E
-```
+![Login Flowchart](../assets/diagrams/ui-dashboard/login-flow.mmd)
 
 ### 4.3 일반 운영 플로우 (모니터링 → 디버깅)
 
-```mermaid
-flowchart LR
-    A[/ Overview] -->|워커 카드 클릭| B[/workers]
-    A -->|Worker 행 클릭| C[/workers/:id]
-    C -->|heartbeat 이상 발견| D[Transport 카드 검사]
-    D -->|mTLS 만료 임박| E[인증서 갱신 절차]
-    D -->|정상| F[과거 태스크 확인]
-    A -->|failed 태스크 발견| G[/tasks?status=failed]
-    G --> H[행 확장 → 타임라인]
-    H -->|payload 확인| I[원인 진단]
-    I -->|재시도 필요| J[재시도 액션]
-    J -->|operator+ 권한| K[재실행]
-    J -->|viewer 권한| L[403 — 관리자 요청]
-    A -->|이벤트 클릭| M[/admin/activity 딥링크]
-```
+![Operational Flowchart](../assets/diagrams/ui-dashboard/operational-flow.mmd)
 
 ### 4.4 관리자 플로우 (신규 사용자 초대 → 권한 검증)
 
-```mermaid
-flowchart TD
-    A[관리자 로그인] --> B[/admin/users]
-    B --> C[+ Invite user]
-    C --> D[이메일 + 역할 선택]
-    D --> E[OTP 발급 → 클립보드]
-    E --> F[초대 이메일/Slack 전송]
-    F --> G[신규 사용자 /bootstrap 접속]
-    G --> H[OTP + 본인 정보 입력]
-    H --> I[계정 생성]
-    I --> J[/admin/activity에서 이벤트 확인]
-    J --> K[세션 활성 모니터링]
-```
+![Admin Flowchart](../assets/diagrams/ui-dashboard/admin-flow.mmd)
 
 ### 4.5 에지 케이스 플로우
 
 #### 세션 만료 (SSE 연결 중)
 
-```mermaid
-sequenceDiagram
-    participant U as 사용자
-    participant B as 브라우저
-    participant S as Server
-    U->>B: 대시보드 조회 중
-    B->>S: GET /api/overview (cookie)
-    S-->>B: 401 Unauthorized
-    B->>B: 전역 인터셉터 감지
-    B->>U: "세션이 만료되었습니다" 모달
-    U->>B: 다시 로그인 클릭
-    B->>S: GET /login
-    Note over B,S: 원래 URL을 ?next= 파라미터로 보존
-    B->>S: POST /api/auth/login (성공)
-    S-->>B: 302 → ?next= 원래 경로
-```
+![Session Timeout Sequence Diagram](../assets/diagrams/ui-dashboard/session-timeout-sequence.mmd)
 
 #### 권한 부족 (403 Forbidden)
 
-```mermaid
-sequenceDiagram
-    participant U as viewer 사용자
-    participant B as 브라우저
-    participant S as Server
-    U->>B: /admin/users 접속
-    B->>S: GET /admin/users (cookie)
-    S-->>B: 403 Forbidden
-    B->>U: "권한이 부족합니다" 페이지
-    U->>B: 관리자에게 요청 링크 복사
-    Note over U,B: 클립보드: "admin@... 님, /admin/users 접근 권한을 요청합니다"
-```
+![Permission Denied Sequence Diagram](../assets/diagrams/ui-dashboard/permission-denied-sequence.mmd)
 
 #### CF Access 연동 시나리오 (이중 인증)
 
-```mermaid
-flowchart LR
-    A[브라우저] --> B[CF Edge]
-    B -->|세션 없음| C[CF Access 로그인 페이지]
-    C -->|이메일 OTP/Google| D[CF Access JWT 발급]
-    D --> E[fleet.agentthread.dev]
-    E --> F[Caddy: CF-JWT 헤더 전달]
-    F --> G[fleet serve]
-    G -->|JWT 서명 검증| H{유효?}
-    H -->|Yes| I[fleet 세션 쿠키 자동 발급]
-    H -->|No| J[401 + CF 재인증]
-    I --> K[/ 대시보드]
-```
+![CF Access Flowchart](../assets/diagrams/ui-dashboard/cf-access-flow.mmd)
 
 ---
 
@@ -716,13 +647,20 @@ flowchart LR
 
 Apple tile 기반 페이지 상단에 고정 헤더:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ [logo] Fleet Orchestrator    [Overview][Workers][Tasks]    │
-│                              [Admin: Users][Audit][Tools]   │
-│                                       [Avatar] [Sign out]   │
-└─────────────────────────────────────────────────────────────┘
-```
+<svg viewBox="0 0 900 220" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="180" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="140" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="60" y="60" width="120" height="28" rx="9999px" fill="#0066cc" />
+  <text x="90" y="78" text-anchor="middle" font-family="Inter, sans-serif" font-size="13" fill="#ffffff">Fleet Orchestrator</text>
+  <rect x="220" y="60" width="70" height="24" rx="9999px" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="306" y="60" width="76" height="24" rx="9999px" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="394" y="60" width="64" height="24" rx="9999px" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="620" y="60" width="116" height="24" rx="9999px" fill="#fafafc" stroke="#e0e0e0" />
+  <rect x="752" y="60" width="78" height="24" rx="9999px" fill="#fafafc" stroke="#e0e0e0" />
+  <circle cx="790" cy="126" r="24" fill="#0066cc" />
+  <text x="790" y="132" text-anchor="middle" font-family="Inter, sans-serif" font-size="14" fill="#ffffff">YA</text>
+  <text x="640" y="132" font-family="Inter, sans-serif" font-size="13" fill="#111">Sign out</text>
+</svg>
 
 - **로고 클릭**: 항상 `/`로 복귀
 - **주요 링크**: Overview, Workers, Tasks (viewer+)
@@ -733,11 +671,18 @@ Apple tile 기반 페이지 상단에 고정 헤더:
 
 상세 페이지에서만 표시:
 
-```
-← Workers / arm2-prod           [● online]
-← Tasks / task_b7e2             [● completed]
-← Admin / Users / jikang        [operator]
-```
+<svg viewBox="0 0 900 180" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="140" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="100" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="15" fill="#111">← Workers / arm2-prod</text>
+  <circle cx="260" cy="68" r="6" fill="#2ea44f" />
+  <text x="280" y="72" font-family="Inter, sans-serif" font-size="13" fill="#444">online</text>
+  <text x="60" y="104" font-family="Inter, sans-serif" font-size="15" fill="#111">← Tasks / task_b7e2</text>
+  <circle cx="260" cy="100" r="6" fill="#0066cc" />
+  <text x="280" y="104" font-family="Inter, sans-serif" font-size="13" fill="#444">completed</text>
+  <text x="60" y="136" font-family="Inter, sans-serif" font-size="15" fill="#111">← Admin / Users / jikang</text>
+  <text x="280" y="136" font-family="Inter, sans-serif" font-size="13" fill="#444">operator</text>
+</svg>
 
 뒤로 가기 버튼(←)은 항상 부모 목록으로 복귀.
 

@@ -1,0 +1,35 @@
+graph TD
+    subgraph "External Access"
+        Client[AI Client: Cursor / Claude Code] -->|HTTPS / WSS| CF_Tunnel[Cloudflare Tunnel]
+    end
+
+    subgraph "Main Controller Server (Static Public IP)"
+        CF_Tunnel -->|Local Port Pass| ReverseProxy[Nginx Gateway]
+        
+        subgraph "Native Layer (Host OS)"
+            ReverseProxy -->|Port 8081/8082| FleetServe[fleet serve \n Native systemd]
+            autosshd[SSH Daemon / autossh endpoint]
+        end
+
+        subgraph "Docker Container Layer"
+            FleetServe -->|Port 5432| PgDB[(PostgreSQL 16)]
+            FleetServe -->|OpenAI API Call| LiteLLM[liteLLM Gateway]
+            LiteLLM -->|Port 5432| PgDB
+        end
+    end
+
+    subgraph "Worker Machine 01 (Private Net)"
+        subgraph "Services"
+            WorkerDaemon01[fleet-worker \n Native systemd]
+            MtlsProxy01[MtlsProxy]
+            GrokAgent01[grok agent serve]
+        end
+        WorkerDaemon01 -->|Manage| GrokAgent01
+        MtlsProxy01 -->|Decrypt & Forward| GrokAgent01
+    end
+
+    %% Connections
+    autosshd <-->|Reverse SSH Tunnel| WorkerDaemon01
+    FleetServe <-->|mTLS / Secure ACP| MtlsProxy01
+    GrokAgent01 -->|API completion request| LiteLLM
+    LiteLLM -->|Consolidated Egress IP| ExtAPI[External Model Providers: \n OpenAI / Anthropic / Gemini]

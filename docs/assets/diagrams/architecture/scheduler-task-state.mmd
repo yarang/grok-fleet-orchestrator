@@ -1,0 +1,7 @@
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Dispatched
+    Dispatched --> Completed
+    Dispatched --> Failed
+    Dispatched --> Cancelled
+    Completed --> Cancelled

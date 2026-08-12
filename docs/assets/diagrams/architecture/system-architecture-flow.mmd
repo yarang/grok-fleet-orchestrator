@@ -1,0 +1,33 @@
+graph TD
+    subgraph Clients [AI 코딩 클라이언트]
+        Client[grok build / Claude Code / Cursor / Codex / Gemini CLI / ...]
+    end
+
+    subgraph Orchestrator [Orchestrator - 단일 Rust 바이너리]
+        subgraph Components [진입점]
+            MCP[fleet-mcp<br/>7 tools]
+            API[fleet-api<br/>REST + auth /metrics]
+            Dash[fleet-dash<br/>HTML + SSE]
+            CLI[fleet-cli<br/>workers/tasks/...]
+        end
+        
+        Scheduler[fleet-scheduler<br/>• WorkerSelector hint+labels<br/>• CircuitBreaker 3-state<br/>• Dispatcher event loop<br/>• HealthChecker]
+        Store[fleet-store Store trait<br/>• PgStore<br/>• migrations sqlx<br/>• LISTEN/NOTIFY]
+        
+        Components --> Scheduler
+        Scheduler --> Store
+    end
+
+    DB[(PostgreSQL<br/>fleet_dev DB)]
+    
+    Client -->|MCP JSON-RPC stdio 또는 HTTP| Components
+    Store --> DB
+
+    subgraph Workers [워커 노드]
+        WorkerA[Worker A Linux<br/>grok serve + cloudflared]
+        WorkerN[Worker N Linux<br/>grok serve + cloudflared]
+    end
+
+    WorkerA -->|HTTP heartbeat| API
+    WorkerN -->|HTTP heartbeat| API
+    DB -.->|heartbeat status sync| Workers

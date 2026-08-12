@@ -6,45 +6,7 @@
 
 ## 인프라 토폴로지
 
-```
-┌────────────────────────────────────────────────────────────────┐
-│ Mac (로컬)                                                       │
-│ - ~/.config/cloudflare/.env  (CLOUDFLARE_API_TOKEN, Mac-only)   │
-│ - 크로스컴파일 환경 (cargo-zigbuild, aarch64-unknown-linux-gnu) │
-└────────────────────────────────────────────────────────────────┘
-                            │
-                            │ DNS 관리 (Cloudflare API)
-                            ▼
-        agentthread.dev (zone 2ea31993...)
-        └─ A: fleet.agentthread.dev → 168.107.38.139 (DNS-only)
-
-┌────────────────────────────────────────────────────────────────┐
-│ oci-yarangdev-arm2  (168.107.38.139)  — orchestrator            │
-│ - Postgres 16 (fleet DB)                                        │
-│ - fleet.service (v0.1.0 + f5205ab 패치, /usr/local/bin/fleet)   │
-│ - Caddy (TLS 종단, fleet.agentthread.dev)                       │
-│   /ws, /ws/* → 127.0.0.1:2419  (역방향 SSH 터널 endpoint)       │
-│   /*         → 127.0.0.1:8081  (HTTP API)                       │
-│ - fleet-tunnel.service 없음 (터널은 arm1에서 arm2로 향함)       │
-│                                                                 │
-│ SSH trust: arm2의 ubuntu 키가 arm1의 authorized_keys에 등록     │
-└────────────────────────────────────────────────────────────────┘
-                            ▲
-                            │ Reverse SSH tunnel (autossh -R 2419)
-                            │
-┌────────────────────────────────────────────────────────────────┐
-│ oci-yarangdev-arm1  — worker                                    │
-│ - fleet-worker.service (/usr/local/bin/fleet-worker)            │
-│ - fleet-tunnel.service (autossh -R 2419:127.0.0.1:2419 arm2)    │
-│ - grok agent serve --bind 0.0.0.0:2419 --secret <hex>           │
-│ - /etc/fleet/worker.toml:                                       │
-│     orchestrator_url = "https://fleet.agentthread.dev"          │
-│     bootstrap_token  = "<WORKER_TOKEN>"                         │
-│     labels = {}  (v0.1.0 직렬화 버그 회피)                      │
-│ - grok 바이너리: /usr/local/bin/grok → ~/.grok/bin/grok (symlink)│
-│ - OCI Security List: arm2 → arm1:2419 차단 → 터널로 우회        │
-└────────────────────────────────────────────────────────────────┘
-```
+![Historical Deploy Infrastructure Topology](../../assets/diagrams/deployment/historical-deploy-topology.mmd)
 
 ## 현재 상태 (동작)
 

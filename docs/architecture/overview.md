@@ -6,54 +6,7 @@
 
 ## TL;DR
 
-```text
-┌──────────────────────────────────────────────────────────────────┐
-│                        AI 코딩 클라이언트                          │
-│  grok build │ Claude Code │ Cursor │ Codex │ Gemini CLI │ ...     │
-└───────────────────────┬──────────────────────────────────────────┘
-                        │  MCP JSON-RPC (stdio) 또는 HTTP
-                        ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    Orchestrator (단일 Rust 바이너리)               │
-│  ┌─────────────┐ ┌─────────────┐ ┌──────────────┐ ┌───────────┐ │
-│  │ fleet-mcp   │ │ fleet-api   │ │ fleet-dash   │ │ fleet-cli │ │
-│  │ 7 tools     │ │ REST + auth │ │ HTML + SSE   │ │ workers/  │ │
-│  │             │ │ /metrics    │ │              │ │ tasks/... │ │
-│  └──────┬──────┘ └──────┬──────┘ └──────┬───────┘ └─────┬─────┘ │
-│         │               │              │                │       │
-│         └───────────────┼──────────────┼────────────────┘       │
-│                         ▼              ▼                        │
-│              ┌──────────────────────────────────┐               │
-│              │   fleet-scheduler                 │               │
-│              │   • WorkerSelector (hint+labels)  │               │
-│              │   • CircuitBreaker (3-state)      │               │
-│              │   • Dispatcher (event loop)       │               │
-│              │   • HealthChecker                 │               │
-│              └────────────────┬─────────────────┘               │
-│                               ▼                                  │
-│              ┌──────────────────────────────────┐               │
-│              │   fleet-store (Store trait)       │               │
-│              │   • PgStore                       │               │
-│              │   • migrations (sqlx)             │               │
-│              │   • LISTEN/NOTIFY                 │               │
-│              └────────────────┬─────────────────┘               │
-└───────────────────────────────┼──────────────────────────────────┘
-                                ▼
-                       ┌─────────────────┐
-                       │   PostgreSQL    │
-                       │  fleet_dev DB   │
-                       └─────────────────┘
-                                ▲
-                                │  HTTP heartbeat
-                                │
-              ┌─────────────────┴────────────────┐
-              ▼                                  ▼
-     ┌──────────────────┐              ┌──────────────────┐
-     │ Worker A (Linux) │   ...        │ Worker N (Linux) │
-     │ grok serve       │              │ grok serve       │
-     │ + cloudflared    │              │ + cloudflared    │
-     └──────────────────┘              └──────────────────┘
-```
+![System Architecture Flowchart](../assets/diagrams/architecture/system-architecture-flow.mmd)
 
 ## 핵심 설계 결정
 
@@ -103,22 +56,7 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
 
 ### 6. WorkerSelector: hint + label + model + least-loaded
 
-```text
-submit_task(server_hint="gpu-box", required_labels=["gpu"], model="gemini")
-   │
-   ├─ required_labels를 만족하지 않는 워커 제외
-   │
-   ├─ model이 지정된 경우: labels["model"]이 정확히 일치하지 않는 워커 제외
-   │    (모두 제외되면 즉시 에러, fallback 없음)
-   │
-   ├─ server_hint가 지정된 경우:
-   │    남은 후보 중 일치하는 워커만. 없으면 에러 (fallback 없음).
-   │
-   ├─ server_hint 없는 경우:
-   │    남은 후보 중 active_tasks가 가장 적은 것을 선택.
-   │
-   └─ dispatchable = online && 회로 닫힘 && active < max_concurrent
-```
+![Worker Selector Logic Diagram](../assets/diagrams/architecture/worker-selector-logic.mmd)
 
 grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바꿀 수 없으므로
 (`session/new`/`session/prompt`에 `model` 파라미터 없음), 모델 선택은 오직
@@ -133,11 +71,7 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
 
 작업은 4단계 상태머신을 따릅니다:
 
-```text
-Pending → Dispatched → Completed
-                    ↘             ↘
-                     Failed      Cancelled
-```
+![Scheduler Task State Diagram](../assets/diagrams/architecture/scheduler-task-state.mmd)
 
 - `submit_task`는 `TaskId`만 반환하고 즉시 리턴 (non-blocking)
 - `wait_for_task` (또는 `stream_task_output`)로 결과를 폴링
@@ -220,26 +154,7 @@ MCP 표준을 준수하므로, 동일한 `fleet serve` 인스턴스에 여러 AI
 
 ### 아키텍처
 
-```text
-[fleet serve --transport acp]
-   │
-   ├─ HTTP API /v1/workers/register
-   │      └─► AcpTransport::register(worker_id, "ws://worker:2419/ws?server-key=...")
-   │              ├─ AcpClient::connect(endpoint)     ← WebSocket handshake
-   │              ├─ client.open_session(None)         ← session/new JSON-RPC
-   │              └─ spawn reader task                 ← AcpEvent → WorkerEvent 변환
-   │
-   ├─ MCP submit_task
-   │      └─► Dispatcher::dispatch
-   │              └─► AcpTransport::dispatch(req)
-   │                      ├─ session.active_task = task_id
-   │                      └─ spawn: client.prompt(session, &prompt)
-   │
-   └─ Transport event stream (broadcast)
-           ├─ WorkerEvent::Output   (agent_message_chunk 스트리밍)
-           ├─ WorkerEvent::Completed (end_of_turn 응답)
-           └─ WorkerEvent::Failed    (오류)
-```
+![ACP Transport Lifecycle Sequence Diagram](../assets/diagrams/architecture/acp-transport-lifecycle.mmd)
 
 ### ACP 메서드 지원
 
@@ -306,31 +221,7 @@ cwd = "/var/lib/fleet-worker"        # 선택
 
 ### 시작 시퀀스
 
-```text
-[WorkerRunner::run]
-  │
-  ├── 1. GrokRunner::new(config) → (runner, shutdown_tx)
-  │      tokio::spawn(runner.run())
-  │        └─ spawn grok agent serve --bind ... --secret ...
-  │           (exit 시 restart_delay_secs 후 재시작, 최대 10회)
-  │
-  ├── 2. RegistrationClient::register_with_retry()
-  │      POST /v1/workers/register  (5초 간격 무한 재시도)
-  │      → worker_id, heartbeat_interval_secs 반환
-  │
-  ├── 3. tokio::spawn(run_heartbeat_loop)
-  │      주기마다:
-  │        ├─ TCP health_check(bind_addr)  (1초 타임아웃)
-  │        ├─ collect_system_metrics (sysinfo: load/mem/disk)
-  │        └─ POST /v1/workers/heartbeat   { worker_id, agent_healthy, ... }
-  │
-  └── 4. wait_for_signal()  (SIGINT/SIGTERM)
-           ↓
-         shutdown_tx.send(true)  +  grok_shutdown_tx.send(true)
-           ├─ grok 서브프로세스 SIGTERM (5s timeout → SIGKILL)
-           ├─ heartbeat 루프 종료 (5s timeout)
-           └─ POST DELETE /v1/workers/:id  (best-effort deregister)
-```
+![Worker Daemon Execution Flowchart](../assets/diagrams/architecture/worker-daemon-execution.mmd)
 
 ### 프로비저닝 통합
 
@@ -371,27 +262,7 @@ supervisor 태스크**를 도입해 자동 복구를 제공합니다.
 각 워커는 `register()` 시점에 전용 supervisor `tokio::task`를 얻습니다. supervisor는
 다음 루프를 반복합니다:
 
-```text
-loop {
-  set state = Connecting
-  establish_session() ─► (AcpClient, SessionId, event_rx)
-    │ 실패:
-    │    set state = Disconnected
-    │    if 첫 연결: register()에 Err 전파 (caller가 인지)
-    │    wait_with_shutdown(backoff)  ← shutdown 신호면 루프 탈출
-    │    backoff = min(backoff * 2, 30s)
-    │    continue
-    │ 성공:
-    │    set state = Connected, backoff = 1s 리셋
-    │    if 첫 연결: register()에 Ok 전파
-    │    spawn reader_loop (event_rx → WorkerEvent broadcast)
-    │
-    tokio::select! {
-      cmd = cmd_rx.recv()  ─► Shutdown / Other → 루프 탈출
-      _ = reader_handle    ─► ReaderExited → 재연결 루프로
-    }
-}
-```
+![Supervisor Backoff Logic Flowchart](../assets/diagrams/architecture/supervisor-backoff-logic.mmd)
 
 ### 상태 머신 (`ConnState`)
 
@@ -606,28 +477,7 @@ enum BufferedEvent {
 
 ### dispatch 흐름
 
-```text
-dispatch(req)
- ├─ session = sessions.get(worker_id)
- ├─ session.try_acquire(task_id)           ← max_concurrent 검사
- │    └ Err(WorkerAtCapacity) → return
- ├─ spawn {
- │     match acp.prompt(...) {
- │       Ok(prompt_id) =>
- │         let buffered = session.set_prompt_id(task_id, prompt_id);
- │         for ev in buffered { emit(ev); }   ← 레이스로 밀린 이벤트 처리
- │       Err(e) =>
- │         if e.contains("ACP connection closed") {
- │           // reader_loop 드레인으로 발생한 에러 → supervisor의 fail_all에 위임
- │         } else {
- │           if session.complete(task_id).is_some() {
- │             emit(Failed { error: e });     ← 내가 emit 소유권
- │           } // else: 이미 fail_all이 처리함
- │         }
- │     }
- │   }
- └─ Ok(())
-```
+![Multi-Session Task Dispatch Flowchart](../assets/diagrams/architecture/multi-session-dispatch.mmd)
 
 - `try_acquire`가 `max_concurrent` 검사 후 `TaskId` 슬롯을 사전에 점유합니다.
 - `complete()`가 `Option<InFlightTask>`를 반환하는 atomic 패턴으로 dispatch와
@@ -700,18 +550,7 @@ Phase 7/8.1의 ACP 연결은 평문 WebSocket (`ws://`) + URL 쿼리로 전달�
 
 ### 아키텍처
 
-```text
-   orchestrator                                   worker machine
-   ────────────                                   ─────────────
-                                                   ┌────────────────────────────┐
-   ┌──────────────┐    wss:// (mTLS, 사설 CA)      │ fleet-worker               │
-   │ AcpTransport ├──────────────────────────────► │  └─ MtlsProxy (0.0.0.0:2420)│
-   │  (ClientTLS) │   클라이언트 인증서 제출        │       │ TLS 종단 + 검증    │
-   └──────────────┘                                │       ▼ 평문 TCP 복사      │
-                                                   │  grok agent serve (:2419)  │
-                                                   │  (loopback only)           │
-                                                   └────────────────────────────┘
-```
+![mTLS Proxy Architecture Diagram](../assets/diagrams/architecture/mtls-proxy-architecture.mmd)
 
 `grok agent serve`는 외부 바이너리라 mTLS를 직접 지원할 수 없다. 그래서
 `fleet-worker`가 proxy 모드로 동작해 **TLS 종단 + 클라이언트 인증서 검증**을
@@ -873,5 +712,23 @@ fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
   `known_hosts` 파일이 작고(수 KB) 연결당 1회만 읽히므로 블로킹 영향은 미미.
 - 해시된 호스트명(`|1|<salt>|<hash> ...` 형식)은 `russh-keys`가 처리하므로
   그대로 지원되지만, TOFU `learn` 은 평문 호스트명으로 추가한다.
+
+## Autonomic Self-Healing Engine (Autonomy)
+
+오케스트레이터의 안정적이고 지속적인 자율 운영을 보장하기 위해, 실시간으로 하드웨어 상태 및 메트릭을 감시하고 자가치유를 수행하는 **Autonomic Engine**이 탑재되어 있습니다.
+
+### MAPE-K 제어 루프 아키텍처
+
+![MAPE-K Self-Healing Control Loop Diagram](../assets/diagrams/architecture/mape-k-control-loop.mmd)
+
+### 작동 메커니즘
+
+1. **상태 감시 (Monitor)**: `AutonomicEngine`은 백그라운드 스레드에서 설정된 interval 마다 가동되며, `Store`로부터 활성 워커들의 메트릭 정보 및 동작 데이터를 폴링하여 관측합니다.
+2. **동적 분석 (Analyze)**: 워커가 전달한 하드웨어 로드 지표를 바탕으로 오작동 여부를 판단합니다:
+   - CPU 로드율 과부하 지속 (>95%)
+   - VRAM 메모리 부족 또는 GPU 스톨(Stall) 누적
+   - API 응답 실패율 누적 및 지연 시간 임계치 초과
+3. **치유 계획 (Plan)**: 진단된 위반 사항에 대해 자율 복구 계획을 결정합니다. 경미한 과부하 시 워커를 `Degraded` 상태로 하향하여 스케줄러 분배 비중을 조절하고, 심각한 고장이나 순단 시 `CircuitBreaker`를 강제 개방하여 유입되는 작업을 원천 차단합니다.
+4. **치유 실행 (Execute)**: `Store` 상태에 `Degraded`/`Offline` 등의 상태를 자율 커밋하고, 메모리 내의 `BreakerRegistry`와 연동하여 해당 워커로 향하는 dispatch 요청을 즉각 정지시킵니다.
 
 

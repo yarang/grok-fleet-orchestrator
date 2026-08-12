@@ -1,0 +1,23 @@
+graph TD
+    Admin[Admin Browser / MCP Client] -->|HTTPS<br/>Cloudflare Access JWT| CF_Edge[Cloudflare Edge<br/>Anycast IP]
+    CF_Edge <--> CF_Access[Cloudflare Access<br/>OIDC/SAML IdP]
+    
+    subgraph Orchestrator_Machine [Orchestrator Machine]
+        Tunnel[cloudflared tunnel<br/>fleet-orchestrator]
+        OrchAPI[fleet serve API<br/>127.0.0.1:8081]
+        OrchDash[fleet serve Dashboard<br/>127.0.0.1:8082]
+    end
+    
+    CF_Edge -->|Tunnel mTLS| Tunnel
+    Tunnel -->|fleet.agentthread.dev/*| OrchAPI
+    Tunnel -->|dash.fleet.agentthread.dev/*| OrchDash
+
+    subgraph Workers [Workers]
+        WorkerA[Worker A]
+        WorkerB[Worker B]
+        WorkerC[Worker C]
+    end
+
+    WorkerA -->|HTTP Heartbeat| OrchAPI
+    WorkerB -->|HTTP Heartbeat| OrchAPI
+    WorkerC -->|HTTP Heartbeat| OrchAPI

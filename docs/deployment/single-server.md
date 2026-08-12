@@ -140,6 +140,8 @@ server {
     # 3. 모델 API 게이트웨이 (liteLLM) 라우팅 (워커가 접근하는 경로)
     location /api-gateway/ {
         proxy_pass http://127.0.0.1:4000/;
+        proxy_buffering off; # 스트리밍 지원을 위해 버퍼 비활성화
+        proxy_read_timeout 600s; # 긴 추론 세션 대비
     }
 
     # SSL 인증서는 certbot이 관리 (managed by Certbot)

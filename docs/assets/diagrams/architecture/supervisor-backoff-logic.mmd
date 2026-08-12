@@ -1,0 +1,20 @@
+flowchart TD
+    Start([Supervisor 루프 시작]) --> SetConnecting[state = Connecting]
+    SetConnecting --> Connect[establish_session 시도]
+    Connect -->|실패| SetDisconnected[state = Disconnected]
+    SetDisconnected --> CheckFirstFail{첫 연결인가?}
+    CheckFirstFail -- Yes --> ReturnErr[register 에 Err 전파]
+    CheckFirstFail -- No --> WaitBackoff[wait_with_shutdown backoff<br/>* shutdown 수신 시 종료]
+    ReturnErr --> WaitBackoff
+    WaitBackoff --> CalcBackoff[backoff = min backoff * 2, 30s]
+    CalcBackoff --> SetConnecting
+    
+    Connect -->|성공| SetConnected[state = Connected<br/>backoff = 1s 리셋]
+    SetConnected --> CheckFirstSuccess{첫 연결인가?}
+    CheckFirstSuccess -- Yes --> ReturnOk[register 에 Ok 전파]
+    CheckFirstSuccess -- No --> SpawnReader[spawn reader_loop<br/>event_rx -> WorkerEvent broadcast]
+    ReturnOk --> SpawnReader
+    SpawnReader --> Select{tokio::select!}
+    Select -->|cmd_rx 수신 Shutdown| Exit([루프 탈출 & 종료])
+    Select -->|reader_handle 종료 ReaderExited| ClearActive[fail_active_task 실행]
+    ClearActive --> SetConnecting

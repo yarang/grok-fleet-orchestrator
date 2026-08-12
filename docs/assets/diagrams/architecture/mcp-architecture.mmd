@@ -1,0 +1,3 @@
+graph TD
+    Client[AI Coding Client<br/>Cursor / Claude] -- "MCP (JSON-RPC 2.0)" --> Orch[fleet serve - Orch<br/>stdio Server]
+    Orch -- "ACP over WebSocket" --> Worker[Worker Daemons]

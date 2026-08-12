@@ -1,0 +1,11 @@
+flowchart LR
+    A[브라우저] --> B[CF Edge]
+    B -->|세션 없음| C[CF Access 로그인 페이지]
+    C -->|이메일 OTP/Google| D[CF Access JWT 발급]
+    D --> E[fleet.agentthread.dev]
+    E --> F[Caddy: CF-JWT 헤더 전달]
+    F --> G[fleet serve]
+    G -->|JWT 서명 검증| H{유효?}
+    H -->|Yes| I[fleet 세션 쿠키 자동 발급]
+    H -->|No| J[401 + CF 재인증]
+    I --> K[/ 대시보드]

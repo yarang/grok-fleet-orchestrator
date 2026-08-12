@@ -1,0 +1,14 @@
+graph LR
+    subgraph Orchestrator [Orchestrator Server]
+        AT[AcpTransport<br/>ClientTLS]
+    end
+
+    subgraph WorkerMachine [Worker Machine]
+        subgraph FW [fleet-worker Daemon]
+            Proxy[MtlsProxy<br/>0.0.0.0:2420]
+        end
+        Grok[grok agent serve<br/>127.0.0.1:2419 loopback]
+    end
+
+    AT -->|wss:// mTLS 사설 CA<br/>클라이언트 인증서 제출| Proxy
+    Proxy -->|TLS 종단 & 검증 후<br/>평문 TCP 복사| Grok

@@ -327,6 +327,15 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Connection "";
     }
+
+    # liteLLM API 게이트웨이 라우팅 (litellm_integration_plan.md 연동)
+    location /api-gateway/ {
+        proxy_pass http://127.0.0.1:4000/;
+        
+        # 스트리밍 응답 지원을 위해 버퍼 비활성화 (Gemini 등 LLM 응답 실시간 전송)
+        proxy_buffering off;
+        proxy_read_timeout 600s; # 긴 추론 세션 대비
+    }
 }
 ```
 
@@ -388,35 +397,7 @@ FLEET_API_CORS_ORIGINS="https://console.agentthread.dev,https://ops.agentthread.
 
 ### 3.1 아키텍처
 
-```text
-┌────────────────────┐
-│ Admin browser      │
-│ + MCP client       │
-└─────────┬──────────┘
-          │ HTTPS (Cloudflare Access JWT)
-          ▼
-┌────────────────────┐         ┌────────────────────┐
-│ Cloudflare Edge    │◄───────►│ Cloudflare Access  │
-│ (Anycast IP)       │         │ (OIDC/SAML IdP)    │
-└─────────┬──────────┘         └────────────────────┘
-          │ Tunnel (mTLS)
-          ▼
-┌────────────────────────────────────────────────────┐
-│ Orchestrator 머신                                   │
-│ cloudflared tunnel run fleet-orchestrator          │
-│                                                    │
-│ ingress:                                           │
-│   - fleet.agentthread.dev/*      → 127.0.0.1:8081     │
-│   - dash.fleet.agentthread.dev/*  → 127.0.0.1:8082     │
-└────────────────────────────────────────────────────┘
-          ▲
-          │ HTTP heartbeat (워커 → 오케스트레이터)
-          │
-   ┌──────┴──────┬─────────────┐
-   ▼             ▼             ▼
- Worker A      Worker B      Worker C
- (터널 클라이언트로 오케스트레이터에 연결)
-```
+![Cloudflare Tunnel Architecture Diagram](../assets/diagrams/deployment/cloudflare-tunnel-architecture.mmd)
 
 ### 3.2 Cloudflare 설정
 
@@ -555,35 +536,7 @@ Phase 8.3부터는 orchestrator 측에서 발급한 **bootstrap 토큰** 한 번
 
 #### 워크플로
 
-```text
-┌──────────────────────┐                   ┌──────────────────────┐
-│ Orchestrator admin   │                   │ Worker 머신 (신규)   │
-└──────────┬───────────┘                   └──────────┬───────────┘
-           │  fleet token issue                       │
-           │  --max-uses 1                            │
-           │  --expires-in-secs 3600                  │
-           │                                          │
-           │       fleet-xxxxxxxxxxxxxxxx              │
-           │ ────────────────────────────────────────► │ (채널: 슬랙/이메일/...)
-           │                                          │
-           │                                          │ fleet-worker join \
-           │                                          │   --orchestrator-url https://fleet.agentthread.dev \
-           │                                          │   --token fleet-xxxx... \
-           │                                          │   --name gpu-a100-1 \
-           │                                          │   --labels gpu=true,arch=arm64 \
-           │                                          │   --config-out /etc/fleet/worker.toml \
-           │                                          │   --start
-           │                                          │
-           │           POST /v1/workers/join           │
-           │ ◄──────────────────────────────────────── │
-           │ ────────────────────────────────────────► │
-           │   200 OK + worker_config_toml 본문        │
-           │                                          │   (atomic write + rename)
-           │                                          │   exec fleet-worker --config ...
-           │                                          │
-           │  /v1/workers (heartbeat 흐름 시작)       │
-           │ ◄──────────────────────────────────────── │
-```
+![Self-service Worker Join Flowchart](../assets/diagrams/deployment/self-service-worker-join.mmd)
 
 #### 1) 토큰 발급 (오케스트레이터 머신)
 

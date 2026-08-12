@@ -26,6 +26,7 @@
 |---|---|---|---|
 | [`architecture/overview.md`](./architecture/overview.md) | Store trait·CircuitBreaker·WorkerSelector·ACP 전송·워커 데몬·mTLS·부트스트랩 토큰 등 내부 설계 마스터 문서 | 🟢 정본 | 2026-08-10 |
 | [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 7종 도구 API 레퍼런스 | 🟢 정본 | 2026-08-06 |
+| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 6종 도구 연동 스펙 | 🟢 정본 | 2026-08-12 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 
@@ -81,7 +82,13 @@
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) | ⚫ 고아 — 다른 문서에서 미인용, 실제 참고 여부 불명 | 2026-07-18 |
-| [`assets/diagrams/README.md`](./assets/diagrams/README.md) | 문서용 다이어그램/SVG 리소스 저장 규약 및 디렉토리 구조 (정본: `/CLAUDE.md`, `/agent.md` §6) | 🟢 정본 | 2026-08-12 |
+
+## 도메인 9. 📖 Agent & Assistant Guidelines
+
+| 문서 | 한 줄 요약 | 상태 | 최종 개정 |
+|---|---|---|---|
+| [`../claude.md`](../claude.md) | 에이전트 문서 작성 시 다이어그램 지향, SVG 레이아웃 활용, 외부 리소스 분리 및 임베딩 수칙 | 🟢 정본 | 2026-08-12 |
+| [`../agent.md`](../agent.md) | 에이전트 문서 작성 시 다이어그램 지향, SVG 레이아웃 활용, 외부 리소스 분리 및 임베딩 수칙 | 🟢 정본 | 2026-08-12 |
 
 ## 하위 디렉토리 (자체 부기 체계 보유)
 

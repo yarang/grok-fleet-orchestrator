@@ -48,34 +48,7 @@
 
 워커가 최초로 오케스트레이터에 인프라 노드로 조인하고 자동 구성 설정(worker.toml)을 받아 가동되는 절차입니다.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Admin as 관리자(Admin)
-    participant Orch as 오케스트레이터 (Orch Server)
-    participant DB as 데이터베이스 (PostgreSQL)
-    actor Worker as 워커 머신 (Worker Host)
-
-    Note over Admin, Orch: 1단계: 부트스트랩 일회용 토큰 생성
-    Admin->>Orch: fleet token issue (API 요청)
-    Orch->>DB: 토큰 정보 INSERT (max_uses=1, 만료시각 설정)
-    DB-->>Orch: DB 저장 완료
-    Orch-->>Admin: 발급된 토큰 출력 (fleet_ABCD...)
-
-    Note over Admin, Worker: 2단계: 워커 조인 명령 실행
-    Admin->>Worker: fleet-worker join --token fleet_ABCD... --orchestrator-url https://fleet.agentthread.dev
-    
-    Note over Worker, Orch: 3단계: 토큰 인증 및 설정 렌더링
-    Worker->>Orch: POST /v1/workers/join { token, worker_name, labels }
-    Orch->>DB: UPDATE bootstrap_tokens SET use_count = use_count + 1 WHERE token = fleet_ABCD...
-    DB-->>Orch: RETURNING 성공 (토큰 유효 및 소비됨)
-    Orch->>Orch: 워커 전용 고유 worker_id 생성 및 worker.toml 템플릿 렌더링
-    Orch-->>Worker: HTTP 200 { worker_id, worker_config_toml }
-
-    Note over Worker: 4단계: 워커 로컬 구동
-    Worker->>Worker: config 파일 디스크 쓰기 (/etc/fleet/worker.toml)
-    Worker->>Worker: fleet-worker 데몬 프로세스 exec 및 systemd 유닛 활성화
-```
+![Worker Bootstrap Sequence Diagram](../assets/diagrams/worker-bootstrap/bootstrap-sequence.mmd)
 
 ---
 
@@ -83,43 +56,4 @@ sequenceDiagram
 
 워커가 구동된 후 일상적인 하트비트 송신, 작업 수신/실행, 로그 청크 스트리밍 및 장애 감지 시의 회로차단기 동작을 보여주는 종합 운영 시퀀스입니다.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Client as AI Client (Cursor)
-    participant Orch as 오케스트레이터 (Orch Server)
-    participant DB as 데이터베이스 (PostgreSQL)
-    participant Worker as 워커 데몬 (fleet-worker)
-    participant Grok as grok agent (Subprocess)
-
-    Note over Worker, Orch: [주기적 반복] 하트비트 & 리소스 메트릭 전송
-    loop Every 15 Seconds
-        Worker->>Worker: sysinfo 수집 (CPU, RAM, Disk)
-        Worker->>Orch: POST /v1/workers/heartbeat { worker_id, agent_healthy: true, metrics }
-        Orch->>DB: 워커 상태 및 수집 메트릭 UPDATE
-    end
-
-    Note over Client, Worker: [작업 실행] 비동기 태스크 디스패치 및 스트리밍
-    Client->>Orch: fleet_dispatch_task (프롬프트 제출)
-    Orch->>DB: Task INSERT (Pending)
-    Orch->>Orch: Scheduler가 Target Worker 선정 (회로 Closed & least-loaded)
-    Orch->>Worker: WebSocket / ACP session/prompt (Task 전달)
-    Worker->>Grok: stdin으로 prompt 전달
-    
-    loop Output Streaming
-        Grok-->>Worker: stdout으로 stdout/stderr chunk 출력
-        Worker-->>Orch: ACP session/update (stream chunk)
-        Orch-->>Client: fleet_stream_task_output
-    end
-
-    Grok-->>Worker: 작업 완료 (Exit Code 0)
-    Worker-->>Orch: ACP Completed
-    Orch->>DB: Task UPDATE (Completed)
-
-    Note over Worker, Orch: [장애 복구] 네트워크 단절 및 회로 차단
-    Note over Worker: 워커 서버 하드웨어 다운 또는 네트워크 단절 발생
-    Orch->>Orch: 45초 동안 하트비트 미수신 감지 (Health Checker)
-    Orch->>DB: 워커 상태를 Offline으로 UPDATE
-    Orch->>Orch: 해당 워커의 Circuit Breaker 상태를 Open으로 강제 변경
-    Note over Orch: 향후 Client의 작업 요청이 들어와도 해당 워커로 할당하지 않고 즉시 배제
-```
+![Worker Lifecycle Sequence Diagram](../assets/diagrams/worker-bootstrap/operational-lifecycle-sequence.mmd)

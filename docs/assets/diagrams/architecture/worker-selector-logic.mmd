@@ -1,0 +1,12 @@
+flowchart TD
+    Start([submit_task<br/>server_hint, required_labels, model]) --> FilterLabels[required_labels를 만족하지 않는 워커 제외]
+    FilterLabels --> CheckModel{model이 지정되었는가?}
+    CheckModel -- Yes --> FilterModel[labels['model']이 일치하지 않는 워커 제외<br/>* 후보 없으면 즉시 에러]
+    CheckModel -- No --> CheckHint
+    FilterModel --> CheckHint{server_hint가 지정되었는가?}
+    CheckHint -- Yes --> FilterHint[남은 후보 중 server_hint와 일치하는 워커만 선택<br/>* 후보 없으면 즉시 에러]
+    CheckHint -- No --> FilterLeastLoaded[남은 후보 중 active_tasks가 가장 적은 워커 선택]
+    FilterHint --> FinalCheck
+    FilterLeastLoaded --> FinalCheck{dispatchable 조건 확인}
+    FinalCheck -->|online && 회로 closed && active < max_concurrent| Dispatch([Dispatch 실행])
+    FinalCheck -->|조건 미충족| Reject([Dispatch 거부 / 대기])

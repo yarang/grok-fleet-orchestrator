@@ -1,0 +1,21 @@
+graph TD
+    subgraph WorkerHost [Worker Host - grok CLI]
+        Config[~/.grok/config.toml<br/>base_url = fleet.agentthread.dev/api-gateway<br/>api_key = LITELLM_MASTER_KEY]
+    end
+
+    subgraph OrchHost [Orchestrator Host - arm2]
+        Nginx[Nginx reverse proxy<br/>fleet.agentthread.dev/api-gateway/ -> 127.0.0.1:4000]
+        LiteLLM[litellm-gateway.service<br/>venv + systemd on 127.0.0.1:4000<br/>config.yaml: model_list + groq_compat callback]
+    end
+
+    subgraph Providers [External LLM API Providers]
+        Gemini[Gemini API]
+        Z_AI[z.ai API GLM-5.1]
+        Groq[Groq API llama...]
+    end
+
+    Config -->|HTTPS| Nginx
+    Nginx -->|Loopback| LiteLLM
+    LiteLLM -->|gemini/*| Gemini
+    LiteLLM -->|GLM-5.1| Z_AI
+    LiteLLM -->|groq/*| Groq

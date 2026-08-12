@@ -1,0 +1,10 @@
+sequenceDiagram
+    participant U as viewer 사용자
+    participant B as 브라우저
+    participant S as Server
+    U->>B: /admin/users 접속
+    B->>S: GET /admin/users (cookie)
+    S-->>B: 403 Forbidden
+    B->>U: "권한이 부족합니다" 페이지
+    U->>B: 관리자에게 요청 링크 복사
+    Note over U,B: 클립보드: "admin@... 님, /admin/users 접근 권한을 요청합니다"

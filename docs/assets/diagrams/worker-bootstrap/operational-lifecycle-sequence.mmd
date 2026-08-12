@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant Client as AI Client (Cursor)
+    participant Orch as 오케스트레이터 (Orch Server)
+    participant DB as 데이터베이스 (PostgreSQL)
+    participant Worker as 워커 데몬 (fleet-worker)
+    participant Grok as grok agent (Subprocess)
+
+    Note over Worker, Orch: [주기적 반복] 하트비트 & 리소스 메트릭 전송
+    loop Every 15 Seconds
+        Worker->>Worker: sysinfo 수집 (CPU, RAM, Disk)
+        Worker->>Orch: POST /v1/workers/heartbeat { worker_id, agent_healthy: true, metrics }
+        Orch->>DB: 워커 상태 및 수집 메트릭 UPDATE
+    end
+
+    Note over Client, Worker: [작업 실행] 비동기 태스크 디스패치 및 스트리밍
+    Client->>Orch: fleet_dispatch_task (프롬프트 제출)
+    Orch->>DB: Task INSERT (Pending)
+    Orch->>Orch: Scheduler가 Target Worker 선정 (회로 Closed & least-loaded)
+    Orch->>Worker: WebSocket / ACP session/prompt (Task 전달)
+    Worker->>Grok: stdin으로 prompt 전달
+    
+    loop Output Streaming
+        Grok-->>Worker: stdout으로 stdout/stderr chunk 출력
+        Worker-->>Orch: ACP session/update (stream chunk)
+        Orch-->>Client: fleet_stream_task_output
+    end
+
+    Grok-->>Worker: 작업 완료 (Exit Code 0)
+    Worker-->>Orch: ACP Completed
+    Orch->>DB: Task UPDATE (Completed)
+
+    Note over Worker, Orch: [장애 복구] 네트워크 단절 및 회로 차단
+    Note over Worker: 워커 서버 하드웨어 다운 또는 네트워크 단절 발생
+    Orch->>Orch: 45초 동안 하트비트 미수신 감지 (Health Checker)
+    Orch->>DB: 워커 상태를 Offline으로 UPDATE
+    Orch->>Orch: 해당 워커의 Circuit Breaker 상태를 Open으로 강제 변경
+    Note over Orch: 향후 Client의 작업 요청이 들어와도 해당 워커로 할당하지 않고 즉시 배제

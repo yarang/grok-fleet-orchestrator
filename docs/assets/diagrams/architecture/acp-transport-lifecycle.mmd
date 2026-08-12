@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant FS as fleet serve (Orchestrator)
+    participant AT as AcpTransport
+    participant AC as AcpClient (Supervisor)
+    participant W as Worker (grok agent serve)
+
+    Note over FS, W: 1. 워커 등록 & ACP 세션 생성
+    FS->>AT: register(worker_id, endpoint)
+    AT->>AC: connect(endpoint) [WebSocket Handshake]
+    AC->>W: TCP/WS 연결 수립
+    AC->>W: session/new (JSON-RPC)
+    W-->>AC: sessionId 반환
+    AC->>AT: reader task 스폰 (AcpEvent -> WorkerEvent 변환)
+
+    Note over FS, W: 2. 작업 제출 & Dispatch
+    FS->>AT: dispatch(req)
+    AT->>AT: session.active_task = task_id
+    AT->>AC: prompt(session, prompt)
+    AC->>W: session/prompt (JSON-RPC)
+
+    Note over FS, W: 3. 이벤트 스트리밍 및 완료
+    W-->>AC: agent_message_chunk (JSON-RPC notification)
+    AC-->>FS: WorkerEvent::Output (스트리밍)
+    W-->>AC: session/prompt response (end_of_turn)
+    AC-->>FS: WorkerEvent::Completed (완료)

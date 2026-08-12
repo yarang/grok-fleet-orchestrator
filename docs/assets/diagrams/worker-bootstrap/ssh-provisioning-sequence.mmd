@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant Orch as 오케스트레이터 (Orch Server)
+    participant SSH as SSH / SFTP Session
+    participant Worker as 워커 머신 (Worker Host)
+    participant Agent as fleet-worker daemon
+
+    Note over Orch, Worker: Step 1: 연결 및 토큰 생성
+    Orch->>Orch: DB에 10분 만료 1회용 토큰 생성 (Token: fleet_tok_123)
+    Orch->>Worker: SSH Handshake (via russh & known_hosts 검증)
+    
+    Note over Orch, Worker: Step 2: SFTP 파일 주입 및 권한 설정
+    Orch->>SSH: SFTP Open File (/run/fleet-bootstrap.token, Write-only)
+    SSH->>Worker: 파일 생성 및 토큰 쓰기 완료
+    Orch->>SSH: chmod 600 /run/fleet-bootstrap.token
+    
+    Note over Orch, Worker: Step 3: 가입 명령 실행 및 토큰 파쇄
+    Orch->>SSH: Run: fleet-worker join --token-file /run/fleet-bootstrap.token ...
+    Worker->>Orch: HTTP POST /v1/workers/join (가입 요청)
+    Orch-->>Worker: 가입 승인 (worker_id, 개별 API Key, worker.toml 반환)
+    Worker->>Worker: /etc/fleet/worker.toml 저장
+    Orch->>SSH: Run: shred -u /run/fleet-bootstrap.token (토큰 파쇄)
+    
+    Note over Orch, Worker: Step 4: 서비스 활성화 및 종료
+    Orch->>SSH: Run: systemctl restart fleet-worker.service
+    Worker->>Agent: systemd에 의해 데몬 가동 (개별 API Key 통신 시작)
+    Orch->>Orch: SSH 세션 종료

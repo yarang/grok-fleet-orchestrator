@@ -1,0 +1,10 @@
+graph TD
+    subgraph MAPE [MAPE-K 자율 루프]
+        Monitor[Monitor<br/>워커/메트릭 상태 주기 스캔] --> Analyze[Analyze<br/>온도/스톨/부하 위반 분석]
+        Analyze --> Plan[Plan<br/>워커 격리 및 부하 감축 계획 수립]
+        Plan --> Execute[Execute<br/>Store 상태 갱신 & 브레이커 연동]
+    end
+
+    Store[(PgStore / Store Trait)] <-->|Knowledge 공유| MAPE
+    Workers[Worker Daemon 풀] -->|heartbeat metrics| Store
+    Execute -->|자가치유 제어| Workers

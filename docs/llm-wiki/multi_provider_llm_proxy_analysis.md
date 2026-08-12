@@ -10,13 +10,7 @@
 
 워커 노드와 오케스트레이터의 LLM 통신 경로에 **LLM Proxy(liteLLM)**가 통합되면 다음과 같은 구조로 일원화됩니다.
 
-```
-[Worker 01] ──┐       ┌───────────────────────────────────────┐
-[Worker 02] ──┼──────►│             liteLLM Proxy             │       ┌──► OpenAI (GPT)
-[Worker 03] ──┘       │  - 표준화된 OpenAI API 규격 수신       ├───────┼──► Anthropic (Claude)
-                      │  - API Key 및 테넌트별 예산 통제        │       └──► Google Gemini
-                      └───────────────────────────────────────┘
-```
+![Multi-Provider LLM Proxy Diagram](../assets/diagrams/llm-wiki/multi-provider-llm-proxy.mmd)
 
 모든 내부/외부 추론 주체는 표준화된 **OpenAI API 스펙(SDK)**만을 바라보고 코딩을 수행하며, 실제 타겟 모델로의 변환과 키 매핑은 프록시가 투명하게 대행합니다.
 
