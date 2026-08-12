@@ -25,8 +25,8 @@
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`architecture/overview.md`](./architecture/overview.md) | Store trait·CircuitBreaker·WorkerSelector·ACP 전송·워커 데몬·mTLS·부트스트랩 토큰 등 내부 설계 마스터 문서 | 🟢 정본 | 2026-08-10 |
-| [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 7종 도구 API 레퍼런스 | 🟢 정본 | 2026-08-06 |
-| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 6종 도구 연동 스펙 | 🟢 정본 | 2026-08-12 |
+| [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 8종 도구 API 레퍼런스 (2026-08-12 코드 대조로 도구명/개수 정정) | 🟢 정본 | 2026-08-12 |
+| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 8종 도구 연동 스펙 | 🟡 부분 수정됨 — §4 도구 목록 정정 필요 | 2026-08-12 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 

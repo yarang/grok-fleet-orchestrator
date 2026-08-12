@@ -334,11 +334,18 @@ es.addEventListener("fleet_event", (e) => {
 ## MCP 도구
 
 MCP(JSON-RPC 2.0 over newline-delimited stdio) 인터페이스. AI 코딩 클라이언트가
-`fleet serve`를 MCP 서버로 등록하면 아래 도구들이 자동으로 노출됩니다.
+`fleet serve`를 MCP 서버로 등록하면 아래 **8개** 도구가 자동으로 노출됩니다
+(`crates/fleet-mcp/src/schema.rs`의 `all_tools()`; `handlers.rs`의 유닛 테스트가
+`assert_eq!(tools.len(), 8)`로 개수를 고정합니다). **모든 도구 이름에는 `fleet_`
+접두사가 붙습니다** — 접두사 없는 이름(`submit_task` 등, 2026-08-06판 문서에 있던 이름)은
+실재하지 않습니다. 응답 봉투는 항상 `{"content": [{"type": "text", "text": "..."}],
+"isError": boolean}` 형태이며, 아래 "출력" 예시는 그 `text` 필드에 문자열로 직렬화되는
+JSON입니다.
 
-### `submit_task`
+### `fleet_dispatch_task`
 
-프롬프트를 비동기 작업으로 큐에 등록.
+프롬프트를 비동기 작업으로 큐에 등록. 완료 여부는 블로킹이 아니라 `fleet_get_task_status`
+폴링으로 관찰합니다.
 
 **입력 스키마**:
 ```json
@@ -349,53 +356,69 @@ MCP(JSON-RPC 2.0 over newline-delimited stdio) 인터페이스. AI 코딩 클라
   "server_hint": "gpu-box-1",
   "required_labels": ["gpu"],
   "max_turns": 30,
-  "timeout_secs": 1800,
-  "priority": "normal"
+  "timeout_secs": 1800
 }
 ```
 
-모든 필드는 `prompt`를 제외하고 선택사항.
+`prompt`만 필수, 나머지는 선택사항. ⚠️ `priority` 필드는 존재하지 않습니다 — 스키마에
+없고, 설령 클라이언트가 보내도 핸들러가 읽지 않아 조용히 무시되며 항상 `Normal`로 처리됩니다.
 
 **출력**:
 ```json
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "pending"
+  "status": "dispatched",
+  "hint": "Poll fleet_get_task_status with the task_id to observe completion."
 }
 ```
 
-### `get_task_status`
+`status`는 `"pending"`이 아니라 `"dispatched"`입니다. `prompt`가 공백/빈 문자열이면
+도구 레벨 에러가 아니라 JSON-RPC `invalid_params`로 거부됩니다.
 
-**입력**: `{ "task_id": "..." }`
+### `fleet_get_task_status`
+
+**입력**: `{ "task_id": "..." }` (필수)
 
 **출력**:
 ```json
 {
-  "id": "550e8400-...",
+  "task_id": "550e8400-...",
   "phase": "dispatched",
+  "prompt": "...",
+  "created_at": "2026-07-19T...",
+  "created_by": "...",
   "worker_id": "660e...",
-  "created_at": "2026-07-19T..."
+  "started_at": "..."
 }
 ```
 
-`phase` 값: `pending` / `dispatched` / `completed` / `failed` / `cancelled`.
+⚠️ 필드명은 `id`가 아니라 `task_id`입니다. `phase`별로 추가 필드가 붙습니다 —
+`completed`: `output`(전체 문자열)·`exit_code`·`duration_secs`·`finished_at`·(선택)
+`token_usage`; `failed`: `error`·`failure_kind`; `cancelled`: `reason`·`cancelled_at`.
+`phase` 값: `pending` / `dispatched` / `completed` / `failed` / `cancelled`. 존재하지
+않는 `task_id`는 JSON-RPC 에러가 아니라 `isError:true` 도구 에러로 반환됩니다.
 
-### `wait_for_task`
+### `fleet_list_tasks`
 
-작업이 종료 상태가 될 때까지 대기.
+⚠️ 2026-08-06판 문서에 누락돼 있던 도구입니다. 상태 필터링 및 페이지네이션으로 작업
+목록을 조회합니다 — 배치 디스패치 후 task_id를 찾거나 전체 활동을 모니터링할 때 유용합니다.
 
 **입력**:
 ```json
 {
-  "task_id": "...",
-  "timeout_secs": 60,
-  "poll_interval_secs": 2
+  "status": "dispatched",
+  "limit": 50,
+  "offset": 0
 }
 ```
 
-**출력**: 종료 시 `get_task_status`와 동일한 형태 + 결과 데이터.
+`status`는 `pending`/`dispatched`/`completed`/`failed`/`cancelled`/`terminal`/`active`
+중 하나(선택), `limit` 기본 50(1~200), `offset` 기본 0. 모두 선택.
 
-### `cancel_task`
+**출력**: `{"tasks": [...], "count": N}`. `fleet_get_task_status`와 달리 **`output`
+필드는 항상 생략**되고, 완료된 작업은 대신 `output_bytes`(바이트 수)만 포함합니다.
+
+### `fleet_cancel_task`
 
 **입력**:
 ```json
@@ -405,63 +428,106 @@ MCP(JSON-RPC 2.0 over newline-delimited stdio) 인터페이스. AI 코딩 클라
 }
 ```
 
-이미 종료된 작업에 대해 호출하면 에러 반환.
+`task_id` 필수, `reason` 선택(기본값 `"cancelled by user"`). 이미 종료 상태
+(`completed`/`failed`/`cancelled`)인 작업에 호출하면 `isError:true` 도구 에러
+(`"cancel failed: ..."`)를 반환합니다 — JSON-RPC 에러가 아닙니다.
 
-### `list_workers`
+**출력**(성공 시): `{"task_id": "...", "status": "cancelled", "hint": "..."}`
+
+### `fleet_list_workers`
 
 **입력**:
 ```json
 {
   "status": "online",
-  "labels": { "gpu": "true" }
+  "labels": { "gpu": "true" },
+  "limit": 100
 }
 ```
 
-모든 필드 선택사항.
+`status`는 `online`/`degraded`/`offline`/`circuit_open`(⚠️ 2026-08-06판 문서에
+`circuit_open`이 누락돼 있었습니다) 중 하나, `labels`는 키-값 필터, `limit` 기본
+100·1~500(⚠️ 2026-08-06판 문서에 누락). 모두 선택.
 
-**출력**: 워커 요약 배열 (HTTP API `/v1/workers`와 동일).
+**출력**: `{"workers": [...], "count": N}`. 각 워커:
+`{id, name, endpoint, status, labels, active_tasks, max_concurrent, circuit_state,
+last_seen, registered_at}`. ⚠️ CPU/VRAM 로드율 등의 메트릭은 포함되지 않습니다.
 
-### `stream_task_output`
+### `fleet_wait_for_task`
 
-작업의 stdout/stderr를 폴링하며 새 청크를 반환.
+작업이 종료 상태(`completed`/`failed`/`cancelled`)가 되거나 타임아웃까지 블로킹
+대기합니다. 워커가 많고 작업이 길면 MCP 클라이언트를 오래 점유하므로, 동기 대기가
+꼭 필요한 경우가 아니면 `fleet_get_task_status` 폴링을 권장합니다.
+
+**입력**:
+```json
+{
+  "task_id": "...",
+  "timeout_secs": 300
+}
+```
+
+⚠️ `timeout_secs` 기본값은 60이 아니라 **300**초(1~3600 범위로 서버가 재클램프)입니다.
+⚠️ `poll_interval_secs` 인자는 이 도구에 존재하지 않습니다(`fleet_stream_task_output`
+전용).
+
+**출력**: 종료 시 `fleet_get_task_status`와 동일한 형태.
+
+### `fleet_stream_task_output`
+
+작업의 stdout/stderr를 폴링하며 새 청크를 누적해 반환합니다. 빌드/테스트 로그를
+`fleet_get_task_status`를 반복 호출하지 않고 tail하는 용도입니다.
 
 **입력**:
 ```json
 {
   "task_id": "...",
   "from_offset": 0,
-  "max_polls": 10,
-  "poll_interval_secs": 2
+  "poll_interval_secs": 1,
+  "max_polls": 60
 }
 ```
 
-종료 조건: 작업이 terminal 상태가 되거나 `max_polls`에 도달할 때까지.
+`task_id`만 필수. `from_offset` 기본 0(⚠️ 필수 아님), `poll_interval_secs` 기본
+1·1~30, `max_polls` 기본 60·1~600. 종료 조건: 작업이 terminal 상태가 되거나
+`max_polls`에 도달할 때까지.
 
-**출력**:
+**출력**(⚠️ 실제 형태는 2026-08-06판 문서와 전혀 다릅니다 — 청크 배열이 아니라
+이미 연결된 단일 문자열입니다):
 ```json
 {
-  "chunks": [
-    { "seq": 1, "chunk": "Compiling...\n", "written_at": "..." },
-    { "seq": 2, "chunk": "warning: unused variable\n", "written_at": "..." }
-  ],
+  "task_id": "...",
+  "phase": "dispatched",
+  "output": "Compiling...\nwarning: unused variable\n",
+  "chunks_seen": 2,
   "next_offset": 2,
-  "task_terminal": false
+  "polls_used": 3,
+  "stopped_reason": "max_polls_reached"
 }
 ```
 
-### `collect_results`
+`stopped_reason`은 `"terminal"` 또는 `"max_polls_reached"`. `chunks` 배열이나
+`task_terminal` 불리언은 존재하지 않습니다.
 
-다수 작업의 결과를 병렬로 수집.
+### `fleet_collect_results`
+
+다수 작업의 최종 상태를 병렬로 수집합니다. `fleet_dispatch_task`로 배치 제출한 뒤
+사용하기 적합합니다.
 
 **입력**:
 ```json
 {
   "task_ids": ["id1", "id2", "id3"],
-  "timeout_secs": 120
+  "include_output": true
 }
 ```
 
-**출력**: 각 작업별 상태 + 결과 (있는 경우) 매핑.
+`task_ids`는 1~200개 배열(필수, 범위를 벗어나면 JSON-RPC `invalid_params`),
+`include_output` 기본 `true`(선택). ⚠️ `timeout_secs` 인자는 존재하지 않습니다.
+
+**출력**: `{"results": [...], "count": N, "summary": {"terminal": N, "not_found": N,
+"total": N}}`. 아직 실행 중인 작업은 `phase: "pending"`/`"dispatched"`로, 존재하지
+않는 ID는 `phase: "not_found"`로 표시됩니다.
 
 ---
 

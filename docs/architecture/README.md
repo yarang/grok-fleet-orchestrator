@@ -7,7 +7,7 @@
 | 문서 | 정본 범위 |
 |---|---|
 | [`overview.md`](./overview.md) | 내부 구조 — Store trait, CircuitBreaker, WorkerSelector, ACP 전송, 워커 데몬, mTLS, 부트스트랩 토큰 |
-| [`api-reference.md`](./api-reference.md) | 외부 계약 — HTTP REST 엔드포인트 + MCP 7종 도구 |
+| [`api-reference.md`](./api-reference.md) | 외부 계약 — HTTP REST 엔드포인트 + MCP 8종 도구 (2026-08-12 코드 대조로 이름/개수 정정) |
 | [`mcp-specification.md`](./mcp-specification.md) | 표준 연동 — Model Context Protocol (MCP) 표준 규격 준수 및 도구 상세 명세 |
 
 두 문서는 상호 보완적이다: `overview.md`가 "왜 이렇게 설계했는가"를, `api-reference.md`가
