@@ -127,7 +127,43 @@
     --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
     (전체 그린) 통과.
 22. ⏳ Dashboard API에 `/v1` 버전 부재.
-23. ⏳ 프론트엔드 페이지네이션 UI 부재.
+23. ✅ **프론트엔드 페이지네이션 UI 부재** — 해결됨 (2026-08-14). 조사 결과
+    백엔드는 `list_tasks`/`list_workers`/`list_audit_events`가 이미 `limit`/
+    `offset`을 완전히 지원했지만(#11), 대시보드 태스크 목록(`tasks.js`)은
+    `?limit=200` 고정값으로 한 번만 조회하고 그 이상 쌓인 태스크는 그냥
+    보이지 않았습니다 — offset을 보내는 UI 자체가 없었습니다.
+
+    `tasks.html`/`tasks.js`에 "Load more" 버튼을 추가했습니다. 총 개수를
+    알려주는 엔드포인트가 없으므로, 매 조회마다 `limit`보다 1개 더
+    요청해서(`limit+1`) "더 있음"을 판단하고 실제로는 `limit`개만
+    렌더링하는 방식을 씁니다(페이지 크기 100씩 증가, `created_at DESC`
+    최신순이라 페이지 경계가 안정적). 클릭할 때마다 페이지 크기를 늘려
+    처음부터(`offset=0`) 다시 조회하는 방식을 택했습니다 — 기존 SSE
+    기반 실시간 갱신(`fetchTasks()`가 매 이벤트/5초마다 전체를 다시
+    가져와 리렌더)과 자연스럽게 맞물립니다.
+
+    **범위 제한(의도적)**: `hosts.js`(`/api/hosts`)와
+    `admin-activity.js`(`/api/events`)도 프론트에서 페이지네이션 UI가
+    없기는 마찬가지지만, 조사해보니 `Store::list_hosts()`는 애초에
+    `limit`/`offset` 파라미터 자체가 없어(무조건 전체 반환) 백엔드부터
+    고쳐야 하는 별도 작업이고, `/api/events`는 `offset` 기반이 아니라
+    `after_seq` 커서 기반(실시간 tailing에 최적화된 모델이라 "이전
+    페이지로" 탐색 자체가 다른 설계 문제)이라 이번 항목과 성격이 다릅니다.
+    호스트 수는 물리 인프라 규모로 자연히 상한이 있어 무기한 증가할
+    작업(태스크) 목록만큼 급하지 않다고 판단해 이번 범위에서 제외했습니다
+    — 필요 시 별도 항목으로 분리 권장.
+
+    신규 테스트: `fleet-store`에 `task_list_respects_limit_and_offset`
+    (limit이 정확히 결과 개수를 제한하는지, offset으로 페이지가 겹치지
+    않는지, "limit+1 조회로 더 있음을 판단"하는 프론트 로직이 실제
+    백엔드 동작과 맞는지 검증 — 실제 Postgres로 검증).
+
+    ✅ **검증 완료**: `cargo build --workspace --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건, 벤더 코드 제외), `cargo test --workspace
+    --features "acp mtls" -- --test-threads=1`(`DATABASE_URL`을 실제
+    Postgres `fleet_test`로 지정, 전체 그린) 통과. 프론트엔드(JS/HTML)
+    변경은 이 저장소에 JS 테스트 도구가 없어 수동 코드 리뷰로 검증.
 24. ⏳ 모바일 반응형 감사 미수행.
 25. ✅ **서킷 브레이커 상태가 인메모리 전용 (다중 인스턴스 불가)** — 해결됨
     (2026-08-13). 서술 자체가 부정확했습니다 — `worker.circuit_state` DB 컬럼
@@ -611,7 +647,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #22~#24, #26 |
+| 미배정 | #14, #22, #24, #26 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
