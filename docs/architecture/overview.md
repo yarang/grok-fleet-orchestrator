@@ -1105,6 +1105,39 @@ capacity_all_complete`(워커 1대에 태스크 3개 동시 디스패치, 독립
 `concurrent_tasks_stream_output_via_correct_session_routing`(태스크 5개 동시 디스패치,
 출력 미혼선 확인) 세 테스트로 검증돼 있습니다.
 
+### Head-of-Line Blocking 방지 (로드맵 #41, 2026-08-13 추가)
+
+워커당 WebSocket 연결은 하나뿐이라, 여러 세션(태스크)의 `session/update`
+notification이 전부 같은 연결을 통해 도착합니다. vendor SDK
+(`vendor/agent-client-protocol-rust-sdk`)의 `incoming_protocol_actor`는 연결
+하나당 **단일 순차 루프**로, 등록된 핸들러(`on_receive_notification` 등)를
+인라인으로 `.await`한 뒤에야 다음 프레임을 읽습니다 — 즉 한 세션의 handler
+처리가 느려지면 같은 연결의 다른 세션 notification 배달까지 지연됩니다
+(vendor SDK 소스 확인, 프로젝트 코드가 아니므로 패치 대상이 아님).
+
+`fleet-transport/src/acp_transport.rs`는 이 위험을 다음과 같이 구조적으로
+차단합니다:
+- 세션마다 `InFlightSession.notify_tx: mpsc::UnboundedSender<SessionMsg>`
+  전용 알림 큐를 둡니다. `on_receive_notification` 핸들러(`handle_session_
+  notification`)는 이 큐에 **non-blocking send만** 하고 즉시 반환합니다 —
+  SDK의 공유 actor 루프를 절대 붙잡지 않습니다.
+- 실제 처리(버퍼 append + `seq` 증가 + `WorkerEvent::Output` 브로드캐스트)는
+  세션마다 `dispatch()`가 별도로 spawn하는 전용 워커 태스크에서 일어납니다.
+  단일 컨슈머(FIFO)라 세션 내부 순서는 그대로 보존되고, 세션마다 독립된
+  태스크이므로 한 세션의 처리가 다른 세션을 지연시키지 않습니다.
+- `dispatch()`가 `PromptResponse` 수신 후 최종 `TaskResult.output`을 읽기
+  전에는 `SessionMsg::Flush(oneshot::Sender<()>)` 배리어를 보내고 ack를
+  기다립니다 — "채널에 청크가 들어가 있음"과 "워커가 실제로 다 처리함"은
+  다르므로, 이 배리어 없이는 마지막 청크 몇 개가 반영되기 전에 output을
+  읽어버리는 경쟁이 이론적으로 가능했습니다.
+
+신규 테스트 2개(`crates/fleet-transport/tests/acp_concurrent.rs`):
+`dispatch_accumulates_multiple_chunks_in_order`(단일 세션, 청크 8개가 순서대로
+빠짐없이 최종 output에 반영되는지 — Flush 배리어 검증),
+`concurrent_sessions_streaming_multiple_chunks_do_not_cross_contaminate`(세션
+4개가 동시에 각 5개 청크를 스트리밍해도 서로 섞이지 않고 각자 정확한
+순서로만 누적되는지 검증).
+
 ### 워커 여러 대 사이의 동시성
 
 디스패치 경로 전체를 잠그는 전역 락이 없습니다 — `FleetState`(`crates/fleet-scheduler/

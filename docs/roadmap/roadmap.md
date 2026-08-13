@@ -392,16 +392,45 @@
     있어 lock 경합이 실제 병목이라는 프로파일링 근거가 없습니다. 근거 없이
     lock-free 재작성부터 하면 검증 難도만 올라갑니다 — 실측(프로파일링)으로
     경합이 확인되면 그때 착수 권고.
-41. ⏳ **WebSocket Demuxer 패턴을 적용한 동시 다중 세션 고도화** (P2, 네트워크) — `xai-computer-hub-sdk` 분석에 근거해 단일 WebSocket 연결 상에서 ACP 프롬프트 세션의 순서 보장 및 Head-of-Line Blocking 방지를 위한 RPC Frame Demultiplexer 구현.
+41. ✅ **WebSocket Demuxer 패턴을 적용한 동시 다중 세션 고도화** (P2, 네트워크) — 해결됨
+    (2026-08-13). `xai-computer-hub-sdk` 분석에 근거해 단일 WebSocket 연결 상에서 ACP
+    프롬프트 세션의 순서 보장 및 Head-of-Line Blocking 방지를 위한 RPC Frame
+    Demultiplexer 구현.
 
     **2026-08-12 정정**: 이 항목이 서술하는 "단일 WebSocket 연결 위에서 여러 ACP 세션을
-    다중화" 구조는 이미 구현되어 있습니다 — `crates/fleet-transport/src/acp_transport.rs`가
+    다중화" 구조는 이미 구현되어 있었습니다 — `crates/fleet-transport/src/acp_transport.rs`가
     2026-08-11 SDK 마이그레이션으로 태스크당 세션(`sessions: Arc<Mutex<HashMap<SessionId,
     InFlightSession>>>`)을 `SessionId` 기준으로 라우팅하며, `acp_concurrent.rs`의 3개
     테스트로 검증됨(`docs/architecture/overview.md §동시 실행` 참조). 이 항목이 실제로
-    추가하려는 것은 **Head-of-Line Blocking 방지**(현재는 단일 WS 커넥션 위에서 순차
-    프레임 처리이므로, 한 세션의 대형 응답이 다른 세션의 스트리밍을 지연시킬 가능성) —
-    항목 설명을 좁혀서 남깁니다.
+    추가로 필요했던 것은 **Head-of-Line Blocking 방지**(단일 WS 커넥션 위에서 순차 프레임
+    처리이므로, 한 세션의 handler 처리가 느려지면 같은 연결의 다른 세션 notification
+    배달까지 지연될 위험)였습니다.
+
+    **2026-08-13 구현**: vendor SDK(`agent-client-protocol-rust-sdk`)의
+    `incoming_protocol_actor`가 연결 하나당 단일 순차 루프로 `on_receive_notification`
+    핸들러를 인라인 `.await`한다는 것을 소스 대조로 확인했습니다(vendor 코드라 패치
+    대상이 아님) — 즉 우리 쪽 핸들러가 조금이라도 느려지면 같은 연결의 다른 세션까지
+    지연됩니다. 세션마다 전용 알림 큐(`InFlightSession.notify_tx:
+    mpsc::UnboundedSender<SessionMsg>`)를 두어, `on_receive_notification`은
+    non-blocking send만 하고 즉시 반환하도록 하고, 실제 처리(버퍼 append + seq 증가 +
+    `WorkerEvent::Output` 브로드캐스트)는 세션마다 spawn되는 전용 워커 태스크로
+    위임했습니다 — 단일 컨슈머(FIFO)라 세션 내부 순서는 보존되고, 세션마다 독립된
+    태스크라 세션 간 지연 전파가 구조적으로 차단됩니다. `dispatch()`가 최종
+    `TaskResult.output`을 읽기 전에는 `SessionMsg::Flush` 배리어로 "워커가 큐잉된
+    모든 청크를 실제로 처리 완료했는지"를 확인합니다(채널에 들어감 ≠ 처리 완료).
+
+    신규 테스트 2개(`acp_concurrent.rs`):
+    `dispatch_accumulates_multiple_chunks_in_order`(단일 세션 8청크, Flush 배리어
+    검증), `concurrent_sessions_streaming_multiple_chunks_do_not_cross_contaminate`
+    (동시 4세션 x 각 5청크, 순서 보존 + 세션 간 무혼선 검증). 상세 배경은
+    [`docs/architecture/overview.md`](../architecture/overview.md) "Head-of-Line
+    Blocking 방지" 절 참고.
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건, 벤더 코드 제외), `cargo test --workspace
+    --features "acp mtls" -- --test-threads=1`(`DATABASE_URL`을 실제 Postgres
+    `fleet_test`로 지정, 전체 그린) 통과.
 
 42. ⏳ **워커 노드 연동 분산 OTLP Tracing Context Propagation 구축** (P2, 모니터링) — `xai-tracing` 기법을 차용해 오케스트레이터와 `fleet-worker` 간 WebSocket 통신 시 `traceparent` 스팬 캐리어를 전파하여 E2E 분산 추적 시각화 완성.
 
@@ -547,7 +576,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #22~#24, #26, #41, #42 |
+| 미배정 | #14, #22~#24, #26, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
