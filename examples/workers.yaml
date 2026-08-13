@@ -30,6 +30,16 @@ defaults:
   host_key_policy: strict
   # known_hosts 파일 경로. 미지정 시 ~/.ssh/known_hosts.
   # known_hosts: /etc/fleet/known_hosts
+  #
+  # mTLS 종단 proxy (선택, Phase 8.5 / 로드맵 #37). 여러 워커가 공유하는 값만
+  # defaults에 둔다 — 서버 인증서/키는 워커마다 고유해야 하므로 아래 workers:
+  # 항목에서만 지정한다(`mtls_server_cert`/`mtls_server_key`).
+  # 각 워커의 인증서는 사전에 `fleet mtls issue-server`로 발급해 두어야 하며,
+  # 프로비저너는 파일을 업로드하지 않고 worker.toml의 경로만 채운다.
+  # mtls_enabled: true
+  # mtls_listen_addr: "0.0.0.0:2420"
+  # mtls_client_ca: /etc/fleet/ca.pem
+  # mtls_advertised_port: 2420
 
 # ─── 프로비저닝 동작 옵션 ──────────────────────────────────────────────
 options:
@@ -82,3 +92,8 @@ workers:
       region: us-west-2
     region: us-west-2
     grok_secret: "REPLACE_WITH_RANDOM_32_BYTE_HEX"
+    # mTLS 예시 — defaults.mtls_enabled가 꺼져 있어도 워커별로 켤 수 있다.
+    # mtls_enabled: true
+    # mtls_server_cert: /etc/fleet/gpu-x86-01.pem   # fleet mtls issue-server로 사전 발급
+    # mtls_server_key: /etc/fleet/gpu-x86-01.key
+    # mtls_advertised_host: gpu-x86-01.fleet.internal  # 미지정 시 name(gpu-x86-01)으로 폴백

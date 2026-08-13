@@ -1336,6 +1336,7 @@ fn build_inventory_step_context(
     options: &ProvisionOptions,
 ) -> PlaybookContext {
     let cf_token = defaults.cf_token.clone();
+    let mtls_enabled = w.effective_mtls_enabled(defaults);
     let base = StepContext {
         worker_name: w.name.clone(),
         labels: w.labels.clone(),
@@ -1346,6 +1347,43 @@ fn build_inventory_step_context(
         bootstrap_token: options.bootstrap_token.clone(),
         orchestrator_api_token: options.api_token.clone(),
         dry_run: options.dry_run,
+        // 로드맵 #37 — 인벤토리 모드 mTLS 설정 주입. cert/key는 워커별 필드에서만
+        // 오고(defaults에는 없음), listen_addr/client_ca/advertised_port는
+        // defaults와 워커별 오버라이드를 함께 본다. 실제로 이 필드가 비어있는데
+        // mtls_enabled=true인 경우의 검증은 `templates.rs`의 렌더링 단계
+        // (`StepError::Template("mtls_enabled=true requires ...")`)가 그대로
+        // 담당한다 — 여기서 별도 검증을 중복하지 않는다.
+        mtls_enabled,
+        mtls_listen_addr: if mtls_enabled {
+            w.effective_mtls_listen_addr(defaults)
+        } else {
+            None
+        },
+        mtls_server_cert_path: if mtls_enabled {
+            w.mtls_server_cert.clone()
+        } else {
+            None
+        },
+        mtls_server_key_path: if mtls_enabled {
+            w.mtls_server_key.clone()
+        } else {
+            None
+        },
+        mtls_client_ca_path: if mtls_enabled {
+            w.effective_mtls_client_ca(defaults)
+        } else {
+            None
+        },
+        mtls_advertised_host: if mtls_enabled {
+            Some(w.effective_mtls_advertised_host())
+        } else {
+            None
+        },
+        mtls_advertised_port: if mtls_enabled {
+            w.effective_mtls_advertised_port(defaults)
+        } else {
+            None
+        },
         ..Default::default()
     };
     PlaybookContext::new(base)

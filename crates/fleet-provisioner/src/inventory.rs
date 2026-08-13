@@ -5,6 +5,10 @@
 //!   user: ubuntu
 //!   ssh_key: ~/.ssh/fleet_workers_ed25519
 //!   ssh_port: 22
+//!   # mTLS(선택) — 여러 워커가 공유하는 값만 defaults에 둔다.
+//!   # mtls_enabled: true
+//!   # mtls_listen_addr: "0.0.0.0:2420"
+//!   # mtls_client_ca: /etc/fleet/ca.pem
 //!
 //! workers:
 //!   - host: 203.0.113.10
@@ -13,6 +17,9 @@
 //!       arch: arm64
 //!       gpu: "false"
 //!     region: us-east-1
+//!     # mTLS 서버 인증서/키는 워커마다 고유하므로 defaults가 아닌 여기서만 지정.
+//!     # mtls_server_cert: /etc/fleet/build-farm-1.pem
+//!     # mtls_server_key: /etc/fleet/build-farm-1.key
 //!
 //! options:
 //!   orchestrator_url: https://orch.fleet.example.com
@@ -59,6 +66,21 @@ pub struct InventoryDefaults {
     /// `known_hosts` 파일 경로. 미지정 시 `~/.ssh/known_hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_hosts: Option<String>,
+    // ── mTLS (로드맵 #37) — 여러 워커에 공유될 만한 값만 defaults에 둔다.
+    // 서버 인증서/키(mtls_server_cert/mtls_server_key)는 워커마다 고유해야
+    // 하므로 defaults가 아니라 InventoryWorker 전용 필드다.
+    /// mTLS 종단 proxy 활성화 (기본값 false). 개별 워커가 `mtls_enabled`로 오버라이드 가능.
+    #[serde(default)]
+    pub mtls_enabled: bool,
+    /// mTLS 리스닝 주소. 보통 모든 워커가 동일 값(예: `0.0.0.0:2420`)을 공유.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_listen_addr: Option<String>,
+    /// 클라이언트 CA PEM 원격 경로. 보통 모든 워커가 동일 CA를 공유.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_client_ca: Option<String>,
+    /// orchestrator 에 광고할 포트. 보통 모든 워커가 동일 값을 공유.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_advertised_port: Option<u16>,
 }
 
 fn default_user() -> String {
@@ -78,6 +100,10 @@ impl Default for InventoryDefaults {
             cf_token: None,
             host_key_policy: None,
             known_hosts: None,
+            mtls_enabled: false,
+            mtls_listen_addr: None,
+            mtls_client_ca: None,
+            mtls_advertised_port: None,
         }
     }
 }
@@ -108,6 +134,31 @@ pub struct InventoryWorker {
     /// 미설정 시 프로비저닝 단계에서 실패함 — caller가 반드시 채워야 함.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_secret: Option<String>,
+    // ── mTLS (로드맵 #37) ────────────────────────────────────────────────
+    /// `defaults.mtls_enabled` 오버라이드. 특정 워커만 mTLS를 끄거나 켤 때 사용.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_enabled: Option<bool>,
+    /// `defaults.mtls_listen_addr` 오버라이드.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_listen_addr: Option<String>,
+    /// 이 워커의 서버 인증서 PEM 원격 절대경로. 워커마다 고유해야 함
+    /// (`fleet mtls issue-server`로 사전 발급 — 인증서 파일 자체는 프로비저너가
+    /// 업로드하지 않고 worker.toml의 경로만 채운다).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_server_cert: Option<String>,
+    /// 이 워커의 서버 비밀키 PEM 원격 절대경로.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_server_key: Option<String>,
+    /// `defaults.mtls_client_ca` 오버라이드.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_client_ca: Option<String>,
+    /// orchestrator 에 광고할 호스트명. 미지정 시 `name` 필드를 그대로 사용
+    /// (대부분의 경우 워커 이름 = mTLS 광고 호스트명이므로).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_advertised_host: Option<String>,
+    /// `defaults.mtls_advertised_port` 오버라이드.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_advertised_port: Option<u16>,
 }
 
 impl InventoryWorker {
@@ -129,6 +180,40 @@ impl InventoryWorker {
 
     pub fn effective_ssh_port(&self, defaults: &InventoryDefaults) -> u16 {
         self.ssh_port.unwrap_or(defaults.ssh_port)
+    }
+
+    /// mTLS 활성화 여부 — 개별값 우선, 그 다음 defaults.
+    pub fn effective_mtls_enabled(&self, defaults: &InventoryDefaults) -> bool {
+        self.mtls_enabled.unwrap_or(defaults.mtls_enabled)
+    }
+
+    /// mTLS 리스닝 주소 — 개별값 우선, 그 다음 defaults.
+    pub fn effective_mtls_listen_addr(&self, defaults: &InventoryDefaults) -> Option<String> {
+        self.mtls_listen_addr
+            .clone()
+            .or_else(|| defaults.mtls_listen_addr.clone())
+    }
+
+    /// 클라이언트 CA 경로 — 개별값 우선, 그 다음 defaults.
+    pub fn effective_mtls_client_ca(&self, defaults: &InventoryDefaults) -> Option<String> {
+        self.mtls_client_ca
+            .clone()
+            .or_else(|| defaults.mtls_client_ca.clone())
+    }
+
+    /// 광고 포트 — 개별값 우선, 그 다음 defaults.
+    pub fn effective_mtls_advertised_port(&self, defaults: &InventoryDefaults) -> Option<u16> {
+        self.mtls_advertised_port
+            .or(defaults.mtls_advertised_port)
+    }
+
+    /// 광고 호스트명 — 개별값 우선, 미지정 시 워커 `name`으로 폴백
+    /// (server_cert/server_key와 달리 defaults 공유값이 의미 없으므로
+    /// defaults를 거치지 않고 곧바로 name으로 대체한다).
+    pub fn effective_mtls_advertised_host(&self) -> String {
+        self.mtls_advertised_host
+            .clone()
+            .unwrap_or_else(|| self.name.clone())
     }
 }
 
@@ -377,5 +462,104 @@ workers:
         let w = &inv.workers[1];
         assert_eq!(w.effective_user(&inv.defaults), "admin");
         assert_eq!(w.effective_ssh_port(&inv.defaults), 22);
+    }
+
+    // ── mTLS (로드맵 #37) ────────────────────────────────────────────────
+
+    #[test]
+    fn mtls_disabled_by_default() {
+        let inv = Inventory::parse(SAMPLE_YAML).unwrap();
+        assert!(!inv.defaults.mtls_enabled);
+        assert!(!inv.workers[0].effective_mtls_enabled(&inv.defaults));
+    }
+
+    #[test]
+    fn parses_shared_mtls_defaults_and_per_worker_cert_paths() {
+        let yaml = r#"
+defaults:
+  ssh_key: ~/.ssh/fleet_workers_ed25519
+  mtls_enabled: true
+  mtls_listen_addr: "0.0.0.0:2420"
+  mtls_client_ca: /etc/fleet/ca.pem
+  mtls_advertised_port: 2420
+workers:
+  - host: 10.0.0.1
+    name: worker-1
+    mtls_server_cert: /etc/fleet/worker-1.pem
+    mtls_server_key: /etc/fleet/worker-1.key
+  - host: 10.0.0.2
+    name: worker-2
+    mtls_server_cert: /etc/fleet/worker-2.pem
+    mtls_server_key: /etc/fleet/worker-2.key
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        let w1 = &inv.workers[0];
+
+        assert!(w1.effective_mtls_enabled(&inv.defaults));
+        assert_eq!(
+            w1.effective_mtls_listen_addr(&inv.defaults).as_deref(),
+            Some("0.0.0.0:2420")
+        );
+        assert_eq!(
+            w1.effective_mtls_client_ca(&inv.defaults).as_deref(),
+            Some("/etc/fleet/ca.pem")
+        );
+        assert_eq!(w1.effective_mtls_advertised_port(&inv.defaults), Some(2420));
+        assert_eq!(w1.mtls_server_cert.as_deref(), Some("/etc/fleet/worker-1.pem"));
+        assert_eq!(w1.mtls_server_key.as_deref(), Some("/etc/fleet/worker-1.key"));
+
+        // 워커별 cert/key는 공유되지 않는다 — 각자 고유.
+        let w2 = &inv.workers[1];
+        assert_eq!(w2.mtls_server_cert.as_deref(), Some("/etc/fleet/worker-2.pem"));
+        assert_ne!(w1.mtls_server_cert, w2.mtls_server_cert);
+    }
+
+    #[test]
+    fn mtls_advertised_host_falls_back_to_worker_name() {
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+workers:
+  - host: 10.0.0.1
+    name: worker-1
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert_eq!(inv.workers[0].effective_mtls_advertised_host(), "worker-1");
+    }
+
+    #[test]
+    fn mtls_advertised_host_explicit_override_wins() {
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+workers:
+  - host: 10.0.0.1
+    name: worker-1
+    mtls_advertised_host: worker-1.fleet.internal
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert_eq!(
+            inv.workers[0].effective_mtls_advertised_host(),
+            "worker-1.fleet.internal"
+        );
+    }
+
+    #[test]
+    fn per_worker_mtls_enabled_overrides_defaults() {
+        // defaults에서 mTLS를 켜뒀어도 특정 워커만 끌 수 있다.
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+  mtls_enabled: true
+workers:
+  - host: 10.0.0.1
+    name: no-mtls-worker
+    mtls_enabled: false
+  - host: 10.0.0.2
+    name: mtls-worker
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert!(!inv.workers[0].effective_mtls_enabled(&inv.defaults));
+        assert!(inv.workers[1].effective_mtls_enabled(&inv.defaults));
     }
 }
