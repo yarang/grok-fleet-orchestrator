@@ -302,7 +302,52 @@
     `cargo check --no-default-features`, `cargo clippy --all-targets
     --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
     (전체 그린) 통과.
-38. ⏳ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) — 네트워크 일시 순단 시 태스크가 즉시 Failed로 유실되지 않도록 자동 재스케줄러 큐 및 Stale 상태 격리를 위한 DLQ 메커니즘 도입.
+38. ✅ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) —
+    해결됨 (2026-08-13). 사용자에게 3가지 구현 범위(AskUserQuestion)를 제시했고
+    **"전체 구현"**이 채택됐습니다: `tasks.retry_count` 컬럼 추가
+    (`014_task_retry.sql`), `ReconcileConfig::max_dispatch_retries`(기본 20) +
+    `Dispatcher::with_max_dispatch_retries`, CLI
+    `--reconcile-max-dispatch-retries`/`FLEET_RECONCILE_MAX_DISPATCH_RETRIES`
+    (기본 20 — 재시도 기본 ON).
+
+    `FailureKind::WorkerUnavailable`/`CircuitOpen`만 재시도 대상으로 삼습니다
+    (`WorkerError`/`AuthFailed`는 제외 — 실제 dispatch/transport 에러는 재시도해도
+    같은 결과가 반복될 가능성이 높아 기존과 동일하게 즉시 `Failed`). 재시도가
+    활성화된 경우(`max_dispatch_retries > 0`) **`submit()`의 API 계약이
+    바뀝니다**: 위 두 실패 유형에서 더 이상 즉시 `Err`를 반환하지 않고
+    `retry_count`를 1 올린 뒤 작업을 `Pending`으로 남겨둔 채 `Ok(task_id)`를
+    반환합니다 — 실제 재시도는 `Reconciler`의 stale-`Pending` 스윕이
+    백그라운드에서 이어받습니다. `retry_count`가 상한에 도달하면 새 DLQ
+    테이블 없이 기존 `Failed` 상태를 dead-letter로 재사용해 전이시킵니다
+    (`ReconcileSummary::dead_lettered`로 집계). `max_dispatch_retries == 0`이면
+    이 기능 도입 이전과 완전히 동일하게 동작합니다(하위 호환).
+
+    `crates/fleet-scheduler/src/dispatcher.rs`(`Dispatcher::submit`),
+    `crates/fleet-scheduler/src/reconcile.rs`(`Reconciler::reconcile_once`의
+    dead-letter 분기), `crates/fleet-cli/src/{main.rs,runtime.rs}`(CLI 플래그
+    배선, `Dispatcher`/`Reconciler`가 동일한 상한값을 공유하도록 연결)을
+    수정했습니다. `docs/architecture/overview.md` §7에 "자동 재시도 및 Dead
+    Letter" 절을 추가하고, 마이그레이션 개수 서술(13→14)을 갱신했습니다.
+
+    구현 도중 발견한 부수 버그도 같이 고쳤습니다: `fleet_dispatch_task`(MCP,
+    `fleet-mcp/src/handlers.rs`)와 `POST /api/tasks`(대시보드,
+    `fleet-dashboard/src/handlers.rs`)가 `submit()`이 `Ok`이면 무조건
+    `status: "dispatched"`/`dispatched: true`를 하드코딩해 응답하고 있었는데,
+    이 변경 이후에는 재시도가 예약된 `Pending` 작업도 `Ok`를 반환하므로 그
+    응답이 거짓이 됩니다 — 실제 태스크 상태를 조회해 정직하게 보고하도록
+    수정하고, `docs/architecture/api-reference.md`의 `fleet_dispatch_task`
+    출력 설명도 함께 정정했습니다.
+
+    신규 테스트 6개: `Dispatcher::submit()` 재시도 비활성/활성 각 1건,
+    `Reconciler`의 재시도 소진 dead-letter 1건, 상한 미만 시 정상 재시도 1건,
+    `fleet-store`의 `increment_task_retry_count` 영속성/NotFound 각 1건
+    (실제 Postgres로 검증).
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건, 벤더 코드 제외), `cargo test --workspace
+    --features "acp mtls" -- --test-threads=1`(`DATABASE_URL`을 실제 Postgres
+    `fleet_test`로 지정, 전체 그린) 통과.
 39. ✅ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) —
     해결됨 (2026-08-13). 신규 `fleet scan-host-keys` 명령을 추가했습니다 —
     `ssh-keyscan`과 동일한 목적으로, 실제 인증 없이 서버가 제시하는 SSH 호스트
@@ -502,7 +547,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #22~#24, #26, #38, #41, #42 |
+| 미배정 | #14, #22~#24, #26, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

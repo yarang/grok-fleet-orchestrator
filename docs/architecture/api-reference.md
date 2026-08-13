@@ -464,8 +464,18 @@ JSON입니다.
 }
 ```
 
-`status`는 `"pending"`이 아니라 `"dispatched"`입니다. `prompt`가 공백/빈 문자열이면
-도구 레벨 에러가 아니라 JSON-RPC `invalid_params`로 거부됩니다.
+`prompt`가 공백/빈 문자열이면 도구 레벨 에러가 아니라 JSON-RPC `invalid_params`로
+거부됩니다.
+
+⚠️ **정정 (2026-08-13, 로드맵 #38)**: 이전 판은 "`status`는 `"pending"`이 아니라
+`"dispatched"`"라고 단정했지만, 이는 dispatch 재시도가 비활성(`max_dispatch_retries
+== 0`, 필드 도입 이전 기본값)일 때만 참입니다. `fleet serve`의 실제 기본값(재시도
+활성, `--reconcile-max-dispatch-retries` 기본 20)에서는 워커 선택 실패/CircuitOpen
+시 `submit()`이 여전히 `Ok`를 반환하지만 실제 작업은 `Pending`으로 남아 재조정
+루프가 백그라운드에서 재시도합니다 — 이 경우 도구 호출은 `isError` 없이 성공하되
+`status`는 `"pending"`으로 반환됩니다(도구가 실제 태스크 상태를 조회해 정직하게
+보고). 즉 `status`는 `"dispatched"` 또는 `"pending"` 둘 다 될 수 있으며, 어느 쪽이든
+정상적인 성공 응답입니다 — 이후 상태는 `fleet_get_task_status`로 폴링하세요.
 
 ### `fleet_get_task_status`
 

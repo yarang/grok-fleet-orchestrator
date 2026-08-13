@@ -122,17 +122,49 @@ grok의 ACP 프로토콜은 실행 중인 세션의 모델을 동적으로 바�
   (`fleet-scheduler::reconcile::Reconciler`, `--reconcile-*` CLI 플래그)가
   주기적으로 stale `Pending` 작업을 다시 훑어 재dispatch를 시도한다.
 
+#### 자동 재시도 및 Dead Letter (로드맵 #38, 2026-08-13 추가)
+
+`WorkerUnavailable`(워커 선택 실패)과 `CircuitOpen`은 "지금 당장 쓸 수 있는
+워커가 없다"는 일시적 상황일 수 있어, 나머지 실패 유형(`WorkerError`,
+`AuthFailed` 등 — 실제 dispatch/transport 에러)과 구분해 재시도 대상으로
+삼는다. `tasks.retry_count` 컬럼(`014_task_retry.sql`)이 재시도 횟수를
+추적한다.
+
+- **`Dispatcher::with_max_dispatch_retries(n)`** (기본값 `0` = 재시도 없음,
+  `fleet serve`는 `--reconcile-max-dispatch-retries`/
+  `FLEET_RECONCILE_MAX_DISPATCH_RETRIES`로 명시적으로 설정, 기본값 **20**)가
+  `n > 0`이면 `submit()`의 API 계약이 바뀐다: `WorkerUnavailable`/
+  `CircuitOpen`에서 더 이상 즉시 `Err`를 반환하며 `Failed`로 확정하지 않고,
+  작업을 `Pending`인 채로 두고 `retry_count`를 1 올린 뒤 **`Ok(task_id)`를
+  반환**한다 — 즉 `fleet_dispatch_task` 호출자 입장에서는 "제출 성공, 실제
+  dispatch는 백그라운드에서 재시도 중"이 된다. `n == 0`이면 이 필드 도입
+  이전과 동일하게 즉시 `Err` + `Failed`.
+- `Reconciler::reconcile_once()`의 stale-`Pending` 스윕은 매 tick마다
+  `retry_count`를 확인한다. `ReconcileConfig::max_dispatch_retries`(기본
+  20)에 도달했으면 더 이상 재dispatch를 시도하지 않고 `Failed`로
+  전이시킨다 — 기존 `Failed` 상태를 그대로 dead-letter로 재사용하며, 별도
+  DLQ 테이블은 두지 않는다(조회는 `fleet tasks list --status failed` 또는
+  `fleet_list_tasks`로 동일하게 가능). 아직 소진되지 않았으면 여느 때처럼
+  `dispatch_existing(task, false)`를 시도하고, 이번에도 실패하면
+  `retry_count`를 다시 1 올린다.
+- `Dispatcher`와 `Reconciler`는 각자 독립적으로 재시도 상한을 갖는
+  구조이므로, `fleet serve`가 둘을 반드시 같은 값으로 연결해 준다
+  (`fleet-cli/src/runtime.rs`) — 그렇지 않으면 `submit()`은 재시도를
+  걸어두는데 Reconciler가 그 값을 다른 기준으로 소진 판단하는 불일치가
+  생긴다.
+
 ## 데이터 모델
 
 ### 테이블 (PostgreSQL 스키마)
 
-⚠️ **정정 (2026-08-12)**: 아래 표는 실제 테이블명과 다르고(`fleet_` 접두사 없음이 코드
-전반의 컨벤션 — 예: `workers`, `tasks`, `hosts`, `ssh_keys`, `bootstrap_tokens`),
-개수도 크게 과소 서술되어 있습니다. `crates/fleet-store/migrations/`에는
-`001`~`013`까지 13개 마이그레이션이 존재하며 RBAC(역할/권한), 호스트 인벤토리,
-이메일 인증, 비밀번호 재설정, SSH 키 금고, 감사 로그, 태스크 스레드 등을 추가로
-다룹니다. 아래 표는 핵심 4종만 남겨두되 이름을 정정합니다 — `events`/`output` 계열의
-정확한 테이블명은 재검증이 필요합니다.
+⚠️ **정정 (2026-08-12, 2026-08-13 갱신)**: 아래 표는 실제 테이블명과 다르고(`fleet_`
+접두사 없음이 코드 전반의 컨벤션 — 예: `workers`, `tasks`, `hosts`, `ssh_keys`,
+`bootstrap_tokens`), 개수도 크게 과소 서술되어 있습니다. `crates/fleet-store/migrations/`에는
+`001`~`014`까지 14개 마이그레이션이 존재하며 RBAC(역할/권한), 호스트 인벤토리,
+이메일 인증, 비밀번호 재설정, SSH 키 금고, 감사 로그, 태스크 스레드, 태스크 재시도
+카운터(`014_task_retry.sql`, 로드맵 #38) 등을 추가로 다룹니다. 아래 표는 핵심 4종만
+남겨두되 이름을 정정합니다 — `events`/`output` 계열의 정확한 테이블명은 재검증이
+필요합니다.
 
 | 테이블(추정 — 재검증 필요)          | 용도                                            |
 |-----------------|-------------------------------------------------|
