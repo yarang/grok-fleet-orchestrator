@@ -101,7 +101,31 @@
 
 20. ✅ Bearer 토큰 상수시간 비교 — 해결됨 (`1d4422e`). 평문 `==` 비교를 `ct_eq` 다이제스트 비교로
     교체 (`subtle`은 이미 워크스페이스에 있었다).
-21. ⏳ OpenAPI/Swagger 스펙 부재.
+21. ✅ **OpenAPI/Swagger 스펙 부재** — 해결됨 (2026-08-13). `fleet-api`의
+    `/v1` HTTP API(워커 등록/조인/하트비트/목록/삭제, 자격 증명 CRUD,
+    부트스트랩 토큰 CRUD, 호스트 등록, `/metrics`) 전체를 다루는 OpenAPI
+    3.0.3 스펙을 `crates/fleet-api/src/openapi.yaml`에 손으로 작성했습니다
+    (`schema.rs`/`handlers.rs`/`app.rs`를 직접 대조해 작성 — 자동 생성 아님).
+    `GET /openapi.yaml`로 서빙되며 `/metrics`와 동일하게 인증 미들웨어
+    바깥에 있어 토큰 없이 Swagger UI 등에 URL을 바로 넘길 수 있습니다.
+
+    작성 과정에서 `docs/architecture/api-reference.md`에 아예 빠져 있던
+    자격 증명 엔드포인트 4종(`PUT/GET /v1/workers/:name/credentials`,
+    `GET .../export`, `DELETE .../:model_id`)도 발견해 스펙에 포함했습니다 —
+    즉 이 OpenAPI 스펙이 기존 산문 문서보다 커버리지가 더 넓습니다.
+
+    **범위 제한**: 대시보드 API(`/api/*`, `fleet-dashboard` 크레이트, ~30개
+    라우트)는 별도 훨씬 큰 표면이라 이번 스펙 범위 밖입니다 — 필요 시
+    후속 항목으로 분리 권장.
+
+    신규 테스트 2개: YAML 구문 유효성 + 알려진 경로 전부 존재 확인(파싱
+    기반, 오타 회귀 방지), `/openapi.yaml`이 토큰 설정 상태에서도 인증
+    없이 200을 반환하는지 확인.
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
+    (전체 그린) 통과.
 22. ⏳ Dashboard API에 `/v1` 버전 부재.
 23. ⏳ 프론트엔드 페이지네이션 UI 부재.
 24. ⏳ 모바일 반응형 감사 미수행.
@@ -440,7 +464,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#24, #26, #36, #38, #41, #42 |
+| 미배정 | #14, #22~#24, #26, #36, #38, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

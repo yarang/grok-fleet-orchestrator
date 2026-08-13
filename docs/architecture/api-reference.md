@@ -9,6 +9,14 @@
 인증: `Authorization: Bearer <token>` (또는 Cloudflare Access 활성화 시
 `CF-Access-Jwt-Assertion` 헤더).
 
+> 📄 **OpenAPI 스펙 (2026-08-13 추가, 로드맵 #21)**: `GET /openapi.yaml`이
+> `/v1` API 전체(호스트 등록·자격 증명 엔드포인트 포함)를 다루는 OpenAPI
+> 3.0.3 스펙을 반환합니다. `/metrics`와 동일하게 인증 미들웨어 바깥에
+> 있어 토큰 없이 조회할 수 있으므로 Swagger UI 등 도구에 URL을 바로
+> 넘겨도 됩니다. 소스는 `crates/fleet-api/src/openapi.yaml`이며 코드
+> 변경 시 함께 손으로 갱신해야 합니다(자동 생성 아님) — 이 문서와
+> 마찬가지로 대시보드 API(`/api/*`)는 다루지 않습니다.
+
 ### 헬스
 
 #### `GET /v1/health`
