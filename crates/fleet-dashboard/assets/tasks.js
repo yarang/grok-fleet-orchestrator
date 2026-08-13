@@ -1,13 +1,29 @@
     let allTasks = [];
     let currentFilter = 'all';
+    // 로드맵 #23 — 페이지 크기. "Load more" 클릭 시 100씩 늘려 재조회한다.
+    // 백엔드(`/api/tasks`)는 limit/offset을 완전히 지원하지만(#11) 프론트가
+    // 그동안 limit=200 고정 단발 조회만 했다 — 태스크가 그 이상 쌓이는
+    // 배포에서는 오래된 태스크가 그냥 안 보이는 문제였다.
+    const PAGE_SIZE = 100;
+    let pageSize = PAGE_SIZE;
+    // 총 개수를 알려주는 엔드포인트가 없으므로, limit보다 1개 더 요청해서
+    // "더 있음"을 판단하고 실제로는 pageSize개만 렌더링한다.
+    let hasMore = false;
 
     async function fetchTasks() {
       try {
-        const resp = await fetch('/api/tasks?limit=200');
-        allTasks = await resp.json();
+        const resp = await fetch('/api/tasks?limit=' + (pageSize + 1) + '&offset=0');
+        const data = await resp.json();
+        hasMore = data.length > pageSize;
+        allTasks = hasMore ? data.slice(0, pageSize) : data;
         render();
       } catch (e) { console.error('fetch tasks:', e); }
     }
+
+    document.getElementById('load-more-btn').addEventListener('click', () => {
+      pageSize += PAGE_SIZE;
+      fetchTasks();
+    });
 
     function fmtTokens(t) {
       if (!t) return '—';
@@ -34,7 +50,18 @@
       return d.toLocaleDateString();
     }
 
+    function updatePaginationUI() {
+      const summary = document.getElementById('pagination-summary');
+      const loadMoreBtn = document.getElementById('load-more-btn');
+      summary.textContent = hasMore
+        ? `Showing ${allTasks.length} tasks`
+        : (allTasks.length > 0 ? `All ${allTasks.length} tasks loaded` : '');
+      loadMoreBtn.style.display = hasMore ? 'inline-flex' : 'none';
+    }
+
     function render() {
+      updatePaginationUI();
+
       const filtered = currentFilter === 'all'
         ? allTasks
         : allTasks.filter(t => t.phase === currentFilter);

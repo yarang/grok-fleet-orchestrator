@@ -228,6 +228,61 @@ async fn task_list_with_filters() {
     assert_eq!(tasks.len(), 3); // 모두 Pending
 }
 
+#[tokio::test]
+async fn task_list_respects_limit_and_offset() {
+    // 로드맵 #23 — 대시보드 프론트엔드의 "Load more" 페이지네이션은
+    // `list_tasks`가 `limit`을 정확히 지키고 `created_at DESC`(최신순) +
+    // `offset`으로 안정적인 페이지 경계를 준다는 것에 의존한다. `created_at`을
+    // 명시적으로 벌려서 실행 타이밍에 좌우되지 않는 결정적 순서를 만든다.
+    require_db!(store);
+
+    let mut tasks = Vec::new();
+    for i in 0..5 {
+        let mut t = sample_task(&format!("Task {i}"), "alice");
+        t.created_at = chrono::Utc::now() - chrono::Duration::seconds(5 - i);
+        tasks.push(t);
+    }
+    for t in &tasks {
+        store.insert_task(t).await.unwrap();
+    }
+
+    // limit=2 — 정확히 2개만, 최신순이므로 가장 나중에 생성된 "Task 4"부터.
+    let page1 = store
+        .list_tasks(&TaskFilter {
+            limit: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page1.len(), 2, "limit must cap the result count");
+    assert_eq!(page1[0].prompt, "Task 4");
+    assert_eq!(page1[1].prompt, "Task 3");
+
+    // limit=2, offset=2 — 다음 페이지, 겹치지 않아야 함.
+    let page2 = store
+        .list_tasks(&TaskFilter {
+            limit: 2,
+            offset: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(page2.len(), 2);
+    assert_eq!(page2[0].prompt, "Task 2");
+    assert_eq!(page2[1].prompt, "Task 1");
+
+    // 프론트엔드의 "더 있음" 판단 방식(limit+1 요청)이 실제로 동작하는지 —
+    // 5개 중 limit=5로 요청하면 전부, limit=4면 "더 있음"을 알 수 있게 4개만.
+    let almost_all = store
+        .list_tasks(&TaskFilter {
+            limit: 4,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(almost_all.len(), 4, "limit < total must not include the last row");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Worker CRUD
 // ═══════════════════════════════════════════════════════════════════════
