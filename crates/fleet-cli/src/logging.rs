@@ -9,6 +9,16 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 /// 로깅 및 OpenTelemetry 분산 추적 초기화.
 /// `log_level`은 기본 필터이나 `RUST_LOG`가 있으면 덮어씀.
 pub fn init(log_level: &str) {
+    // W3C Trace Context propagator 전역 등록 (로드맵 #42). `fleet-worker`가
+    // register/heartbeat HTTP 요청에 실어 보내는 `traceparent`/`tracestate`
+    // 헤더를 파싱해 현재 스팬의 부모로 잇기 위해 필요 — OTLP 익스포터 설정
+    // 여부와 무관하게 항상 등록한다(파서 등록 자체는 부작용이 없고, 이걸
+    // 빼먹으면 `fleet-api::handlers`의 `continue_trace_from_headers`가 항상
+    // no-op이 된다).
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     // 표준 stderr 포맷팅 레이어 (기존 동작 유지)
@@ -44,8 +54,13 @@ pub fn init(log_level: &str) {
                     opentelemetry::global::set_tracer_provider(provider.clone());
 
                     // tracer 빌드 후 tracing_opentelemetry 레이어로 매핑
-                    let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "grok-fleet-orchestrator");
-                    eprintln!("✓ OpenTelemetry tracing layer initialized with endpoint: {endpoint}");
+                    let tracer = opentelemetry::trace::TracerProvider::tracer(
+                        &provider,
+                        "grok-fleet-orchestrator",
+                    );
+                    eprintln!(
+                        "✓ OpenTelemetry tracing layer initialized with endpoint: {endpoint}"
+                    );
                     Some(tracing_opentelemetry::layer().with_tracer(tracer))
                 }
                 Err(e) => {

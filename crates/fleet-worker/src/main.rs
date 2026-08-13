@@ -131,6 +131,8 @@ async fn main() -> ExitCode {
         .await,
     };
 
+    fleet_worker::shutdown_tracing();
+
     if let Err(e) = result {
         eprintln!("error: {e:#}");
         return ExitCode::FAILURE;

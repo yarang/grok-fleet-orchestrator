@@ -40,8 +40,13 @@ toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.32"
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tempfile = "3"
+opentelemetry_sdk = { workspace = true, features = ["testing"] }

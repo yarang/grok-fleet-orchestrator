@@ -23,15 +23,47 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use opentelemetry::propagation::Injector;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::{info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::config::WorkerConfig;
 use crate::error::WorkerError;
 use crate::grok_process;
 
 use std::sync::OnceLock;
+
+/// `reqwest::header::HeaderMap`에 W3C Trace Context를 쓰기 위한
+/// `opentelemetry::propagation::Injector` 어댑터 (로드맵 #42).
+struct HeaderInjector<'a>(&'a mut reqwest::header::HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+            reqwest::header::HeaderValue::from_str(&value),
+        ) {
+            self.0.insert(name, val);
+        }
+    }
+}
+
+/// 현재 스팬의 트레이스 컨텍스트를 `traceparent`/`tracestate` 헤더로 담은
+/// `HeaderMap`을 만든다 (로드맵 #42). `fleet_worker::init_tracing()`이 등록한
+/// 전역 propagator를 사용한다 — OTel이 비활성이거나(OTLP endpoint 미설정)
+/// 호출 시점에 활성 스팬이 없으면 유효한 컨텍스트가 없어 헤더가 비어
+/// 있는 채로 반환된다(무해한 no-op — orchestrator 쪽은 헤더가 없으면 그냥
+/// 로컬 루트 스팬으로 처리한다).
+fn trace_context_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let cx = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(&mut headers));
+    });
+    headers
+}
 
 /// orchestrator와 통신하는 HTTP 클라이언트.
 pub struct RegistrationClient {
@@ -137,6 +169,7 @@ impl RegistrationClient {
     }
 
     /// 1회 등록 시도. 성공 시 worker_id를 내부 상태에 저장.
+    #[tracing::instrument(skip(self), fields(worker_name = %self.config.worker.name))]
     pub async fn register_once(&self) -> Result<RegisterResponse, WorkerError> {
         let endpoint = self.config.agent_endpoint();
         let labels = self.config.worker.labels.clone();
@@ -153,7 +186,15 @@ impl RegistrationClient {
             "{}/v1/workers/register",
             self.config.worker.orchestrator_url
         );
-        let mut req = self.http.post(&url).json(&body);
+        // 로드맵 #42 — 이 스팬의 트레이스 컨텍스트를 traceparent/tracestate
+        // 헤더로 실어 보낸다. fleet-api::handlers가 이를 받아 자신의 스팬을
+        // 여기에 이어붙이면, 오케스트레이터 로그/트레이스에서 "어느 워커의
+        // 어느 register 시도가 이 요청을 만들었는지"를 추적할 수 있다.
+        let mut req = self
+            .http
+            .post(&url)
+            .headers(trace_context_headers())
+            .json(&body);
         if let Some(token) = &self.config.worker.bootstrap_token {
             req = req.bearer_auth(token);
         }
@@ -175,6 +216,7 @@ impl RegistrationClient {
     }
 
     /// 하트비트 1회 전송.
+    #[tracing::instrument(skip(self))]
     pub async fn heartbeat_once(&self, agent_healthy: bool) -> Result<(), WorkerError> {
         let worker_id = self
             .worker_id
@@ -218,7 +260,12 @@ impl RegistrationClient {
             "{}/v1/workers/heartbeat",
             self.config.worker.orchestrator_url
         );
-        let mut req = self.http.post(&url).json(&body);
+        // 로드맵 #42 — register_once와 동일하게 트레이스 컨텍스트 전파.
+        let mut req = self
+            .http
+            .post(&url)
+            .headers(trace_context_headers())
+            .json(&body);
         if let Some(token) = &self.config.worker.bootstrap_token {
             req = req.bearer_auth(token);
         }
@@ -836,5 +883,67 @@ mod tests {
 
         // 두 번째 호출 — 캐시 hit, 추가 수집 트리거 안 함.
         assert!(cache.get_or_schedule_refresh().is_some());
+    }
+
+    // ── 로드맵 #42: register/heartbeat HTTP 요청의 traceparent 전파 ──────
+
+    #[test]
+    fn trace_context_headers_injects_active_span_trace_id() {
+        use opentelemetry_sdk::testing::trace::InMemorySpanExporter;
+        use opentelemetry_sdk::trace::TracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = TracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "test");
+        let subscriber =
+            tracing_subscriber::Registry::default().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        // 활성 스팬이 있을 때 — traceparent 헤더가 그 스팬의 trace-id를
+        // 담아 나가야 한다.
+        let headers = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("register_once");
+            let _guard = span.enter();
+            trace_context_headers()
+        });
+
+        let traceparent = headers
+            .get("traceparent")
+            .expect("traceparent header should be present when called inside an active span")
+            .to_str()
+            .unwrap();
+
+        // W3C 포맷: "00-<32자리 hex trace-id>-<16자리 hex span-id>-<flags>"
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "unexpected traceparent format: {traceparent}"
+        );
+        assert_eq!(parts[0], "00", "version byte must be 00");
+        assert_eq!(parts[1].len(), 32, "trace-id must be 32 hex chars");
+        assert_ne!(
+            parts[1],
+            "0".repeat(32),
+            "trace-id must not be all-zero (would mean no real span was active)"
+        );
+    }
+
+    #[test]
+    fn trace_context_headers_is_empty_without_active_span() {
+        // OTel 레이어가 없는(=활성 스팬 컨텍스트가 없는) 기본 상태에서는
+        // traceparent를 만들 게 없으므로 헤더가 비어 있어야 한다 — panic 없이
+        // 조용한 no-op이어야 한다(OTLP 미설정 배포에서의 기본 동작).
+        let headers = trace_context_headers();
+        assert!(
+            headers.get("traceparent").is_none(),
+            "no traceparent should be injected without an active OTel span"
+        );
     }
 }

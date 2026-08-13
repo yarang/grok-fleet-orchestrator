@@ -7,9 +7,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use chrono::Utc;
+use opentelemetry::propagation::Extractor;
 use tracing::{debug, info};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
@@ -31,6 +34,33 @@ pub async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// `axum::http::HeaderMap`에서 W3C Trace Context(`traceparent`/`tracestate`)를
+/// 읽기 위한 `opentelemetry::propagation::Extractor` 어댑터 (로드맵 #42).
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+/// 들어온 요청의 `traceparent`/`tracestate` 헤더(있으면)를 현재(`#[instrument]`가
+/// 만든) 스팬의 부모 컨텍스트로 잇는다 (로드맵 #42 — `fleet-worker`↔오케스트레이터
+/// register/heartbeat 경로 한정, 다른 HTTP API 라우트에는 적용하지 않음). 헤더가
+/// 없거나 파싱에 실패하면 조용히 아무 것도 하지 않는다 — 이 스팬은 그냥 로컬
+/// 루트 스팬으로 남는다. `fleet-cli::logging::init()`이 전역 propagator를
+/// 등록하지 않은 상태(테스트 등)에서도 no-op이라 안전하다.
+fn continue_trace_from_headers(headers: &HeaderMap) {
+    let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    });
+    tracing::Span::current().set_parent(parent_cx);
+}
+
 /// `POST /v1/workers/register`.
 ///
 /// 신규 워커 등록 또는 재연결 처리:
@@ -38,11 +68,16 @@ pub async fn health() -> Json<HealthResponse> {
 /// 2. `existing_worker_id`가 있으면 해당 ID 유지
 /// 3. last_seen을 now로 설정
 /// 4. status를 Online으로 설정 (재등록 시 암묵적 복구)
-#[tracing::instrument(skip(state, req), fields(worker_name = %req.name))]
+#[tracing::instrument(skip(state, req, headers), fields(worker_name = %req.name))]
 pub async fn register_worker(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
+    // 로드맵 #42 — fleet-worker가 실어 보낸 traceparent가 있으면 이 스팬을
+    // 거기 잇는다.
+    continue_trace_from_headers(&headers);
+
     if req.name.trim().is_empty() {
         return Err(ApiError::BadRequest("name must not be empty".into()));
     }
@@ -122,11 +157,15 @@ pub async fn register_worker(
 }
 
 /// `POST /v1/workers/heartbeat`.
-#[tracing::instrument(skip(state, req), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
+#[tracing::instrument(skip(state, req, headers), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
+    // 로드맵 #42 — register_worker와 동일하게 트레이스 컨텍스트 연결.
+    continue_trace_from_headers(&headers);
+
     let worker_id = Uuid::parse_str(&req.worker_id)
         .map_err(|e| ApiError::BadRequest(format!("invalid worker_id: {e}")))?;
 
@@ -973,4 +1012,74 @@ pub async fn delete_worker_credential(
         "worker_name": name,
         "model_id": model_id,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 로드맵 #42: register/heartbeat 요청의 traceparent 수신 처리 ──────
+
+    #[test]
+    fn continue_trace_from_headers_links_span_to_incoming_traceparent() {
+        use opentelemetry_sdk::testing::trace::InMemorySpanExporter;
+        use opentelemetry_sdk::trace::TracerProvider;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = TracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "test");
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        // fleet-worker가 보냈을 법한, 알려진 trace-id를 가진 traceparent.
+        let known_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            format!("00-{known_trace_id}-00f067aa0b902b7-01")
+                .parse()
+                .unwrap(),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("register_worker");
+            let _guard = span.enter();
+            continue_trace_from_headers(&headers);
+        });
+
+        let spans = exporter
+            .get_finished_spans()
+            .expect("exporter should have received the finished span");
+        assert_eq!(spans.len(), 1, "exactly one span should have been recorded");
+        assert_eq!(
+            spans[0].span_context.trace_id().to_string(),
+            known_trace_id,
+            "span exported after continue_trace_from_headers must share the incoming trace-id"
+        );
+    }
+
+    #[test]
+    fn continue_trace_from_headers_is_noop_without_traceparent_header() {
+        // 헤더가 없으면 panic 없이 조용히 넘어가야 한다(로컬 루트 스팬으로
+        // 남는다) — OTel이 비활성인 배포에서도 안전해야 하기 때문.
+        let headers = HeaderMap::new();
+        continue_trace_from_headers(&headers);
+    }
+
+    #[test]
+    fn header_extractor_reads_case_insensitively() {
+        // `axum::http::HeaderMap`은 헤더 이름을 대소문자 구분 없이 저장한다 —
+        // Extractor 어댑터가 이를 그대로 위임하는지 확인.
+        let mut headers = HeaderMap::new();
+        headers.insert("TraceParent", "00-abc-def-01".parse().unwrap());
+        let extractor = HeaderExtractor(&headers);
+        assert_eq!(extractor.get("traceparent"), Some("00-abc-def-01"));
+    }
 }

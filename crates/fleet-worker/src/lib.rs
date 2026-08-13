@@ -44,18 +44,91 @@ pub use runner::WorkerRunner;
 /// GrokRunner가 세션을 시작/종료할 때 이 값을 증감한다.
 pub static ACTIVE_SESSIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// tracing-subscriber 초기화. 환경변수 `RUST_LOG`가 없으면 `info` 레벨 적용.
+/// tracing-subscriber 초기화 + OpenTelemetry 분산 추적 연동 (로드맵 #42).
+/// 환경변수 `RUST_LOG`가 없으면 `info` 레벨 적용.
+///
+/// `fleet-worker`는 오케스트레이터의 `AcpTransport`가 붙는 ACP WebSocket
+/// 경로(`grok agent serve`가 직접 종단)에는 관여하지 않는다 — 이 프로세스가
+/// 실제로 참여하는 오케스트레이터와의 통신은 `POST /v1/workers/register`·
+/// `POST /v1/workers/heartbeat` HTTP 호출뿐이다. 그래서 여기서 하는
+/// 분산 추적 연동의 범위도 그 HTTP 경로로 한정한다 — `registration.rs`가
+/// 이 함수가 등록한 W3C Trace Context propagator를 이용해 나가는 요청에
+/// `traceparent`/`tracestate` 헤더를 실어 보내고, `fleet-api::handlers`가
+/// 그 헤더를 받아 자신의 스팬을 이어붙인다.
 pub fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::{trace::TracerProvider, Resource};
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
+
+    // W3C Trace Context propagator 전역 등록. OTLP 익스포터 설정 여부와
+    // 무관하게 항상 등록한다 — `registration.rs`의 헤더 주입이 이 등록에
+    // 의존하며, 등록 자체는 부작용이 없다.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,fleet_worker=debug"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(false)
         .with_file(false)
-        .with_line_number(false)
+        .with_line_number(false);
+
+    // fleet-cli/src/logging.rs와 동일한 컨벤션: OTEL_EXPORTER_OTLP_ENDPOINT가
+    // 설정된 경우에만 실제 OTLP 익스포터/트레이서 레이어를 켠다. 이 env var가
+    // 없으면(기본) 워커는 이전과 동일하게 로컬 stderr 로그만 남긴다 — 다만
+    // propagator는 위에서 이미 등록했으므로, 헤더 주입 자체는 시도하되
+    // 활성 스팬 컨텍스트가 없어 실질적으로 빈 헤더가 된다(무해한 no-op).
+    let otel_layer = if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        if !endpoint.is_empty() {
+            let resource = Resource::new(vec![
+                KeyValue::new("service.name", "grok-fleet-worker"),
+                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            ]);
+
+            match opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint.clone())
+                .build()
+            {
+                Ok(otlp_exporter) => {
+                    let provider = TracerProvider::builder()
+                        .with_batch_exporter(otlp_exporter, opentelemetry_sdk::runtime::Tokio)
+                        .with_resource(resource)
+                        .build();
+                    opentelemetry::global::set_tracer_provider(provider.clone());
+                    let tracer = opentelemetry::trace::TracerProvider::tracer(
+                        &provider,
+                        "grok-fleet-worker",
+                    );
+                    eprintln!(
+                        "✓ OpenTelemetry tracing layer initialized with endpoint: {endpoint}"
+                    );
+                    Some(tracing_opentelemetry::layer().with_tracer(tracer))
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Failed to build OpenTelemetry OTLP exporter: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Registry::default()
+        .with(filter)
+        .with(fmt_layer)
+        .with(otel_layer)
         .init();
+}
+
+/// 프로세스 종료 시 잔여 트레이스 버퍼를 OTLP Collector로 flush.
+pub fn shutdown_tracing() {
+    opentelemetry::global::shutdown_tracer_provider();
 }
