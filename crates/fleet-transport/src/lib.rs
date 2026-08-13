@@ -49,7 +49,7 @@ pub use acp_transport::{AcpTransport, ConnState, ReconnectConfig};
 #[cfg(feature = "mtls")]
 pub use mtls_proxy::{MtlsProxy, ProxyError};
 #[cfg(feature = "mtls")]
-pub use tls::{ClientTlsConfig, ServerTlsConfig, TlsError};
+pub use tls::{ClientTlsConfig, RotatingCertResolver, ServerTlsConfig, TlsError};
 
 use async_trait::async_trait;
 use fleet_core::{TaskId, TaskResult, WorkerId};

@@ -190,18 +190,72 @@ async fn spawn_mtls_proxy_if_enabled(
         &mtls.server_cert_path,
         &mtls.server_key_path,
     );
-    let server_config = server_tls
-        .build_server_config()
-        .map_err(|e| WorkerError::Config(format!("mtls server config: {e}")))?;
+
+    // 로드맵 #36 — cert_reload_interval_secs가 설정된 경우, 서버 인증서를
+    // ServerConfig에 고정하지 않고 RotatingCertResolver에 위임한 뒤 별도
+    // 백그라운드 루프가 주기적으로 reload()를 호출한다. 미설정(기본값,
+    // 하위 호환)이면 기존처럼 기동 시 한 번만 읽는다.
+    let (server_config, reload_handle) = match mtls.cert_reload_interval_secs {
+        Some(secs) if secs > 0 => {
+            let (config, resolver) = server_tls
+                .build_rotating_server_config()
+                .map_err(|e| WorkerError::Config(format!("mtls server config: {e}")))?;
+            let mut reload_shutdown = shutdown.clone();
+            let reload_tls = server_tls.clone();
+            let interval = std::time::Duration::from_secs(secs);
+            let handle = tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await; // 최초 tick은 즉시 완료 — 실제 첫 갱신은 한 주기 뒤.
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = reload_shutdown.changed() => {
+                            if *reload_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                        _ = ticker.tick() => {
+                            match resolver.reload(&reload_tls) {
+                                Ok(()) => info!("mTLS server certificate reloaded"),
+                                Err(e) => warn!(
+                                    error = %e,
+                                    "mTLS certificate reload failed — continuing to serve the last-good certificate"
+                                ),
+                            }
+                        }
+                    }
+                }
+            });
+            (config, Some(handle))
+        }
+        _ => {
+            let config = server_tls
+                .build_server_config()
+                .map_err(|e| WorkerError::Config(format!("mtls server config: {e}")))?;
+            (config, None)
+        }
+    };
 
     let proxy = MtlsProxy::bind(listen_addr, upstream_addr, Arc::new(server_config))
         .await
         .map_err(|e| WorkerError::Config(format!("mtls proxy bind: {e}")))?;
     let bound = proxy.local_addr().ok();
-    info!(listen = ?bound, upstream = %upstream_addr, "starting mTLS proxy");
+    info!(
+        listen = ?bound,
+        upstream = %upstream_addr,
+        cert_reload_interval_secs = ?mtls.cert_reload_interval_secs,
+        "starting mTLS proxy"
+    );
     let handle = tokio::spawn(async move {
         if let Err(e) = proxy.run(shutdown).await {
             error!(error = %e, "mTLS proxy exited with error");
+        }
+        // reload 루프도 proxy와 생사를 같이 한다 — shutdown 신호가 이미
+        // 공유되므로 별도 join으로 정리만 기다린다(에러는 무시: 로깅용 백그라운드
+        // 루프가 실패해도 proxy 자체의 종료 흐름을 막지 않는다).
+        if let Some(h) = reload_handle {
+            let _ = h.await;
         }
     });
     Ok(Some(handle))

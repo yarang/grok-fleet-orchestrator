@@ -79,3 +79,8 @@ client_ca_path   = "/etc/fleet/ca.pem"
 # 미지정 시 orchestrator 가 worker 접속 호스트를 그대로 사용.
 # advertised_host = "worker-1.fleet.internal"
 # advertised_port = 2420
+# 서버 인증서 무중단 회전 (선택, 로드맵 #36). 이 주기(초)마다 server_cert_path/
+# server_key_path 를 디스크에서 다시 읽어 이후 핸드셰이크부터 반영 — 프로세스
+# 재시작 불필요. 미지정(기본값) 시 기동 시 한 번만 읽는다(기존 동작).
+# client_ca_path(CA)는 회전 대상이 아님 — CA 교체는 재시작으로 처리.
+# cert_reload_interval_secs = 3600

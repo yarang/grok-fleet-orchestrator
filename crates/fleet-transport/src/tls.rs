@@ -23,9 +23,11 @@
 //!   전송 (leaf + intermediate).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert, WebPkiClientVerifier};
+use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, RootCertStore};
 use thiserror::Error;
 use tokio_rustls::TlsConnector;
@@ -148,17 +150,14 @@ impl ServerTlsConfig {
     }
 
     /// rustls `ServerConfig` 빌드. 클라이언트 인증서 강제 (mTLS).
+    ///
+    /// 인증서/키를 이 호출 시점에 한 번만 읽어 `ServerConfig`에 고정한다 —
+    /// 이후 파일이 바뀌어도 반영되지 않는다(프로세스 재시작 필요). 재시작
+    /// 없이 회전하려면 [`Self::build_rotating_server_config`]를 사용하라
+    /// (로드맵 #36).
     pub fn build_server_config(&self) -> Result<rustls::ServerConfig, TlsError> {
-        let ca_certs = load_certs(&self.ca_path, "CA")?;
         let server_chain = load_certs(&self.server_cert_path, "server cert")?;
         let server_key = load_private_key(&self.server_key_path)?;
-
-        if ca_certs.is_empty() {
-            return Err(TlsError::Build(format!(
-                "no CA certificates in {}",
-                self.ca_path.display()
-            )));
-        }
         if server_chain.is_empty() {
             return Err(TlsError::Build(format!(
                 "no server certificate in {}",
@@ -166,20 +165,8 @@ impl ServerTlsConfig {
             )));
         }
 
-        let mut client_roots = RootCertStore::empty();
-        for cert in &ca_certs {
-            client_roots
-                .add(cert.clone())
-                .map_err(|e| TlsError::Build(format!("add client CA root: {e}")))?;
-        }
-
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(client_roots),
-            provider.clone(),
-        )
-        .build()
-        .map_err(|e| TlsError::Build(format!("client verifier: {e}")))?;
+        let verifier = self.build_client_verifier(&provider)?;
 
         rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
@@ -187,6 +174,115 @@ impl ServerTlsConfig {
             .with_client_cert_verifier(verifier)
             .with_single_cert(server_chain, server_key)
             .map_err(|e| TlsError::Build(format!("with_single_cert: {e}")))
+    }
+
+    /// [`build_server_config`](Self::build_server_config)과 동일한 클라이언트
+    /// CA 신뢰 관계를 쓰되, 서버 인증서는 정적으로 고정하지 않고
+    /// [`RotatingCertResolver`]에 위임한다. 반환된 리졸버의
+    /// [`RotatingCertResolver::reload`]를 (보통 백그라운드 루프에서) 주기적으로
+    /// 호출하면 `ServerConfig`를 재빌드하거나 프로세스를 재시작하지 않고도
+    /// 새 인증서가 이후 핸드셰이크부터 즉시 반영된다 — 로드맵 #36.
+    ///
+    /// 클라이언트 CA(`ca_path`)는 서버 인증서와 달리 회전 대상이 아니다 —
+    /// CA 교체는 사설 PKI 전체를 다시 구성하는 것과 같은 무게의 작업이라
+    /// 이 메서드의 범위 밖이다(프로세스 재시작으로 처리).
+    pub fn build_rotating_server_config(
+        &self,
+    ) -> Result<(rustls::ServerConfig, Arc<RotatingCertResolver>), TlsError> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = self.build_client_verifier(&provider)?;
+        let initial = self.load_certified_key(&provider)?;
+        let resolver = Arc::new(RotatingCertResolver::new(initial));
+
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TlsError::Build(format!("protocol versions: {e}")))?
+            .with_client_cert_verifier(verifier)
+            .with_cert_resolver(resolver.clone());
+
+        Ok((config, resolver))
+    }
+
+    /// 클라이언트 인증서 검증기 빌드 (CA 로드 + `WebPkiClientVerifier`).
+    /// `build_server_config`/`build_rotating_server_config`가 공유.
+    fn build_client_verifier(
+        &self,
+        provider: &Arc<rustls::crypto::CryptoProvider>,
+    ) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>, TlsError> {
+        let ca_certs = load_certs(&self.ca_path, "CA")?;
+        if ca_certs.is_empty() {
+            return Err(TlsError::Build(format!(
+                "no CA certificates in {}",
+                self.ca_path.display()
+            )));
+        }
+        let mut client_roots = RootCertStore::empty();
+        for cert in &ca_certs {
+            client_roots
+                .add(cert.clone())
+                .map_err(|e| TlsError::Build(format!("add client CA root: {e}")))?;
+        }
+        WebPkiClientVerifier::builder_with_provider(Arc::new(client_roots), provider.clone())
+            .build()
+            .map_err(|e| TlsError::Build(format!("client verifier: {e}")))
+    }
+
+    /// 서버 인증서/키를 디스크에서 읽어 rustls `CertifiedKey`로 빌드.
+    /// 최초 구성과 [`RotatingCertResolver::reload`] 양쪽에서 재사용.
+    fn load_certified_key(
+        &self,
+        provider: &rustls::crypto::CryptoProvider,
+    ) -> Result<CertifiedKey, TlsError> {
+        let server_chain = load_certs(&self.server_cert_path, "server cert")?;
+        let server_key = load_private_key(&self.server_key_path)?;
+        if server_chain.is_empty() {
+            return Err(TlsError::Build(format!(
+                "no server certificate in {}",
+                self.server_cert_path.display()
+            )));
+        }
+        CertifiedKey::from_der(server_chain, server_key, provider)
+            .map_err(|e| TlsError::Build(format!("build certified key: {e}")))
+    }
+}
+
+/// 백그라운드에서 주기적으로 디스크의 서버 인증서/키를 다시 읽어 스왑하는
+/// rustls 인증서 리졸버 (로드맵 #36).
+///
+/// `resolve()`는 매 TLS 핸드셰이크마다 호출되므로 디스크 I/O를 직접 하지
+/// 않는다 — 마지막으로 적재된 `CertifiedKey`를 캐시해 두고 그것만 클론해
+/// 반환한다. 실제 재적재는 [`reload`](Self::reload)를 호출하는 별도
+/// 백그라운드 루프(호출자 책임 — 보통 `tokio::time::interval`)가 담당한다.
+#[derive(Debug)]
+pub struct RotatingCertResolver {
+    current: RwLock<Arc<CertifiedKey>>,
+}
+
+impl RotatingCertResolver {
+    fn new(initial: CertifiedKey) -> Self {
+        Self {
+            current: RwLock::new(Arc::new(initial)),
+        }
+    }
+
+    /// `config`가 가리키는 파일에서 서버 인증서/키를 다시 읽어 캐시를 교체.
+    ///
+    /// 파싱/검증에 실패하면 **기존 캐시를 그대로 두고** 에러만 반환한다 —
+    /// 잘못된(또는 교체 도중 반만 쓰인) 파일 때문에 진행 중인 서비스가
+    /// 중단되지 않도록 하기 위함이다("서비스 중단 없이 교체"가 이 기능의
+    /// 핵심 요구사항). 호출자는 에러를 로깅만 하고 다음 주기에 재시도하면
+    /// 된다.
+    pub fn reload(&self, config: &ServerTlsConfig) -> Result<(), TlsError> {
+        let provider = rustls::crypto::ring::default_provider();
+        let fresh = config.load_certified_key(&provider)?;
+        *self.current.write().unwrap() = Arc::new(fresh);
+        Ok(())
+    }
+}
+
+impl ResolvesServerCert for RotatingCertResolver {
+    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current.read().unwrap().clone())
     }
 }
 

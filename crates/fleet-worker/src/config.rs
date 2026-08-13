@@ -128,6 +128,13 @@ pub struct MtlsSection {
     /// orchestrator에게 노출할 포트. 미지정 시 listen_addr의 포트 사용.
     #[serde(default)]
     pub advertised_port: Option<u16>,
+    /// 서버 인증서를 이 주기(초)마다 디스크에서 다시 읽어 무중단 회전
+    /// (로드맵 #36). 미지정 또는 `0`이면 비활성 — 최초 기동 시 한 번만
+    /// 읽고 이후 변경은 프로세스 재시작 전까지 반영되지 않는다(기존 동작,
+    /// 하위 호환 기본값). 클라이언트 CA는 이 회전 대상이 아니다 — CA
+    /// 교체는 프로세스 재시작으로 처리한다.
+    #[serde(default)]
+    pub cert_reload_interval_secs: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -549,6 +556,7 @@ secret = "x"
             client_ca_path: "/etc/ca.pem".into(),
             advertised_host: Some("worker-1.fleet".into()),
             advertised_port: Some(2420),
+            cert_reload_interval_secs: None,
         };
         let config = WorkerConfig::for_test()
             .orchestrator_url("https://fleet.example.com")
@@ -571,6 +579,7 @@ secret = "x"
             client_ca_path: "/etc/ca.pem".into(),
             advertised_host: Some("ignored".into()),
             advertised_port: Some(9999),
+            cert_reload_interval_secs: None,
         };
         let config = WorkerConfig::for_test()
             .orchestrator_url("https://fleet.example.com")
@@ -597,6 +606,7 @@ secret = "x"
             client_ca_path: "/x".into(),
             advertised_host: None,
             advertised_port: None,
+            cert_reload_interval_secs: None,
         };
         let config = WorkerConfig::for_test().mtls(mtls).build();
         let err = config.validate().unwrap_err();
@@ -613,6 +623,7 @@ secret = "x"
             client_ca_path: "".into(),
             advertised_host: None,
             advertised_port: None,
+            cert_reload_interval_secs: None,
         };
         let config = WorkerConfig::for_test().mtls(mtls).build();
         let err = config.validate().unwrap_err();
