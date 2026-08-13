@@ -378,6 +378,52 @@ CLI (`fleet provision`)는 `--grok-secret`, `--bootstrap-token` 플래그와 환
 - ~~mTLS 미지원 — Cloudflare Tunnel에 위임 (Phase 8.5)~~ → **Phase 8.5에서 사설 CA 기반 mTLS 구현** (아래 "mTLS for Orchestrator↔Worker ACP 트래픽 (Phase 8.5)" 절 참조)
 - 시스템 메트릭의 `active_tasks`는 항상 0 — Phase 8.4에서 동시성 도입 시 실제 카운트 (개선 후보)
 
+### 분산 추적: register/heartbeat 경로의 traceparent 전파 (로드맵 #42, 2026-08-14 추가)
+
+로드맵 #42는 원래 "오케스트레이터와 `fleet-worker` 간 **WebSocket 통신** 시
+`traceparent` 전파"를 목표로 서술했지만, 조사 결과 그 서술이 실제 아키텍처와
+어긋난다는 것이 확인됐습니다 — **`fleet-worker`(이 크레이트)는 ACP WebSocket
+경로에 전혀 관여하지 않습니다.** 오케스트레이터의 `AcpTransport`는
+`grok agent serve`(이 저장소 밖의 외부 바이너리)의 WS 엔드포인트에 직접
+연결하고, `fleet-worker`는 그 서브프로세스를 관리·감시할 뿐입니다. `fleet-worker`가
+오케스트레이터와 실제로 주고받는 통신은 `POST /v1/workers/register`·
+`POST /v1/workers/heartbeat` **HTTP** 호출뿐입니다(`registration.rs`).
+
+그래서 이 항목이 실제로 구현하는 범위는 **그 HTTP 경로**로 한정됩니다(사용자
+확인 후 결정 — ACP `_meta` 필드에 `traceparent`를 추가로 주입하는 안, 항목
+자체를 로드맵 정정만 하고 스킵하는 안도 검토했으나, grok이 외부 블랙박스라
+ACP 경로로 보내는 값을 실제로 grok이 이어붙이는지 이 저장소에서 검증할 수
+없어 제외):
+
+- `fleet-worker::init_tracing()`이 `fleet-cli::logging::init()`과 동일한
+  패턴(같은 `OTEL_EXPORTER_OTLP_ENDPOINT` env var, 같은 조건부 OTLP Tonic
+  익스포터 초기화)으로 OpenTelemetry를 연동합니다 — 다만 `service.name`은
+  `"grok-fleet-worker"`. 두 프로세스 모두 W3C `TraceContextPropagator`를
+  전역 등록합니다(`opentelemetry::global::set_text_map_propagator`) — 이게
+  없으면 헤더 주입/추출이 항상 no-op이 됩니다.
+- `RegistrationClient::register_once`/`heartbeat_once`에 `#[tracing::instrument]`를
+  달아 클라이언트 쪽 스팬을 만들고, `trace_context_headers()`가 그 스팬의
+  컨텍스트를 `traceparent`/`tracestate` 헤더로 담아 나가는 HTTP 요청에
+  실어 보냅니다.
+- `fleet-api::handlers::register_worker`/`heartbeat` 핸들러가
+  `continue_trace_from_headers()`로 들어온 헤더를 파싱해 자신의
+  `#[tracing::instrument]` 스팬의 부모로 잇습니다(`tracing_opentelemetry::
+  OpenTelemetrySpanExt::set_parent`). 이 연결은 **register/heartbeat 두
+  라우트에만 적용**되며, HTTP API의 다른 라우트에는 적용하지 않습니다
+  (전체 라우트에 적용하려면 `tower_http::trace::TraceLayer` 수준의 별도
+  미들웨어가 필요 — 범위 밖으로 명시적으로 남겨둠).
+- 헤더가 없거나(발신 측 OTel 미설정) 파싱에 실패하면 양쪽 모두 조용히
+  no-op — 로컬 루트 스팬으로 남을 뿐 에러가 나지 않습니다.
+
+신규 테스트 5개: `fleet-worker`의 `trace_context_headers_injects_active_span_
+trace_id`/`trace_context_headers_is_empty_without_active_span`,
+`fleet-api`의 `continue_trace_from_headers_links_span_to_incoming_
+traceparent`/`continue_trace_from_headers_is_noop_without_traceparent_header`/
+`header_extractor_reads_case_insensitively` — 모두
+`opentelemetry_sdk::testing::trace::InMemorySpanExporter`로 실제 OTel
+파이프라인을 구동해 trace-id가 발신 헤더에서 수신 스팬까지 정확히
+전파되는지 검증합니다(라이브 OTLP 컬렉터 불필요).
+
 ## WebSocket Reconnection (Phase 8.2)
 
 Phase 7의 `AcpTransport`는 단일 WebSocket 연결만 유지했기 때문에, 네트워크 끊김,

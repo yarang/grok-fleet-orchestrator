@@ -432,7 +432,42 @@
     --features "acp mtls" -- --test-threads=1`(`DATABASE_URL`을 실제 Postgres
     `fleet_test`로 지정, 전체 그린) 통과.
 
-42. ⏳ **워커 노드 연동 분산 OTLP Tracing Context Propagation 구축** (P2, 모니터링) — `xai-tracing` 기법을 차용해 오케스트레이터와 `fleet-worker` 간 WebSocket 통신 시 `traceparent` 스팬 캐리어를 전파하여 E2E 분산 추적 시각화 완성.
+42. ✅ **워커 노드 연동 분산 OTLP Tracing Context Propagation 구축** (P2, 모니터링) —
+    해결됨 (2026-08-14). 원 서술("오케스트레이터와 `fleet-worker` 간 WebSocket
+    통신 시 `traceparent` 전파")이 실제 아키텍처와 어긋났습니다 — `fleet-worker`는
+    ACP WebSocket 경로에 전혀 관여하지 않습니다. 오케스트레이터의 `AcpTransport`는
+    `grok agent serve`(이 저장소 밖 외부 바이너리)의 WS 엔드포인트에 직접 붙고,
+    `fleet-worker`는 그 서브프로세스를 관리할 뿐 — 오케스트레이터와 실제로 주고받는
+    통신은 `POST /v1/workers/register`·`heartbeat` **HTTP** 호출뿐입니다.
+
+    이 발견을 사용자에게 제시하고(AskUserQuestion) 3가지 범위(HTTP 경로만 / HTTP +
+    ACP `_meta` 주입까지 / 로드맵만 정정하고 스킵) 중 **"HTTP 경로(register/
+    heartbeat)만 구현"**이 채택됐습니다 — ACP `_meta` 주입은 grok이 외부 블랙박스라
+    실제로 이어붙이는지 이 저장소에서 검증할 수 없어 제외.
+
+    구현: `fleet-worker`에 `fleet-cli::logging.rs`와 동일한 패턴(같은 `OTEL_
+    EXPORTER_OTLP_ENDPOINT` env var, service.name만 `"grok-fleet-worker"`)으로
+    OpenTelemetry 연동(`init_tracing()`)을 신규 추가했습니다. 양쪽 프로세스가
+    W3C `TraceContextPropagator`를 전역 등록하고, `RegistrationClient::
+    register_once`/`heartbeat_once`(신규 `#[tracing::instrument]`)가 자신의
+    스팬 컨텍스트를 `traceparent`/`tracestate` 헤더로 실어 보내면, `fleet-api::
+    handlers::register_worker`/`heartbeat`가 그 헤더를 파싱해 자신의 스팬을
+    거기 이어붙입니다(`continue_trace_from_headers`). 이 연결은 register/heartbeat
+    두 라우트에만 적용되며, 헤더가 없거나 OTel이 비활성이면 양쪽 다 조용히
+    no-op(로컬 루트 스팬)입니다.
+
+    신규 테스트 5개(`fleet-worker`/`fleet-api` 각 크레이트, `opentelemetry_sdk::
+    testing::trace::InMemorySpanExporter`로 실제 OTel 파이프라인을 구동해
+    trace-id가 발신 헤더에서 수신 스팬까지 정확히 전파되는지 검증 — 라이브
+    OTLP 컬렉터 불필요). 상세 배경은
+    [`docs/architecture/overview.md`](../architecture/overview.md) "분산 추적:
+    register/heartbeat 경로의 traceparent 전파" 절 참고.
+
+    ✅ **검증 완료**: `cargo build --workspace --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건, 벤더 코드 제외), `cargo test --workspace
+    --features "acp mtls" -- --test-threads=1`(`DATABASE_URL`을 실제 Postgres
+    `fleet_test`로 지정, 전체 그린) 통과.
 
 ## 신규 항목 (2026-08-12 추가 — `docs/` 전체 코드 대조 검증 중 발견)
 
@@ -576,7 +611,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #22~#24, #26, #42 |
+| 미배정 | #14, #22~#24, #26 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
