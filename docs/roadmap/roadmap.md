@@ -682,6 +682,16 @@
     `cargo check --no-default-features`, `cargo clippy --all-targets
     --all-features`(자체 크레이트 경고 0건) 모두 통과.
 
+    **추가 정리 (2026-08-14)**: 당시 검색이 문자 그대로 `struct MemStore`를
+    찾는 방식이었던 탓에, `fleet-scheduler/tests/dispatch_e2e.rs`가 이름만
+    `InMemoryStore`로 다르게 지은 11번째 중복(Store trait 전체를 재구현한
+    ~210줄)을 놓쳤었습니다. `#38` 작업 중 발견해 기록해 두었다가 이번에
+    canonical `fleet_store::mem::MemStore`로 교체하고, 그 구현에만 쓰이던
+    이제-불필요한 import(`HashMap`, `async_trait`, `tokio::sync::Mutex`,
+    `EventEntry`/`TaskOutput`/`BootstrapToken`/`WorkerHeartbeat`/`StoreError`
+    등)를 함께 제거했습니다(순변화 -210줄). 기존 17개 e2e 테스트 전부
+    동일하게 통과 — 동작 변화 없음, 순수 중복 제거.
+
 46. ✅ **`docs/` 전체 코드 대조 검증 및 문서 구조 정리** — 해결됨
     (2026-08-12, 이 세션). `docs/architecture/*.md`(overview.md 9개 절 + 신규 2개 절,
     api-reference.md, mcp-specification.md), `docs/worker-bootstrap/*.md`(5개 문서),
