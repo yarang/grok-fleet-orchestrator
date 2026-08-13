@@ -819,9 +819,23 @@ supervisor 의 `establish_session` 은 endpoint 스킴에 따라 다음과 같�
 
 ### 제한
 
-- 인증서 자동 회전 미지원. CA/서버 인증서 만료 전 수동 갱신 필요
-  (`ClientTlsConfig` 는 매 핸드셰이크마다 파일을 다시 읽으므로 갱신 후 프로세스
-  재시작 불필요, 하지만 fleet-worker의 proxy는 시작 시 한 번만 읽음).
+- ~~인증서 자동 회전 미지원~~ → ✅ **부분 해결 (2026-08-13, 로드맵 #36)**.
+  `ClientTlsConfig`는 원래부터 매 핸드셰이크마다 파일을 다시 읽어 갱신 후
+  프로세스 재시작이 필요 없었지만(orchestrator 쪽), fleet-worker의
+  `MtlsProxy`(서버 역할)는 기동 시 한 번만 읽고 그 뒤로는 절대 반영하지
+  않는 게 진짜 문제였다. `fleet-transport::tls::RotatingCertResolver`를
+  추가해 rustls의 `ResolvesServerCert`를 커스텀 구현했다 — 매 핸드셰이크마다
+  디스크 I/O를 하는 대신 최신 `CertifiedKey`를 캐시해 두고, 별도 백그라운드
+  루프가 `worker.toml`의 `[mtls] cert_reload_interval_secs`(초 단위, 미지정
+  시 기존처럼 비활성)마다 `reload()`를 호출해 캐시를 교체한다. 파싱 실패
+  시에는 기존 캐시를 그대로 유지하고 에러만 로깅한다("서비스 중단 없이
+  교체"가 핵심 요구사항이므로 잘못된 갱신 시도가 서비스를 끊으면 안 됨).
+  실제 러닝 프록시에 새 연결을 걸어 회전 전/후 제시되는 인증서의 raw DER
+  바이트가 실제로 바뀌는지까지 확인하는 엔드투엔드 테스트로 검증했다
+  (`crates/fleet-transport/tests/mtls_proxy.rs`). **CA는 회전 대상이
+  아니다** — CA 교체는 사설 PKI 전체를 다시 구성하는 것과 같은 무게라
+  범위 밖으로 남겨두었으며(프로세스 재시작으로 처리), CRL/OCSP도 여전히
+  미지원이다(아래 항목).
 - CRL/OCSP 미지원. 폐기된 클라이언트 인증서는 CA 자체를 교체하지 않는 한
   유효. (대안: mTLS + Cloudflare Access 동시 사용.)
 - ~~인벤토리 모드(`--inventory`)의 mTLS 미지원~~ → ✅ **해결 (2026-08-13, 로드맵 #37)**.

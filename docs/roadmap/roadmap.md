@@ -237,7 +237,45 @@
 ## 신규 항목 (2026-08-11 추가)
 
 35. ✅ **docs 디렉토리 내 다이어그램 Mermaid 변환 및 문서 정합성 개선** (P2, 문서화) — 해결됨 (2026-08-11). docs 내 ASCII 다이어그램 16개를 Mermaid로 마이그레이션하고, `/api-gateway/` Nginx 설정 누락 해결 및 `single-server.md` 내 폐기된 Docker 스펙 정리 완료.
-36. ⏳ **mTLS 인증서 자동 회전(Auto-Rotation) 정책 도입** (P1/P2, 보안/운영) — 사설 CA 기반 mTLS 인증서 만료 시 서비스 중단 없이 교체하기 위해 TLS 컨텍스트 동적 리로드(File Watcher) 또는 중앙 인증서 자동 배포 설계.
+36. ✅ **mTLS 인증서 자동 회전(Auto-Rotation) 정책 도입** (P1/P2, 보안/운영) —
+    해결됨 (2026-08-13). 실측해보니 오케스트레이터(클라이언트) 쪽은 이미
+    매 핸드셰이크마다 파일을 다시 읽고 있어(`ClientTlsConfig`) 문제가
+    없었고, 진짜 격차는 fleet-worker의 `MtlsProxy`(서버 역할)가 기동 시
+    한 번만 인증서를 읽고 이후 변경을 절대 반영하지 않는다는 점이었습니다
+    — 이 절반만 실제로 고쳤습니다.
+
+    `crates/fleet-transport/src/tls.rs`에 `RotatingCertResolver`를
+    추가했습니다 — rustls `ResolvesServerCert`를 구현해 매 핸드셰이크마다
+    캐시된 `CertifiedKey`(Arc)만 반환하고(디스크 I/O 없음), 별도 백그라운드
+    루프가 `reload()`를 호출할 때만 캐시를 교체합니다. `ServerTlsConfig::
+    build_rotating_server_config()`가 이 리졸버로 구성된 `ServerConfig`를
+    만듭니다. `fleet-worker`의 `worker.toml` `[mtls]` 섹션에 신규 필드
+    `cert_reload_interval_secs`(초, 미지정/0이면 기존처럼 정적 로드 — 하위
+    호환 기본값)를 추가하고, `runner.rs`가 설정된 경우 백그라운드 재적재
+    루프를 spawn하도록 연결했습니다. 재적재 실패 시 **기존 캐시를 그대로
+    유지**하고 에러만 로깅합니다 — 잘못된(또는 원자적 교체 도중 반만 쓰인)
+    파일 때문에 서비스가 끊기지 않도록("서비스 중단 없이 교체"가 이 항목의
+    핵심 요구사항).
+
+    **의도적 범위 제한**: 클라이언트 CA(`client_ca_path`)는 회전 대상이
+    아닙니다 — CA 교체는 사설 PKI 전체를 다시 구성하는 것과 같은 무게의
+    작업이라 프로세스 재시작으로 처리합니다. CRL/OCSP도 여전히 미지원입니다
+    (기존에 알려진 별도 제한, 이번 항목의 범위 밖). `fleet provision`
+    인벤토리/CLI를 통한 자동 설정 배선은 하지 않았습니다 — `worker.toml`을
+    직접 편집해 설정해야 합니다(#37과 달리 "배선 자체가 요청 사항"은
+    아니었으므로 범위를 좁혔습니다).
+
+    **실측 검증**: `crates/fleet-transport/tests/mtls_proxy.rs`에 엔드투엔드
+    테스트 2개를 추가했습니다 — (1) 같은 CA로 서명된 서로 다른 서버 인증서
+    두 개를 준비해, 실제 러닝 프록시에 연결→`reload()`→재연결하며 클라이언트가
+    받는 인증서의 raw DER 바이트가 회전 전/후 실제로 바뀌는지 확인(단순히
+    "에러 없이 리턴"보다 훨씬 강한 증거), (2) 손상된 인증서 파일로
+    `reload()`가 실패해도 에러만 반환하고 패닉하지 않는지 확인.
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
+    (전체 그린, 신규 mTLS 테스트 2개 포함) 통과.
 37. ✅ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — 해결됨
     (2026-08-13). `InventoryDefaults`/`InventoryWorker`(`crates/fleet-provisioner/src/inventory.rs`)에
     mTLS 필드를 추가했습니다. 여러 워커가 공유할 만한 값(`mtls_enabled`,
@@ -464,7 +502,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #22~#24, #26, #36, #38, #41, #42 |
+| 미배정 | #14, #22~#24, #26, #38, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
