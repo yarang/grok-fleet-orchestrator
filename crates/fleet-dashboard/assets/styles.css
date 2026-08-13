@@ -415,6 +415,26 @@ h2 {
   grid-template-columns: 1.3fr 0.8fr 1fr 0.8fr 0.8fr 0.9fr 0.6fr 1.1fr;
 }
 
+/* 로드맵 #24(모바일 반응형 감사) 수행 중 발견: 아래 3개 admin 테이블은
+   #task-table/#host-table과 같은 이유(전용 규칙 부재)로 grid-template-columns가
+   전혀 없어 데스크톱에서도 컬럼 정렬 없이 세로로 쌓여 보이고 있었다 —
+   모바일 전용 버그가 아니라 애초에 스타일이 빠져 있던 것. */
+
+/* /admin/activity 페이지 (Seq/Type/Task/Worker/Details/Time, 6열). */
+#activity-table .row {
+  grid-template-columns: 0.4fr 1fr 0.8fr 0.8fr 2fr 1fr;
+}
+
+/* /admin/ssh-keys 페이지 (Name/Type/Fingerprint/Created/Actions, 5열). */
+#key-table .row {
+  grid-template-columns: 1fr 0.6fr 2fr 1fr 0.8fr;
+}
+
+/* /admin/users 페이지 (Username/Email/Roles/Enabled/Last Login/Actions, 6열). */
+#user-table .row {
+  grid-template-columns: 1fr 1.5fr 1fr 0.6fr 1fr 0.8fr;
+}
+
 /* ── Status pills ────────────────────────────────────────────────── */
 
 .status-pill {
@@ -496,10 +516,13 @@ h2 {
   .metric { font-size: 28px; }
   h2 { font-size: 21px; }
 
-  #worker-list .row,
-  #task-list .row,
-  #task-table .row,
-  #host-table .row {
+  /* 로드맵 #24 — 예전에는 테이블 ID를 하나하나 나열했는데(#worker-list,
+     #task-list, #task-table, #host-table), 그 목록 갱신을 잊은 채 새 테이블
+     (#activity-table/#key-table/#user-table)이 추가되면서 그 세 곳은
+     모바일에서도 데스크톱 컬럼 그리드 그대로 남아 잘리는 문제가 있었다.
+     공용 `.table` 래퍼 클래스를 기준으로 일반화해, 앞으로 새 테이블이
+     추가돼도 이 규칙을 자동으로 상속받도록 한다. */
+  .table .row {
     grid-template-columns: 1fr;
     gap: 2px;
   }
