@@ -406,199 +406,13 @@ mod tests {
     use super::*;
     use crate::dispatcher::Dispatcher;
     use crate::state::FleetState;
-    use async_trait::async_trait;
     use fleet_core::{
-        BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskId, TaskOutput,
-        TaskRequest, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+        CircuitBreakerConfig, Task, TaskId, TaskRequest, TaskStatus, Worker, WorkerId,
+        WorkerStatus,
     };
-    use fleet_store::{Store, StoreError};
+    use fleet_store::mem::MemStore;
+    use fleet_store::Store;
     use fleet_transport::{MockTransport, MockWorker};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    /// 인메모리 Store — reconcile 테스트 전용. 실제로 필요한 메서드만 동작하고
-    /// 나머지는 이 테스트에서 호출되지 않으므로 `unimplemented!()`.
-    struct MemStore {
-        tasks: Mutex<HashMap<TaskId, Task>>,
-        workers: Mutex<HashMap<WorkerId, Worker>>,
-        events: Mutex<Vec<EventEntry>>,
-        /// `true`이면 `list_tasks`가 항상 에러를 반환 (회복성 테스트용).
-        fail_list_tasks: bool,
-    }
-
-    impl MemStore {
-        fn new() -> Self {
-            Self {
-                tasks: Mutex::new(HashMap::new()),
-                workers: Mutex::new(HashMap::new()),
-                events: Mutex::new(Vec::new()),
-                fail_list_tasks: false,
-            }
-        }
-
-        fn failing_list_tasks() -> Self {
-            Self {
-                fail_list_tasks: true,
-                ..Self::new()
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Store for MemStore {
-        async fn insert_task(&self, t: &Task) -> Result<(), StoreError> {
-            self.tasks.lock().unwrap().insert(t.id, t.clone());
-            Ok(())
-        }
-        async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
-            Ok(self.tasks.lock().unwrap().get(&id).cloned())
-        }
-        async fn update_task_status(
-            &self,
-            id: TaskId,
-            status: &TaskStatus,
-        ) -> Result<(), StoreError> {
-            let mut tasks = self.tasks.lock().unwrap();
-            let Some(task) = tasks.get_mut(&id) else {
-                return Err(StoreError::NotFound);
-            };
-            task.status = status.clone();
-            if matches!(status, TaskStatus::Dispatched { .. }) {
-                task.dispatched_at = Some(chrono::Utc::now());
-            }
-            Ok(())
-        }
-        async fn list_tasks(
-            &self,
-            filter: &fleet_core::TaskFilter,
-        ) -> Result<Vec<Task>, StoreError> {
-            if self.fail_list_tasks {
-                return Err(StoreError::Unsupported("list_tasks forced failure"));
-            }
-            let tasks = self.tasks.lock().unwrap();
-            let mut out: Vec<Task> = tasks
-                .values()
-                .filter(|t| match &filter.status {
-                    Some(TaskStatusFilter::Pending) => matches!(t.status, TaskStatus::Pending),
-                    Some(TaskStatusFilter::Dispatched) => {
-                        matches!(t.status, TaskStatus::Dispatched { .. })
-                    }
-                    Some(TaskStatusFilter::Completed) => {
-                        matches!(t.status, TaskStatus::Completed(_))
-                    }
-                    Some(TaskStatusFilter::Failed) => matches!(t.status, TaskStatus::Failed(_)),
-                    Some(TaskStatusFilter::Cancelled) => {
-                        matches!(t.status, TaskStatus::Cancelled { .. })
-                    }
-                    Some(TaskStatusFilter::Terminal) => t.is_terminal(),
-                    Some(TaskStatusFilter::Active) => !t.is_terminal(),
-                    None => true,
-                })
-                .cloned()
-                .collect();
-            out.sort_by_key(|t| t.created_at);
-            out.truncate(filter.limit);
-            Ok(out)
-        }
-        async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-            self.workers.lock().unwrap().insert(w.id, w.clone());
-            Ok(())
-        }
-        async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
-            Ok(self.workers.lock().unwrap().get(&id).cloned())
-        }
-        async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
-            Ok(self
-                .workers
-                .lock()
-                .unwrap()
-                .values()
-                .find(|w| w.name == name)
-                .cloned())
-        }
-        async fn list_workers(&self, f: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-            let workers = self.workers.lock().unwrap();
-            let out: Vec<Worker> = workers
-                .values()
-                .filter(|w| f.status.is_none_or(|s| w.status == s))
-                .filter(|w| f.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)))
-                .cloned()
-                .collect();
-            Ok(out)
-        }
-        async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-            self.workers.lock().unwrap().remove(&id);
-            Ok(())
-        }
-        async fn update_worker_heartbeat(
-            &self,
-            _: WorkerId,
-            _: &WorkerHeartbeat,
-        ) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn append_event(&self, e: &FleetEvent) -> Result<u64, StoreError> {
-            let mut events = self.events.lock().unwrap();
-            let seq = (events.len() + 1) as u64;
-            events.push(EventEntry {
-                seq,
-                event: e.clone(),
-            });
-            Ok(seq)
-        }
-        async fn list_events(&self, _: u64, _: u32) -> Result<Vec<EventEntry>, StoreError> {
-            Ok(self.events.lock().unwrap().clone())
-        }
-        async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-            unimplemented!()
-        }
-        async fn get_output(&self, _: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-            unimplemented!()
-        }
-        async fn migrate(&self) -> Result<(), StoreError> {
-            Ok(())
-        }
-        async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-            unimplemented!()
-        }
-        async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
-            unimplemented!()
-        }
-        async fn upsert_worker_credential(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: u32,
-            _: Option<&str>,
-        ) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn get_worker_credential(
-            &self,
-            _: &str,
-            _: &str,
-        ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
-            unimplemented!()
-        }
-        async fn list_worker_credentials(
-            &self,
-            _: &str,
-        ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
-            unimplemented!()
-        }
-        async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
-            unimplemented!()
-        }
-    }
 
     /// FleetState + Dispatcher를 함께 조립. `mock_workers`가 있으면 transport에
     /// 등록하고 이벤트 루프를 백그라운드에서 실행한다.
@@ -780,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_once_tolerates_store_errors_without_panicking() {
-        let store = Arc::new(MemStore::failing_list_tasks());
+        let store = Arc::new(MemStore::new().with_failing(&["list_tasks"]));
         let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
 
         let reconciler = Reconciler::new(state, dispatcher, ReconcileConfig::default());

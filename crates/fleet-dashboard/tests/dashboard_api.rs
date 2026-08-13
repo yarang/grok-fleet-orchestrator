@@ -11,164 +11,112 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use fleet_core::{
-    auth::PermissionKind, BootstrapToken, EventEntry, FleetEvent, Permission, PermissionId,
-    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    auth::PermissionKind, Permission, PermissionId, Session, SessionId, Task, TaskId, User,
+    UserId, Worker, WorkerId, WorkerStatus,
 };
 use fleet_dashboard::{build_dashboard_app, DashboardState, SESSION_DURATION_SECS};
-use fleet_store::{Store, StoreError};
+use fleet_store::mem::MemStore;
+use fleet_store::Store;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 // ═══════════════════════════════════════════════════════════════════════
-//  인메모리 Store (실제 DB 없이 테스트용)
+//  세션 시딩 헬퍼 (인메모리 Store는 fleet_store::mem::MemStore 공용 구현 사용)
 // ═══════════════════════════════════════════════════════════════════════
 
-struct MemStore {
-    workers: Mutex<HashMap<WorkerId, Worker>>,
-    tasks: Mutex<HashMap<TaskId, Task>>,
-    events: Mutex<Vec<EventEntry>>,
-    // RBAC (Phase 9.1 테스트용)
-    users: Mutex<HashMap<UserId, User>>,
-    sessions: Mutex<HashMap<String, Session>>, // token_hash → Session
-    user_permissions: Mutex<HashMap<UserId, Vec<Permission>>>,
-    // Host inventory (Phase P1.5 테스트용)
-    hosts: Mutex<Vec<fleet_core::Host>>,
-    host_events: Mutex<Vec<fleet_core::HostEvent>>,
+/// 테스트 관리자 사용자 + 유효한 세션을 주입하고, 세션 쿠키 raw 값을 반환.
+async fn seed_test_session(store: MemStore) -> (MemStore, String) {
+    let user = User {
+        id: UserId::new(),
+        username: "test_admin".into(),
+        email: Some("test@example.com".into()),
+        email_verified: true,
+        password_hash: String::new(),
+        enabled: true,
+        created_at: Utc::now(),
+        last_login_at: None,
+    };
+
+    // 쿠키 원문 토큰 (테스트 고정값)
+    let raw_token = "test-session-token-for-integration-tests".to_string();
+    let hash = sha256_hex(raw_token.as_bytes());
+
+    let session = Session {
+        id: SessionId::new(),
+        user_id: user.id,
+        token_hash: hash,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(8),
+        ip_address: None,
+        user_agent: None,
+    };
+
+    let uid = user.id;
+    store.create_user(&user).await.unwrap();
+
+    // 테스트 관리자에게 모든 권한 부여.
+    let all_perms: Vec<Permission> = PermissionKind::all()
+        .iter()
+        .map(|pk| Permission {
+            id: PermissionId::new(),
+            name: pk.as_str().to_string(),
+            description: None,
+        })
+        .collect();
+    store.seed_permissions(uid, all_perms);
+
+    store.create_session(&session).await.unwrap();
+
+    (store, raw_token)
 }
 
-impl MemStore {
-    fn new() -> Self {
-        Self {
-            workers: Mutex::new(HashMap::new()),
-            tasks: Mutex::new(HashMap::new()),
-            events: Mutex::new(Vec::new()),
-            users: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            user_permissions: Mutex::new(HashMap::new()),
-            hosts: Mutex::new(Vec::new()),
-            host_events: Mutex::new(Vec::new()),
-        }
-    }
+/// `seed_test_session`과 동일하되 권한을 직접 지정한다 — 권한 부족(403) 경로를
+/// 테스트할 때 사용.
+async fn seed_test_session_with_perms(store: MemStore, perm_kinds: &[PermissionKind]) -> (MemStore, String) {
+    let user = User {
+        id: UserId::new(),
+        username: "test_limited".into(),
+        email: Some("limited@example.com".into()),
+        email_verified: true,
+        password_hash: String::new(),
+        enabled: true,
+        created_at: Utc::now(),
+        last_login_at: None,
+    };
 
-    fn with_worker(self, w: Worker) -> Self {
-        self.workers.lock().unwrap().insert(w.id, w);
-        self
-    }
+    let raw_token = "test-limited-session-token".to_string();
+    let hash = sha256_hex(raw_token.as_bytes());
+    let session = Session {
+        id: SessionId::new(),
+        user_id: user.id,
+        token_hash: hash,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(8),
+        ip_address: None,
+        user_agent: None,
+    };
 
-    fn with_task(self, t: Task) -> Self {
-        self.tasks.lock().unwrap().insert(t.id, t);
-        self
-    }
+    let uid = user.id;
+    store.create_user(&user).await.unwrap();
 
-    fn with_host(self, h: fleet_core::Host) -> Self {
-        self.hosts.lock().unwrap().push(h);
-        self
-    }
+    let perms: Vec<Permission> = perm_kinds
+        .iter()
+        .map(|pk| Permission {
+            id: PermissionId::new(),
+            name: pk.as_str().to_string(),
+            description: None,
+        })
+        .collect();
+    store.seed_permissions(uid, perms);
 
-    /// `seed_test_session`과 동일하되 권한을 직접 지정한다 — 권한 부족(403) 경로를
-    /// 테스트할 때 사용.
-    fn seed_test_session_with_perms(self, perm_kinds: &[PermissionKind]) -> (Self, String) {
-        let user = User {
-            id: UserId::new(),
-            username: "test_limited".into(),
-            email: Some("limited@example.com".into()),
-            email_verified: true,
-            password_hash: String::new(),
-            enabled: true,
-            created_at: Utc::now(),
-            last_login_at: None,
-        };
+    store.create_session(&session).await.unwrap();
 
-        let raw_token = "test-limited-session-token".to_string();
-        let hash = sha256_hex(raw_token.as_bytes());
-        let session = Session {
-            id: SessionId::new(),
-            user_id: user.id,
-            token_hash: hash,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(8),
-            ip_address: None,
-            user_agent: None,
-        };
-
-        let uid = user.id;
-        self.users.lock().unwrap().insert(uid, user);
-
-        let perms: Vec<Permission> = perm_kinds
-            .iter()
-            .map(|pk| Permission {
-                id: PermissionId::new(),
-                name: pk.as_str().to_string(),
-                description: None,
-            })
-            .collect();
-        self.user_permissions.lock().unwrap().insert(uid, perms);
-
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(sha256_hex(raw_token.as_bytes()), session);
-
-        (self, raw_token)
-    }
-
-    /// 테스트용 관리자 사용자 + 유효한 세션을 주입하고,
-    /// 세션 쿠키 raw 값을 반환.
-    fn seed_test_session(self) -> (Self, String) {
-        let user = User {
-            id: UserId::new(),
-            username: "test_admin".into(),
-            email: Some("test@example.com".into()),
-            email_verified: true,
-            password_hash: String::new(),
-            enabled: true,
-            created_at: Utc::now(),
-            last_login_at: None,
-        };
-
-        // 쿠키 원문 토큰 (테스트 고정값)
-        let raw_token = "test-session-token-for-integration-tests".to_string();
-        let hash = sha256_hex(raw_token.as_bytes());
-
-        let session = Session {
-            id: SessionId::new(),
-            user_id: user.id,
-            token_hash: hash,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(8),
-            ip_address: None,
-            user_agent: None,
-        };
-
-        let uid = user.id;
-        self.users.lock().unwrap().insert(uid, user);
-
-        // 테스트 관리자에게 모든 권한 부여.
-        let all_perms: Vec<Permission> = PermissionKind::all()
-            .iter()
-            .map(|pk| Permission {
-                id: PermissionId::new(),
-                name: pk.as_str().to_string(),
-                description: None,
-            })
-            .collect();
-        self.user_permissions.lock().unwrap().insert(uid, all_perms);
-
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(sha256_hex(raw_token.as_bytes()), session);
-
-        (self, raw_token)
-    }
+    (store, raw_token)
 }
 
 /// SHA-256 hex 계산 (auth_util 과 동일 로직, 테스트 격리용).
@@ -178,257 +126,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-#[async_trait]
-impl Store for MemStore {
-    async fn insert_task(&self, t: &Task) -> Result<(), StoreError> {
-        self.tasks.lock().unwrap().insert(t.id, t.clone());
-        Ok(())
-    }
-    async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
-        Ok(self.tasks.lock().unwrap().get(&id).cloned())
-    }
-    async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError> {
-        if let Some(t) = self.tasks.lock().unwrap().get_mut(&id) {
-            t.status = status.clone();
-        }
-        Ok(())
-    }
-    async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-        let mut all: Vec<Task> = self.tasks.lock().unwrap().values().cloned().collect();
-        all.sort_by_key(|a| a.created_at);
-        all.truncate(filter.limit);
-        Ok(all)
-    }
-    async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().insert(w.id, w.clone());
-        Ok(())
-    }
-    async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
-        Ok(self.workers.lock().unwrap().get(&id).cloned())
-    }
-    async fn get_worker_by_name(&self, _: &str) -> Result<Option<Worker>, StoreError> {
-        Ok(None)
-    }
-    async fn list_workers(&self, filter: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-        let mut all: Vec<Worker> = self.workers.lock().unwrap().values().cloned().collect();
-        if let Some(status) = filter.status {
-            all.retain(|w| w.status == status);
-        }
-        if !filter.labels.is_empty() {
-            all.retain(|w| {
-                filter
-                    .labels
-                    .iter()
-                    .all(|(k, v)| w.labels.get(k) == Some(v))
-            });
-        }
-        all.sort_by_key(|w| w.registered_at);
-        all.reverse();
-
-        let start = filter.offset.min(all.len());
-        let end = (start + filter.limit).min(all.len());
-        Ok(all[start..end].to_vec())
-    }
-    async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().remove(&id);
-        Ok(())
-    }
-    async fn update_worker_heartbeat(
-        &self,
-        id: WorkerId,
-        hb: &WorkerHeartbeat,
-    ) -> Result<(), StoreError> {
-        if let Some(w) = self.workers.lock().unwrap().get_mut(&id) {
-            w.last_seen = Some(chrono::Utc::now());
-            let _ = hb;
-        }
-        Ok(())
-    }
-    async fn append_event(&self, _: &FleetEvent) -> Result<u64, StoreError> {
-        Ok(0)
-    }
-    async fn list_events(&self, after_seq: u64, limit: u32) -> Result<Vec<EventEntry>, StoreError> {
-        let all = self.events.lock().unwrap();
-        let filtered: Vec<EventEntry> = all
-            .iter()
-            .filter(|e| e.seq > after_seq)
-            .take(limit as usize)
-            .cloned()
-            .collect();
-        Ok(filtered)
-    }
-    async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-        Ok(0)
-    }
-    async fn get_output(&self, id: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-        Ok(TaskOutput {
-            task_id: id,
-            chunks: Vec::new(),
-            next_offset: 0,
-        })
-    }
-    async fn migrate(&self) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-        unimplemented!()
-    }
-    async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
-        unimplemented!()
-    }
-
-    // ── RBAC (테스트 지원 구현체) ──────────────────────────────────────
-
-    async fn create_user(&self, user: &User) -> Result<(), StoreError> {
-        self.users.lock().unwrap().insert(user.id, user.clone());
-        Ok(())
-    }
-    async fn get_user_by_id(&self, id: UserId) -> Result<Option<User>, StoreError> {
-        Ok(self.users.lock().unwrap().get(&id).cloned())
-    }
-    async fn get_user_by_username(&self, name: &str) -> Result<Option<User>, StoreError> {
-        Ok(self
-            .users
-            .lock()
-            .unwrap()
-            .values()
-            .find(|u| u.username == name)
-            .cloned())
-    }
-    async fn get_user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
-        Ok(self
-            .users
-            .lock()
-            .unwrap()
-            .values()
-            .find(|u| u.email.as_deref() == Some(email))
-            .cloned())
-    }
-    async fn count_users(&self) -> Result<u64, StoreError> {
-        Ok(self.users.lock().unwrap().len() as u64)
-    }
-    async fn list_user_permissions(&self, uid: UserId) -> Result<Vec<Permission>, StoreError> {
-        Ok(self
-            .user_permissions
-            .lock()
-            .unwrap()
-            .get(&uid)
-            .cloned()
-            .unwrap_or_default())
-    }
-    async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(session.token_hash.clone(), session.clone());
-        Ok(())
-    }
-    async fn get_session_by_token_hash(&self, hash: &str) -> Result<Option<Session>, StoreError> {
-        Ok(self.sessions.lock().unwrap().get(hash).cloned())
-    }
-    async fn delete_session(&self, id: SessionId) -> Result<(), StoreError> {
-        self.sessions.lock().unwrap().retain(|_, s| s.id != id);
-        Ok(())
-    }
-
-    // ── Email verification (테스트 stub) ─────────────────────────────
-
-    async fn create_email_verification_token(
-        &self,
-        _token: &fleet_core::EmailVerificationToken,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn get_email_verification_token(
-        &self,
-        _token_hash: &str,
-    ) -> Result<Option<fleet_core::EmailVerificationToken>, StoreError> {
-        Ok(None)
-    }
-    async fn consume_email_verification_token(
-        &self,
-        _token_id: Uuid,
-        _at: chrono::DateTime<Utc>,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn set_user_email_verified(
-        &self,
-        _user_id: UserId,
-        _verified: bool,
-    ) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    // ── Host inventory (테스트 지원 구현체) ───────────────────────────
-
-    async fn upsert_host(&self, host: &fleet_core::Host) -> Result<(), StoreError> {
-        let mut hosts = self.hosts.lock().unwrap();
-        if let Some(existing) = hosts.iter_mut().find(|h| h.hostname == host.hostname) {
-            *existing = host.clone();
-        } else {
-            hosts.push(host.clone());
-        }
-        Ok(())
-    }
-
-    async fn get_host_by_hostname(
-        &self,
-        hostname: &str,
-    ) -> Result<Option<fleet_core::Host>, StoreError> {
-        Ok(self
-            .hosts
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|h| h.hostname == hostname)
-            .cloned())
-    }
-
-    async fn get_host_by_worker(
-        &self,
-        worker_id: WorkerId,
-    ) -> Result<Option<fleet_core::Host>, StoreError> {
-        Ok(self
-            .hosts
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|h| h.worker_id == Some(worker_id))
-            .cloned())
-    }
-
-    async fn list_hosts(&self) -> Result<Vec<fleet_core::Host>, StoreError> {
-        Ok(self.hosts.lock().unwrap().clone())
-    }
-
-    async fn append_host_event(&self, event: &fleet_core::HostEvent) -> Result<(), StoreError> {
-        self.host_events.lock().unwrap().push(event.clone());
-        Ok(())
-    }
-
-    async fn list_host_events(
-        &self,
-        host_id: Uuid,
-        limit: u32,
-    ) -> Result<Vec<fleet_core::HostEvent>, StoreError> {
-        let events = self.host_events.lock().unwrap();
-        let mut filtered: Vec<fleet_core::HostEvent> = events
-            .iter()
-            .filter(|e| e.host_id == host_id)
-            .cloned()
-            .collect();
-        filtered.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        filtered.truncate(limit as usize);
-        Ok(filtered)
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  테스트 헬퍼
@@ -447,7 +144,7 @@ async fn spawn_server(store: MemStore) -> TestServer {
 /// 테스트 관리자 세션을 주입하고 서버 시작.
 /// 반환값: (TestServer, session_cookie_value)
 async fn spawn_authed_server(store: MemStore) -> (TestServer, String) {
-    let (store, cookie) = store.seed_test_session();
+    let (store, cookie) = seed_test_session(store).await;
     (spawn_server_inner(store).await, cookie)
 }
 
@@ -481,7 +178,7 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
 /// (예: parent_task_id 상속) 테스트 전용. 반환된 `(TestServer, String)`의
 /// 문자열은 `session_cookie`.
 async fn spawn_server_with_dispatcher(store: MemStore, worker: Worker) -> (TestServer, String) {
-    let (store, cookie) = store.seed_test_session();
+    let (store, cookie) = seed_test_session(store).await;
     let store = Arc::new(store) as Arc<dyn Store>;
     store.upsert_worker(&worker).await.unwrap();
 
@@ -797,7 +494,7 @@ async fn protected_route_without_cookie_returns_401() {
 
 fn sample_host(hostname: &str, status: fleet_core::HostStatus) -> fleet_core::Host {
     fleet_core::Host {
-        id: Uuid::new_v4(),
+        id: uuid::Uuid::new_v4(),
         hostname: hostname.into(),
         worker_id: None,
         status,
@@ -853,31 +550,29 @@ async fn host_detail_returns_info_and_events() {
     // host_events에 몇 개 이벤트 추가.
     let store = MemStore::new().with_host(host);
     store
-        .host_events
-        .lock()
-        .unwrap()
-        .push(fleet_core::HostEvent {
-            id: Uuid::new_v4(),
+        .append_host_event(&fleet_core::HostEvent {
+            id: uuid::Uuid::new_v4(),
             host_id,
             event_type: "heartbeat".into(),
             severity: fleet_core::EventSeverity::Info,
             message: Some("heartbeat received".into()),
             payload: HashMap::new(),
             created_at: chrono::Utc::now(),
-        });
+        })
+        .await
+        .unwrap();
     store
-        .host_events
-        .lock()
-        .unwrap()
-        .push(fleet_core::HostEvent {
-            id: Uuid::new_v4(),
+        .append_host_event(&fleet_core::HostEvent {
+            id: uuid::Uuid::new_v4(),
             host_id,
             event_type: "provision_ok".into(),
             severity: fleet_core::EventSeverity::Info,
             message: Some("provisioned successfully".into()),
             payload: HashMap::new(),
             created_at: chrono::Utc::now() - chrono::Duration::minutes(5),
-        });
+        })
+        .await
+        .unwrap();
 
     let (server, cookie) = spawn_authed_server(store).await;
     let client = reqwest::Client::new();
@@ -1000,7 +695,7 @@ fn authed_post_form(
 #[tokio::test]
 async fn submit_task_denies_without_task_create_permission() {
     // task:create가 없는 세션(TaskList만 보유) — 403이어야 함.
-    let (store, cookie) = MemStore::new().seed_test_session_with_perms(&[PermissionKind::TaskList]);
+    let (store, cookie) = seed_test_session_with_perms(MemStore::new(), &[PermissionKind::TaskList]).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1019,7 +714,7 @@ async fn submit_task_denies_without_task_create_permission() {
 
 #[tokio::test]
 async fn submit_task_rejects_invalid_csrf() {
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1046,7 +741,7 @@ async fn submit_task_rejects_invalid_csrf() {
 /// 쿠키와 폼 값이 "서로 다른" 경우만 검증해 이 실패 모드를 놓쳤었다.
 #[tokio::test]
 async fn submit_task_rejects_missing_csrf_cookie() {
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1073,7 +768,7 @@ async fn submit_task_rejects_missing_csrf_cookie() {
 /// 영원히 CSRF 오류에 갇힌다.
 #[tokio::test]
 async fn authenticated_request_without_csrf_cookie_gets_one_issued() {
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1111,7 +806,7 @@ async fn authenticated_request_without_csrf_cookie_gets_one_issued() {
 /// 갱신된다.
 #[tokio::test]
 async fn authenticated_request_preserves_existing_csrf_cookie_value() {
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1142,7 +837,7 @@ async fn authenticated_request_preserves_existing_csrf_cookie_value() {
 
 #[tokio::test]
 async fn submit_task_rejects_empty_prompt() {
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
@@ -1302,7 +997,7 @@ async fn submit_task_reply_inherits_thread_from_parent() {
 #[tokio::test]
 async fn submit_task_without_dispatcher_returns_unavailable_and_creates_no_task() {
     // 이 하네스의 DashboardState.dispatcher는 항상 None — "기능 미구성" 경로.
-    let (store, cookie) = MemStore::new().seed_test_session();
+    let (store, cookie) = seed_test_session(MemStore::new()).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 

@@ -226,12 +226,38 @@
     (자체 크레이트 경고 0건 — vendor SDK 예제 경고 1건은 무관) 전부 통과.
     `cargo test -p fleet-scheduler breaker::` **8/8 통과** (신규 4개 포함).
 
-45. 🔵 **`MemStore`가 `fleet-store` 밖에 6개 이상 독립 중복 정의로 흩어짐** (P3, 기술 부채) —
-    `fleet-api`/`fleet-dashboard`의 `#[cfg(test)]` 코드마다 각자 `struct MemStore`를
-    따로 구현하고 있어(`fleet-api/src/test_support.rs`, `fleet-api/tests/*.rs`,
-    `fleet-dashboard/src/app.rs` 등), 한 곳을 고쳐도 나머지가 갈라질 위험이 있습니다.
-    `fleet-store`에 단일 `MemStore` 구현을 두고 재사용하는 리팩터링 권고. 낮은
-    우선순위 — 테스트 전용 코드라 프로덕션 영향 없음.
+45. ✅ **`MemStore`가 `fleet-store` 밖에 6개 이상 독립 중복 정의로 흩어짐** (P3, 기술 부채) —
+    해결됨 (2026-08-13). 실측해보니 실제로는 **10개 파일**에 각자 `struct MemStore`가
+    흩어져 있었습니다: `fleet-api/src/test_support.rs`(+ `mod test_support;`가
+    `#[cfg(test)]`로 가려져 있어 `tests/*.rs` 통합 테스트는 애초에 재사용 자체가
+    불가능했음), `fleet-api/tests/{metrics_endpoint,cloudflare_access,api_flow,
+    transport_integration}.rs`(4개), `fleet-dashboard/src/app.rs`,
+    `fleet-dashboard/tests/dashboard_api.rs`, `fleet-scheduler/src/{cleanup,health,
+    reconcile}.rs`(3개).
+
+    수정: `fleet-store`에 `mem::MemStore`(신규, `test-support` 카고 피처 뒤에
+    게이트 — 프로덕션 빌드에 포함되지 않음)를 신설해 **Store trait의 모든 메서드를
+    실제로 동작하는 인메모리 구현**으로 통합했습니다. 단순 통합에 그치지 않고
+    `PgStore`의 실제 SQL 동작(정렬 순서 `ORDER BY ... DESC`, `NotFound` 반환 조건,
+    `Dispatched` 전이 시 `dispatched_at` 자동 갱신 등)과 일치하도록 기존 10개
+    구현의 사소한 divergence도 함께 바로잡았습니다(예: 기존 `fleet-api`
+    `test_support.rs`는 `update_task_status`가 존재하지 않는 태스크에도 조용히
+    no-op이었으나 실제 `PgStore`는 `NotFound`를 반환함 — 통합 과정에서 발견해
+    실제 동작에 맞춤). 회복성(에러 주입) 테스트가 필요한 소수 케이스는
+    `MemStore::with_failing(&["list_tasks", ...])` 제네릭 실패 주입 메커니즘으로
+    흡수했고, `fleet-scheduler/src/cleanup.rs`의 5개 테스트는 기존의 "카운터만
+    돌려주는" 스크립트형 mock 대신 **실제 세션/로그인시도 레코드를 삽입해 진짜
+    삭제 로직을 태우는 방식**으로 다시 작성해 테스트 사실성도 함께 개선했습니다.
+
+    각 소비 크레이트(`fleet-api`/`fleet-dashboard`/`fleet-scheduler`)의
+    `[dev-dependencies]`에 `fleet-store = { features = ["test-support"] }`를
+    추가하고, 10개 파일의 로컬 `MemStore` 정의를 전부 제거했습니다. 순변화:
+    19개 파일, +1,150/−1,951줄 (신규 통합 구현 949줄을 포함하고도 순감소 801줄).
+
+    ✅ **검증 완료**: `cargo test --workspace --features "acp mtls"` 전체
+    그린(실패 0건), `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(자체 크레이트 경고 0건) 모두 통과.
 
 46. ✅ **`docs/` 전체 코드 대조 검증 및 문서 구조 정리** — 해결됨
     (2026-08-12, 이 세션). `docs/architecture/*.md`(overview.md 9개 절 + 신규 2개 절,
@@ -302,7 +328,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#26, #28, #36~#39, #40~#42, #45 |
+| 미배정 | #14, #21~#26, #28, #36~#39, #40~#42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

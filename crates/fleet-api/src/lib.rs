@@ -30,9 +30,6 @@ mod handlers;
 pub mod metrics;
 mod schema;
 
-#[cfg(test)]
-mod test_support;
-
 pub use app::{build_app, run_http_server, AppState};
 pub use cloudflare::{cloudflare_access_middleware, setup_test_jwks_for_testing, VerifiedUser};
 pub use error::ApiError;

@@ -480,7 +480,7 @@ struct TokenCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MemStore;
+    use fleet_store::mem::MemStore;
     use fleet_core::{Task, TaskRequest, TaskResult, TokenUsage, Worker};
 
     #[tokio::test]

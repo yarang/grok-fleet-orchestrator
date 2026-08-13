@@ -136,136 +136,53 @@ impl SessionCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use fleet_core::{
-        BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-        Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-    };
-    use fleet_store::StoreError;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
+    use fleet_core::{LoginAttempt, Session, SessionId, UserId};
+    use fleet_store::mem::MemStore;
+    use uuid::Uuid;
 
-    /// 인메모리 Store — cleanup 테스트 전용. 필요한 메서드만 실제 동작하고
-    /// 나머지는 이 테스트에서 호출되지 않으므로 `unimplemented!()`.
-    struct MemStore {
-        expired_sessions_to_delete: AtomicU64,
-        old_login_attempts_to_delete: AtomicU64,
-        /// `delete_old_login_attempts`에 전달된 cutoff 기록 (호출 여부/인자 검증용).
-        last_cutoff: Mutex<Option<chrono::DateTime<Utc>>>,
-        fail_sessions: bool,
-        fail_attempts: bool,
-    }
-
-    impl MemStore {
-        fn new(expired_sessions: u64, old_attempts: u64) -> Self {
-            Self {
-                expired_sessions_to_delete: AtomicU64::new(expired_sessions),
-                old_login_attempts_to_delete: AtomicU64::new(old_attempts),
-                last_cutoff: Mutex::new(None),
-                fail_sessions: false,
-                fail_attempts: false,
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                expired_sessions_to_delete: AtomicU64::new(0),
-                old_login_attempts_to_delete: AtomicU64::new(0),
-                last_cutoff: Mutex::new(None),
-                fail_sessions: true,
-                fail_attempts: true,
-            }
+    /// 만료된 세션 N개를 실제로 저장소에 삽입 (`create_session` 경유).
+    async fn seed_expired_sessions(store: &MemStore, n: usize) {
+        for _ in 0..n {
+            let token = Uuid::new_v4().to_string();
+            store
+                .create_session(&Session {
+                    id: SessionId::new(),
+                    user_id: UserId::new(),
+                    token_hash: token,
+                    created_at: Utc::now() - chrono::Duration::days(1),
+                    // 이미 만료됨 — delete_expired_sessions의 대상.
+                    expires_at: Utc::now() - chrono::Duration::minutes(1),
+                    ip_address: None,
+                    user_agent: None,
+                })
+                .await
+                .unwrap();
         }
     }
 
-    #[async_trait]
-    impl Store for MemStore {
-        async fn insert_task(&self, _: &Task) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn get_task(&self, _: TaskId) -> Result<Option<Task>, StoreError> {
-            unimplemented!()
-        }
-        async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-            unimplemented!()
-        }
-        async fn upsert_worker(&self, _: &Worker) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn get_worker(&self, _: WorkerId) -> Result<Option<Worker>, StoreError> {
-            unimplemented!()
-        }
-        async fn get_worker_by_name(&self, _: &str) -> Result<Option<Worker>, StoreError> {
-            unimplemented!()
-        }
-        async fn list_workers(&self, _: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-            unimplemented!()
-        }
-        async fn delete_worker(&self, _: WorkerId) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn update_worker_heartbeat(
-            &self,
-            _: WorkerId,
-            _: &WorkerHeartbeat,
-        ) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn append_event(&self, _: &FleetEvent) -> Result<u64, StoreError> {
-            unimplemented!()
-        }
-        async fn list_events(&self, _: u64, _: u32) -> Result<Vec<EventEntry>, StoreError> {
-            unimplemented!()
-        }
-        async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-            unimplemented!()
-        }
-        async fn get_output(&self, _: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-            unimplemented!()
-        }
-        async fn migrate(&self) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
-            unimplemented!()
-        }
-        async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-            unimplemented!()
-        }
-        async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
-            unimplemented!()
-        }
-
-        // ── 이 테스트가 실제로 검증하는 두 메서드 ──────────────────────
-        async fn delete_expired_sessions(&self) -> Result<u64, StoreError> {
-            if self.fail_sessions {
-                return Err(StoreError::Unsupported("delete_expired_sessions"));
-            }
-            Ok(self.expired_sessions_to_delete.swap(0, Ordering::SeqCst))
-        }
-
-        async fn delete_old_login_attempts(
-            &self,
-            before: chrono::DateTime<Utc>,
-        ) -> Result<u64, StoreError> {
-            *self.last_cutoff.lock().unwrap() = Some(before);
-            if self.fail_attempts {
-                return Err(StoreError::Unsupported("delete_old_login_attempts"));
-            }
-            Ok(self.old_login_attempts_to_delete.swap(0, Ordering::SeqCst))
+    /// `retention`보다 오래된 로그인 시도 기록 N개를 실제로 삽입.
+    async fn seed_old_login_attempts(store: &MemStore, n: usize, retention: chrono::Duration) {
+        for _ in 0..n {
+            store
+                .record_login_attempt(&LoginAttempt {
+                    id: Uuid::new_v4(),
+                    identifier: "old-attempt".to_string(),
+                    ip_address: None,
+                    success: false,
+                    failure_reason: Some("bad_password".to_string()),
+                    attempted_at: Utc::now() - retention - chrono::Duration::days(1),
+                })
+                .await
+                .unwrap();
         }
     }
 
     #[tokio::test]
     async fn sweep_once_reports_deleted_counts() {
-        let store = Arc::new(MemStore::new(3, 5));
-        let cleanup = SessionCleanup::new(store, CleanupConfig::default());
+        let store = MemStore::new();
+        seed_expired_sessions(&store, 3).await;
+        seed_old_login_attempts(&store, 5, chrono::Duration::days(7)).await;
+        let cleanup = SessionCleanup::new(Arc::new(store), CleanupConfig::default());
 
         let summary = cleanup.sweep_once().await;
         assert_eq!(summary.expired_sessions, 3);
@@ -274,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_once_passes_correct_retention_cutoff() {
-        let store = Arc::new(MemStore::new(0, 0));
+        let store = Arc::new(MemStore::new());
         let config = CleanupConfig {
             interval: Duration::from_secs(1),
             login_attempt_retention: chrono::Duration::days(7),
@@ -285,7 +202,9 @@ mod tests {
         cleanup.sweep_once().await;
         let after = Utc::now() - chrono::Duration::days(7);
 
-        let recorded = store.last_cutoff.lock().unwrap().expect("cutoff recorded");
+        let recorded = store
+            .last_delete_old_login_attempts_cutoff()
+            .expect("cutoff recorded");
         assert!(
             recorded >= before && recorded <= after,
             "cutoff should be ~7 days before now (recorded={recorded}, expected between {before} and {after})"
@@ -294,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_once_is_zero_when_nothing_to_delete() {
-        let store = Arc::new(MemStore::new(0, 0));
+        let store = Arc::new(MemStore::new());
         let cleanup = SessionCleanup::new(store, CleanupConfig::default());
 
         let summary = cleanup.sweep_once().await;
@@ -305,8 +224,12 @@ mod tests {
     async fn sweep_once_is_resilient_to_store_errors() {
         // 하나(또는 둘 다) 실패해도 panic하지 않고 0으로 보고해야 한다 — 백그라운드
         // 루프가 죽지 않고 다음 사이클에 재시도할 수 있어야 하므로.
-        let store = Arc::new(MemStore::failing());
-        let cleanup = SessionCleanup::new(store, CleanupConfig::default());
+        let store = MemStore::new().with_failing(&["delete_expired_sessions", "delete_old_login_attempts"]);
+        // 실패 주입이 정말 걸러지는지(사이드이펙트가 아니라) 확인하기 위해
+        // 지울 데이터도 함께 넣어둔다 — 그래도 0이 나와야 한다.
+        seed_expired_sessions(&store, 2).await;
+        seed_old_login_attempts(&store, 2, chrono::Duration::days(7)).await;
+        let cleanup = SessionCleanup::new(Arc::new(store), CleanupConfig::default());
 
         let summary = cleanup.sweep_once().await;
         assert_eq!(summary, CleanupSummary::default());
@@ -316,10 +239,12 @@ mod tests {
     async fn spawn_runs_sweep_immediately_without_waiting_for_first_tick() {
         // HealthChecker와 달리 첫 사이클을 interval 대기 없이 즉시 실행한다 —
         // 재시작 직후 쌓여있던 만료 데이터를 바로 청소하기 위함.
-        let store = Arc::new(MemStore::new(1, 1));
+        let store = Arc::new(MemStore::new());
+        seed_expired_sessions(&store, 1).await;
+        seed_old_login_attempts(&store, 1, chrono::Duration::days(7)).await;
         let config = CleanupConfig {
             // interval을 아주 길게 잡아서, "즉시 실행"이 아니라면 이 테스트
-            // 타임아웃 내에 카운터가 절대 줄어들지 않는다.
+            // 타임아웃 내에 세션이 절대 지워지지 않는다.
             interval: Duration::from_secs(3600),
             login_attempt_retention: chrono::Duration::days(7),
         };
@@ -329,7 +254,7 @@ mod tests {
         // 즉시 실행되는지 폴링 (최대 1초) — CI 환경 스케줄링 지연 감안.
         let mut swept = false;
         for _ in 0..50 {
-            if store.expired_sessions_to_delete.load(Ordering::SeqCst) == 0 {
+            if store.last_delete_old_login_attempts_cutoff().is_some() {
                 swept = true;
                 break;
             }

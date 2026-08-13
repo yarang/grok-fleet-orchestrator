@@ -19,6 +19,8 @@
 
 pub mod error;
 pub mod listener;
+#[cfg(feature = "test-support")]
+pub mod mem;
 pub mod postgres;
 pub mod rbac;
 
@@ -43,7 +45,8 @@ use uuid::Uuid;
 ///
 /// 구현체:
 /// - [`PgStore`] — PostgreSQL (프로덕션)
-/// - (테스트용 mock은 `fleet-scheduler` 테스트에서 정의)
+/// - [`mem::MemStore`] — 완전 동작하는 인메모리 구현 (`test-support` 피처,
+///   테스트 전용)
 #[async_trait]
 pub trait Store: Send + Sync {
     // ── Task ───────────────────────────────────────────────────────

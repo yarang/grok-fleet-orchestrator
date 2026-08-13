@@ -1,126 +1,12 @@
 //! Cloudflare Access 미들웨어 통합 테스트.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 
 use fleet_api::{build_app, AppState};
-use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-};
-use fleet_store::{Store, StoreError};
+use fleet_store::Store;
 
-struct MemStore {
-    workers: Mutex<HashMap<WorkerId, Worker>>,
-}
-
-impl MemStore {
-    fn new() -> Self {
-        Self {
-            workers: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl Store for MemStore {
-    async fn insert_task(&self, _: &Task) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn get_task(&self, _: TaskId) -> Result<Option<Task>, StoreError> {
-        unimplemented!()
-    }
-    async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-        unimplemented!()
-    }
-    async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().insert(w.id, w.clone());
-        Ok(())
-    }
-    async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
-        Ok(self.workers.lock().unwrap().get(&id).cloned())
-    }
-    async fn get_worker_by_name(&self, _: &str) -> Result<Option<Worker>, StoreError> {
-        Ok(None)
-    }
-    async fn list_workers(&self, _: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-        Ok(self.workers.lock().unwrap().values().cloned().collect())
-    }
-    async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().remove(&id);
-        Ok(())
-    }
-    async fn update_worker_heartbeat(
-        &self,
-        id: WorkerId,
-        _: &WorkerHeartbeat,
-    ) -> Result<(), StoreError> {
-        if let Some(w) = self.workers.lock().unwrap().get_mut(&id) {
-            w.last_seen = Some(chrono::Utc::now());
-        }
-        Ok(())
-    }
-    async fn append_event(&self, _: &FleetEvent) -> Result<u64, StoreError> {
-        Ok(1)
-    }
-    async fn list_events(&self, _: u64, _: u32) -> Result<Vec<EventEntry>, StoreError> {
-        Ok(vec![])
-    }
-    async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-        unimplemented!()
-    }
-    async fn get_output(&self, _: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-        unimplemented!()
-    }
-    async fn migrate(&self) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-        unimplemented!()
-    }
-    async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
-        unimplemented!()
-    }
-    async fn upsert_worker_credential(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: u32,
-        _: Option<&str>,
-    ) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn get_worker_credential(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
-        unimplemented!()
-    }
-    async fn list_worker_credentials(
-        &self,
-        _: &str,
-    ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
-        unimplemented!()
-    }
-    async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
-        unimplemented!()
-    }
-}
+use fleet_store::mem::MemStore;
 
 const TEST_PRIVATE_KEY_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\n\
 MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDC5lIpyZgLqiHI\n\

@@ -392,7 +392,7 @@ pub async fn run_http_server(state: Arc<AppState>, bind: SocketAddr) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::MemStore;
+    use fleet_store::mem::MemStore;
     use fleet_core::CircuitState;
     use std::sync::Arc;
 

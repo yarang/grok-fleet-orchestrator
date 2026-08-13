@@ -24,3 +24,10 @@ tokio = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 fleet-core = { workspace = true }
+
+[features]
+# 테스트 전용 완전 인메모리 Store 구현(`mem::MemStore`)을 노출한다. 로드맵
+# #45 — fleet-api/fleet-dashboard/fleet-scheduler가 각자 정의하던 10개의
+# 중복 MemStore를 이 하나로 통합하기 위한 피처. 프로덕션 빌드에는 이 피처를
+# 켜지 않으므로 릴리즈 바이너리에 포함되지 않는다.
+test-support = []

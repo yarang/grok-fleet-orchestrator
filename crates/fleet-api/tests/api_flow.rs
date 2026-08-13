@@ -6,160 +6,17 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
 use fleet_api::AppState;
-use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-};
-use fleet_store::{Store, StoreError};
+use fleet_store::Store;
 
 // ── 인메모리 Store (테스트 픽스처) ──────────────────────────────────────
 
-struct MemStore {
-    workers: Mutex<HashMap<WorkerId, Worker>>,
-    events: Mutex<Vec<EventEntry>>,
-}
-
-impl MemStore {
-    fn new() -> Self {
-        Self {
-            workers: Mutex::new(HashMap::new()),
-            events: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-#[async_trait]
-impl Store for MemStore {
-    async fn insert_task(&self, _: &Task) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn get_task(&self, _: TaskId) -> Result<Option<Task>, StoreError> {
-        unimplemented!()
-    }
-    async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
-        unimplemented!()
-    }
-    async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().insert(w.id, w.clone());
-        Ok(())
-    }
-    async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
-        Ok(self.workers.lock().unwrap().get(&id).cloned())
-    }
-    async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
-        Ok(self
-            .workers
-            .lock()
-            .unwrap()
-            .values()
-            .find(|w| w.name == name)
-            .cloned())
-    }
-    async fn list_workers(&self, f: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
-        let mut all: Vec<Worker> = self
-            .workers
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|w| f.status.is_none_or(|s| w.status == s))
-            .filter(|w| f.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)))
-            .cloned()
-            .collect();
-
-        all.sort_by_key(|w| w.registered_at);
-        all.reverse();
-
-        let start = f.offset.min(all.len());
-        let end = (start + f.limit).min(all.len());
-        Ok(all[start..end].to_vec())
-    }
-    async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().remove(&id);
-        Ok(())
-    }
-    async fn update_worker_heartbeat(
-        &self,
-        id: WorkerId,
-        hb: &WorkerHeartbeat,
-    ) -> Result<(), StoreError> {
-        if let Some(w) = self.workers.lock().unwrap().get_mut(&id) {
-            w.active_tasks = hb.active_tasks;
-            w.last_seen = Some(chrono::Utc::now());
-        }
-        Ok(())
-    }
-    async fn append_event(&self, e: &FleetEvent) -> Result<u64, StoreError> {
-        let mut events = self.events.lock().unwrap();
-        let seq = (events.len() + 1) as u64;
-        events.push(EventEntry {
-            seq,
-            event: e.clone(),
-        });
-        Ok(seq)
-    }
-    async fn list_events(&self, _: u64, _: u32) -> Result<Vec<EventEntry>, StoreError> {
-        Ok(self.events.lock().unwrap().clone())
-    }
-    async fn append_output(&self, _: TaskId, _: &str) -> Result<u64, StoreError> {
-        unimplemented!()
-    }
-    async fn get_output(&self, _: TaskId, _: u64) -> Result<TaskOutput, StoreError> {
-        unimplemented!()
-    }
-    async fn migrate(&self) -> Result<(), StoreError> {
-        Ok(())
-    }
-    async fn create_bootstrap_token(&self, _: &BootstrapToken) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn consume_bootstrap_token(&self, _: &str, _: &str) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
-        unimplemented!()
-    }
-    async fn revoke_bootstrap_token(&self, _: &str) -> Result<bool, StoreError> {
-        unimplemented!()
-    }
-    async fn upsert_worker_credential(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: u32,
-        _: Option<&str>,
-    ) -> Result<(), StoreError> {
-        unimplemented!()
-    }
-    async fn get_worker_credential(
-        &self,
-        _: &str,
-        _: &str,
-    ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
-        unimplemented!()
-    }
-    async fn list_worker_credentials(
-        &self,
-        _: &str,
-    ) -> Result<Vec<fleet_store::StoredCredential>, StoreError> {
-        unimplemented!()
-    }
-    async fn delete_worker_credential(&self, _: &str, _: &str) -> Result<bool, StoreError> {
-        unimplemented!()
-    }
-}
+use fleet_store::mem::MemStore;
 
 // ── 테스트 헬퍼 ─────────────────────────────────────────────────────────
 

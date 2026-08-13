@@ -31,5 +31,6 @@ subtle = { workspace = true }
 
 [dev-dependencies]
 fleet-scheduler = { workspace = true }
+fleet-store = { workspace = true, features = ["test-support"] }
 fleet-transport = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
