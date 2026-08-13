@@ -217,7 +217,23 @@
 37. ⏳ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — `--inventory` 모드에서 `InventoryWorker` 스키마 확장을 적용하여 mTLS 설정 및 인증서 자동 주입 파이프라인 구현.
 38. ⏳ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) — 네트워크 일시 순단 시 태스크가 즉시 Failed로 유실되지 않도록 자동 재스케줄러 큐 및 Stale 상태 격리를 위한 DLQ 메커니즘 도입.
 39. ⏳ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) — 대규모 배포 시 첫 SSH 연결의 MITM 방어를 위해 `fleet provision` 도구 실행 시 SSH 호스트 키 사전 수집/검증 기능 구현.
-40. ⏳ **`xai-circuit-breaker` 기반 고성능 회로 차단기 도입** (P2, 성능/안정성) — `grok-build` 분석에 따라 슬라이딩 윈도우 실패율 측정, `AtomicU8/AtomicBool`을 이용한 lock-free `is_open()` 핫패스 최적화 및 `probe_claimed_at_millis`를 이용한 Lost Probe 캔슬 안전장치 설계 도입.
+40. 🔵 **`xai-circuit-breaker` 기반 고성능 회로 차단기 도입** (P2, 성능/안정성) —
+    **2026-08-13 재평가: 항목이 요구하는 3가지 중 2가지는 이미 구현돼 있었습니다.**
+    (1) 슬라이딩 윈도우 실패율 측정 — `BreakerInner.samples: VecDeque<(bool,
+    Instant)>` + `window_duration_secs`/`min_samples`/`error_rate_threshold`로
+    이미 존재(`crates/fleet-scheduler/src/breaker.rs`). (2) Lost Probe 캔슬
+    안전장치 — 정확히 `probe_claimed_at_millis`라는 이름은 아니지만
+    `half_open_probes: VecDeque<Instant>` + `open_duration_secs` 경과 시
+    `check()`가 스스로 회수하는 동일한 메커니즘을 항목 #44에서 구현·테스트
+    완료(2026-08-13).
+
+    남은 것은 (3) `AtomicU8`/`AtomicBool` 기반 lock-free `is_open()` 핫패스
+    최적화뿐입니다. 실측 없이 우선순위를 낮춰 남겨둡니다 — 현재도 워커별
+    `Mutex<BreakerInner>`로 세분화(fine-grained)돼 있어 단일 전역 락 병목이
+    아니며, 한 워커당 동시 dispatch 수는 `max_concurrent`로 이미 상한이 걸려
+    있어 lock 경합이 실제 병목이라는 프로파일링 근거가 없습니다. 근거 없이
+    lock-free 재작성부터 하면 검증 難도만 올라갑니다 — 실측(프로파일링)으로
+    경합이 확인되면 그때 착수 권고.
 41. ⏳ **WebSocket Demuxer 패턴을 적용한 동시 다중 세션 고도화** (P2, 네트워크) — `xai-computer-hub-sdk` 분석에 근거해 단일 WebSocket 연결 상에서 ACP 프롬프트 세션의 순서 보장 및 Head-of-Line Blocking 방지를 위한 RPC Frame Demultiplexer 구현.
 
     **2026-08-12 정정**: 이 항목이 서술하는 "단일 WebSocket 연결 위에서 여러 ACP 세션을
@@ -373,7 +389,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#24, #26, #36~#39, #40~#42 |
+| 미배정 | #14, #21~#24, #26, #36~#39, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
