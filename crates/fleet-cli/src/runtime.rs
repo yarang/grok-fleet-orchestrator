@@ -37,9 +37,10 @@ use fleet_core::{
 use crate::{EventsAction, TasksAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
-    HostKeyConfig, HostKeyPolicy, Inventory, InventoryWorker, MockExecutor, Playbook,
-    PlaybookContext, PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient,
-    SshConnectInfo, StepContext,
+    append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig,
+    HostKeyPolicy, Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext,
+    PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
+    StepContext,
 };
 use fleet_scheduler::{
     CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, MultiAdminSync,
@@ -1348,6 +1349,92 @@ fn build_inventory_step_context(
         ..Default::default()
     };
     PlaybookContext::new(base)
+}
+
+/// `fleet scan-host-keys` 인자.
+pub struct ScanHostKeysArgs {
+    pub host: Option<String>,
+    pub ssh_port: u16,
+    pub inventory: Option<String>,
+    pub known_hosts: Option<PathBuf>,
+    pub write: bool,
+}
+
+/// SSH 호스트 공개키 사전 수집 (`ssh-keyscan`과 동일한 목적, 로드맵 #39).
+///
+/// `--write` 없이는 지문(fingerprint)만 출력한다 — 운영자가 대역 밖 채널로
+/// 검증한 뒤 다시 `--write`로 실행해야 known_hosts에 반영된다. 여러 호스트
+/// 중 일부가 실패해도 나머지는 계속 스캔하고, 마지막에 실패 건수를 집계해
+/// 0이 아니면 에러로 종료한다.
+pub async fn run_scan_host_keys(args: ScanHostKeysArgs) -> Result<()> {
+    let targets: Vec<(String, u16)> = if let Some(host) = &args.host {
+        vec![(host.clone(), args.ssh_port)]
+    } else if let Some(inv_path) = &args.inventory {
+        let inv = Inventory::from_file(inv_path)
+            .with_context(|| format!("failed to load inventory from {inv_path}"))?;
+        inv.workers
+            .iter()
+            .map(|w| (w.host.clone(), w.effective_ssh_port(&inv.defaults)))
+            .collect()
+    } else {
+        return Err(anyhow!("either --host or --inventory is required"));
+    };
+
+    if targets.is_empty() {
+        println!("(no hosts to scan)");
+        return Ok(());
+    }
+
+    let known_hosts_path = args.known_hosts.clone().or_else(default_known_hosts_path);
+    if args.write && known_hosts_path.is_none() {
+        return Err(anyhow!(
+            "--write requires a known_hosts path — pass --known-hosts explicitly or set HOME"
+        ));
+    }
+
+    let mut failed = 0usize;
+    for (host, port) in &targets {
+        match scan_host_key(host, *port).await {
+            Ok(scanned) => {
+                println!(
+                    "{}:{}  {}  {}",
+                    scanned.host, scanned.port, scanned.algorithm, scanned.fingerprint
+                );
+                if args.write {
+                    let path = known_hosts_path.as_ref().expect("checked above");
+                    match append_known_hosts_line(&scanned.known_hosts_line, path) {
+                        Ok(()) => println!("  -> appended to {}", path.display()),
+                        Err(e) => {
+                            tracing::error!(%host, error = %e, "failed to write known_hosts entry");
+                            eprintln!("  -> FAILED to write known_hosts entry: {e}");
+                            failed += 1;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(%host, port, error = %e, "host key scan failed");
+                eprintln!("{host}:{port}  SCAN FAILED: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    if !args.write {
+        println!();
+        println!(
+            "⚠️  위 지문을 대역 밖(클라우드 콘솔, 프로비저닝 로그 등) 채널로 반드시 검증한 뒤 사용하세요."
+        );
+        println!("검증 후 --write 플래그로 다시 실행하면 known_hosts에 기록됩니다.");
+    }
+
+    if failed > 0 {
+        return Err(anyhow!(
+            "{failed}/{} host(s) failed to scan or write",
+            targets.len()
+        ));
+    }
+    Ok(())
 }
 
 fn filter_workers(inv: &Inventory, options: &ProvisionOptions) -> Vec<InventoryWorker> {

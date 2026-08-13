@@ -177,6 +177,74 @@ pub fn default_known_hosts_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh").join("known_hosts"))
 }
 
+// ── 호스트 키 사전 수집 (keyscan) ────────────────────────────────────────
+//
+// 로드맵 #39 — 대규모 인프라를 `--host-key-policy strict`로 배포하려면 각
+// 호스트의 known_hosts 항목이 미리 채워져 있어야 한다(그렇지 않으면 Strict가
+// 모든 최초 연결을 거부한다). 이 모듈은 `ssh-keyscan`과 같은 목적을 수행한다
+// — 실제 인증 없이 서버가 제시하는 호스트 공개키만 수집해, 운영자가
+// 대역 밖(out-of-band) 채널(클라우드 콘솔 시리얼 로그, 프로비저닝 스크립트
+// 출력 등)로 지문을 검증한 뒤 `known_hosts`에 반영할 수 있게 한다.
+//
+// **TOFU와는 목적이 다르다**: TOFU는 "첫 연결을 그냥 신뢰"하지만, 이 스캔은
+// 키를 사람이 검증하기 좋은 형태(지문)로 노출하는 것이 목표다. 스캔 결과를
+// 자동으로 `known_hosts`에 쓰는 것(`--write`)은 TOFU와 동일한 신뢰 모델이므로,
+// 진짜 MITM 방어 효과를 얻으려면 반드시 지문을 out-of-band로 대조해야 한다.
+
+/// 스캔된 단일 호스트 키. `ssh` 피처 여부와 무관하게 사용 가능한 순수 데이터 타입.
+#[derive(Debug, Clone)]
+pub struct ScannedHostKey {
+    pub host: String,
+    pub port: u16,
+    /// 키 알고리즘 (예: `ssh-ed25519`, `rsa-sha2-512`).
+    pub algorithm: String,
+    /// `SHA256:<base64>` 형식 지문 — 운영자가 대역 밖 채널과 대조하는 값.
+    pub fingerprint: String,
+    /// `known_hosts` 파일에 그대로 append 가능한 한 줄
+    /// (`host algo base64` 또는 포트가 22가 아니면 `[host]:port algo base64`).
+    pub known_hosts_line: String,
+}
+
+/// 스캔된 known_hosts 한 줄을 파일에 append. `ssh` 피처와 무관하게 동작하는
+/// 순수 파일 I/O — 다른 도구가 만든 known_hosts 줄을 붙일 때도 재사용 가능.
+///
+/// 중복 검사는 하지 않는다 — OpenSSH 클라이언트는 known_hosts에서 첫 매치를
+/// 사용하므로 안전하지만, 파일을 깔끔하게 유지하고 싶다면 운영자가 직접
+/// 정리해야 한다.
+pub fn append_known_hosts_line(line: &str, path: &std::path::Path) -> Result<(), SshError> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+
+    // 기존 파일이 비어있지 않은데 개행으로 끝나지 않으면 먼저 개행을 넣어,
+    // 새 줄이 기존 줄과 붙어버리는 것을 방지. 빈 파일(신규 생성 포함)에는
+    // 선행 개행을 넣지 않는다 — `learn_known_hosts_path`의 동일 로직은
+    // 빈 파일에서도 선행 개행을 넣는 사소한 흠이 있어 여기서는 피했다.
+    let is_empty = file.metadata()?.len() == 0;
+    let mut buf = [0u8; 1];
+    let mut ends_in_newline = is_empty;
+    if !is_empty && file.seek(SeekFrom::End(-1)).is_ok() {
+        file.read_exact(&mut buf)?;
+        ends_in_newline = buf[0] == b'\n';
+    }
+    file.seek(SeekFrom::End(0))?;
+
+    let mut file = std::io::BufWriter::new(file);
+    if !ends_in_newline {
+        file.write_all(b"\n")?;
+    }
+    writeln!(file, "{line}")?;
+    Ok(())
+}
+
 // ── russh 기반 실제 SSH 클라이언트 ─────────────────────────────────────
 
 #[cfg(feature = "ssh")]
@@ -376,6 +444,73 @@ mod russh_impl {
         }
     }
 
+    /// 서버가 제시하는 SSH 호스트 공개키만 수집. 인증은 하지 않는다
+    /// (`ssh-keyscan`과 동일한 목적 — `ScannedHostKey`/`append_known_hosts_line`
+    /// 문서 참고).
+    ///
+    /// 구현: `check_server_key` 콜백에서 키를 캡처한 뒤 `Ok(false)`를 반환해
+    /// handshake를 즉시 종료시킨다 — 개인키·사용자 계정 없이도 키를 얻을 수
+    /// 있다(실제 인증 단계까지 갈 필요가 없으므로).
+    pub async fn scan_host_key(host: &str, port: u16) -> Result<ScannedHostKey, SshError> {
+        struct CaptureHandler {
+            captured: StdArc<std::sync::Mutex<Option<key::PublicKey>>>,
+        }
+
+        #[async_trait]
+        impl client::Handler for CaptureHandler {
+            type Error = russh::Error;
+
+            async fn check_server_key(
+                &mut self,
+                server_public_key: &key::PublicKey,
+            ) -> Result<bool, Self::Error> {
+                *self.captured.lock().unwrap() = Some(server_public_key.clone());
+                // 스캔이 목적이므로 실제 연결/인증까지 진행하지 않고 즉시 거부.
+                Ok(false)
+            }
+        }
+
+        let captured = StdArc::new(std::sync::Mutex::new(None));
+        let handler = CaptureHandler {
+            captured: captured.clone(),
+        };
+        let config = StdArc::new(client::Config::default());
+
+        // 위 핸들러가 항상 `Ok(false)`를 반환하므로 이 connect는 (키를 이미
+        // 캡처했더라도) 대개 host-key-rejected 에러로 끝난다 — 의도된 동작.
+        let connect_result = client::connect(config, (host, port), handler).await;
+
+        let key = captured.lock().unwrap().take().ok_or_else(|| {
+            let detail = connect_result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "connection unexpectedly succeeded".to_string());
+            SshError::Protocol(format!(
+                "no host key observed while scanning {host}:{port}: {detail}"
+            ))
+        })?;
+
+        let mut buf = Vec::new();
+        russh_keys::known_hosts::write_public_key_base64(&mut buf, &key)
+            .map_err(SshError::RusshKeys)?;
+        let algo_and_b64 = String::from_utf8_lossy(&buf).trim_end().to_string();
+
+        let known_hosts_line = if port == 22 {
+            format!("{host} {algo_and_b64}")
+        } else {
+            format!("[{host}]:{port} {algo_and_b64}")
+        };
+
+        Ok(ScannedHostKey {
+            host: host.to_string(),
+            port,
+            algorithm: key.name().to_string(),
+            fingerprint: format!("SHA256:{}", key.fingerprint()),
+            known_hosts_line,
+        })
+    }
+
     #[async_trait]
     impl RemoteExecutor for SshClient {
         async fn exec(&self, command: &str) -> Result<String, SshError> {
@@ -489,7 +624,7 @@ mod russh_impl {
 }
 
 #[cfg(feature = "ssh")]
-pub use russh_impl::{SshClient, SshHandler};
+pub use russh_impl::{scan_host_key, SshClient, SshHandler};
 
 #[cfg(not(feature = "ssh"))]
 mod stub {
@@ -512,10 +647,17 @@ mod stub {
             ))
         }
     }
+
+    /// `ssh` feature가 비활성화된 경우 항상 에러.
+    pub async fn scan_host_key(_host: &str, _port: u16) -> Result<ScannedHostKey, SshError> {
+        Err(SshError::Protocol(
+            "SSH support is disabled. Rebuild with `--features ssh`.".into(),
+        ))
+    }
 }
 
 #[cfg(not(feature = "ssh"))]
-pub use stub::SshClient;
+pub use stub::{scan_host_key, SshClient};
 
 // ── MockExecutor (테스트용) ─────────────────────────────────────────────
 
@@ -815,5 +957,62 @@ mod tests {
             s.ends_with("/.ssh/known_hosts"),
             "expected ~/.ssh/known_hosts, got {s}"
         );
+    }
+
+    // ── append_known_hosts_line (로드맵 #39) ────────────────────────────
+
+    #[test]
+    fn append_known_hosts_line_creates_file_and_parent_dirs() {
+        let dir = std::env::temp_dir().join(format!("fleet-test-kh-{}", uuid_like()));
+        let path = dir.join("known_hosts");
+        assert!(!dir.exists());
+
+        append_known_hosts_line("10.0.0.5 ssh-ed25519 AAAA...", &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "10.0.0.5 ssh-ed25519 AAAA...\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_known_hosts_line_appends_without_clobbering() {
+        let dir = std::env::temp_dir().join(format!("fleet-test-kh-{}", uuid_like()));
+        let path = dir.join("known_hosts");
+
+        append_known_hosts_line("host-a ssh-ed25519 AAAA", &path).unwrap();
+        append_known_hosts_line("host-b ssh-ed25519 BBBB", &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn append_known_hosts_line_inserts_newline_if_file_lacked_trailing_one() {
+        let dir = std::env::temp_dir().join(format!("fleet-test-kh-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("known_hosts");
+        // 개행 없이 끝나는 기존 파일을 시뮬레이션.
+        std::fs::write(&path, "host-a ssh-ed25519 AAAA").unwrap();
+
+        append_known_hosts_line("host-b ssh-ed25519 BBBB", &path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 병렬 테스트 실행 시 임시 파일 경로 충돌을 피하기 위한 저비용 유사-UUID.
+    /// 실제 UUID 크레이트를 새로 끌어오지 않고 시간+스레드 ID로 충분히 유일하게 만든다.
+    fn uuid_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{nanos:x}-{:?}", std::thread::current().id())
     }
 }

@@ -11,6 +11,8 @@
 //! - `fleet token new` — 부트스트랩 토큰 생성
 //! - `fleet doctor` — 인프라 진단 (DB 연결, 마이그레이션, 워커 상태)
 //! - `fleet provision` — SSH 자동 프로비저닝
+//! - `fleet scan-host-keys` — SSH 호스트 공개키 사전 수집 (`ssh-keyscan`과 동일한
+//!   목적 — `--host-key-policy strict` 대규모 배포 전 known_hosts를 채운다)
 //!
 //! ## 환경변수
 //!
@@ -386,6 +388,39 @@ enum Command {
         /// orchestrator 에게 광고할 포트. 미지정 시 `--mtls-listen-addr` 포트 사용.
         #[arg(long)]
         mtls_advertised_port: Option<u16>,
+    },
+
+    /// SSH 호스트 공개키를 사전 수집 (`ssh-keyscan`과 동일한 목적, 로드맵 #39).
+    ///
+    /// `fleet provision --host-key-policy strict`는 known_hosts에 없는 호스트의
+    /// 첫 연결을 전부 거부한다 — 대규모 배포 전 이 명령으로 각 호스트의 키를
+    /// 미리 수집해, 지문(fingerprint)을 대역 밖(클라우드 콘솔, 프로비저닝 로그
+    /// 등) 채널로 검증한 뒤 `--write`로 known_hosts에 반영하는 흐름을 지원한다.
+    ///
+    /// **주의**: `--write` 없이 실행하면 지문만 출력하고 파일에는 쓰지 않는다
+    /// (기본값). 지문을 검증하지 않고 바로 `--write`하는 것은 TOFU와 동일한
+    /// 신뢰 모델이라 MITM 방어 효과가 없다.
+    ScanHostKeys {
+        /// 단일 호스트 (IP 또는 호스트명). --inventory와 배타.
+        #[arg(long, conflicts_with = "inventory")]
+        host: Option<String>,
+
+        /// SSH 포트. --host 모드에서 사용.
+        #[arg(long, default_value_t = 22)]
+        ssh_port: u16,
+
+        /// 인벤토리 YAML 파일 경로 — 전체 워커 호스트를 일괄 스캔. --host 대신 사용.
+        #[arg(long, conflicts_with = "host")]
+        inventory: Option<String>,
+
+        /// known_hosts 파일 경로. 미지정 시 `~/.ssh/known_hosts`.
+        #[arg(long, env = "FLEET_KNOWN_HOSTS")]
+        known_hosts: Option<String>,
+
+        /// 스캔한 키를 known_hosts 파일에 실제로 추가. 기본값(false)이면
+        /// 지문만 출력한다.
+        #[arg(long, default_value_t = false)]
+        write: bool,
     },
 
     /// mTLS 인증서 발급 도구 (Phase 8.5). 사설 CA + 워커 서버 인증서 +
@@ -991,6 +1026,22 @@ async fn main() -> Result<()> {
                 mtls_client_ca_path: mtls_client_ca,
                 mtls_advertised_host,
                 mtls_advertised_port,
+            })
+            .await
+        }
+        Command::ScanHostKeys {
+            host,
+            ssh_port,
+            inventory,
+            known_hosts,
+            write,
+        } => {
+            runtime::run_scan_host_keys(runtime::ScanHostKeysArgs {
+                host,
+                ssh_port,
+                inventory,
+                known_hosts: known_hosts.map(PathBuf::from),
+                write,
             })
             .await
         }
