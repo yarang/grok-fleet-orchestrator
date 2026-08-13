@@ -42,8 +42,8 @@ use fleet_provisioner::{
     SshConnectInfo, StepContext,
 };
 use fleet_scheduler::{
-    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, ReconcileConfig,
-    Reconciler, SessionCleanup,
+    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, MultiAdminSync,
+    ReconcileConfig, Reconciler, SessionCleanup,
 };
 use fleet_store::{PgStore, PoolConfig, Store};
 use fleet_transport::{MockTransport, WorkerTransport};
@@ -230,6 +230,7 @@ pub async fn run_serve(
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
     dashboard_bind: Option<&str>,
+    no_circuit_sync: bool,
     mtls_flags: MtlsFlags<'_>,
 ) -> Result<()> {
     // 로드맵 P2 #16 — `serve`는 장수명 프로세스이므로 풀 세부 옵션을 명시적으로
@@ -373,6 +374,25 @@ pub async fn run_serve(
         None
     };
 
+    // 다중 오케스트레이터 인스턴스 간 CircuitBreaker 상태 동기화 (옵션,
+    // 기본값: 활성). 로드맵 #25 — `MultiAdminSync`는 Postgres LISTEN/NOTIFY로
+    // 다른 인스턴스가 발행한 `WorkerCircuitChanged`/`WorkerLeft` 이벤트를
+    // 받아 로컬 `BreakerRegistry`에 즉시 반영한다. 구현·테스트는 오래전에
+    // 끝났지만(`fleet-scheduler/tests/scaleout_sync.rs`) 이 기동 경로에는
+    // 한 번도 연결되지 않아, 스케일아웃 배포에서 한 인스턴스가 워커를
+    // CircuitOpen 시켜도 다른 인스턴스는 자신이 별도로 실패를 겪기 전까지
+    // 이를 몰랐다.
+    let _circuit_sync_handle = if !no_circuit_sync {
+        tracing::info!("multi-admin CircuitBreaker sync enabled");
+        let sync = MultiAdminSync::new(state.clone(), store.pool().clone());
+        Some(tokio::spawn(async move {
+            sync.run().await;
+        }))
+    } else {
+        tracing::info!("multi-admin CircuitBreaker sync disabled by --no-circuit-sync");
+        None
+    };
+
     // HTTP API 서버 (옵션). --http-bind가 지정된 경우에만 실행.
     let _http_handle = if let Some(bind_str) = http_bind {
         let bind: SocketAddr = bind_str
@@ -511,6 +531,9 @@ pub async fn run_serve(
     }
     if let Some(h) = _reconcile_handle {
         h.abort().await;
+    }
+    if let Some(h) = _circuit_sync_handle {
+        h.abort();
     }
     if let Some(h) = _http_handle {
         h.abort();

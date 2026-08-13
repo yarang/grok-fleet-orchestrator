@@ -105,7 +105,30 @@
 22. ⏳ Dashboard API에 `/v1` 버전 부재.
 23. ⏳ 프론트엔드 페이지네이션 UI 부재.
 24. ⏳ 모바일 반응형 감사 미수행.
-25. ⏳ 서킷 브레이커 상태가 인메모리 전용 (다중 인스턴스 불가).
+25. ✅ **서킷 브레이커 상태가 인메모리 전용 (다중 인스턴스 불가)** — 해결됨
+    (2026-08-13). 서술 자체가 부정확했습니다 — `worker.circuit_state` DB 컬럼
+    영속화(`PgStore::update_worker_circuit_state`, `dispatcher.rs` 4곳에서 호출)와
+    Postgres LISTEN/NOTIFY 기반 인스턴스 간 실시간 동기화 코디네이터
+    (`fleet-scheduler/src/sync.rs`의 `MultiAdminSync`)는 **이미 오래전에 구현·
+    테스트까지 완료**돼 있었습니다(단위 테스트 4개 + 스케일아웃 통합 테스트
+    `test_circuit_breaker_sync_between_scaleout_nodes`). 문제는 다른 곳에
+    있었습니다 — **`MultiAdminSync`가 실제 `fleet serve` 기동 경로
+    (`crates/fleet-cli/src/runtime.rs`)에는 한 번도 연결(`spawn`)되지 않아서**,
+    구현·테스트는 그린인데 실배포에서는 죽은 코드였습니다(Autonomic Engine과
+    같은 유형의 "구현은 됐지만 배선이 안 된" 결함).
+
+    수정: `run_serve`가 `HealthChecker`/`Reconciler`/`SessionCleanup`을 기동하는
+    자리에 `MultiAdminSync::new(state.clone(), store.pool().clone()).run()`을
+    함께 `tokio::spawn`하도록 연결했습니다. 형제 background 루프들과 동일한
+    옵트아웃 컨벤션을 따라 신규 CLI 플래그 `--no-circuit-sync`(기본값: 비활성 —
+    즉 동기화는 기본 켜짐)를 추가했습니다. 단일 인스턴스 배포에서는 자신이
+    발행한 이벤트를 다시 받아 멱등하게 재적용할 뿐이라 켜둬도 무해합니다.
+    상세 배경은 [`docs/architecture/overview.md`](../architecture/overview.md)
+    "PostgreSQL LISTEN/NOTIFY로 다중 admin 동기화" 절의 정정 참고.
+
+    ✅ **검증 완료**: `cargo check --no-default-features`,
+    `cargo clippy --all-targets --all-features`(경고 0건),
+    `cargo test --workspace --features "acp mtls"`(전체 그린) 통과.
 26. ⏳ 시크릿 매니저 통합 부재 (Vault/AWS SM).
 27. 🔵 예시 설정 파일 — **사실상 충족**. `orchestrator.example.toml`은 없으나 `examples/fleet.env`
     (DATABASE_URL, FLEET_HTTP_BIND, FLEET_API_TOKENS 등) + `examples/worker.toml`이 같은 역할을 한다.
@@ -328,7 +351,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#26, #28, #36~#39, #40~#42 |
+| 미배정 | #14, #21~#24, #26, #28, #36~#39, #40~#42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

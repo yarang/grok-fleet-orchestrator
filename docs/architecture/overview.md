@@ -57,6 +57,17 @@ JSON-RPC 2.0 over newline-delimited stdio를 구현하여, **어떤 AI 코딩 �
    (`crates/fleet-scheduler/src/sync.rs`의 `MultiAdminSync::apply_one_to()` —
    테스트 `circuit_open_event_forces_local_breaker_open`로 검증됨)
 
+> ✅ **정정 (2026-08-13)**: 위 메커니즘은 유닛 테스트(`sync.rs`)와 스케일아웃
+> 통합 테스트(`fleet-scheduler/tests/scaleout_sync.rs`)로는 오래전부터 검증돼
+> 있었지만, **실제 `fleet serve` 기동 경로(`crates/fleet-cli/src/runtime.rs`)에는
+> 한 번도 연결된 적이 없었습니다** — `MultiAdminSync`가 어디서도 `spawn`되지
+> 않아, 스케일아웃 배포에서 한 인스턴스가 워커를 CircuitOpen 시켜도 다른
+> 인스턴스는 스스로 실패를 겪기 전까지 이를 몰랐습니다(로드맵 #25). `run_serve`가
+> `HealthChecker`/`Reconciler`/`SessionCleanup`을 기동할 때와 같은 자리에서
+> `MultiAdminSync`도 함께 `spawn`하도록 연결했고, 신규 CLI 플래그
+> `--no-circuit-sync`로 끌 수 있습니다(기본값: 활성 — 형제 플래그
+> `--no-health-check`/`--no-cleanup`/`--no-reconcile`와 동일하게 env var는 없음).
+
 ### 5. CircuitBreaker 3-state 머신
 
 각 워커마다 독립적인 회로차단기:

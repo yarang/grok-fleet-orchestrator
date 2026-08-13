@@ -167,6 +167,17 @@ enum Command {
         #[arg(long, env = "FLEET_DASHBOARD_BIND")]
         dashboard_bind: Option<String>,
 
+        /// 다중 오케스트레이터 인스턴스 간 CircuitBreaker 상태 동기화
+        /// 비활성화 (기본값: 활성). 로드맵 #25 — `MultiAdminSync`가
+        /// 구현·테스트(`scaleout_sync.rs`)는 오래전에 끝났지만 실제 `fleet
+        /// serve` 기동 경로에는 연결된 적이 없어, 스케일아웃 배포에서 한
+        /// 인스턴스가 워커를 CircuitOpen 시켜도 다른 인스턴스는 자신이
+        /// 별도로 실패를 겪기 전까지 이를 모르는 상태였다. 단일 인스턴스
+        /// 배포에서는 자기 자신이 발행한 이벤트를 다시 받아 멱등하게
+        /// 재적용할 뿐이라 켜둬도 무해하다.
+        #[arg(long, default_value_t = false)]
+        no_circuit_sync: bool,
+
         /// mTLS: 사설 CA PEM 파일 경로. orchestrator↔worker ACP 트래픽을
         /// TLS로 보호 (`--features mtls` 필요). `--mtls-cert`, `--mtls-key` 도 함께 필요.
         #[arg(
@@ -872,6 +883,7 @@ async fn main() -> Result<()> {
             api_tokens,
             cf_audience,
             dashboard_bind,
+            no_circuit_sync,
             mtls_ca,
             mtls_cert,
             mtls_key,
@@ -897,6 +909,7 @@ async fn main() -> Result<()> {
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
                 dashboard_bind.as_deref(),
+                no_circuit_sync,
                 runtime::MtlsFlags {
                     ca: mtls_ca.as_deref(),
                     cert: mtls_cert.as_deref(),
