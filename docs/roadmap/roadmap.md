@@ -122,7 +122,7 @@
 
 31. ✅ **`dispatch_latency` 메트릭** (P2) — 해결됨 (`ed82b27`). `tasks` 테이블에 `dispatched_at` 컬럼을 추가하는 마이그레이션(`012_task_dispatch_latency.sql`)을 진행하고, 스케줄러 디스패치 시점에 갱신하도록 처리. 대기 시간차를 계산하여 Prometheus Histogram `fleet_task_dispatch_latency_seconds` 메트릭으로 노출 완료.
 
-32. ⏳ **`/admin/*` HTML 페이지에 RBAC 검사 부재** (P2, 보안) — → 담당: security
+32. ✅ **`/admin/*` HTML 페이지에 RBAC 검사 부재** (P2, 보안) — 해결됨 (`db614ec`).
 
     `admin_activity_page`(당시 `admin_audit_page`), `admin_users_page`, `admin_tools_page` 세 핸들러 모두 인자 없이
     `serve_page(...)`만 호출하며 `require_permission` 검사가 없다. **`/admin/activity`(당시 `/admin/audit`) 한 곳의
@@ -302,8 +302,13 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| security | #32 (`/admin/*` RBAC — 3개 페이지 일괄) |
-| 미배정 | #10, #11, #13, #14, #15 잔여, #21~#28, #31, #36~#39, #40~#42, #45 |
+| 미배정 | #14, #21~#26, #28, #36~#39, #40~#42, #45 |
+
+> ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
+> 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
+> 아이콘과 이 표 갱신이 누락된 채 방치된 사례여서 제거했다. `#27`도 원래 목록에
+> 있었으나 본문이 "🔵 사실상 충족 — 종료 또는 최하위 강등 권고"로 이미 사실상
+> 실질 작업이 아니라고 결론 낸 항목이라 함께 제거했다.
 
 ### 호환성 주의 — `/api/audit` 의미 변경 (`8755c0d`)
 `/api/audit`가 반환하는 데이터가 **바뀌었다**. 기존에는 작업·워커 생명주기 이벤트(`events`
