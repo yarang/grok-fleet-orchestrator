@@ -147,7 +147,7 @@ CREATE INDEX idx_hosts_labels_gin ON hosts USING GIN (labels jsonb_path_ops); --
 - **CLI 경로가 금고를 우회함**: `fleet provision --host/--inventory --ssh-key <로컬경로>`는 금고를 거치지 않고 운영자 로컬 파일을 직접 읽습니다(`crates/fleet-cli/src/runtime.rs`). 중앙 관리가 목표라면 CLI에도 `--ssh-key-name <금고이름>` 옵션을 추가하거나, 로컬 파일 경로 사용을 에어갭/최초 부트스트랩 등 예외 상황으로만 한정하는 정책 결정이 필요합니다.
 - **임시 키 파일 정리가 단순 삭제**: 프로비저닝 중 복호화된 키를 `/tmp/.fleet-ssh-key-{uuid}`에 0600 권한으로 잠깐 쓰고 완료 후 `remove_file`로 지우지만, 덮어쓰기 없는 일반 삭제입니다. 강화하려면 삭제 전 덮어쓰기(`zeroize` 등)를 추가하세요.
 - **`fingerprint`는 표시용**: `ssh_keys.fingerprint`는 실제 SSH 공개키 fingerprint가 아니라 개인키 텍스트의 SHA-256 앞부분입니다 — 키 신원 검증 용도로 쓰지 마세요.
-- `known_hosts` TOFU 검증은 최초 연결 시 스푸핑을 탐지할 수 없는 근본 한계가 있습니다. 최초 등록 시 호스트 지문을 관리자가 대시보드에서 육안 확인하는 단계를 넣는 것을 권장합니다.
+- `known_hosts` TOFU 검증은 최초 연결 시 스푸핑을 탐지할 수 없는 근본 한계가 있습니다. ✅ **부분 해소 (2026-08-13, 로드맵 #39)**: `fleet scan-host-keys` 명령이 신설되어(`ssh-keyscan`과 동일한 목적), `--host-key-policy strict` 대규모 배포 전 지문을 사전에 뽑아 대역 밖(out-of-band) 채널로 검증할 수 있습니다. 다만 이 검증 단계는 CLI 출력을 사람이 읽는 것에 의존하며, "대시보드에서 육안 확인" 같은 UI 통합은 여전히 없습니다.
 - 프로비저닝 흐름도 [`join-authentication.md`](./join-authentication.md)가 정의한 **Cloudflare Access 1단계 방어**를 통과해야 합니다 — 워커가 오케스트레이터의 `/v1/workers/join`을 호출하는 구간은 동일한 네트워크 경계 보안을 적용합니다.
 
 #### 3.2.3 실패 경로
@@ -183,3 +183,4 @@ hosts:
 
 - **2026-08-12**: v0.2 최초 작성분을 코드 대비 검증 후 요약/색인 문서로 축소. MCP 도구 개수·디스패처 동작 방식 정정, SSH 프로비저닝을 "구현됨(§3.1)"과 "신규 제안(§3.2)"으로 명확히 분리, `inventory_hosts` 신규 테이블 제안을 기존 `hosts` 테이블 확장안으로 변경, IdentityFile 처리 기본값(수동 허용)을 명시, 실패 경로 보완. `ssh-provisioning.md`/`token-delivery.md`에 정정 배너 추가(연동 패치). §3.3 `labels.yaml` 매칭 실패 시 동작을 "빈 라벨 등록"에서 "`host`(+FQDN이면 `domain`) 폴백 라벨 자동 유도"로 변경.
 - **2026-08-12 (2차)**: §3.2.2를 재작성 — IdentityFile "자동 수집 모드"를 기본값으로 전환하되, 새 메커니즘을 만드는 대신 이미 구현되어 있는 SSH 키 금고(`ssh_keys` 테이블 + `fleet-dashboard`, 22종 `PermissionKind` 기반 RBAC)를 재사용하는 설계로 확정. 감사 로그 부재·키 로테이션 API 부재·MCP 미노출·CLI의 금고 우회 등 실제 남은 격차를 명시.
+- **2026-08-13**: 로드맵 #28(MCP 도구 4종 추가) 반영해 "MCP 미노출" 항목을 "MCP 부분 노출"로 갱신. 로드맵 #39(`fleet scan-host-keys` 신설) 반영해 known_hosts TOFU 근본 한계 항목에 부분 해소 노트 추가.

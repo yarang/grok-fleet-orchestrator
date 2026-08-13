@@ -216,7 +216,33 @@
 36. ⏳ **mTLS 인증서 자동 회전(Auto-Rotation) 정책 도입** (P1/P2, 보안/운영) — 사설 CA 기반 mTLS 인증서 만료 시 서비스 중단 없이 교체하기 위해 TLS 컨텍스트 동적 리로드(File Watcher) 또는 중앙 인증서 자동 배포 설계.
 37. ⏳ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — `--inventory` 모드에서 `InventoryWorker` 스키마 확장을 적용하여 mTLS 설정 및 인증서 자동 주입 파이프라인 구현.
 38. ⏳ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) — 네트워크 일시 순단 시 태스크가 즉시 Failed로 유실되지 않도록 자동 재스케줄러 큐 및 Stale 상태 격리를 위한 DLQ 메커니즘 도입.
-39. ⏳ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) — 대규모 배포 시 첫 SSH 연결의 MITM 방어를 위해 `fleet provision` 도구 실행 시 SSH 호스트 키 사전 수집/검증 기능 구현.
+39. ✅ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) —
+    해결됨 (2026-08-13). 신규 `fleet scan-host-keys` 명령을 추가했습니다 —
+    `ssh-keyscan`과 동일한 목적으로, 실제 인증 없이 서버가 제시하는 SSH 호스트
+    공개키만 수집합니다(`fleet-provisioner::ssh::scan_host_key` — `check_server_key`
+    콜백에서 키를 캡처한 뒤 `Ok(false)`로 즉시 handshake를 종료시켜, 개인키·
+    사용자 계정 없이도 키를 얻습니다). `--host <addr>` 단일 호스트 또는
+    `--inventory <file>` 일괄 스캔을 지원하고, 기본 동작은 지문(SHA-256) 출력만
+    — `--write`를 명시해야 `known_hosts`에 반영됩니다(대역 밖 검증을 건너뛰기
+    어렵게 하려는 의도적 설계). 파일 append 로직(`append_known_hosts_line`)은
+    `ssh` 카고 피처와 무관하게 항상 컴파일되는 순수 파일 I/O이며, 기존
+    `russh_keys::learn_known_hosts_path`와 동일한 줄 형식을 생성해 100% 호환됩니다.
+
+    **실측 검증**: `fleet scan-host-keys --host github.com`을 실행해 GitHub가
+    공식 문서에 게시한 ed25519 지문(`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`)과
+    **정확히 일치**함을 확인했습니다 — 실제 네트워크 경로(handshake→키 캡처→
+    지문 계산)가 전부 올바르게 동작함을 실제 공인 SSH 서버로 검증한 것입니다.
+    `--write` 모드로 known_hosts 파일에 기록된 내용도 GitHub 공식 문서의
+    `known_hosts` 항목과 바이트 단위로 일치함을 확인했습니다.
+
+    `docs/architecture/overview.md`("SSH 호스트 키 검증" 절)와
+    `docs/worker-bootstrap/bootstrap-release-v0.2.md`를 갱신해 기존 외부
+    `ssh-keyscan` 의존 예시를 신규 내장 명령으로 교체했습니다.
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
+    (전체 그린) 통과 + 위 실제 네트워크 스모크 테스트.
 40. 🔵 **`xai-circuit-breaker` 기반 고성능 회로 차단기 도입** (P2, 성능/안정성) —
     **2026-08-13 재평가: 항목이 요구하는 3가지 중 2가지는 이미 구현돼 있었습니다.**
     (1) 슬라이딩 윈도우 실패율 측정 — `BreakerInner.samples: VecDeque<(bool,
@@ -389,7 +415,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#24, #26, #36~#39, #41, #42 |
+| 미배정 | #14, #21~#24, #26, #36, #37, #38, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

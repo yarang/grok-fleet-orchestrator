@@ -869,8 +869,10 @@ supervisor 의 `establish_session` 은 endpoint 스킴에 따라 다음과 같�
 ### 사용 예시
 
 ```bash
-# 운영 권장: strict 모드 + 사전에 ssh-keyscan 으로 known_hosts 채우기
-ssh-keyscan -H 10.0.1.10 >> ~/.ssh/known_hosts
+# 운영 권장: strict 모드 + 사전에 fleet scan-host-keys 로 known_hosts 채우기
+fleet scan-host-keys --host 10.0.1.10
+# 출력된 SHA256 지문을 클라우드 콘솔 등 대역 밖(out-of-band) 채널로 검증한 뒤:
+fleet scan-host-keys --host 10.0.1.10 --write
 fleet provision --host 10.0.1.10 --ssh-key ~/.ssh/id_ed25519 \
     --name build-arm64-01 --host-key-policy strict
 
@@ -881,12 +883,37 @@ fleet provision --inventory workers.yaml --ssh-key ~/.ssh/id_ed25519
 fleet provision --host 10.0.1.10 --host-key-policy accept-all ...
 ```
 
+### 대규모 배포용 사전 키 수집 — `fleet scan-host-keys` (2026-08-13 추가, 로드맵 #39)
+
+`strict` 정책은 `known_hosts`에 없는 호스트의 **모든** 첫 연결을 거부한다 —
+대규모 인프라를 처음부터 `strict`로 배포하려면 각 호스트의 키가 미리
+채워져 있어야 한다는 뜻이다. 기존에는 외부 `ssh-keyscan` 바이너리에
+의존해야 했는데(위 예시), 이제 `fleet` 바이너리 자체에 동등한 기능이
+내장되어 있다.
+
+* **구현**: `fleet-provisioner::ssh::scan_host_key(host, port)`가
+  `russh::client::connect`로 handshake만 수행하고 `check_server_key`
+  콜백에서 서버 키를 캡처한 뒤 `Ok(false)`를 반환해 즉시 종료시킨다 —
+  개인키나 사용자 계정 없이도 키만 얻을 수 있다(`ssh-keyscan`과 동일한
+  원리). 지문은 `PublicKey::fingerprint()`(SHA-256)로 계산.
+* **`--host <addr>` 또는 `--inventory <file>`**: 단일 호스트 또는 인벤토리
+  전체를 일괄 스캔.
+* **기본값은 출력만, `--write`로 명시해야 파일에 반영**: 지문을 대역 밖으로
+  검증하지 않고 바로 `--write`하는 것은 TOFU와 신뢰 모델이 동일해 실질적인
+  MITM 방어 효과가 없다 — 그래서 기본 동작을 "출력만"으로 두어 검증 단계를
+  건너뛰기 어렵게 설계했다.
+* 파일 append 로직(`append_known_hosts_line`)은 `ssh` 카고 피처와 무관하게
+  항상 컴파일되는 순수 파일 I/O이며, `russh_keys::learn_known_hosts_path`와
+  동일한 줄 형식(`host algo base64` 또는 비표준 포트면 `[host]:port algo base64`)을
+  만든다 — 기존 known_hosts 파싱 경로(`check_known_hosts_path`)와 100% 호환.
+
 ### 제한
 
 - `check_known_hosts_path` / `learn_known_hosts_path` 는 동기 파일 I/O.
   `known_hosts` 파일이 작고(수 KB) 연결당 1회만 읽히므로 블로킹 영향은 미미.
 - 해시된 호스트명(`|1|<salt>|<hash> ...` 형식)은 `russh-keys`가 처리하므로
-  그대로 지원되지만, TOFU `learn` 은 평문 호스트명으로 추가한다.
+  그대로 지원되지만, TOFU `learn`과 `fleet scan-host-keys --write`는 모두
+  평문 호스트명으로 추가한다.
 
 ## Autonomic Self-Healing Engine (Autonomy) — 🔴 미구현·비연결 상태 (설계 초안)
 
