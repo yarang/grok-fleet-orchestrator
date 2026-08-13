@@ -56,7 +56,7 @@ use agent_client_protocol_http::HttpClient;
 use async_trait::async_trait;
 use chrono::Utc;
 use fleet_core::{TaskId, TaskResult, TokenUsage, WorkerId};
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -105,10 +105,33 @@ pub enum ConnState {
 /// 출력을 올바른 task로 라우팅한다.
 struct InFlightSession {
     task_id: TaskId,
-    /// 누적된 스트리밍 텍스트. 최종 `TaskResult.output`으로 쓰인다.
-    output_buf: Arc<Mutex<String>>,
-    /// `WorkerEvent::Output`용 단조 증가 시퀀스.
-    seq: Arc<AtomicU64>,
+    /// Head-of-Line Blocking 방지용 세션 전용 알림 큐 (로드맵 #41).
+    ///
+    /// 워커당 WebSocket 연결은 하나뿐이라, SDK의 `on_receive_notification`
+    /// 핸들러는 연결 전체에 대해 **단일 순차 루프**(`incoming_protocol_actor`,
+    /// vendor SDK 내부)에서 인라인으로 `.await`된다 — 즉 한 세션의
+    /// notification 처리가 느려지면 같은 연결을 공유하는 다른 세션의
+    /// notification 배달까지 지연된다(vendor SDK 소스로 확인, 프로젝트 코드가
+    /// 아니라 패치 대상이 아님). 실제 처리(버퍼 append + seq 증가 + 이벤트
+    /// 브로드캐스트)는 세션마다 별도로 spawn된 워커 태스크로 위임하고, 여기
+    /// 큐에는 non-blocking send만 하도록 해 SDK의 공유 actor 루프가 즉시
+    /// 반환하게 한다 — 세션 간 동시성을 확보하면서, 세션 내부의 순서(단일
+    /// 컨슈머 = FIFO)는 그대로 보존한다.
+    notify_tx: mpsc::UnboundedSender<SessionMsg>,
+}
+
+/// 세션 전용 알림 큐에 들어가는 메시지 (로드맵 #41).
+enum SessionMsg {
+    /// `session/update`에서 추출한 텍스트 청크.
+    Chunk(String),
+    /// 배리어. 이 메시지가 컨슈머(세션 워커)에 도달했다는 것은 그 이전에
+    /// 큐잉된 모든 `Chunk`가 이미 처리(버퍼 append + 브로드캐스트) 완료됐다는
+    /// 뜻이다 — `dispatch()`가 `PromptResponse` 수신 후 `output_buf`를 읽기
+    /// 전에 이 배리어를 통해 "지금까지 도착한 모든 청크가 반영됐음"을
+    /// 보장한다. 큐잉 자체(채널에 들어간 순서)는 이미 SDK의 단일 actor
+    /// 루프가 보장하므로, 이 배리어는 오직 "컨슈머가 실제로 다 처리했는지"만
+    /// 확인한다.
+    Flush(oneshot::Sender<()>),
 }
 
 /// 워커별 세션. supervisor와 dispatch/cancel 양쪽에서 공유.
@@ -449,14 +472,36 @@ impl WorkerTransport for AcpTransport {
 
             let output_buf = Arc::new(Mutex::new(String::new()));
             let seq = Arc::new(AtomicU64::new(0));
+            let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionMsg>();
             sessions_map.lock().await.insert(
                 session_id.clone(),
-                InFlightSession {
-                    task_id,
-                    output_buf: output_buf.clone(),
-                    seq,
-                },
+                InFlightSession { task_id, notify_tx },
             );
+
+            // 로드맵 #41 — 이 세션 전용 워커. FIFO 단일 컨슈머라 세션 내부
+            // 순서는 보존되고, 세션마다 독립된 태스크로 돌기 때문에 한
+            // 세션의 처리가 같은 연결을 공유하는 다른 세션을 지연시키지
+            // 않는다(`InFlightSession::notify_tx` 문서 참고).
+            let worker_output_buf = output_buf.clone();
+            let worker_broadcaster = broadcaster.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = notify_rx.recv().await {
+                    match msg {
+                        SessionMsg::Chunk(text) => {
+                            worker_output_buf.lock().await.push_str(&text);
+                            let out_seq = seq.fetch_add(1, Ordering::Relaxed);
+                            let _ = worker_broadcaster.send(WorkerEvent::Output {
+                                task_id,
+                                seq: out_seq,
+                                chunk: text,
+                            });
+                        }
+                        SessionMsg::Flush(ack) => {
+                            let _ = ack.send(());
+                        }
+                    }
+                }
+            });
 
             let prompt_result = tokio::time::timeout(
                 timeout,
@@ -469,13 +514,36 @@ impl WorkerTransport for AcpTransport {
             )
             .await;
 
+            // 로드맵 #41 — `output_buf`를 읽기 전에, 이 세션 워커가 지금까지
+            // 큐잉된 모든 청크를 실제로 처리(append) 완료했는지 배리어로
+            // 확인한다. PromptResponse는 같은 연결의 이전 notification들보다
+            // 항상 나중에 도착/디스패치되므로(SDK의 단일 incoming actor
+            // 루프가 순서를 보존) 여기 도달한 시점엔 마지막 청크까지 이미
+            // `notify_tx` 채널에 들어가 있음이 보장된다 — 다만 "채널에
+            // 들어가 있음"과 "워커가 다 처리함"은 다르므로 별도 배리어가
+            // 필요하다. 세션이 없거나(비정상 경로) send가 실패하면 워커가
+            // 이미 죽은 것이므로 조용히 건너뛴다.
+            let flush_tx = sessions_map
+                .lock()
+                .await
+                .get(&session_id)
+                .map(|entry| entry.notify_tx.clone());
+            if let Some(tx) = flush_tx {
+                let (ack_tx, ack_rx) = oneshot::channel();
+                if tx.send(SessionMsg::Flush(ack_tx)).is_ok() {
+                    let _ = ack_rx.await;
+                }
+            }
+
             // 이 턴은 끝났으므로 더 이상 이 session_id로 오는 notification을
             // 라우팅할 필요가 없다 — 제거해 맵이 무한정 자라는 것을 방지.
             // 반환값(제거된 엔트리 유무)로 중복 emit을 막는다: 연결이 끊기면
             // supervisor의 fail_all()도 "같은" session_id를 동시에 정리하며
             // Failed를 emit할 수 있다 — 이미 fail_all()이 먼저 제거했다면
             // (반환값 None) 여기서는 emit하지 않는다(2026-08-11 발견 —
-            // 연결 종료 시 Failed가 태스크당 최대 1번만 나가야 함).
+            // 연결 종료 시 Failed가 태스크당 최대 1번만 나가야 함). 맵에서
+            // 제거되면 이 세션의 마지막 `notify_tx` 소유자가 사라지므로
+            // 위 세션 워커 태스크도 채널 종료로 자연스럽게 끝난다.
             let already_handled_elsewhere = sessions_map.lock().await.remove(&session_id).is_none();
 
             let duration_secs = started.elapsed().as_secs_f64();
@@ -637,17 +705,18 @@ fn spawn_supervisor(
 
             let sessions_map = session.sessions.clone();
             let session_for_conn = session.clone();
-            let notification_broadcaster = broadcaster.clone();
 
             let connect_future = agent_client_protocol::Client
                 .builder()
                 .on_receive_notification(
                     move |notification: SessionNotification, _cx| {
                         let sessions_map = sessions_map.clone();
-                        let broadcaster = notification_broadcaster.clone();
+                        // 로드맵 #41 — 여기서는 세션 전용 큐에 non-blocking
+                        // send만 하고 즉시 반환한다. 실제 처리는 세션 워커
+                        // 태스크에서 일어난다 — `handle_session_notification`
+                        // 문서 참고.
                         async move {
-                            handle_session_notification(&sessions_map, &broadcaster, notification)
-                                .await;
+                            handle_session_notification(&sessions_map, notification).await;
                             Ok(())
                         }
                     },
@@ -744,12 +813,19 @@ fn spawn_supervisor(
     })
 }
 
-/// `session/update` notification 처리 — session_id로 해당 task를 찾아 텍스트를
-/// 누적하고 `WorkerEvent::Output`을 emit. 등록 안 된 session_id(이미 종료됐거나
-/// 이 워커 소관이 아님)는 조용히 무시.
+/// `session/update` notification 처리 — session_id로 해당 세션의 전용 알림
+/// 큐를 찾아 텍스트 청크를 non-blocking send한다. 등록 안 된 session_id(이미
+/// 종료됐거나 이 워커 소관이 아님)는 조용히 무시.
+///
+/// 로드맵 #41 — 실제 버퍼 append/`WorkerEvent::Output` emit은 여기서 하지
+/// 않는다. 이 함수는 SDK의 공유 `incoming_protocol_actor` 루프에서 인라인
+/// `.await`로 호출되므로(`InFlightSession::notify_tx` 문서 참고), 여기서
+/// 느려질 수 있는 작업을 하면 같은 연결의 다른 세션 notification 배달까지
+/// 지연시킨다 — 그래서 세션 조회 + non-blocking channel send만 하고 즉시
+/// 반환하고, 실제 처리는 세션마다 별도로 spawn된 워커 태스크(`dispatch()`
+/// 참고)로 넘긴다.
 async fn handle_session_notification(
     sessions_map: &Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
-    broadcaster: &broadcast::Sender<WorkerEvent>,
     notification: SessionNotification,
 ) {
     let text = match &notification.update {
@@ -758,19 +834,14 @@ async fn handle_session_notification(
     };
     let Some(text) = text else { return };
 
-    let (task_id, seq) = {
+    let notify_tx = {
         let sessions = sessions_map.lock().await;
-        let Some(entry) = sessions.get(&notification.session_id) else {
-            return;
-        };
-        entry.output_buf.lock().await.push_str(&text);
-        (entry.task_id, entry.seq.fetch_add(1, Ordering::Relaxed))
+        sessions
+            .get(&notification.session_id)
+            .map(|entry| entry.notify_tx.clone())
     };
-    let _ = broadcaster.send(WorkerEvent::Output {
-        task_id,
-        seq,
-        chunk: text,
-    });
+    let Some(notify_tx) = notify_tx else { return };
+    let _ = notify_tx.send(SessionMsg::Chunk(text));
 }
 
 /// `PromptResponse`에서 토큰 사용량 추출 (`unstable_end_turn_token_usage`

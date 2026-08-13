@@ -39,12 +39,26 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct MockState {
     next_session_id: Arc<AtomicU64>,
     /// 각 session/prompt를 몇 초 지연시킬지 — 동시성/용량 테스트에서 슬롯을
     /// 오래 붙잡아두기 위해 사용.
     prompt_delay: Arc<Mutex<Duration>>,
+    /// session/prompt 하나당 몇 개의 `session/update` 청크를 스트리밍할지
+    /// (기본 1). 로드맵 #41 — 세션 워커의 순서 보존/누락 없는 누적을
+    /// 검증하기 위해 여러 청크를 보내는 시나리오에서 사용.
+    chunks_per_prompt: Arc<Mutex<usize>>,
+}
+
+impl Default for MockState {
+    fn default() -> Self {
+        Self {
+            next_session_id: Arc::new(AtomicU64::new(0)),
+            prompt_delay: Arc::new(Mutex::new(Duration::ZERO)),
+            chunks_per_prompt: Arc::new(Mutex::new(1)),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,18 +122,23 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                 }
 
                 // 세션마다 고유한 echo 텍스트 — 라우팅 정확성 검증용.
-                let update = json!({
-                    "jsonrpc": "2.0",
-                    "method": "session/update",
-                    "params": {
-                        "sessionId": session_id,
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": { "type": "text", "text": format!("echo:{session_id}") },
+                // 로드맵 #41: chunks_per_prompt > 1이면 여러 청크로 나눠
+                // 보낸다 — 세션 워커가 순서 보존/누락 없이 누적하는지 검증.
+                let n = *state.chunks_per_prompt.lock().await;
+                for i in 0..n {
+                    let update = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": { "type": "text", "text": format!("echo:{session_id}:{i};") },
+                            },
                         },
-                    },
-                });
-                let _ = writer.send(WsMessage::Text(update.to_string())).await;
+                    });
+                    let _ = writer.send(WsMessage::Text(update.to_string())).await;
+                }
 
                 let resp = json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}});
                 let _ = writer.send(WsMessage::Text(resp.to_string())).await;
@@ -289,6 +308,121 @@ async fn concurrent_tasks_stream_output_via_correct_session_routing() {
         assert!(
             seen.insert(out.clone()),
             "duplicate/cross-contaminated output detected: {out}"
+        );
+    }
+
+    transport.unregister(worker).await.unwrap();
+}
+
+// ── 로드맵 #41: Head-of-Line Blocking 방지 (세션 전용 알림 큐) ──────────
+
+#[tokio::test]
+async fn dispatch_accumulates_multiple_chunks_in_order() {
+    // 세션 전용 워커 태스크로 처리를 위임한 뒤에도(로드맵 #41), 최종
+    // TaskResult.output이 스트리밍된 모든 청크를 순서대로 빠짐없이
+    // 포함해야 한다 — `dispatch()`의 Flush 배리어가 없다면 세션 워커가 아직
+    // 마지막 청크를 처리하기 전에 output_buf를 읽어버리는 경쟁이 가능하다.
+    let (state, addr) = start_mock_server().await;
+    *state.chunks_per_prompt.lock().await = 8;
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let task_id = TaskId::new();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "prompt"))
+        .await
+        .expect("dispatch");
+
+    let mut result_output = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while result_output.is_none() && std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Completed { task_id: tid, result })) if tid == task_id => {
+                result_output = Some(result.output);
+            }
+            _ => continue,
+        }
+    }
+
+    let output = result_output.expect("task should have completed with a result");
+    let expected: String = (0..8)
+        .map(|i| format!("echo:session-0:{i};"))
+        .collect();
+    assert_eq!(
+        output, expected,
+        "final output must contain all chunks, in order, with none dropped or reordered"
+    );
+
+    transport.unregister(worker).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_sessions_streaming_multiple_chunks_do_not_cross_contaminate() {
+    // 세션마다 독립된 워커 태스크로 청크를 처리하므로(로드맵 #41), 여러
+    // 세션이 동시에 다중 청크를 스트리밍해도 각 세션의 최종 output은 정확히
+    // 자기 자신의 청크만, 순서대로 포함해야 한다.
+    let (state, addr) = start_mock_server().await;
+    *state.chunks_per_prompt.lock().await = 5;
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 4)
+        .await
+        .expect("register");
+
+    let task_ids: Vec<TaskId> = (0..4).map(|_| TaskId::new()).collect();
+    for (i, tid) in task_ids.iter().enumerate() {
+        transport
+            .dispatch(dispatch_req(*tid, worker, &format!("prompt-{i}")))
+            .await
+            .expect("dispatch");
+    }
+
+    let mut outputs: std::collections::HashMap<TaskId, String> = std::collections::HashMap::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while outputs.len() < 4 && std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Completed { task_id, result })) => {
+                outputs.insert(task_id, result.output);
+            }
+            _ => continue,
+        }
+    }
+    assert_eq!(outputs.len(), 4, "all 4 concurrent tasks should complete");
+
+    // 각 태스크의 최종 output이 정확히 자기 세션의 5개 청크를, 순서대로,
+    // 다른 세션의 청크 없이 포함해야 한다.
+    let mut seen_sessions = std::collections::HashSet::new();
+    for tid in &task_ids {
+        let out = outputs
+            .get(tid)
+            .unwrap_or_else(|| panic!("task {tid} should have its own output"));
+        // 청크 포맷은 "echo:<session_id>:<i>;"이고 session_id 자체가
+        // "session-N"이므로 두 번째 `:`-구분 필드만 session_id다.
+        let session_id = out
+            .split(':')
+            .nth(1)
+            .unwrap_or_else(|| panic!("unexpected output shape: {out}"));
+        assert!(
+            seen_sessions.insert(session_id.to_string()),
+            "session {session_id} appeared in more than one task's output"
+        );
+        let expected: String = (0..5)
+            .map(|i| format!("echo:{session_id}:{i};"))
+            .collect();
+        assert_eq!(
+            out, &expected,
+            "task {tid}'s output must be exactly its own 5 chunks in order, no cross-contamination"
         );
     }
 
