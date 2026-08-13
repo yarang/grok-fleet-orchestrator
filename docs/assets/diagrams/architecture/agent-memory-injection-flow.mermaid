@@ -1,0 +1,27 @@
+flowchart TD
+    Submit([태스크 제출<br/>prompt, agent_id? / project_id?, thread_id]) --> ResolveAgent{agent_id 지정?}
+
+    ResolveAgent -- "Yes" --> LoadAgent["Agent 조회 — custom_prompt,<br/>worker_id(Running 상태여야 함) 확보"]
+    LoadAgent --> AgentRunning{status == Running?}
+    AgentRunning -- No --> RejectAgent(["에러 — Agent not running<br/>(server_hint의 HintedUnavailable과 동일한 엄격도)"])
+    AgentRunning -- Yes --> LoadMemory["agent_memory에서 이 agent_id의<br/>최근 N개 엔트리 조회 (created_at DESC)"]
+    LoadMemory --> ComposeWithMemory["프롬프트 = custom_prompt<br/>+ 메모리 요약<br/>+ (thread_id 있으면) 기존 build_threaded_prompt 이어붙이기<br/>+ 사용자의 새 prompt"]
+    ComposeWithMemory --> Dispatch
+
+    ResolveAgent -- "No" --> HasProject{project_id 지정?}
+    HasProject -- Yes --> ExistingSoftSelect["#48의 소프트 선호 필터로<br/>워커 선택 (변경 없음)"]
+    ExistingSoftSelect --> HasThread1{thread_id의 project_id가 있음?}
+    HasThread1 -- Yes --> ComposeProjectThread["프로젝트 스코프 스레드 — 향후 해당 스레드를<br/>맡은 agent가 있으면 그 메모리도 함께 주입<br/>(열린 질문 — §9 참고)"]
+    HasThread1 -- No --> ComposeWithMemory
+    ComposeProjectThread --> Dispatch
+
+    HasProject -- No --> HasThread2{"기존 스레드(thread_id)에<br/>2턴 이상 쌓였는가?"}
+    HasThread2 -- No --> ComposeRaw["기존 build_threaded_prompt 그대로<br/>(전체 이력 원문 이어붙이기, 변경 없음)"]
+    HasThread2 -- Yes --> LoadThreadSummary["thread_summaries에서<br/>이 thread_id의 요약 조회"]
+    LoadThreadSummary --> SummaryExists{요약 존재?}
+    SummaryExists -- Yes --> ComposeSummarized["프롬프트 = 저장된 요약<br/>+ 요약 이후의 최근 원문 턴만 이어붙이기<br/>(무한정 원문 누적 방지)"]
+    SummaryExists -- No --> ComposeRaw
+    ComposeRaw --> Dispatch
+    ComposeSummarized --> Dispatch
+
+    Dispatch([기존 Dispatcher::dispatch_existing 경로<br/>— WorkerSelector 파이프라인 변경 없음])

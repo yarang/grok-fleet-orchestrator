@@ -1,0 +1,70 @@
+erDiagram
+    HOSTS ||--o{ AGENTS : "runs (host_id)"
+    PROJECTS |o--o{ AGENTS : "owns (project_id, nullable — 0 = general pool)"
+    AGENTS |o--o| WORKERS : "worker_id, Some once Running (self-registers via existing /v1/workers/register)"
+    AGENTS ||--o{ AGENT_MEMORY : "accumulates"
+    AGENTS ||--o{ AGENT_COMMANDS : "receives (start/stop, heartbeat-piggybacked)"
+    TASKS |o--o| AGENTS : "agent_id, nullable — resolves to worker_id at dispatch time"
+    TASKS |o--o| THREAD_SUMMARIES : "thread_id (project_id IS NULL 태스크만 해당)"
+
+    AGENTS {
+        uuid id PK
+        uuid host_id FK
+        uuid project_id FK "nullable — 0 or 1 project (M:N with Worker via #48 is separate concern)"
+        uuid worker_id FK "nullable — set once the spawned grok process registers"
+        text name
+        text custom_prompt "system-prompt prefix, applied at dispatch-time prompt composition (NOT a grok CLI flag)"
+        text status "Pending | Starting | Running | Stopping | Stopped | Failed"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    AGENT_MEMORY {
+        uuid id PK
+        uuid agent_id FK
+        text kind "note | summary | fact"
+        text content
+        uuid source_task_id FK "nullable"
+        timestamptz created_at
+    }
+
+    AGENT_COMMANDS {
+        uuid id PK
+        uuid host_id FK
+        uuid agent_id FK "agent row is created first (Pending), then this command references it"
+        text command_type "start | stop"
+        text status "pending | acked | done | failed"
+        text error
+        timestamptz created_at
+        timestamptz acked_at
+    }
+
+    THREAD_SUMMARIES {
+        uuid thread_id PK "tasks.thread_id 값 공유, 별도 FK 아님(thread_id는 PK 엔티티가 아니라 tasks의 그룹핑 컬럼)"
+        text summary
+        integer turn_count
+        timestamptz updated_at
+    }
+
+    HOSTS {
+        uuid id PK
+        text hostname UK
+        integer max_agents "신규 — 이 host에 동시 운영 가능한 agent 상한(운영자 설정, 여유 판단 기준)"
+    }
+
+    WORKERS {
+        uuid id PK
+        text name UK
+    }
+
+    PROJECTS {
+        uuid id PK
+        text name UK
+    }
+
+    TASKS {
+        uuid id PK
+        uuid project_id FK "nullable, #48에서 이미 도입"
+        uuid agent_id FK "nullable, 신규 — 지정 시 그 agent의 worker_id로 해석돼 디스패치"
+        uuid thread_id "nullable 아님, 013에서 이미 도입"
+    }

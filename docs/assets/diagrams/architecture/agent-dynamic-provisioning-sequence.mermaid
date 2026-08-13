@@ -1,0 +1,47 @@
+sequenceDiagram
+    actor Admin as 관리자/프로젝트(대시보드·MCP)
+    participant API as fleet-api / fleet-dashboard
+    participant Store as fleet-store<br/>(agents, agent_commands)
+    participant FW as fleet-worker<br/>(대상 host)
+    participant Grok as grok agent serve<br/>(신규 프로세스)
+
+    Note over Admin,Store: fleet-worker는 오케스트레이터로 인바운드 연결을 받지 않는다<br/>(#42에서 확인된 "워커는 항상 아웃바운드만" 설계 원칙 유지) —<br/>그래서 명령은 새 인바운드 채널이 아니라 기존 heartbeat 폴링에 얹는다.
+
+    Admin->>API: POST /api/agents {host_id, project_id?, custom_prompt}
+    API->>API: require_permission(AgentCreate)
+    API->>Store: host의 여유 확인<br/>(count(running agents on host) < hosts.max_agents)
+    alt 여유 없음
+        Store-->>API: 거부
+        API-->>Admin: 409 Conflict "host at agent capacity"
+    else 여유 있음
+        API->>Store: insert_agent(status=Pending) + insert_agent_command(type=start)
+        Store-->>API: Ok(agent_id)
+        API-->>Admin: 202 Accepted {agent_id, status: "Pending"}
+    end
+
+    loop 기존 heartbeat 주기 (기본 15초, 변경 없음)
+        FW->>API: POST /v1/workers/heartbeat {worker_id, ...}
+        API->>Store: list_pending_agent_commands(host_id)
+        Store-->>API: [{command_id, type: start, agent_id, custom_prompt}]
+        API-->>FW: HeartbeatResponse { ..., pending_commands: [...] }
+    end
+
+    FW->>FW: GrokRunner가 새 grok agent serve 서브프로세스<br/>spawn(빈 포트 자동 할당) — 기존 1-프로세스 관리에서<br/>N-프로세스 관리로 확장된 부분
+    FW->>Grok: grok agent serve --bind 127.0.0.1:<동적 포트> --secret ...
+    Grok-->>FW: 기동 완료(헬스체크 TCP probe 통과)
+    FW->>API: POST /v1/workers/register<br/>{name: "<host>-agent-<agent_id 앞 8자리>", agent_endpoint, ...}
+    Note right of API: 기존 register 플로우 그대로 재사용 —<br/>worker.name에 agent_id를 인코딩해 상관관계 확보.
+    API->>Store: upsert_worker(...) → worker_id 발급
+    API->>Store: link_agent_worker(agent_id, worker_id), agent.status = Running
+    FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: done}
+    API->>Store: agent_command.status = done
+
+    Note over Admin,Grok: 이 시점부터 이 agent로의 디스패치는<br/>기존 Dispatcher/WorkerSelector 경로를 그대로 탄다<br/>(worker_id가 채워졌으므로) — custom_prompt/메모리는<br/>디스패치 시점에 프롬프트에 주입될 뿐, 별도 프로토콜 불필요.
+
+    Note over Admin,Grok: 종료도 동일 패턴
+    Admin->>API: POST /api/agents/:id/stop
+    API->>Store: insert_agent_command(type=stop, agent_id)
+    FW->>API: (다음 heartbeat) pending_commands에서 stop 수신
+    FW->>Grok: SIGTERM → 5초 대기 → SIGKILL (기존 GrokRunner 종료 정책 재사용)
+    FW->>API: POST /v1/workers/deregister (기존 흐름) + agent-commands ack
+    API->>Store: agent.status = Stopped, worker 행 정리
