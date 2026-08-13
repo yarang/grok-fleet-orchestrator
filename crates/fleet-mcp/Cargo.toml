@@ -27,5 +27,6 @@ path = "src/lib.rs"
 chrono = { workspace = true }
 fleet-transport = { workspace = true }
 fleet-core = { workspace = true }
-fleet-store = { workspace = true }
+fleet-store = { workspace = true, features = ["test-support"] }
 async-trait = { workspace = true }
+uuid = { workspace = true }

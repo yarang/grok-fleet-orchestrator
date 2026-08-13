@@ -16,15 +16,17 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fleet_core::{
-    Task, TaskFilter, TaskId, TaskRequest, TaskStatusFilter, WorkerFilter, WorkerStatus,
+    CircuitState, FleetEvent, Host, Task, TaskFilter, TaskId, TaskRequest, TaskStatusFilter,
+    WorkerFilter, WorkerId, WorkerStatus,
 };
-use fleet_scheduler::{Dispatcher, FleetState};
+use fleet_scheduler::{BreakerState, Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
     self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_DISPATCH_TASK,
-    TOOL_GET_TASK_STATUS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS, TOOL_STREAM_TASK_OUTPUT,
-    TOOL_WAIT_FOR_TASK,
+    TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS, TOOL_LIST_HOSTS, TOOL_LIST_TASKS,
+    TOOL_LIST_WORKERS, TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN,
+    TOOL_STREAM_TASK_OUTPUT, TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -59,6 +61,10 @@ pub async fn dispatch_tool(
         TOOL_WAIT_FOR_TASK => handle_wait_for_task(ctx, arguments).await,
         TOOL_STREAM_TASK_OUTPUT => handle_stream_task_output(ctx, arguments).await,
         TOOL_COLLECT_RESULTS => handle_collect_results(ctx, arguments).await,
+        TOOL_LIST_HOSTS => handle_list_hosts(ctx, arguments).await,
+        TOOL_RESET_WORKER_BREAKER => handle_reset_worker_breaker(ctx, arguments).await,
+        TOOL_LIST_BOOTSTRAP_TOKENS => handle_list_bootstrap_tokens(ctx, arguments).await,
+        TOOL_REVOKE_BOOTSTRAP_TOKEN => handle_revoke_bootstrap_token(ctx, arguments).await,
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -634,6 +640,208 @@ fn parse_task_status_filter(s: &str) -> Result<TaskStatusFilter, JsonRpcError> {
     }
 }
 
+// ── fleet_list_hosts ─────────────────────────────────────────────────────
+
+async fn handle_list_hosts(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let status_filter = args
+        .as_object()
+        .and_then(|obj| obj.get("status"))
+        .and_then(|v| v.as_str())
+        .map(parse_host_status)
+        .transpose()?;
+
+    let mut hosts = ctx
+        .state
+        .store
+        .list_hosts()
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    if let Some(status) = status_filter {
+        hosts.retain(|h| h.status == status);
+    }
+
+    let summary: Vec<Value> = hosts.iter().map(host_summary).collect();
+
+    Ok(schema::tool_json(&json!({
+        "hosts": summary,
+        "count": summary.len(),
+    })))
+}
+
+/// `HostStatus` 문자열 → enum. snake_case 매칭.
+fn parse_host_status(s: &str) -> Result<fleet_core::HostStatus, JsonRpcError> {
+    fleet_core::HostStatus::parse(s).ok_or_else(|| {
+        JsonRpcError::invalid_params(format!(
+            "invalid status '{s}': expected one of provisioned, online, offline, failed"
+        ))
+    })
+}
+
+/// 클라이언트에게 반환할 호스트 요약.
+fn host_summary(h: &Host) -> Value {
+    json!({
+        "id": h.id.to_string(),
+        "hostname": h.hostname,
+        "worker_id": h.worker_id.map(|w| w.to_string()),
+        "status": h.status.as_str(),
+        "ssh_host": h.ssh_host,
+        "ssh_port": h.ssh_port,
+        "grok_version": h.grok_version,
+        "fleet_worker_version": h.fleet_worker_version,
+        "load_avg": h.metrics.load_avg,
+        "mem_available_mb": h.metrics.mem_available_mb,
+        "disk_free_mb": h.metrics.disk_free_mb,
+        "last_heartbeat_at": h.last_heartbeat_at.map(|t| t.to_rfc3339()),
+        "provisioned_at": h.provisioned_at.map(|t| t.to_rfc3339()),
+    })
+}
+
+// ── fleet_reset_worker_breaker ───────────────────────────────────────────
+
+async fn handle_reset_worker_breaker(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let worker_id_str = args.get("worker_id").and_then(|v| v.as_str());
+    let worker_name = args.get("worker_name").and_then(|v| v.as_str());
+
+    let worker_id: WorkerId = match (worker_id_str, worker_name) {
+        (Some(_), Some(_)) => {
+            return Err(JsonRpcError::invalid_params(
+                "provide exactly one of worker_id or worker_name, not both",
+            ));
+        }
+        (Some(s), None) => s
+            .parse()
+            .map_err(|e| JsonRpcError::invalid_params(format!("invalid worker_id: {e}")))?,
+        (None, Some(name)) => {
+            let worker = ctx
+                .state
+                .store
+                .get_worker_by_name(name)
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+            match worker {
+                Some(w) => w.id,
+                None => return Ok(schema::tool_error(format!("worker not found: {name}"))),
+            }
+        }
+        (None, None) => {
+            return Err(JsonRpcError::invalid_params(
+                "one of worker_id or worker_name is required",
+            ));
+        }
+    };
+
+    let from_state = ctx.state.breakers.state_of(worker_id);
+    ctx.state.breakers.reset(worker_id);
+
+    let from = breaker_state_to_circuit_state(from_state);
+    let _ = ctx
+        .state
+        .store
+        .update_worker_circuit_state(worker_id, CircuitState::Closed)
+        .await;
+    let _ = ctx
+        .state
+        .store
+        .append_event(&FleetEvent::worker_circuit_changed(
+            worker_id,
+            from,
+            CircuitState::Closed,
+        ))
+        .await;
+
+    Ok(schema::tool_json(&json!({
+        "worker_id": worker_id.to_string(),
+        "previous_state": format!("{from_state:?}").to_lowercase(),
+        "new_state": "closed",
+    })))
+}
+
+fn breaker_state_to_circuit_state(s: BreakerState) -> CircuitState {
+    match s {
+        BreakerState::Closed => CircuitState::Closed,
+        BreakerState::Open => CircuitState::Open,
+        BreakerState::HalfOpen => CircuitState::HalfOpen,
+    }
+}
+
+// ── fleet_list_bootstrap_tokens ──────────────────────────────────────────
+
+async fn handle_list_bootstrap_tokens(
+    ctx: &ToolContext,
+    _args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let tokens = ctx
+        .state
+        .store
+        .list_bootstrap_tokens()
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let summary: Vec<Value> = tokens
+        .iter()
+        .map(|t| {
+            json!({
+                "token": t.token,
+                "created_at": t.created_at.to_rfc3339(),
+                "expires_at": t.expires_at.map(|e| e.to_rfc3339()),
+                "max_uses": t.max_uses,
+                "use_count": t.use_count,
+                "usable": t.is_usable(),
+                "notes": t.notes,
+                "last_used_by": t.last_used_by,
+                "last_used_at": t.last_used_at.map(|e| e.to_rfc3339()),
+            })
+        })
+        .collect();
+
+    Ok(schema::tool_json(&json!({
+        "tokens": summary,
+        "count": summary.len(),
+    })))
+}
+
+// ── fleet_revoke_bootstrap_token ─────────────────────────────────────────
+
+async fn handle_revoke_bootstrap_token(
+    ctx: &ToolContext,
+    args: &Value,
+) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let token = args
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: token"))?;
+
+    let revoked = ctx
+        .state
+        .store
+        .revoke_bootstrap_token(token)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    if revoked {
+        Ok(schema::tool_json(&json!({
+            "token": token,
+            "revoked": true,
+        })))
+    } else {
+        Ok(schema::tool_error(format!(
+            "token not found (already revoked or never existed): {token}"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,7 +898,7 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 12);
     }
 
     #[test]
@@ -807,5 +1015,230 @@ mod tests {
         assert!(summary.get("output").is_none());
         // "build finished" = 14 bytes
         assert_eq!(summary["output_bytes"], 14);
+    }
+
+    #[test]
+    fn parse_host_status_accepts_known_values() {
+        assert!(parse_host_status("provisioned").is_ok());
+        assert!(parse_host_status("online").is_ok());
+        assert!(parse_host_status("offline").is_ok());
+        assert!(parse_host_status("failed").is_ok());
+        assert!(parse_host_status("bogus").is_err());
+    }
+
+    #[test]
+    fn breaker_state_maps_to_matching_circuit_state() {
+        assert_eq!(
+            breaker_state_to_circuit_state(BreakerState::Closed),
+            CircuitState::Closed
+        );
+        assert_eq!(
+            breaker_state_to_circuit_state(BreakerState::Open),
+            CircuitState::Open
+        );
+        assert_eq!(
+            breaker_state_to_circuit_state(BreakerState::HalfOpen),
+            CircuitState::HalfOpen
+        );
+    }
+
+    // ── 신규 도구(host/breaker/token) 핸들러 통합 테스트 ────────────────
+    //
+    // fleet_store::mem::MemStore(로드맵 #45)로 실제 ToolContext를 구성해
+    // dispatch_tool을 그대로 호출한다 — 이 파일의 기존 handle_* 함수들은
+    // (cross_client.rs의 subprocess+DB 통합 테스트를 빼면) 단위 수준에서
+    // 검증된 적이 없었다.
+
+    fn test_ctx(store: fleet_store::mem::MemStore) -> ToolContext {
+        let store: Arc<dyn fleet_store::Store> = Arc::new(store);
+        let transport = Arc::new(fleet_transport::MockTransport::new())
+            as Arc<dyn fleet_transport::WorkerTransport>;
+        let state = Arc::new(FleetState::new(
+            store,
+            transport,
+            fleet_core::CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Arc::new(Dispatcher::new(state.clone()));
+        ToolContext::new(state, dispatcher)
+    }
+
+    fn sample_host(hostname: &str, status: fleet_core::HostStatus) -> Host {
+        Host {
+            id: uuid::Uuid::new_v4(),
+            hostname: hostname.into(),
+            worker_id: None,
+            status,
+            ssh_host: Some(format!("{hostname}.example")),
+            ssh_port: 22,
+            ssh_user: Some("fleet".into()),
+            grok_version: None,
+            fleet_worker_version: None,
+            os_info: None,
+            metrics: Default::default(),
+            last_heartbeat_at: None,
+            provisioned_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_hosts_returns_seeded_hosts() {
+        let store = fleet_store::mem::MemStore::new()
+            .with_host(sample_host("node-a", fleet_core::HostStatus::Online))
+            .with_host(sample_host("node-b", fleet_core::HostStatus::Failed));
+        let ctx = test_ctx(store);
+
+        let result = dispatch_tool(&ctx, TOOL_LIST_HOSTS, &json!({}))
+            .await
+            .unwrap();
+        let body: Value = parse_tool_json(&result);
+        assert_eq!(body["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_hosts_filters_by_status() {
+        let store = fleet_store::mem::MemStore::new()
+            .with_host(sample_host("node-a", fleet_core::HostStatus::Online))
+            .with_host(sample_host("node-b", fleet_core::HostStatus::Failed));
+        let ctx = test_ctx(store);
+
+        let result = dispatch_tool(&ctx, TOOL_LIST_HOSTS, &json!({"status": "failed"}))
+            .await
+            .unwrap();
+        let body: Value = parse_tool_json(&result);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["hosts"][0]["hostname"], "node-b");
+    }
+
+    #[tokio::test]
+    async fn reset_worker_breaker_by_id_closes_open_breaker() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let worker_id = WorkerId::new();
+        // Open 상태로 미리 생성 — check()를 여러 번 실패시키지 않고 직접 시딩.
+        ctx.state.breakers.get(worker_id, CircuitState::Open);
+
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_RESET_WORKER_BREAKER,
+            &json!({"worker_id": worker_id.to_string()}),
+        )
+        .await
+        .unwrap();
+        let body: Value = parse_tool_json(&result);
+        assert_eq!(body["previous_state"], "open");
+        assert_eq!(body["new_state"], "closed");
+        assert_eq!(ctx.state.breakers.state_of(worker_id), BreakerState::Closed);
+    }
+
+    #[tokio::test]
+    async fn reset_worker_breaker_by_name_resolves_worker() {
+        let mut worker = fleet_core::Worker::new("resettable", "wss://resettable/ws");
+        let worker_id = worker.id;
+        worker.status = WorkerStatus::CircuitOpen;
+        let store = fleet_store::mem::MemStore::new().with_worker(worker);
+        let ctx = test_ctx(store);
+        ctx.state.breakers.get(worker_id, CircuitState::Open);
+
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_RESET_WORKER_BREAKER,
+            &json!({"worker_name": "resettable"}),
+        )
+        .await
+        .unwrap();
+        let body: Value = parse_tool_json(&result);
+        assert_eq!(body["worker_id"], worker_id.to_string());
+        assert_eq!(body["new_state"], "closed");
+    }
+
+    #[tokio::test]
+    async fn reset_worker_breaker_unknown_name_returns_tool_error() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_RESET_WORKER_BREAKER,
+            &json!({"worker_name": "ghost"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn reset_worker_breaker_requires_exactly_one_identifier() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        assert!(
+            dispatch_tool(&ctx, TOOL_RESET_WORKER_BREAKER, &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(dispatch_tool(
+            &ctx,
+            TOOL_RESET_WORKER_BREAKER,
+            &json!({"worker_id": WorkerId::new().to_string(), "worker_name": "both"})
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn list_and_revoke_bootstrap_tokens_round_trip() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let token = fleet_core::BootstrapToken {
+            token: "fbt_test123".into(),
+            created_at: chrono::Utc::now(),
+            created_by: None,
+            expires_at: None,
+            max_uses: 1,
+            use_count: 0,
+            notes: None,
+            last_used_by: None,
+            last_used_at: None,
+        };
+        ctx.state.store.create_bootstrap_token(&token).await.unwrap();
+
+        let listed = dispatch_tool(&ctx, TOOL_LIST_BOOTSTRAP_TOKENS, &json!({}))
+            .await
+            .unwrap();
+        let body: Value = parse_tool_json(&listed);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["tokens"][0]["token"], "fbt_test123");
+
+        let revoked = dispatch_tool(
+            &ctx,
+            TOOL_REVOKE_BOOTSTRAP_TOKEN,
+            &json!({"token": "fbt_test123"}),
+        )
+        .await
+        .unwrap();
+        let body: Value = parse_tool_json(&revoked);
+        assert_eq!(body["revoked"], true);
+
+        let listed_after = dispatch_tool(&ctx, TOOL_LIST_BOOTSTRAP_TOKENS, &json!({}))
+            .await
+            .unwrap();
+        let body: Value = parse_tool_json(&listed_after);
+        assert_eq!(body["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn revoke_unknown_bootstrap_token_returns_tool_error() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_REVOKE_BOOTSTRAP_TOKEN,
+            &json!({"token": "does-not-exist"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// `schema::tool_json`이 만든 `{content:[{type:"text",text:"<json>"}]}`에서
+    /// 원본 JSON 값을 다시 파싱.
+    fn parse_tool_json(result: &Value) -> Value {
+        let text = result["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
     }
 }

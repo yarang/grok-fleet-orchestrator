@@ -40,6 +40,14 @@ pub const TOOL_WAIT_FOR_TASK: &str = "fleet_wait_for_task";
 pub const TOOL_STREAM_TASK_OUTPUT: &str = "fleet_stream_task_output";
 /// 여러 작업 결과 취합 도구 (Phase 3).
 pub const TOOL_COLLECT_RESULTS: &str = "fleet_collect_results";
+/// 호스트 인벤토리 조회 도구 (로드맵 #28).
+pub const TOOL_LIST_HOSTS: &str = "fleet_list_hosts";
+/// 워커 CircuitBreaker 강제 리셋 도구 (로드맵 #28).
+pub const TOOL_RESET_WORKER_BREAKER: &str = "fleet_reset_worker_breaker";
+/// 부트스트랩 토큰 목록 조회 도구 (로드맵 #28).
+pub const TOOL_LIST_BOOTSTRAP_TOKENS: &str = "fleet_list_bootstrap_tokens";
+/// 부트스트랩 토큰 폐기 도구 (로드맵 #28).
+pub const TOOL_REVOKE_BOOTSTRAP_TOKEN: &str = "fleet_revoke_bootstrap_token";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  JSON-RPC 2.0 봉투
@@ -405,6 +413,59 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["task_ids"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_HOSTS,
+            description: "List the host inventory — all physical/virtual hosts fleet knows about (provisioned, online, offline, or failed), not just currently-registered workers. Useful for finding hosts that were provisioned but never joined as a worker, or diagnosing hosts whose grok/fleet-worker versions have drifted. Distinct from fleet_list_workers, which only shows hosts with an active worker registration.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["provisioned", "online", "offline", "failed"],
+                        "description": "Filter by host status (optional)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_RESET_WORKER_BREAKER,
+            description: "Force a worker's CircuitBreaker back to Closed, discarding its recent failure history. Use after fixing whatever caused a worker to trip (e.g. a transient network partition or a bad deploy that has since been rolled back) to make it immediately eligible for dispatch again, instead of waiting out the cooldown/half-open probe cycle. The reset is persisted to the store and broadcast to other fleet serve instances sharing the same database.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "worker_id": {
+                        "type": "string",
+                        "description": "UUID of the worker (mutually exclusive with worker_name; provide exactly one)."
+                    },
+                    "worker_name": {
+                        "type": "string",
+                        "description": "Name of the worker (mutually exclusive with worker_id; provide exactly one)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_BOOTSTRAP_TOKENS,
+            description: "List all worker bootstrap (join) tokens, newest first, including usage counts and expiry. Does not reveal the raw token strings (only shown once at creation time via `fleet token create`). Useful for auditing which tokens are still active before onboarding new workers.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolInfo {
+            name: TOOL_REVOKE_BOOTSTRAP_TOKEN,
+            description: "Revoke a worker bootstrap (join) token immediately, preventing any further worker registrations with it. Already-joined workers are unaffected — this only blocks future use of the token. Irreversible; a new token must be created (via `fleet token create`) if joining is needed again.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "token": {
+                        "type": "string",
+                        "description": "The bootstrap token string to revoke (as returned by fleet_list_bootstrap_tokens or `fleet token create`)."
+                    }
+                },
+                "required": ["token"]
             }),
         },
     ]
