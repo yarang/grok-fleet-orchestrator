@@ -417,6 +417,9 @@ impl Store for BsStore {
     async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         unimplemented!()
     }
+    async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
+        unimplemented!()
+    }
     async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
         self.workers.lock().unwrap().insert(w.id, w.clone());
         Ok(())

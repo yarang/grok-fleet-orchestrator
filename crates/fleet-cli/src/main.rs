@@ -145,6 +145,21 @@ enum Command {
         )]
         reconcile_offline_worker_grace_secs: u64,
 
+        /// 워커 선택 실패(`WorkerUnavailable`)/CircuitOpen으로 인한
+        /// dispatch 실패를 최대 몇 번까지 재시도할지 (로드맵 #38 — 자동
+        /// 재시도 및 Dead Letter Queue). `submit()`은 이 값이 0보다 크면 위
+        /// 두 실패 유형에서 즉시 `Failed`로 확정하지 않고 `Pending`인 채로
+        /// 남겨 이 재조정 루프가 백그라운드에서 재시도하도록 한다.
+        /// `retry_count`가 이 값에 도달하면 재시도를 포기하고
+        /// `Failed`(dead-letter)로 전이한다. `0`이면 이 필드 도입 이전과
+        /// 동일하게 즉시 `Failed`로 확정하고 무제한 재시도하지 않는다.
+        #[arg(
+            long,
+            env = "FLEET_RECONCILE_MAX_DISPATCH_RETRIES",
+            default_value_t = 20
+        )]
+        reconcile_max_dispatch_retries: u32,
+
         /// HTTP API 바인드 주소 (예: `127.0.0.1:8081`).
         /// 생략하면 HTTP API를 실행하지 않고 MCP stdio만 서비스.
         /// 지정하면 워커 등록/하트비트 엔드포인트가 병렬로 serve됩니다.
@@ -914,6 +929,7 @@ async fn main() -> Result<()> {
             reconcile_stale_secs,
             reconcile_dispatched_check_secs,
             reconcile_offline_worker_grace_secs,
+            reconcile_max_dispatch_retries,
             http_bind,
             api_tokens,
             cf_audience,
@@ -940,6 +956,7 @@ async fn main() -> Result<()> {
                 reconcile_stale_secs,
                 reconcile_dispatched_check_secs,
                 reconcile_offline_worker_grace_secs,
+                reconcile_max_dispatch_retries,
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),

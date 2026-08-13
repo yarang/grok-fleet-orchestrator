@@ -110,6 +110,17 @@ pub struct ReconcileConfig {
     /// `Failed`로 전이한다. `Offline`은 되돌릴 수 있는 상태라 `dispatched_worker_
     /// check_after`보다 훨씬 보수적으로(길게) 잡는다 — 기본값 5분.
     pub offline_worker_grace: Duration,
+    /// stale `Pending` 작업을 최대 몇 번까지 재dispatch 시도할지 (로드맵 #38).
+    /// `Task.retry_count`가 이 값에 도달하면 더 이상 재시도하지 않고
+    /// `Failed(WorkerUnavailable)`로 전이시킨다(dead-letter). `0`이면 재시도
+    /// 없이 기존 동작과 동일 — stale해질 때마다 무기한 재시도(이 필드 도입
+    /// 이전의 기존 동작).
+    ///
+    /// 기본값 20 x 기본 interval(30초) 는 최초 stale_after(60초) 유예 이후
+    /// 약 10분간 재시도하다가 포기한다는 뜻이다 - "네트워크 일시 순단"을
+    /// 흡수하기엔 충분하고, 영구적으로 워커가 없는 상황을 무기한 Pending으로
+    /// 방치하지도 않는 절충값.
+    pub max_dispatch_retries: u32,
 }
 
 impl Default for ReconcileConfig {
@@ -119,6 +130,7 @@ impl Default for ReconcileConfig {
             stale_after: Duration::from_secs(60),
             dispatched_worker_check_after: Duration::from_secs(30),
             offline_worker_grace: Duration::from_secs(300),
+            max_dispatch_retries: 20,
         }
     }
 }
@@ -138,6 +150,9 @@ pub struct ReconcileSummary {
     pub offline_worker_found: u64,
     /// 이번 라운드에 Failed로 전이시킨, offline 워커 배정 작업 수.
     pub offline_worker_failed: u64,
+    /// `retry_count`가 `max_dispatch_retries`에 도달해 재시도를 포기하고
+    /// dead-letter(`Failed`)로 전이시킨 작업 수 (로드맵 #38).
+    pub dead_lettered: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -241,6 +256,30 @@ impl Reconciler {
             summary.stale_found += 1;
             let task_id = task.id;
 
+            // 로드맵 #38: `max_dispatch_retries > 0`이고 이미 그만큼 재시도
+            // (submit()의 최초 시도 포함)했다면 더 이상 dispatch를 시도하지
+            // 않고 dead-letter(`Failed`)로 전이시킨다 — 무기한 Pending 방치를
+            // 방지한다. `max_dispatch_retries == 0`이면 이 필드 도입 이전과
+            // 동일하게 무제한 재시도한다.
+            if self.config.max_dispatch_retries > 0
+                && task.retry_count >= self.config.max_dispatch_retries
+            {
+                let retry_count = task.retry_count;
+                let failure = TaskFailure {
+                    error: format!("dispatch retries exhausted ({retry_count} attempts)"),
+                    kind: FailureKind::WorkerUnavailable,
+                    worker_id: None,
+                    attempts: retry_count,
+                };
+                self.dispatcher.mark_failed(task_id, failure).await;
+                summary.dead_lettered += 1;
+                warn!(
+                    %task_id, retry_count,
+                    "reconcile: dispatch retries exhausted, dead-lettering task"
+                );
+                continue;
+            }
+
             // `false` — 선택 실패/CircuitOpen을 실패로 마킹하지 않고 Pending
             // 상태를 유지, 다음 tick에서 재시도한다.
             match self.dispatcher.dispatch_existing(task, false).await {
@@ -250,12 +289,18 @@ impl Reconciler {
                 }
                 Err(DispatchError::NoWorker(reason)) => {
                     debug!(%task_id, %reason, "reconcile: still no capacity, leaving pending");
+                    if self.config.max_dispatch_retries > 0 {
+                        let _ = self.state.store.increment_task_retry_count(task_id).await;
+                    }
                 }
                 Err(DispatchError::CircuitOpen(worker_id)) => {
                     debug!(
                         %task_id, %worker_id,
                         "reconcile: selected worker's circuit is open, leaving pending"
                     );
+                    if self.config.max_dispatch_retries > 0 {
+                        let _ = self.state.store.increment_task_retry_count(task_id).await;
+                    }
                 }
                 Err(e) => {
                     // 진짜 dispatch 에러(transport 실패 등) — dispatch_existing이
@@ -275,6 +320,7 @@ impl Reconciler {
                 orphaned_failed = summary.orphaned_failed,
                 offline_worker_found = summary.offline_worker_found,
                 offline_worker_failed = summary.offline_worker_failed,
+                dead_lettered = summary.dead_lettered,
                 "reconciliation sweep completed"
             );
         }
@@ -518,6 +564,7 @@ mod tests {
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 20,
             },
         );
 
@@ -574,6 +621,7 @@ mod tests {
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 20,
             },
         );
 
@@ -590,6 +638,88 @@ mod tests {
             "task should remain Pending, not Failed: {:?}",
             still_pending.status
         );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_task_dead_letters_after_max_retries_exhausted() {
+        // 로드맵 #38 — retry_count가 max_dispatch_retries에 도달한 stale
+        // Pending 작업은 더 이상 재시도하지 않고 Failed(dead-letter)로 전이.
+        let store = Arc::new(MemStore::new());
+        let mut task = make_pending_task("retries exhausted", chrono::Duration::seconds(120));
+        let task_id = task.id;
+        task.retry_count = 3;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 3,
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.stale_found, 1);
+        assert_eq!(summary.redispatched, 0);
+        assert_eq!(summary.dead_lettered, 1);
+
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(failed.status, TaskStatus::Failed(_)),
+            "task should be dead-lettered as Failed: {:?}",
+            failed.status
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_task_under_retry_limit_still_gets_redispatch_attempt() {
+        // retry_count가 max_dispatch_retries 미만이면 여전히 정상적으로
+        // dispatch_existing()을 시도한다 (dead-letter 분기를 타지 않음).
+        let worker = make_worker("idle-1");
+        let worker_id = worker.id;
+
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = make_pending_task("still retrying", chrono::Duration::seconds(120));
+        let task_id = task.id;
+        task.retry_count = 2;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, "wss://idle-1/ws")],
+        )
+        .await;
+
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 3,
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.stale_found, 1);
+        assert_eq!(summary.redispatched, 1);
+        assert_eq!(summary.dead_lettered, 0);
+
+        let completed = wait_until_terminal(state.store.as_ref(), task_id).await;
+        match completed.status {
+            TaskStatus::Completed(result) => assert_eq!(result.worker_id, worker_id),
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -628,6 +758,7 @@ mod tests {
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 20,
             },
         );
 
@@ -734,6 +865,7 @@ mod tests {
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(5), // 짧게 — 테스트용
+                max_dispatch_retries: 20,
             },
         );
 
@@ -774,6 +906,7 @@ mod tests {
                 stale_after: Duration::from_secs(60),
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300), // 기본값 — 2초는 한참 못 미침
+                max_dispatch_retries: 20,
             },
         );
 

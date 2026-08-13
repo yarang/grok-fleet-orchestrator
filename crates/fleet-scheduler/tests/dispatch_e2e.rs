@@ -89,6 +89,15 @@ impl Store for InMemoryStore {
         Ok(())
     }
 
+    async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError> {
+        let mut tasks = self.tasks.lock().await;
+        let Some(task) = tasks.get_mut(&id) else {
+            return Err(StoreError::NotFound);
+        };
+        task.retry_count += 1;
+        Ok(task.retry_count)
+    }
+
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         let tasks = self.tasks.lock().await;
         let mut out: Vec<Task> = tasks.values().cloned().collect();

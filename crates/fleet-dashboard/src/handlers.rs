@@ -444,6 +444,13 @@ pub struct SubmitTaskForm {
 /// (실패 사유와 함께 `Failed`로 마킹됨) — 그래서 이 경우도 HTTP 200으로 응답하고
 /// `dispatched: false` + `warning`으로 알린다. 진짜 4xx/5xx는 태스크가 아예
 /// 생성되기 전(권한 없음/빈 프롬프트/CSRF 무효/Dispatcher 미구성)에만 낸다.
+///
+/// 로드맵 #38: dispatch 재시도가 활성화된 배포(`--reconcile-max-dispatch-retries`가
+/// 0보다 큼, 기본값)에서는 `submit()`이 `Ok`를 반환해도 실제 태스크가 아직
+/// `Pending`(재조정 루프의 백그라운드 재시도 대기)일 수 있다 — 이 경우
+/// `dispatched: false`이지만 `warning` 필드는 없다(진짜 에러가 아니라 정상적인
+/// "재시도 예약됨" 상태이기 때문). `warning` 필드 유무로 "실패"와 "재시도 중"을
+/// 구분해야 한다.
 pub async fn submit_task_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -515,10 +522,24 @@ pub async fn submit_task_api(
     let task_id = task.id;
 
     match dispatcher.submit(task).await {
-        Ok(id) => Ok(Json(serde_json::json!({
-            "task_id": id,
-            "dispatched": true,
-        }))),
+        Ok(id) => {
+            // 로드맵 #38: 재시도가 활성화된 배포에서는 submit()이 워커 선택
+            // 실패/CircuitOpen에서도 Ok를 반환할 수 있다 — 이 경우 작업은
+            // 아직 Pending(백그라운드 재시도 대기)이므로 `dispatched: true`를
+            // 무조건 단정하지 않고 실제 상태를 조회해 정확히 보고한다.
+            let actually_dispatched = state
+                .store
+                .get_task(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| matches!(t.status, fleet_core::TaskStatus::Dispatched { .. }))
+                .unwrap_or(true);
+            Ok(Json(serde_json::json!({
+                "task_id": id,
+                "dispatched": actually_dispatched,
+            })))
+        }
         Err(e) => {
             debug!(%task_id, error = %e, "dashboard task submission did not dispatch immediately");
             Ok(Json(serde_json::json!({

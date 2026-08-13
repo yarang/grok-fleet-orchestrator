@@ -199,7 +199,7 @@ impl Store for PgStore {
         let row = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                      thread_id, parent_task_id, project_id
+                      thread_id, parent_task_id, project_id, retry_count
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -213,7 +213,7 @@ impl Store for PgStore {
         let rows = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                      thread_id, parent_task_id, project_id
+                      thread_id, parent_task_id, project_id, retry_count
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -247,6 +247,19 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError> {
+        let row = sqlx::query(
+            "UPDATE tasks SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let row = row.ok_or(StoreError::NotFound)?;
+        let retry_count: i32 = row.try_get("retry_count")?;
+        Ok(retry_count as u32)
+    }
+
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         // 단순 필터는 SQL로, 복잡한 것(status 위상)은 Rust로 후처리.
         let limit = filter.limit.min(1000) as i64;
@@ -260,7 +273,7 @@ impl Store for PgStore {
         //   {"Failed": {"worker_id": "..."}}
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                          thread_id, parent_task_id, project_id
+                          thread_id, parent_task_id, project_id, retry_count
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -1757,6 +1770,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let thread_id: Uuid = row.try_get("thread_id")?;
     let parent_task_id: Option<Uuid> = row.try_get("parent_task_id")?;
     let project_id: Option<Uuid> = row.try_get("project_id")?;
+    let retry_count: i32 = row.try_get("retry_count")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
@@ -1779,6 +1793,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         thread_id: TaskId::from(thread_id),
         parent_task_id: parent_task_id.map(TaskId::from),
         project_id: project_id.map(fleet_core::ProjectId::from),
+        retry_count: retry_count as u32,
     })
 }
 

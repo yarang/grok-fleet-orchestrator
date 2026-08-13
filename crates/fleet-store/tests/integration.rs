@@ -117,6 +117,35 @@ async fn task_insert_and_get() {
     assert_eq!(fetched.created_by, "alice");
     assert!(matches!(fetched.status, TaskStatus::Pending));
     assert_eq!(fetched.required_labels, vec!["linux".to_string()]);
+    assert_eq!(fetched.retry_count, 0, "retry_count must default to 0");
+}
+
+/// 로드맵 #38 — dispatch 재시도 카운터가 실제 Postgres에서 원자적으로
+/// 증가하고, `get_task`로 다시 읽었을 때도 반영되는지 확인.
+#[tokio::test]
+async fn task_increment_retry_count_persists_and_accumulates() {
+    require_db!(store);
+
+    let task = sample_task("Flaky dispatch", "carol");
+    let task_id = task.id;
+    store.insert_task(&task).await.unwrap();
+
+    let first = store.increment_task_retry_count(task_id).await.unwrap();
+    assert_eq!(first, 1);
+    let second = store.increment_task_retry_count(task_id).await.unwrap();
+    assert_eq!(second, 2);
+
+    let fetched = store.get_task(task_id).await.unwrap().unwrap();
+    assert_eq!(fetched.retry_count, 2, "increment must persist across reads");
+}
+
+#[tokio::test]
+async fn task_increment_retry_count_nonexistent_returns_not_found() {
+    require_db!(store);
+
+    let bogus = TaskId::new();
+    let err = store.increment_task_retry_count(bogus).await.unwrap_err();
+    assert!(matches!(err, StoreError::NotFound));
 }
 
 #[tokio::test]

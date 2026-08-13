@@ -155,6 +155,15 @@ impl Store for MemStore {
         Ok(())
     }
 
+    async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.get_mut(&id) else {
+            return Err(StoreError::NotFound);
+        };
+        task.retry_count += 1;
+        Ok(task.retry_count)
+    }
+
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         if self.is_failing("list_tasks") {
             return Err(StoreError::Unsupported("list_tasks"));

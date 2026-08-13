@@ -39,6 +39,14 @@ pub struct Dispatcher {
     state: Arc<FleetState>,
     /// 워커 이벤트 수신 (transport → dispatcher)
     event_rx: tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<WorkerEvent>>>,
+    /// `submit()`이 `WorkerUnavailable`/`CircuitOpen`을 몇 번까지 "재시도
+    /// 가능한 일시적 실패"로 취급할지 (로드맵 #38). 기본값 0 = 재시도 없음
+    /// (이 필드 도입 이전과 동일한 즉시 `Failed` 동작). `fleet serve`는
+    /// [`with_max_dispatch_retries`](Self::with_max_dispatch_retries)로
+    /// `ReconcileConfig::max_dispatch_retries`(기본 20)와 동일한 값을
+    /// 명시적으로 설정한다 — Dispatcher와 Reconciler가 같은 기준으로 재시도
+    /// 소진 여부를 판단해야 하기 때문이다.
+    max_dispatch_retries: u32,
 }
 
 impl Dispatcher {
@@ -46,7 +54,16 @@ impl Dispatcher {
         Self {
             state,
             event_rx: tokio::sync::Mutex::new(None),
+            max_dispatch_retries: 0,
         }
+    }
+
+    /// dispatch 실패 시 최대 재시도 횟수를 설정한다 (로드맵 #38). `n == 0`
+    /// (기본값)이면 `submit()`은 이 필드 도입 이전과 동일하게 워커 선택
+    /// 실패나 CircuitOpen에서도 즉시 작업을 `Failed`로 마킹한다.
+    pub fn with_max_dispatch_retries(mut self, n: u32) -> Self {
+        self.max_dispatch_retries = n;
+        self
     }
 
     /// MockTransport 등과 이벤트 채널 연결.
@@ -226,11 +243,32 @@ impl Dispatcher {
             .await;
 
         // 3-6. 워커 선택 → CircuitBreaker 확인 → dispatch. `submit()`은 최초
-        // 제출 시도이므로 선택/회로 실패도 기존과 동일하게 즉시 `Failed`로
-        // 마킹한다 (`mark_unavailable_as_failed = true`). 재조정 루프
-        // ([`crate::reconcile::Reconciler`])는 같은 경로를 재사용하되 그 경우
-        // `false`를 전달해 "지금 당장 용량이 없음"을 실패로 취급하지 않는다.
-        self.dispatch_existing(task, true).await?;
+        // 제출 시도이므로 기본(재시도 비활성, `max_dispatch_retries == 0`)
+        // 상태에서는 선택/회로 실패도 기존과 동일하게 즉시 `Failed`로
+        // 마킹한다 (`mark_unavailable_as_failed = true`).
+        //
+        // 로드맵 #38: `max_dispatch_retries > 0`이면 `WorkerUnavailable`/
+        // `CircuitOpen`을 일시적 실패로 간주해 즉시 확정하지 않는다 —
+        // `dispatch_existing`에 `false`를 전달해 작업을 `Pending`인 채로 두고
+        // (재조정 루프가 재사용하는 것과 동일한 경로), `retry_count`만 1
+        // 올린 뒤 `Ok(task_id)`를 반환한다. 실제 재시도는
+        // [`Reconciler`](crate::reconcile::Reconciler)의 stale-Pending
+        // 스윕이 백그라운드에서 수행하고, 소진되면 dead-letter(`Failed`)로
+        // 전이시킨다. transport dispatch 자체의 실패(연결 오류 등)는 이
+        // 플래그와 무관하게 `dispatch_existing` 내부에서 항상 즉시 `Failed`로
+        // 마킹되므로 아래에서 별도 처리가 필요 없다.
+        let retries_enabled = self.max_dispatch_retries > 0;
+        match self.dispatch_existing(task, !retries_enabled).await {
+            Ok(()) => {}
+            Err(DispatchError::NoWorker(_) | DispatchError::CircuitOpen(_)) if retries_enabled => {
+                // 첫 시도가 일시적으로 실패 — Pending인 채로 두고 재시도
+                // 횟수만 기록한다. 카운트 증가 자체가 실패해도(드문 경합)
+                // 제출은 성공한 것으로 취급한다 — 다음 Reconciler tick이
+                // 재시도한다.
+                let _ = self.state.store.increment_task_retry_count(task_id).await;
+            }
+            Err(e) => return Err(e),
+        }
 
         Ok(task_id)
     }
@@ -641,4 +679,78 @@ pub enum WaitError {
         task_id: TaskId,
         timeout: std::time::Duration,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::FleetState;
+    use fleet_core::{CircuitBreakerConfig, TaskRequest};
+    use fleet_store::mem::MemStore;
+    use fleet_store::Store;
+
+    /// 워커가 하나도 없는(선택 실패가 보장되는) `FleetState` + `Dispatcher` 조립.
+    fn setup_no_workers(max_dispatch_retries: u32) -> (Arc<FleetState>, Dispatcher) {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(FleetState::new(store, transport, CircuitBreakerConfig::default()));
+        let dispatcher =
+            Dispatcher::new(state.clone()).with_max_dispatch_retries(max_dispatch_retries);
+        (state, dispatcher)
+    }
+
+    fn sample_task() -> Task {
+        Task::from_request(TaskRequest {
+            prompt: "hello".into(),
+            created_by: "test".into(),
+            ..Default::default()
+        })
+    }
+
+    // 로드맵 #38: 재시도 비활성(기본값, max_dispatch_retries == 0)일 때는 이
+    // 필드 도입 이전과 동일하게 워커 선택 실패에서 즉시 Err + Failed 확정.
+    #[tokio::test]
+    async fn submit_marks_failed_immediately_when_retries_disabled() {
+        let (state, dispatcher) = setup_no_workers(0);
+        let task = sample_task();
+        let task_id = task.id;
+
+        let err = dispatcher
+            .submit(task)
+            .await
+            .expect_err("no worker available — submit() must fail");
+        assert!(matches!(err, DispatchError::NoWorker(_)));
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Failed(_)),
+            "expected Failed, got {:?}",
+            stored.status
+        );
+    }
+
+    // 재시도 활성(max_dispatch_retries > 0)일 때는 WorkerUnavailable을 즉시
+    // 확정하지 않고 Pending으로 남긴 채 Ok(task_id)를 반환, retry_count를 1
+    // 올린다 — Reconciler가 백그라운드에서 재시도를 이어받는다.
+    #[tokio::test]
+    async fn submit_leaves_task_pending_and_records_retry_when_retries_enabled() {
+        let (state, dispatcher) = setup_no_workers(3);
+        let task = sample_task();
+        let task_id = task.id;
+
+        let returned_id = dispatcher
+            .submit(task)
+            .await
+            .expect("submit() must succeed when retries are enabled");
+        assert_eq!(returned_id, task_id);
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Pending),
+            "expected Pending, got {:?}",
+            stored.status
+        );
+        assert_eq!(stored.retry_count, 1);
+    }
 }

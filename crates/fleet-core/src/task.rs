@@ -87,6 +87,12 @@ pub struct Task {
     /// 예약 필드 — project 그룹화 기능 도입 전까지는 항상 `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
+    /// dispatch 재시도 횟수 (로드맵 #38). `submit()`의 최초 시도 또는
+    /// `Reconciler`의 stale-Pending 재시도가 `WorkerUnavailable`/`CircuitOpen`으로
+    /// 실패할 때마다 1씩 증가한다 — 이 값이 `max_dispatch_retries`에 도달하면
+    /// 더 이상 재시도하지 않고 `Failed`(dead-letter)로 전이된다.
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 impl Task {
@@ -116,6 +122,7 @@ impl Task {
             thread_id: id,
             parent_task_id: req.parent_task_id,
             project_id: None,
+            retry_count: 0,
         }
     }
 
@@ -376,6 +383,7 @@ mod tests {
             thread_id: id,
             parent_task_id: None,
             project_id: None,
+            retry_count: 0,
         };
         assert!(t.is_terminal());
         assert!(!t.is_running());

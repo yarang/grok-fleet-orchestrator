@@ -63,6 +63,12 @@ pub trait Store: Send + Sync {
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError>;
 
+    /// `tasks.retry_count`를 원자적으로 1 증가시키고 새 값을 반환 (로드맵 #38).
+    /// dispatch 재시도 상한(`max_dispatch_retries`) 판단에 사용 — `submit()`
+    /// 최초 시도 또는 `Reconciler`의 stale-Pending 재시도가 `WorkerUnavailable`/
+    /// `CircuitOpen`으로 실패할 때마다 호출된다.
+    async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError>;
+
     /// 스레드(연속 대화) 전체를 시간순(오름차순)으로 조회 — 대화를 읽는 순서.
     ///
     /// 기본 구현은 `list_tasks`를 넉넉한 limit으로 호출한 뒤 클라이언트 측에서

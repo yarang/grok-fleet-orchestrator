@@ -159,6 +159,9 @@ impl Store for AttemptStore {
     async fn list_tasks(&self, _filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         Ok(Vec::new())
     }
+    async fn increment_task_retry_count(&self, _id: TaskId) -> Result<u32, StoreError> {
+        unimplemented!()
+    }
     async fn upsert_worker(&self, _worker: &Worker) -> Result<(), StoreError> {
         unimplemented!()
     }

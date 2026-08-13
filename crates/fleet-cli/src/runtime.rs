@@ -227,6 +227,7 @@ pub async fn run_serve(
     reconcile_stale_secs: u64,
     reconcile_dispatched_check_secs: u64,
     reconcile_offline_worker_grace_secs: u64,
+    reconcile_max_dispatch_retries: u32,
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
@@ -289,7 +290,13 @@ pub async fn run_serve(
         CircuitBreakerConfig::default(),
     ));
 
-    let dispatcher = Arc::new(Dispatcher::new(state.clone()));
+    // 로드맵 #38 — `Dispatcher`와 `Reconciler`가 같은 재시도 상한
+    // (`reconcile_max_dispatch_retries`)을 공유해야 `submit()`이 남겨둔
+    // `Pending` 작업을 Reconciler가 일관되게 재시도/소진 판단할 수 있다.
+    let dispatcher = Arc::new(
+        Dispatcher::new(state.clone())
+            .with_max_dispatch_retries(reconcile_max_dispatch_retries),
+    );
     dispatcher.attach_event_receiver(event_rx).await;
 
     // 백그라운드에서 워커 이벤트 소비 루프 시작.
@@ -360,12 +367,14 @@ pub async fn run_serve(
             offline_worker_grace: Duration::from_secs(
                 reconcile_offline_worker_grace_secs.max(1),
             ),
+            max_dispatch_retries: reconcile_max_dispatch_retries,
         };
         tracing::info!(
             interval_secs = reconcile_interval_secs,
             stale_secs = reconcile_stale_secs,
             dispatched_check_secs = reconcile_dispatched_check_secs,
             offline_worker_grace_secs = reconcile_offline_worker_grace_secs,
+            max_dispatch_retries = reconcile_max_dispatch_retries,
             "task reconciliation loop enabled (pending redispatch + orphaned/offline dispatched reap)"
         );
         let reconciler = Reconciler::new(state.clone(), dispatcher.clone(), cfg);

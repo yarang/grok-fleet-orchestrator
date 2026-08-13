@@ -118,9 +118,22 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
     match ctx.dispatcher.submit(task).await {
         Ok(returned_id) => {
             debug!(%returned_id, "dispatch_task succeeded");
+            // 로드맵 #38: 재시도가 활성화된 배포에서는 submit()이 워커 선택
+            // 실패/CircuitOpen에서도 Ok(task_id)를 반환할 수 있다 — 그 경우
+            // 작업은 아직 Pending(Reconciler의 백그라운드 재시도 대기)이므로
+            // "dispatched"라고 단정하지 않고 실제 상태를 조회해 보고한다.
+            let status = ctx
+                .state
+                .store
+                .get_task(returned_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| phase_str(&t.status))
+                .unwrap_or("dispatched");
             Ok(schema::tool_json(&json!({
                 "task_id": returned_id.to_string(),
-                "status": "dispatched",
+                "status": status,
                 "hint": "Poll fleet_get_task_status with the task_id to observe completion."
             })))
         }
@@ -930,6 +943,7 @@ mod tests {
             thread_id: id,
             parent_task_id: None,
             project_id: None,
+            retry_count: 0,
         };
         let summary = task_summary_with_options(&task, true);
         assert_eq!(summary["phase"], "completed");
@@ -972,6 +986,7 @@ mod tests {
             thread_id: id,
             parent_task_id: None,
             project_id: None,
+            retry_count: 0,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["token_usage"]["input_tokens"], 100);
@@ -1009,6 +1024,7 @@ mod tests {
             thread_id: id,
             parent_task_id: None,
             project_id: None,
+            retry_count: 0,
         };
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["phase"], "completed");
