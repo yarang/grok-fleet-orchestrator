@@ -221,9 +221,10 @@
     서술해온 30초가 아니라 실제로는 **10초**입니다
     (`CircuitBreakerConfig::default().open_duration_secs`).
 
-    ⚠️ **미검증**: 이 세션 환경에 Rust 툴체인이 없어 `cargo test`로 실제 컴파일/
-    테스트 통과를 확인하지 못했습니다 — 코드 리뷰로 타입/문법을 검증했으나, 다음
-    빌드 시 `cargo test -p fleet-scheduler breaker::` 로 반드시 재확인 필요합니다.
+    ✅ **검증 완료 (2026-08-13)**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets --all-features`
+    (자체 크레이트 경고 0건 — vendor SDK 예제 경고 1건은 무관) 전부 통과.
+    `cargo test -p fleet-scheduler breaker::` **8/8 통과** (신규 4개 포함).
 
 45. 🔵 **`MemStore`가 `fleet-store` 밖에 6개 이상 독립 중복 정의로 흩어짐** (P3, 기술 부채) —
     `fleet-api`/`fleet-dashboard`의 `#[cfg(test)]` 코드마다 각자 `struct MemStore`를
@@ -283,9 +284,10 @@
     두는 이유는 `Offline`이 되돌릴 수 있는 상태이기 때문입니다. 테스트 3개 추가
     (유예 초과 시 실패 처리, 유예 이내 방치, `Degraded`는 건드리지 않음 확인).
 
-    ⚠️ **미검증**: 이 세션 환경에 Rust 툴체인이 없어 `cargo test`로 실제 컴파일/
-    테스트 통과를 확인하지 못했습니다 — 다음 빌드 시
-    `cargo test -p fleet-scheduler reconcile::` 로 반드시 재확인 필요합니다.
+    ✅ **검증 완료 (2026-08-13)**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets --all-features`
+    (자체 크레이트 경고 0건) 전부 통과. `cargo test -p fleet-scheduler reconcile::`
+    **10/10 통과** (신규 3개 포함).
     ⚠️ **알려진 한계**: `update_task_status`가 낙관적 잠금을 하지 않아, `Failed`로
     마킹한 직후 워커가 실제로는 재연결해 뒤늦게 `WorkerEvent::Completed`가
     도착하면 상태가 덮어써질 수 있는 이론적 경쟁 상태가 남아 있습니다(5분 유예가
