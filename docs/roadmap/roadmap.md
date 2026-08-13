@@ -214,7 +214,32 @@
 
 35. ✅ **docs 디렉토리 내 다이어그램 Mermaid 변환 및 문서 정합성 개선** (P2, 문서화) — 해결됨 (2026-08-11). docs 내 ASCII 다이어그램 16개를 Mermaid로 마이그레이션하고, `/api-gateway/` Nginx 설정 누락 해결 및 `single-server.md` 내 폐기된 Docker 스펙 정리 완료.
 36. ⏳ **mTLS 인증서 자동 회전(Auto-Rotation) 정책 도입** (P1/P2, 보안/운영) — 사설 CA 기반 mTLS 인증서 만료 시 서비스 중단 없이 교체하기 위해 TLS 컨텍스트 동적 리로드(File Watcher) 또는 중앙 인증서 자동 배포 설계.
-37. ⏳ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — `--inventory` 모드에서 `InventoryWorker` 스키마 확장을 적용하여 mTLS 설정 및 인증서 자동 주입 파이프라인 구현.
+37. ✅ **인벤토리 기반 mTLS 프로비저닝 자동화 지원** (P2, 인프라) — 해결됨
+    (2026-08-13). `InventoryDefaults`/`InventoryWorker`(`crates/fleet-provisioner/src/inventory.rs`)에
+    mTLS 필드를 추가했습니다. 여러 워커가 공유할 만한 값(`mtls_enabled`,
+    `mtls_listen_addr`, `mtls_client_ca`, `mtls_advertised_port`)은
+    `defaults:`에, 워커마다 고유해야 하는 서버 인증서/키
+    (`mtls_server_cert`/`mtls_server_key` — `fleet mtls issue-server`로 사전
+    발급된 원격 경로만 참조, 파일 자체는 업로드하지 않음)는 개별 워커에만
+    두도록 설계했습니다. `mtls_advertised_host`를 생략하면 워커 `name`으로
+    자동 폴백합니다. `effective_mtls_*` 헬퍼로 개별값→defaults 우선순위를
+    해석하고, `fleet-cli::runtime::build_inventory_step_context`가 이를
+    `StepContext`에 주입하도록 연결했습니다.
+
+    필드 누락 검증은 새로 만들지 않고 기존 템플릿 렌더링 단계
+    (`templates.rs`의 `StepError::Template("mtls_enabled=true requires ...")`)를
+    그대로 재사용합니다 — 단일 호스트 모드(`--host`)와 완전히 동일한 에러
+    경로이므로 중복 검증 로직이 없습니다. `examples/workers.yaml`과
+    `docs/architecture/overview.md`의 "mTLS 제한" 절을 갱신했습니다.
+
+    신규 테스트 5개(공유 defaults + per-worker cert 파싱, advertised_host
+    name 폴백/명시적 오버라이드, per-worker mtls_enabled가 defaults를
+    오버라이드하는 케이스 등).
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
+    (전체 그린) 통과.
 38. ⏳ **스케줄러 작업 실패 시 자동 재시도 및 Dead Letter Queue (DLQ) 설계** (P2, 안정성) — 네트워크 일시 순단 시 태스크가 즉시 Failed로 유실되지 않도록 자동 재스케줄러 큐 및 Stale 상태 격리를 위한 DLQ 메커니즘 도입.
 39. ✅ **Known Hosts TOFU 모드에서의 대규모 인프라 배포 절차 상 보안 공백 보완** (P2, 보안) —
     해결됨 (2026-08-13). 신규 `fleet scan-host-keys` 명령을 추가했습니다 —
@@ -415,7 +440,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#24, #26, #36, #37, #38, #41, #42 |
+| 미배정 | #14, #21~#24, #26, #36, #38, #41, #42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

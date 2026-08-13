@@ -824,10 +824,30 @@ supervisor 의 `establish_session` 은 endpoint 스킴에 따라 다음과 같�
   재시작 불필요, 하지만 fleet-worker의 proxy는 시작 시 한 번만 읽음).
 - CRL/OCSP 미지원. 폐기된 클라이언트 인증서는 CA 자체를 교체하지 않는 한
   유효. (대안: mTLS + Cloudflare Access 동시 사용.)
-- 인벤토리 모드(`--inventory`)의 mTLS 미지원 — Phase 8.5.3 의 프로비저닝
-  mTLS 통합은 단일 호스트 모드(`--host`)만 지원. 인벤토리 YAML 에
-  per-worker mTLS 메타데이터를 추가하려면 `InventoryWorker` 스키마 확장이
-  필요 (후속 과제).
+- ~~인벤토리 모드(`--inventory`)의 mTLS 미지원~~ → ✅ **해결 (2026-08-13, 로드맵 #37)**.
+  `InventoryDefaults`/`InventoryWorker`에 mTLS 필드를 추가했다 — 여러
+  워커가 공유할 만한 값(`mtls_enabled`, `mtls_listen_addr`, `mtls_client_ca`,
+  `mtls_advertised_port`)은 `defaults:`에, 워커마다 고유해야 하는 서버
+  인증서/키(`mtls_server_cert`/`mtls_server_key`, `fleet mtls issue-server`로
+  사전 발급)는 개별 `workers:` 항목에만 둔다. `mtls_advertised_host`를
+  생략하면 워커 `name`으로 자동 폴백한다. 예시는
+  [`examples/workers.yaml`](../../examples/workers.yaml) 참고:
+  ```yaml
+  defaults:
+    mtls_enabled: true
+    mtls_listen_addr: "0.0.0.0:2420"
+    mtls_client_ca: /etc/fleet/ca.pem
+  workers:
+    - host: 10.0.2.20
+      name: gpu-x86-01
+      mtls_server_cert: /etc/fleet/gpu-x86-01.pem
+      mtls_server_key: /etc/fleet/gpu-x86-01.key
+      # mtls_advertised_host 생략 → "gpu-x86-01"로 자동 폴백
+  ```
+  필드가 채워졌는데 `mtls_enabled: true`인 워커에 cert/key가 빠진 경우의
+  검증은 새로 만들지 않고 기존 템플릿 렌더링 단계
+  (`templates.rs`의 `StepError::Template("mtls_enabled=true requires ...")`)를
+  그대로 재사용한다 — 단일 호스트 모드와 동일한 에러 경로.
 
 ## SSH 호스트 키 검증 (프로비저너)
 
