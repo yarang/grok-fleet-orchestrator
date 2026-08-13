@@ -43,8 +43,18 @@
     <p class="page-subtitle">All hosts in your infrastructure — registered workers, provisioned machines, and their grok status.</p>
 
     <div id="host-table" class="table">
-      <div class="row header">
-        <div>Hostname</div><div>Status</div><div>Worker</div><div>grok</div><div>Worker Ver</div><div>OS</div><div>Arch</div><div>Last Heartbeat</div>
+      <!-- 로드맵 #14 — 컬럼 정렬(tasks.html과 동일한 패턴). 고급 필터는
+           호스트 목록이 상대적으로 작아(물리 인프라 규모로 자연히 상한)
+           이번 범위에서 제외 — #23의 페이지네이션 제외 사유와 동일. -->
+      <div class="row header" id="host-table-header">
+        <div class="sortable" data-sort-key="hostname">Hostname</div>
+        <div class="sortable" data-sort-key="status">Status</div>
+        <div class="sortable" data-sort-key="worker_name">Worker</div>
+        <div class="sortable" data-sort-key="grok_version">grok</div>
+        <div class="sortable" data-sort-key="fleet_worker_version">Worker Ver</div>
+        <div class="sortable" data-sort-key="os_type">OS</div>
+        <div class="sortable" data-sort-key="arch">Arch</div>
+        <div class="sortable" data-sort-key="last_heartbeat_at">Last Heartbeat</div>
       </div>
     </div>
     <div id="empty-state" class="empty-state" style="display:none;">

@@ -1,10 +1,51 @@
+    let allHosts = [];
+    // 로드맵 #14 — 컬럼 정렬 상태 (tasks.js와 동일한 패턴).
+    let sortKey = 'hostname';
+    let sortDir = 'asc';
+
     async function fetchHosts() {
       try {
         const resp = await fetch('/api/hosts');
-        const hosts = await resp.json();
-        render(hosts);
+        allHosts = await resp.json();
+        render();
       } catch(e) { console.error('fetch hosts:', e); }
     }
+
+    function compareHosts(a, b, key, dir) {
+      let va, vb;
+      if (key === 'last_heartbeat_at') {
+        va = a.last_heartbeat_at ? new Date(a.last_heartbeat_at).getTime() : -1;
+        vb = b.last_heartbeat_at ? new Date(b.last_heartbeat_at).getTime() : -1;
+      } else {
+        va = String(a[key] ?? '').toLowerCase();
+        vb = String(b[key] ?? '').toLowerCase();
+      }
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return dir === 'asc' ? cmp : -cmp;
+    }
+
+    function updateSortIndicators() {
+      document.querySelectorAll('#host-table-header .sortable').forEach(cell => {
+        const active = cell.dataset.sortKey === sortKey;
+        cell.classList.toggle('sort-active', active);
+        cell.dataset.sortDir = active ? sortDir : '';
+      });
+    }
+
+    document.querySelectorAll('#host-table-header .sortable').forEach(cell => {
+      cell.addEventListener('click', () => {
+        const key = cell.dataset.sortKey;
+        if (sortKey === key) {
+          sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortKey = key;
+          sortDir = 'asc';
+        }
+        updateSortIndicators();
+        render();
+      });
+    });
+    updateSortIndicators();
 
     function fmtTime(iso) {
       if (!iso) return '—';
@@ -22,19 +63,22 @@
       return '<span style="color:var(--ok);font-size:13px;">'+version+'</span>';
     }
 
-    function render(hosts) {
+    function render() {
       const table = document.getElementById('host-table');
       const empty = document.getElementById('empty-state');
 
       table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
 
-      if (!hosts || hosts.length === 0) {
+      if (!allHosts || allHosts.length === 0) {
         empty.style.display = 'block';
         table.style.display = 'none';
         return;
       }
       empty.style.display = 'none';
       table.style.display = 'grid';
+
+      // 로드맵 #14 — 컬럼 정렬.
+      const hosts = [...allHosts].sort((a, b) => compareHosts(a, b, sortKey, sortDir));
 
       for (const h of hosts) {
         const row = document.createElement('div');

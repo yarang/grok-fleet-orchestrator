@@ -1,5 +1,13 @@
     let allTasks = [];
     let currentFilter = 'all';
+    // 로드맵 #14 — 고급 필터 상태(상태 필터 pill과 별개로 함께 적용된다).
+    let currentSearch = '';
+    let currentWorker = '';
+    let currentModel = '';
+    // 로드맵 #14 — 정렬 상태. 기본값은 페이지 부제("newest first")와
+    // 일치하도록 created_at 내림차순.
+    let sortKey = 'created_at';
+    let sortDir = 'desc';
     // 로드맵 #23 — 페이지 크기. "Load more" 클릭 시 100씩 늘려 재조회한다.
     // 백엔드(`/api/tasks`)는 limit/offset을 완전히 지원하지만(#11) 프론트가
     // 그동안 limit=200 고정 단발 조회만 했다 — 태스크가 그 이상 쌓이는
@@ -16,6 +24,7 @@
         const data = await resp.json();
         hasMore = data.length > pageSize;
         allTasks = hasMore ? data.slice(0, pageSize) : data;
+        populateFilterOptions();
         render();
       } catch (e) { console.error('fetch tasks:', e); }
     }
@@ -24,6 +33,94 @@
       pageSize += PAGE_SIZE;
       fetchTasks();
     });
+
+    // ── 로드맵 #14: 고급 필터 (검색 / worker / model) ────────────────────
+
+    /// worker/model 드롭다운 옵션을 현재 로드된 태스크 목록에서 동적으로
+    /// 채운다 — 별도 백엔드 엔드포인트 없이 클라이언트에서 유일값만 추출.
+    /// 재조회(폴링/Load more)할 때마다 다시 호출되므로, 사용자가 이미 골라둔
+    /// 값은 그 옵션이 여전히 존재하는 한 유지한다.
+    function populateFilterOptions() {
+      const workerSel = document.getElementById('filter-worker');
+      const modelSel = document.getElementById('filter-model');
+      const workers = [...new Set(allTasks.map(t => t.worker_id).filter(Boolean))].sort();
+      const models = [...new Set(allTasks.map(t => t.model).filter(Boolean))].sort();
+
+      const buildOptions = (label, values) =>
+        `<option value="">${label}</option>` +
+        values.map(v => {
+          const display = v.length > 12 ? v.slice(0, 8) + '…' : v;
+          return `<option value="${escapeHtml(v)}">${escapeHtml(display)}</option>`;
+        }).join('');
+
+      const prevWorker = workerSel.value;
+      const prevModel = modelSel.value;
+      workerSel.innerHTML = buildOptions('All workers', workers);
+      modelSel.innerHTML = buildOptions('All models', models);
+      if (workers.includes(prevWorker)) workerSel.value = prevWorker;
+      if (models.includes(prevModel)) modelSel.value = prevModel;
+    }
+
+    document.getElementById('filter-search').addEventListener('input', (e) => {
+      currentSearch = e.target.value.trim();
+      render();
+    });
+    document.getElementById('filter-worker').addEventListener('change', (e) => {
+      currentWorker = e.target.value;
+      render();
+    });
+    document.getElementById('filter-model').addEventListener('change', (e) => {
+      currentModel = e.target.value;
+      render();
+    });
+
+    // ── 로드맵 #14: 컬럼 정렬 ────────────────────────────────────────────
+
+    function compareTasks(a, b, key, dir) {
+      let va, vb;
+      switch (key) {
+        case 'tokens':
+          va = (a.token_usage && a.token_usage.total_tokens) || 0;
+          vb = (b.token_usage && b.token_usage.total_tokens) || 0;
+          break;
+        case 'duration_secs':
+          va = a.duration_secs ?? -1;
+          vb = b.duration_secs ?? -1;
+          break;
+        case 'created_at':
+          va = new Date(a.created_at).getTime();
+          vb = new Date(b.created_at).getTime();
+          break;
+        default:
+          va = String(a[key] ?? '').toLowerCase();
+          vb = String(b[key] ?? '').toLowerCase();
+      }
+      const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+      return dir === 'asc' ? cmp : -cmp;
+    }
+
+    function updateSortIndicators() {
+      document.querySelectorAll('#task-table-header .sortable').forEach(cell => {
+        const active = cell.dataset.sortKey === sortKey;
+        cell.classList.toggle('sort-active', active);
+        cell.dataset.sortDir = active ? sortDir : '';
+      });
+    }
+
+    document.querySelectorAll('#task-table-header .sortable').forEach(cell => {
+      cell.addEventListener('click', () => {
+        const key = cell.dataset.sortKey;
+        if (sortKey === key) {
+          sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortKey = key;
+          sortDir = 'asc';
+        }
+        updateSortIndicators();
+        render();
+      });
+    });
+    updateSortIndicators();
 
     function fmtTokens(t) {
       if (!t) return '—';
@@ -62,9 +159,25 @@
     function render() {
       updatePaginationUI();
 
-      const filtered = currentFilter === 'all'
+      let filtered = currentFilter === 'all'
         ? allTasks
         : allTasks.filter(t => t.phase === currentFilter);
+
+      // 로드맵 #14 — 고급 필터. 상태 pill 필터와 AND로 함께 적용된다.
+      if (currentSearch) {
+        const q = currentSearch.toLowerCase();
+        filtered = filtered.filter(t => (t.prompt || '').toLowerCase().includes(q));
+      }
+      if (currentWorker) {
+        filtered = filtered.filter(t => t.worker_id === currentWorker);
+      }
+      if (currentModel) {
+        filtered = filtered.filter(t => t.model === currentModel);
+      }
+
+      // 로드맵 #14 — 컬럼 정렬. allTasks 자체가 아니라 필터링된 결과를
+      // 정렬해야 필터+정렬이 함께 걸린 상태로 일관되게 보인다.
+      filtered = [...filtered].sort((a, b) => compareTasks(a, b, sortKey, sortDir));
 
       const table = document.getElementById('task-table');
       const empty = document.getElementById('empty-state');
@@ -73,6 +186,15 @@
       table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
 
       if (filtered.length === 0) {
+        // 로드맵 #14 — 필터/검색 때문에 결과가 0인 것과, 애초에 태스크가
+        // 하나도 없는 것을 구분해서 안내한다.
+        const filtersActive = currentFilter !== 'all' || currentSearch || currentWorker || currentModel;
+        empty.querySelector('h3').textContent = filtersActive
+          ? 'No matching tasks'
+          : 'No tasks found';
+        empty.querySelector('p').textContent = filtersActive
+          ? 'Try adjusting or clearing the filters above.'
+          : 'Tasks will appear here when submitted via MCP or API.';
         empty.style.display = 'block';
         table.style.display = 'none';
         return;

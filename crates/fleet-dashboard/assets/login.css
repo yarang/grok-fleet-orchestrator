@@ -42,6 +42,28 @@
   --font-mono: ui-monospace, "SF Mono", Monaco, monospace;
 }
 
+/* 로드맵 #14 — 로그인/부트스트랩 페이지는 인증 전이라 app.js(다크 모드
+   토글 버튼)를 로드하지 않는다. 그래서 여기는 시스템 설정만 따른다(수동
+   토글 없음) — 그것만으로도 대부분의 사용자에게는 충분하고, 깜빡임(FOUC)도
+   전혀 없다(순수 CSS, 스크립트 관여 없음). */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary: #2997ff;
+    --primary-focus: #0a84ff;
+
+    --canvas: #1c1c1e;
+    --canvas-parchment: #000000;
+    --surface-pearl: #2c2c2e;
+
+    --ink: #f5f5f7;
+    --ink-muted-80: #e5e5e7;
+    --ink-muted-48: #98989d;
+
+    --divider-soft: #2c2c2e;
+    --hairline: #38383a;
+  }
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -80,7 +102,11 @@ html, body {
   width: 44px;
   height: 44px;
   border-radius: var(--r-sm);
-  background: var(--ink);
+  /* 로드맵 #14: 고정 브랜드 마크라 var(--ink)를 쓰면 다크 모드에서
+     --ink가 거의 흰색으로 뒤집혀 흰 배경+흰 글자로 안 보이게 된다 —
+     로고는 테마와 무관하게 항상 같은 다크 사각형으로 보여야 하므로
+     고정값을 쓴다(라이트 모드의 --ink 값과 동일). */
+  background: #1d1d1f;
   color: #fff;
   display: flex;
   align-items: center;

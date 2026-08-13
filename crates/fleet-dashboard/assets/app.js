@@ -1,6 +1,7 @@
 // Fleet Orchestrator Dashboard — 쿠키 기반 세션 (Phase 9.1).
 // 인증은 HttpOnly 쿠키로 자동 처리. fetch는 credentials: 'same-origin' (기본값).
-// 401 시 /login 으로 리다이렉트. 별도 prompt/localStorage 없음.
+// 401 시 /login 으로 리다이렉트. 별도 prompt 없음(로드맵 #14의 다크 모드
+// 명시적 선호만 localStorage에 저장 — 인증/세션과는 무관).
 
 const API = {
   overview: '/api/overview',
@@ -10,6 +11,30 @@ const API = {
   eventsStream: '/api/events/stream',
   me: '/api/me',
 };
+
+// ── 다크 모드: 저장된 명시적 선호를 즉시 적용 (로드맵 #14) ───────────────
+//
+// 이 파일은 매 페이지의 </body> 바로 앞에서 로드되므로, 여기서 최대한
+// 일찍(다른 초기화보다 먼저, 스크립트 최상단에서) 적용해야 깜빡임(FOUC)이
+// 짧다. `initThemeToggle()`(아래 §다크 모드 섹션)은 토글 버튼 UI를
+// 만드는 부분만 담당 — 실제 테마 적용은 여기서 끝낸다.
+const THEME_KEY = 'fleet-theme';
+
+function currentEffectiveTheme() {
+  const explicit = localStorage.getItem(THEME_KEY);
+  if (explicit === 'light' || explicit === 'dark') return explicit;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyExplicitTheme(theme) {
+  if (theme === 'light' || theme === 'dark') {
+    document.documentElement.setAttribute('data-theme', theme);
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+}
+
+applyExplicitTheme(localStorage.getItem(THEME_KEY));
 
 // ── 인증 헬퍼 ────────────────────────────────────────────────────────
 
@@ -63,6 +88,39 @@ function renderUserMenu() {
     });
     window.location.href = '/login';
   });
+}
+
+// ── 다크 모드: 토글 버튼 UI (로드맵 #14) ─────────────────────────────
+//
+// 실제 테마 적용(`applyExplicitTheme`)은 이 파일 최상단에서 이미 끝났다 —
+// 여기서는 사이드바 하단에 토글 버튼을 동적으로 만들어 붙이기만 한다. 모든
+// HTML 페이지가 사이드바 마크업을 각자 복제하고 있어(공용 템플릿 없음)
+// 정적 버튼을 마크업에 추가하는 대신 여기서 동적으로 생성 — 페이지 14곳을
+// 일일이 고칠 필요가 없다.
+function initThemeToggle() {
+  const footer = document.querySelector('.sidebar-footer');
+  if (!footer) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'theme-toggle';
+  btn.type = 'button';
+  btn.className = 'theme-toggle-btn';
+
+  const updateLabel = () => {
+    const dark = currentEffectiveTheme() === 'dark';
+    btn.textContent = dark ? '☀️ Light mode' : '🌙 Dark mode';
+    btn.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode');
+  };
+  updateLabel();
+
+  btn.addEventListener('click', () => {
+    const next = currentEffectiveTheme() === 'dark' ? 'light' : 'dark';
+    localStorage.setItem(THEME_KEY, next);
+    applyExplicitTheme(next);
+    updateLabel();
+  });
+
+  footer.insertBefore(btn, footer.firstChild);
 }
 
 // ── 사이드바 모바일 드로어 토글 ──────────────────────────────────────────
@@ -258,8 +316,9 @@ async function refreshAll() {
 }
 
 (async () => {
-  // 0. 사이드바 모바일 드로어는 모든 인증된 페이지에서 공통으로 초기화.
+  // 0. 사이드바 모바일 드로어 / 다크 모드 토글은 모든 인증된 페이지에서 공통으로 초기화.
   initSidebarToggle();
+  initThemeToggle();
 
   // 1. 인증된 사용자 정보 로드 (401 → 자동 리다이렉트). 사이드바 사용자 메뉴도 여기서 렌더링.
   await loadCurrentUser();

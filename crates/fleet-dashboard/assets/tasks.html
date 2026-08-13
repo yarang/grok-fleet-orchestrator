@@ -55,11 +55,23 @@
         <button class="pill-btn" data-filter="completed">Completed</button>
         <button class="pill-btn" data-filter="failed">Failed</button>
       </div>
+      <!-- 로드맵 #14 — 고급 필터. worker/model 옵션은 현재 로드된 태스크
+           목록에서 동적으로 채운다(별도 백엔드 엔드포인트 불필요). -->
+      <input type="search" id="filter-search" placeholder="Search prompt…" style="min-width:180px;" />
+      <select id="filter-worker"><option value="">All workers</option></select>
+      <select id="filter-model"><option value="">All models</option></select>
     </div>
 
     <div id="task-table" class="table">
-      <div class="row header">
-        <div>ID</div><div>Phase</div><div>Prompt</div><div>Model</div><div>Worker</div><div>Tokens</div><div>Duration</div><div>Created</div>
+      <div class="row header" id="task-table-header">
+        <div class="sortable" data-sort-key="id">ID</div>
+        <div class="sortable" data-sort-key="phase">Phase</div>
+        <div class="sortable" data-sort-key="prompt">Prompt</div>
+        <div class="sortable" data-sort-key="model">Model</div>
+        <div class="sortable" data-sort-key="worker_id">Worker</div>
+        <div class="sortable" data-sort-key="tokens">Tokens</div>
+        <div class="sortable" data-sort-key="duration_secs">Duration</div>
+        <div class="sortable" data-sort-key="created_at">Created</div>
       </div>
     </div>
     <div id="empty-state" class="empty-state" style="display:none;">
