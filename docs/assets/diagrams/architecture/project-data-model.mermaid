@@ -1,0 +1,46 @@
+erDiagram
+    PROJECTS ||--o{ PROJECT_WORKERS : "has assigned"
+    PROJECTS ||--o{ PROJECT_HOSTS : "has assigned"
+    PROJECTS ||--o{ TASKS : "scopes (optional)"
+    WORKERS ||--o{ PROJECT_WORKERS : "assigned to (M:N)"
+    HOSTS ||--o{ PROJECT_HOSTS : "assigned to (M:N)"
+    HOSTS |o--o| WORKERS : "worker_id (existing, unrelated to project membership)"
+
+    PROJECTS {
+        uuid id PK
+        text name UK
+        text description
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    PROJECT_WORKERS {
+        uuid project_id FK
+        uuid worker_id FK
+        timestamptz assigned_at
+    }
+
+    PROJECT_HOSTS {
+        uuid project_id FK
+        uuid host_id FK
+        timestamptz assigned_at
+    }
+
+    WORKERS {
+        uuid id PK
+        text name UK
+        text endpoint
+        text status
+    }
+
+    HOSTS {
+        uuid id PK
+        text hostname UK
+        uuid worker_id FK "nullable, ON DELETE SET NULL"
+    }
+
+    TASKS {
+        uuid id PK
+        uuid project_id FK "nullable, ON DELETE SET NULL — already exists since 013_task_threads.sql"
+    }

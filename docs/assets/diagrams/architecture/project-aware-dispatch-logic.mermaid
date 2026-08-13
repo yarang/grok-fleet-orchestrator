@@ -1,0 +1,23 @@
+flowchart TD
+    Start([fleet_dispatch_task<br/>server_hint, required_labels, model, project_id?]) --> FilterOnline[1. WorkerStatus::Online 워커만 후보로]
+    FilterOnline --> FilterLabels[2. required_labels를 만족하지 않는 워커 제외]
+    FilterLabels --> CheckModel{model이 지정되었는가?}
+    CheckModel -- Yes --> FilterModel[3. labels 'model'이 일치하지 않는 워커 제외]
+    CheckModel -- No --> FilterBreaker
+    FilterModel --> FilterBreaker[4. 회로차단기 Open인 워커 제외]
+    FilterBreaker --> FilterCapacity[5. has_capacity 실패 워커 제외]
+    FilterCapacity --> CheckProject{"신규 5.5. project_id가 지정되었는가?"}
+    CheckProject -- No --> CheckHint{server_hint가 지정되었는가?}
+    CheckProject -- Yes --> ProjectMembers["project_workers에서<br/>이 project_id에 배치된 워커 조회"]
+    ProjectMembers --> AnyMembers{"후보 풀 ∩ 배치된 워커 ≠ ∅?"}
+    AnyMembers -- "Yes — 소프트 선호 적용" --> NarrowToProject["후보 풀을 프로젝트 배치 워커로 좁힘"]
+    AnyMembers -- "No — 소프트 폴백" --> KeepFullPool["후보 풀 그대로 유지<br/>(전체 풀로 폴백, 에러 아님)"]
+    NarrowToProject --> CheckHint
+    KeepFullPool --> CheckHint
+    CheckHint -- Yes --> HintLookup["6a. 힌트 워커를 이름으로 조회<br/>(project 필터와 무관하게 항상 존중 — 명시적 힌트가 소프트 선호보다 강함)"]
+    HintLookup --> HintExists{조회 결과}
+    HintExists -- 워커 자체가 없음 --> RejectNotFound([HintedNotFound 에러])
+    HintExists -- "존재하지만 4/5단계에서 제외됨" --> RejectUnavailable([HintedUnavailable 에러])
+    HintExists -- 후보 풀에 존재 --> Dispatch
+    CheckHint -- No --> FilterLeastLoaded["6b. active_tasks 최소인 워커 선택<br/>(동률이면 name 순 — 여러 프로젝트에<br/>공유 배치된 워커는 총 부하로 자연히 견제됨)"]
+    FilterLeastLoaded --> Dispatch([선택된 워커로 Dispatch])

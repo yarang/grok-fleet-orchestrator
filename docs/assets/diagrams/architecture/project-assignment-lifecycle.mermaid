@@ -1,0 +1,42 @@
+sequenceDiagram
+    actor Admin as 관리자(대시보드/MCP)
+    participant API as fleet-dashboard API<br/>(또는 fleet-mcp 도구)
+    participant Store as fleet-store<br/>(projects/project_workers/project_hosts)
+    participant Sel as WorkerSelector
+
+    Note over Admin,Store: 1. 프로젝트 생성
+    Admin->>API: POST /api/projects {name, description}
+    API->>API: require_permission(ProjectCreate)
+    API->>Store: insert_project(&Project)
+    Store-->>API: Ok(project_id)
+    API-->>Admin: 201 {project_id}
+
+    Note over Admin,Store: 2. host/agent 배치 (M:N — 여러 프로젝트에 동시 배치 가능)
+    Admin->>API: POST /api/projects/:id/workers {worker_id}
+    API->>API: require_permission(ProjectAssign)
+    API->>Store: assign_worker_to_project(project_id, worker_id)
+    Store-->>API: Ok(())
+    Admin->>API: POST /api/projects/:id/hosts {host_id}
+    API->>Store: assign_host_to_project(project_id, host_id)
+    Store-->>API: Ok(())
+
+    Note over Admin,Sel: 3. 프로젝트 스코프 태스크 제출 및 소프트 디스패치
+    Admin->>API: fleet_dispatch_task {prompt, project_id}
+    API->>Sel: select(task) — project_id 포함
+    Sel->>Store: list_project_workers(project_id)
+    Store-->>Sel: [worker_a, worker_b, ...]
+    alt 배치된 워커 중 후보 존재
+        Sel->>Sel: 후보 풀을 배치된 워커로 좁힌 뒤 최소부하 선택
+    else 배치된 워커 없음/전부 불가
+        Sel->>Sel: 소프트 폴백 — 전체 풀에서 최소부하 선택 (에러 아님)
+    end
+    Sel-->>API: 선택된 worker_id
+    API-->>Admin: {task_id, status}
+
+    Note over Admin,Store: 4. 배치 해제 / 프로젝트 삭제
+    Admin->>API: DELETE /api/projects/:id/workers/:worker_id
+    API->>Store: unassign_worker_from_project(project_id, worker_id)
+    Admin->>API: DELETE /api/projects/:id
+    API->>API: require_permission(ProjectDelete)
+    API->>Store: delete_project(project_id)
+    Note right of Store: CASCADE로 project_workers/project_hosts 행 삭제.<br/>tasks.project_id는 ON DELETE SET NULL — 과거 태스크는<br/>보존되고 "미배정"으로만 표시됨.
