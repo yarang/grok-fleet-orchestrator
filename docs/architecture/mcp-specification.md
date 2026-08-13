@@ -67,7 +67,7 @@ Grok Fleet Orchestrator는 특정 상용 에이전트의 내부 API에 얽매이
 
 오케스트레이터가 지원하는 도구(Tools)의 전체 명세 목록과 입력 스키마(JSON Schema)를 클라이언트에 응답합니다.
 
-* **서버 응답**: `fleet_dispatch_task`, `fleet_get_task_status` 등 **8종** 도구의 JSON Schema 목록을 반환합니다 (`crates/fleet-mcp/src/schema.rs`의 `all_tools()`; 개수는 `handlers.rs`의 유닛 테스트로 고정되어 있습니다). 모든 도구 이름에는 `fleet_` 접두사가 붙습니다.
+* **서버 응답**: `fleet_dispatch_task`, `fleet_get_task_status` 등 **12종** 도구의 JSON Schema 목록을 반환합니다 (`crates/fleet-mcp/src/schema.rs`의 `all_tools()`; 개수는 `handlers.rs`의 유닛 테스트로 고정되어 있습니다). 모든 도구 이름에는 `fleet_` 접두사가 붙습니다.
 
 ### 3) `tools/call`
 
@@ -77,7 +77,7 @@ Grok Fleet Orchestrator는 특정 상용 에이전트의 내부 API에 얽매이
 
 ## 4. 오케스트레이터 MCP 도구(Tools) 상세 사양
 
-모든 도구는 표준 JSON Schema를 준수하며, 결과는 MCP 규격에 맞게 `content` 배열 내의 text 객체로 래핑되어 직렬화됩니다(`isError` 불리언 포함). 아래는 8종 도구의 요약이며, 전체 입출력 JSON 예시는 [`api-reference.md` §MCP 도구](./api-reference.md)를 정본으로 참조하세요 — 이름·인자·응답 필드는 `crates/fleet-mcp/src/schema.rs`/`handlers.rs` 기준으로 2026-08-12에 전면 정정되었습니다(이전 판은 `fleet_` 접두사 없는 도구명과 존재하지 않는 인자를 다수 포함하고 있었습니다).
+모든 도구는 표준 JSON Schema를 준수하며, 결과는 MCP 규격에 맞게 `content` 배열 내의 text 객체로 래핑되어 직렬화됩니다(`isError` 불리언 포함). 아래는 12종 도구의 요약이며, 전체 입출력 JSON 예시는 [`api-reference.md` §MCP 도구](./api-reference.md)를 정본으로 참조하세요 — 이름·인자·응답 필드는 `crates/fleet-mcp/src/schema.rs`/`handlers.rs` 기준으로 2026-08-12에 전면 정정되었습니다(이전 판은 `fleet_` 접두사 없는 도구명과 존재하지 않는 인자를 다수 포함하고 있었습니다). 2026-08-13에 호스트 인벤토리/브레이커 리셋/부트스트랩 토큰 관리 4종(9~12번)이 추가되어 8종에서 늘었습니다(로드맵 #28).
 
 ### 1) `fleet_dispatch_task` (작업 제출)
 
@@ -134,6 +134,37 @@ Grok Fleet Orchestrator는 특정 상용 에이전트의 내부 API에 얽매이
 
 * **Arguments**: `task_ids`(Array of Strings, Required, 1~200개), `include_output`(Boolean, Optional, 기본 `true`). `timeout_secs` 인자는 존재하지 않습니다.
 * **Response**: `results` 배열, `count`, `summary`(`terminal`/`not_found`/`total`).
+
+### 9) `fleet_list_hosts` (호스트 인벤토리 조회, 2026-08-13 추가)
+
+`hosts` 테이블 전체를 조회합니다 — `fleet_list_workers`와 달리 아직 워커로
+조인하지 않은 프로비저닝된 호스트, 오프라인/장애 호스트까지 포함합니다.
+
+* **Arguments**: `status`(String, Optional, `provisioned`|`online`|`offline`|`failed`).
+* **Response**: `hosts` 배열(`id`/`hostname`/`worker_id`/`status`/`ssh_host`/`ssh_port`/`grok_version`/`fleet_worker_version`/`load_avg`/`mem_available_mb`/`disk_free_mb`/`last_heartbeat_at`/`provisioned_at`) + `count`.
+
+### 10) `fleet_reset_worker_breaker` (CircuitBreaker 강제 리셋, 2026-08-13 추가)
+
+워커의 CircuitBreaker를 `Closed`로 강제 리셋합니다.
+
+* **Arguments**: `worker_id`(String, Optional) 또는 `worker_name`(String, Optional) — 둘 중 정확히 하나만.
+* **Response**: `worker_id`, `previous_state`, `new_state: "closed"`. 존재하지 않는 `worker_name`은 `isError:true`.
+* 리셋은 store에 영속화되고 `WorkerCircuitChanged` 이벤트로 발행되어 `MultiAdminSync`(로드맵 #25)를 통해 다른 인스턴스에도 전파됩니다.
+
+### 11) `fleet_list_bootstrap_tokens` (부트스트랩 토큰 조회, 2026-08-13 추가)
+
+워커 조인 토큰 목록을 최신순으로 조회합니다(원문 토큰 값 포함, 마스킹 없음).
+
+* **Arguments**: 없음.
+* **Response**: `tokens` 배열(`token`/`created_at`/`expires_at`/`max_uses`/`use_count`/`usable`/`notes`/`last_used_by`/`last_used_at`) + `count`.
+
+### 12) `fleet_revoke_bootstrap_token` (부트스트랩 토큰 폐기, 2026-08-13 추가)
+
+부트스트랩 토큰을 즉시 폐기합니다(되돌릴 수 없음, 이미 조인한 워커는 무영향).
+
+* **Arguments**: `token`(String, Required).
+* **Response**: `token`, `revoked: true`. 존재하지 않는 토큰은 `isError:true`.
+* ⚠️ 토큰 **발급**(create)은 의도적으로 MCP에 노출하지 않았습니다 — fleet-cli/HTTP API 전용.
 
 ---
 

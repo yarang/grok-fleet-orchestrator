@@ -133,7 +133,29 @@
 27. 🔵 예시 설정 파일 — **사실상 충족**. `orchestrator.example.toml`은 없으나 `examples/fleet.env`
     (DATABASE_URL, FLEET_HTTP_BIND, FLEET_API_TOKENS 등) + `examples/worker.toml`이 같은 역할을 한다.
     종료 또는 최하위 강등 권고.
-28. ⏳ 추가 MCP 도구 (토큰 관리, 호스트 인벤토리, 브레이커 리셋).
+28. ✅ **추가 MCP 도구 (토큰 관리, 호스트 인벤토리, 브레이커 리셋)** — 해결됨
+    (2026-08-13). `crates/fleet-mcp/src/schema.rs`/`handlers.rs`에 신규 도구
+    4종을 추가해 8개 → 12개로 늘렸습니다: `fleet_list_hosts`(호스트 인벤토리
+    조회, 상태 필터 지원), `fleet_reset_worker_breaker`(worker_id 또는
+    worker_name으로 CircuitBreaker 강제 리셋 — store 영속화 +
+    `WorkerCircuitChanged` 이벤트 발행으로 #25에서 새로 연결한
+    `MultiAdminSync`를 통해 다른 인스턴스에도 전파됨), `fleet_list_bootstrap_tokens`,
+    `fleet_revoke_bootstrap_token`. 네 도구 모두 기존 Store trait 메서드만
+    재사용했고(`list_hosts`, `update_worker_circuit_state`,
+    `list_bootstrap_tokens`, `revoke_bootstrap_token`) 새 백엔드 로직은
+    없습니다 — 이미 대시보드 HTTP API에만 있던 기능을 MCP 클라이언트에도
+    노출한 것입니다. 토큰 **발급**(create)은 의도적으로 범위에서 제외했습니다
+    (fleet-cli/HTTP API 전용 유지).
+
+    이 참에 `fleet-mcp`가 그동안 `handle_*` 핸들러를 단위 수준에서 전혀
+    테스트하지 않고 있었음(`cross_client.rs`의 `DATABASE_URL` 게이트 서브프로세스
+    테스트로만 커버)을 발견해, `fleet_store::mem::MemStore`(#45)로 실제
+    `ToolContext`를 구성하는 신규 도구 4종의 유닛 테스트 10개를 추가했습니다.
+
+    ✅ **검증 완료**: `cargo build --release --features "acp mtls"`,
+    `cargo check --no-default-features`, `cargo clippy --all-targets
+    --all-features`(경고 0건), `cargo test --workspace --features "acp mtls"`
+    (전체 그린) 통과.
 29. ✅ Dashboard API의 하드코딩된 도구 목록 — 해결됨 (`8755c0d`). `list_tools_api`가
     `fleet_mcp::schema::all_tools()`를 그대로 노출해 단일 진실 원천을 따른다.
     (별도 보고 없이 #12 작업에 포함되어 반영됐다 — 실측 대조 중 확인.)
@@ -351,7 +373,7 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #14, #21~#24, #26, #28, #36~#39, #40~#42 |
+| 미배정 | #14, #21~#24, #26, #36~#39, #40~#42 |
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더

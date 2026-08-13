@@ -5,7 +5,7 @@ graph TD
 
     subgraph Orchestrator [Orchestrator - 단일 Rust 바이너리 `fleet serve`]
         subgraph Components [진입점]
-            MCP[fleet-mcp<br/>8 tools]
+            MCP[fleet-mcp<br/>12 tools]
             API[fleet-api<br/>REST + auth /metrics]
             Dash[fleet-dashboard<br/>별도 크레이트, HTML + SSE]
             CLI[fleet-cli<br/>workers/tasks/provision/mtls/...]

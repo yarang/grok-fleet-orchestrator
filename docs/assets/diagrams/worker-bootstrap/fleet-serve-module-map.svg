@@ -37,10 +37,10 @@
   <text x="450" y="136" text-anchor="middle" font-size="13" font-weight="700" fill="#14532d">MCP stdio Server</text>
   <text x="450" y="153" text-anchor="middle" font-size="11" fill="#3f6b4a">(JSON-RPC 2.0)</text>
   <line x1="364" y1="163" x2="536" y2="163" stroke="#bbf7d0" stroke-width="1"/>
-  <text x="364" y="181" font-size="10.5" fill="#14532d">MCP 도구 8개:</text>
+  <text x="364" y="181" font-size="10.5" fill="#14532d">MCP 도구 12개:</text>
   <text x="364" y="197" font-size="10.5" fill="#14532d">fleet_dispatch_task,</text>
   <text x="364" y="213" font-size="10.5" fill="#14532d">fleet_get_task_status,</text>
-  <text x="364" y="229" font-size="10.5" fill="#14532d">fleet_list_workers 외 5개</text>
+  <text x="364" y="229" font-size="10.5" fill="#14532d">fleet_list_workers 외 9개</text>
   <text x="364" y="245" font-size="10.5" fill="#14532d">(fleet-mcp/src/schema.rs)</text>
 
   <!-- Column 3: Background Loops -->

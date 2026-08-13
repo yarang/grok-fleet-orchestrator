@@ -25,8 +25,8 @@
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`architecture/overview.md`](./architecture/overview.md) | Store trait·CircuitBreaker·WorkerSelector·ACP 전송·워커 데몬·mTLS·부트스트랩 토큰 등 내부 설계 마스터 문서 | 🟢 정본 | 2026-08-10 |
-| [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 8종 도구 API 레퍼런스 (2026-08-12 코드 대조로 도구명/개수 정정) | 🟢 정본 | 2026-08-12 |
-| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 8종 도구 연동 스펙 | 🟢 정본 — §4 도구 목록 정정 완료(2026-08-12) | 2026-08-12 |
+| [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 12종 도구 API 레퍼런스 (2026-08-12 코드 대조로 도구명/개수 정정, 2026-08-13 호스트/브레이커/토큰 4종 추가) | 🟢 정본 | 2026-08-13 |
+| [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 12종 도구 연동 스펙 | 🟢 정본 — §4 도구 목록 정정 완료(2026-08-12), 4종 추가 반영(2026-08-13) | 2026-08-13 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 
@@ -73,7 +73,7 @@
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`ui-dashboard/ui-design.md`](./ui-dashboard/ui-design.md) | 8개 대시보드 페이지 IA·플로우·컴포넌트 카탈로그. SSH Config 자동 임포트 UI 흐름 추가 | 🟡 부분 수정됨 | 2026-08-12 |
+| [`ui-dashboard/ui-design.md`](./ui-dashboard/ui-design.md) | 18개 대시보드 라우트 IA·플로우·컴포넌트 카탈로그(원안 "8개 페이지" 오기재 정정됨). SSH Config 자동 임포트 UI 흐름 추가 | 🟢 정본 — 2026-08-13 전체 절 코드 대조 완료(호스트 인벤토리 재분류, StatusPill/HostStatus enum, MCP 도구 12개 반영) | 2026-08-13 |
 | [`../DESIGN-apple.md`](../DESIGN-apple.md) | 실제 적용된 Apple Design System 토큰(Action Blue, SF Pro, parchment, pill CTA) | 🟢 정본 — 루트 문서 | 2026-07-27 |
 | [`../DESIGN-notion.md`](../DESIGN-notion.md) | 이전 Notion 테마 원안 분석 (폐기, 현재는 Apple 정본으로 대체) | ⚫ 폐기(미채택) — 루트 문서 | 2026-07-20 |
 

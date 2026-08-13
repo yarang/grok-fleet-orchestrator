@@ -416,9 +416,11 @@ es.addEventListener("fleet_event", (e) => {
 ## MCP 도구
 
 MCP(JSON-RPC 2.0 over newline-delimited stdio) 인터페이스. AI 코딩 클라이언트가
-`fleet serve`를 MCP 서버로 등록하면 아래 **8개** 도구가 자동으로 노출됩니다
+`fleet serve`를 MCP 서버로 등록하면 아래 **12개** 도구가 자동으로 노출됩니다
 (`crates/fleet-mcp/src/schema.rs`의 `all_tools()`; `handlers.rs`의 유닛 테스트가
-`assert_eq!(tools.len(), 8)`로 개수를 고정합니다). **모든 도구 이름에는 `fleet_`
+`assert_eq!(tools.len(), 12)`로 개수를 고정합니다 — 2026-08-13에 호스트 인벤토리/
+브레이커 리셋/부트스트랩 토큰 관리 4종이 추가되어 8개에서 늘었습니다, 로드맵 #28).
+**모든 도구 이름에는 `fleet_`
 접두사가 붙습니다** — 접두사 없는 이름(`submit_task` 등, 2026-08-06판 문서에 있던 이름)은
 실재하지 않습니다. 응답 봉투는 항상 `{"content": [{"type": "text", "text": "..."}],
 "isError": boolean}` 형태이며, 아래 "출력" 예시는 그 `text` 필드에 문자열로 직렬화되는
@@ -610,6 +612,77 @@ last_seen, registered_at}`. ⚠️ CPU/VRAM 로드율 등의 메트릭은 포함
 **출력**: `{"results": [...], "count": N, "summary": {"terminal": N, "not_found": N,
 "total": N}}`. 아직 실행 중인 작업은 `phase: "pending"`/`"dispatched"`로, 존재하지
 않는 ID는 `phase: "not_found"`로 표시됩니다.
+
+### `fleet_list_hosts`
+
+호스트 인벤토리(`hosts` 테이블)를 조회합니다. `fleet_list_workers`는 **현재
+등록된 워커만** 보여주는 반면, 이 도구는 프로비저닝만 되고 아직 워커로 조인하지
+않았거나, grok/fleet-worker 버전이 예상과 다르거나, 장애가 난 호스트까지 전부
+포함합니다.
+
+**입력**:
+```json
+{ "status": "online" }
+```
+
+`status`는 `provisioned`/`online`/`offline`/`failed` 중 하나(선택 — 생략 시 전체).
+
+**출력**: `{"hosts": [...], "count": N}`. 각 항목은
+`id, hostname, worker_id, status, ssh_host, ssh_port, grok_version,
+fleet_worker_version, load_avg, mem_available_mb, disk_free_mb,
+last_heartbeat_at, provisioned_at`.
+
+### `fleet_reset_worker_breaker`
+
+워커의 CircuitBreaker를 강제로 `Closed`로 되돌립니다. 워커를 Open시킨 원인(일시적
+네트워크 단절, 이후 롤백된 배포 등)을 해결한 뒤, 쿨다운/HalfOpen 프로브 주기를
+기다리지 않고 즉시 dispatch 대상에 다시 포함시키고 싶을 때 사용합니다.
+
+**입력**:
+```json
+{ "worker_id": "550e8400-..." }
+```
+또는
+```json
+{ "worker_name": "gpu-box-1" }
+```
+
+`worker_id`/`worker_name` 중 **정확히 하나만** 지정해야 합니다(둘 다 또는 둘 다
+생략 시 `invalid_params`). 존재하지 않는 `worker_name`은 `isError: true`로
+반환됩니다(JSON-RPC 레벨 에러 아님).
+
+**출력**: `{"worker_id": "...", "previous_state": "open", "new_state": "closed"}`.
+리셋은 `update_worker_circuit_state`로 store에 영속화되고
+`WorkerCircuitChanged` 이벤트로 발행되어, 같은 DB를 공유하는 다른 `fleet serve`
+인스턴스에도 즉시 전파됩니다(`MultiAdminSync`, 로드맵 #25).
+
+### `fleet_list_bootstrap_tokens`
+
+워커 조인용 부트스트랩 토큰 목록을 최신순으로 조회합니다. 원문 토큰 값이
+그대로 반환됩니다(`GET /v1/bootstrap-tokens`와 동일 — 별도 마스킹 없음).
+
+**입력**: 없음 (`{}`).
+
+**출력**: `{"tokens": [...], "count": N}`. 각 항목은
+`token, created_at, expires_at, max_uses, use_count, usable, notes,
+last_used_by, last_used_at`.
+
+### `fleet_revoke_bootstrap_token`
+
+부트스트랩 토큰을 즉시 폐기해 이후 조인 시도를 차단합니다. 이미 조인한 워커에는
+영향을 주지 않습니다. 되돌릴 수 없습니다.
+
+**입력**:
+```json
+{ "token": "fbt_..." }
+```
+
+**출력**: `{"token": "...", "revoked": true}`, 또는 존재하지 않는 토큰이면
+`isError: true`.
+
+⚠️ **의도적 범위 제한**: 토큰 **발급**(create)은 MCP 도구로 노출하지 않았습니다 —
+새 조인 토큰을 발급하는 것은 fleet-cli(`fleet token create`)나 대시보드 HTTP API를
+통해서만 가능합니다.
 
 ---
 

@@ -123,3 +123,18 @@
 
 - `docs/engineering-patterns/documentation-policy.md`를 신설하여 현재 문서화 시스템의 아키텍처 상태를 분석하고, 이를 지속 관리하기 위한 핵심 지침(정본-사본 원칙, 코드 실측 검증 원칙, 다이어그램/SVG 리소스 관리 규약, Ingest-Query-Lint 3단계 워크플로우 및 YAML 프론트매터 표준 양식)을 정립했습니다.
 - `docs/index.md`에 해당 문서를 도메인 8 (Engineering Patterns) 아래의 🟢 정본으로 등재했습니다.
+
+## 2026-08-13 — ingest — MCP 도구 4종 추가(로드맵 #28) 반영 문서 갱신
+
+- `crates/fleet-mcp`에 `fleet_list_hosts`/`fleet_reset_worker_breaker`/
+  `fleet_list_bootstrap_tokens`/`fleet_revoke_bootstrap_token` 4종을 추가해
+  MCP 도구가 8개 → 12개로 늘어난 것을 반영해 `architecture/api-reference.md`
+  (§MCP 도구, 4종 전체 입출력 스펙 추가), `architecture/mcp-specification.md`
+  (§4, 9~12번 항목 추가), `architecture/README.md`, `ui-dashboard/ui-design.md`
+  (§3.8 목업 정정 배너), `worker-bootstrap/{bootstrap-release-v0.2,
+  serve-and-bootstrap-design}.md`, `assets/diagrams/architecture/
+  system-architecture-flow.mermaid`, `assets/diagrams/worker-bootstrap/
+  fleet-serve-module-map.svg`를 일괄 갱신했다.
+- 같은 패스에서 `docs/index.md`의 `ui-design.md` 행이 "8개 페이지"라는 이미
+  정정된(2026-08-13 이전 세션) 오기재를 그대로 요약에 남기고 있던 것을 발견해
+  "18개 라우트"로 정정하고 상태를 🟡→🟢로 올렸다.

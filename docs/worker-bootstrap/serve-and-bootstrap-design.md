@@ -17,7 +17,7 @@
    * **API 엔드포인트**: 워커의 등록/해제 및 하트비트 통신 처리, 마스터 키 기반의 credentials 암호화 보관/조회 API 제공.
    * **정적 자산 서빙**: 대시보드는 별도 크레이트 `fleet-dashboard`가 자체 라우터(`/`, `/tasks`, `/hosts`, `/admin/*` 등)로 서빙하며, `fleet serve`가 HTTP API 서버와 함께 기동합니다.
 2. **MCP stdio JSON-RPC 엔진**:
-   * AI 코딩 클라이언트(Cursor, Claude Code 등)가 실행한 서브프로세스 표준 입출력(stdin/stdout) 채널을 통해 JSON-RPC 2.0 규격으로 **8개**의 MCP 도구(`fleet_dispatch_task`, `fleet_get_task_status`, `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`, `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results`)를 노출 (`crates/fleet-mcp/src/schema.rs`).
+   * AI 코딩 클라이언트(Cursor, Claude Code 등)가 실행한 서브프로세스 표준 입출력(stdin/stdout) 채널을 통해 JSON-RPC 2.0 규격으로 **12개**(2026-08-13 기준, 최초 8개 + 호스트/브레이커/토큰 관리 4개)의 MCP 도구(`fleet_dispatch_task`, `fleet_get_task_status`, `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`, `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results`, `fleet_list_hosts`, `fleet_reset_worker_breaker`, `fleet_list_bootstrap_tokens`, `fleet_revoke_bootstrap_token`)를 노출 (`crates/fleet-mcp/src/schema.rs`).
 3. **태스크 디스패처 (Dispatcher Loop)**:
    * **이벤트 기반**으로 동작합니다 — `mpsc` 채널로 전달되는 태스크를 즉시 소비해 위임합니다(`crates/fleet-scheduler/src/dispatcher.rs`). 별도로 정체된(`Pending`/`Dispatched`) 태스크를 쓸어가는 **Reconciler**가 **30초** 주기 안전망으로 동작합니다(`crates/fleet-scheduler/src/reconcile.rs`). 테이블명은 `fleet_tasks`가 아니라 `tasks`입니다.
    * `WorkerSelector` 모듈을 통해 `Closed` 상태의 회로차단기를 가졌고 CPU/Memory 여유 용량이 남은 워커를 찾아 ACP(Agent Client Protocol) over WebSocket 채널로 작업을 위임.

@@ -667,7 +667,7 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
   <rect x="320" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <rect x="600" y="192" width="260" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <rect x="40" y="332" width="820" height="160" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">8 tools exposed via JSON-RPC 2.0 stdio</text>
+  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">12 tools exposed via JSON-RPC 2.0 stdio</text>
   <text x="60" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_list_workers</text>
   <text x="340" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_get_task_status</text>
   <text x="620" y="222" font-family="Inter, sans-serif" font-size="13" fill="#111">fleet_dispatch_task</text>
@@ -675,12 +675,14 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
   <text x="60" y="400" font-family="Inter, sans-serif" font-size="13" fill="#111">Input schema • usage example • metrics</text>
 </svg>
 
-> ⚠️ **정정 (2026-08-13)**: 실제 도구는 8개이며 전부 `fleet_` 접두사가 붙은
+> ⚠️ **정정 (2026-08-13)**: 실제 도구는 **12개**이며 전부 `fleet_` 접두사가 붙은
 > snake_case 이름입니다(`fleet_dispatch_task`, `fleet_get_task_status`,
 > `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`,
-> `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results` —
-> `crates/fleet-mcp/src/schema.rs`). 위 목업의 `workers.list` 같은 점(dot) 표기
-> 네이밍은 실재하지 않습니다.
+> `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results`,
+> `fleet_list_hosts`, `fleet_reset_worker_breaker`, `fleet_list_bootstrap_tokens`,
+> `fleet_revoke_bootstrap_token` — `crates/fleet-mcp/src/schema.rs`). 뒤 4개는
+> 2026-08-13에 로드맵 #28 대응으로 신규 추가됐습니다. 위 목업의 `workers.list`
+> 같은 점(dot) 표기 네이밍은 실재하지 않습니다.
 
 ---
 

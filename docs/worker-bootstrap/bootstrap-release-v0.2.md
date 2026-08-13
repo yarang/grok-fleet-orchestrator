@@ -28,7 +28,7 @@
 
 | 항목 | 이전 문서 서술 | 실제 코드 (파일 근거) |
 |---|---|---|
-| MCP 도구 개수 | 7개 | **8개** — `fleet_dispatch_task`, `fleet_get_task_status`, `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`, `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results` (`crates/fleet-mcp/src/schema.rs`) |
+| MCP 도구 개수 | 7개 | **12개** (2026-08-13 기준, 최초 8개 + 호스트/브레이커/토큰 관리 4개 추가) — `fleet_dispatch_task`, `fleet_get_task_status`, `fleet_list_workers`, `fleet_list_tasks`, `fleet_cancel_task`, `fleet_wait_for_task`, `fleet_stream_task_output`, `fleet_collect_results`, `fleet_list_hosts`, `fleet_reset_worker_breaker`, `fleet_list_bootstrap_tokens`, `fleet_revoke_bootstrap_token` (`crates/fleet-mcp/src/schema.rs`) |
 | 태스크 디스패처 방식 | `fleet_tasks` 테이블을 1초 주기 폴링 | **이벤트 기반** (`mpsc` 채널 소비, `crates/fleet-scheduler/src/dispatcher.rs`). 테이블명도 `tasks`(`fleet_tasks` 아님). 별도로 정체된 태스크를 쓸어가는 **reconciler**가 **30초** 주기로 동작(`crates/fleet-scheduler/src/reconcile.rs`, 안전망 용도) |
 | 헬스체커 주기/오프라인 판정 | 15초 간격, 45초(3회 누락) | **일치** — `crates/fleet-scheduler/src/health.rs`의 `HealthConfig::default` |
 | 회로차단기 | Circuit Breaker 언급 | **일치, 실제 3상태(Closed/Open/HalfOpen) 구현** — `crates/fleet-scheduler/src/breaker.rs`, `workers.circuit_state` 컬럼에 영속화 |
@@ -143,7 +143,7 @@ CREATE INDEX idx_hosts_labels_gin ON hosts USING GIN (labels jsonb_path_ops); --
 
 - **감사 로그 부재**: 키 생성·삭제·사용이 `audit_log` 테이블에 전혀 기록되지 않습니다. 현재는 `tracing::info!` 로그(조회 불가)와 `host_events`의 자유 텍스트 메시지(`"Provisioning by {username}..."`, 구조화된 actor 컬럼 없음)뿐입니다. 인증/사용자 관리 액션에 이미 쓰이고 있는 `record_audit_event()` 경로를 `create_ssh_key_api`/`delete_ssh_key_api`/`provision_host_api`에도 연결해야 "권한에 따라 제어"가 사후 추적 가능한 통제로 완성됩니다.
 - **키 로테이션 API 부재**: 현재 생성/삭제만 있고 갱신(rotate) 엔드포인트가 없습니다. 로테이션은 사실상 "새 이름으로 생성 → 참조하는 모든 `ssh_key_name` 갱신 → 구키 삭제"로만 가능합니다.
-- **MCP 미노출**: "사용자가 MCP로 orchestrator에 접근"하는 경로가 아직 없습니다 — 현재 8개 MCP 도구(`crates/fleet-mcp/src/schema.rs`) 중 프로비저닝/키 관련 도구가 전무하며, 이 기능은 대시보드 HTTP API 전용입니다. 신규 MCP 도구(예: `fleet_provision_host`)를 추가하려면, stdio 서브프로세스 채널 기반의 현재 MCP 인증 모델을 위 `PermissionKind` 권한 체계와 어떻게 연결할지부터 설계해야 합니다 — 이 부분은 별도 SPEC이 필요합니다.
+- **MCP 부분 노출 (2026-08-13 갱신)**: "사용자가 MCP로 orchestrator에 접근"하는 경로가 부분적으로 열렸습니다 — `fleet_list_hosts`(호스트 인벤토리 **조회**)가 2026-08-13에 추가됐습니다(로드맵 #28). 다만 **프로비저닝 실행·SSH 키 금고 관리는 여전히 MCP에 없으며** 대시보드 HTTP API 전용입니다. 신규 MCP 도구(예: `fleet_provision_host`, `fleet_create_ssh_key`)를 추가하려면, stdio 서브프로세스 채널 기반의 현재 MCP 인증 모델을 위 `PermissionKind` 권한 체계와 어떻게 연결할지부터 설계해야 합니다(현재 MCP는 어떤 도구도 RBAC 검사를 하지 않음 — 이 부분은 별도 SPEC이 필요합니다).
 - **CLI 경로가 금고를 우회함**: `fleet provision --host/--inventory --ssh-key <로컬경로>`는 금고를 거치지 않고 운영자 로컬 파일을 직접 읽습니다(`crates/fleet-cli/src/runtime.rs`). 중앙 관리가 목표라면 CLI에도 `--ssh-key-name <금고이름>` 옵션을 추가하거나, 로컬 파일 경로 사용을 에어갭/최초 부트스트랩 등 예외 상황으로만 한정하는 정책 결정이 필요합니다.
 - **임시 키 파일 정리가 단순 삭제**: 프로비저닝 중 복호화된 키를 `/tmp/.fleet-ssh-key-{uuid}`에 0600 권한으로 잠깐 쓰고 완료 후 `remove_file`로 지우지만, 덮어쓰기 없는 일반 삭제입니다. 강화하려면 삭제 전 덮어쓰기(`zeroize` 등)를 추가하세요.
 - **`fingerprint`는 표시용**: `ssh_keys.fingerprint`는 실제 SSH 공개키 fingerprint가 아니라 개인키 텍스트의 SHA-256 앞부분입니다 — 키 신원 검증 용도로 쓰지 마세요.
