@@ -275,7 +275,25 @@
     ✅ **검증 완료**: `cargo check --no-default-features`,
     `cargo clippy --all-targets --all-features`(경고 0건),
     `cargo test --workspace --features "acp mtls"`(전체 그린) 통과.
-26. ⏳ 시크릿 매니저 통합 부재 (Vault/AWS SM).
+26. 🔵 **시크릿 매니저 통합 부재 (Vault/AWS SM)** — **스킵, 최하위 강등**
+    (2026-08-14). premise 자체(외부 시크릿 매니저 연동이 없음)는 정확합니다
+    — `fleet-credentials`는 AES-256-GCM + 로컬 마스터키(환경변수/파일)로
+    워커 API 키를 암호화해 Postgres에 저장할 뿐, Vault/AWS Secrets Manager
+    같은 외부 KMS와는 연동하지 않습니다.
+
+    사용자에게 처리 방식(AskUserQuestion)을 물었고 **"실제 사용 중인
+    벤더가 없음 — 스킵"**이 확인됐습니다 — 현재 배포 환경에 HashiCorp
+    Vault나 AWS Secrets Manager가 운영되고 있지 않아, 연결·인증 흐름을
+    실제로 검증할 수도 없는 상태에서 통합 코드를 작성하는 것은 가치가
+    낮다고 판단했습니다. 코드 변경 없음.
+
+    향후 실제로 Vault 또는 AWS SM을 운영하게 되면, 개별 워커 API 키
+    자체보다는 `fleet-credentials::MasterKey`의 로딩 경로(현재 환경변수/
+    파일 2가지)에 해당 KMS를 세 번째 옵션으로 추가하는 방향을 권고합니다
+    — 루트 비밀(마스터키) 하나만 외부 KMS가 관리하고, 그 아래 개별 자격
+    증명은 기존 AES-GCM-in-Postgres 설계를 그대로 유지하는 편이 변경
+    범위가 작고 기존 아키텍처와도 잘 맞습니다. 재검토 시 어떤 벤더를 실제로
+    쓸지부터 다시 확인 필요.
 27. 🔵 예시 설정 파일 — **사실상 충족**. `orchestrator.example.toml`은 없으나 `examples/fleet.env`
     (DATABASE_URL, FLEET_HTTP_BIND, FLEET_API_TOKENS 등) + `examples/worker.toml`이 같은 역할을 한다.
     종료 또는 최하위 강등 권고.
@@ -731,9 +749,11 @@
 > **P0·P1은 전부 해소됐다.** 남은 항목은 모두 P2 이하다.
 
 ### 남은 작업 배정
-| 담당 | 항목 |
-|---|---|
-| 미배정 | #26 |
+> **2026-08-14 기준: 미배정 항목 없음.** ⏳(진행 대기) 상태인 항목이 하나도
+> 남지 않았다 — 마지막 남았던 `#14`(다크모드/정렬/필터)를 완료했고, `#26`
+> (시크릿 매니저)은 재평가 후 🔵 최하위 강등으로 결론 냈다. 남은 것은 모두
+> ✅ 해결 또는 🔵 재평가-강등 상태다. 새 로드맵 항목이 추가되면 이 표를
+> 다시 채운다.
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
