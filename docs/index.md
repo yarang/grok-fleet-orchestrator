@@ -82,6 +82,7 @@
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) — 10종 중 3종(#1,#3,#6)이 `fleet-scheduler` 코드 주석에 명시적으로 채택 근거로 인용됨을 확인 | 🔵 사본 — 실제 채택 근거는 `crates/fleet-scheduler/src/dispatcher.rs`/`breaker.rs` 코드 주석 | 2026-08-12 |
+| [`engineering-patterns/documentation-policy.md`](./engineering-patterns/documentation-policy.md) | 문서의 정본/사본 정합성 관리 정책, 코드 실측 검증 원칙, 다이어그램/SVG 리소스 관리 규약 및 Ingest/Query/Lint 3단계 워크플로우 명세서 | 🟢 정본 | 2026-08-13 |
 
 ## 도메인 9. 📖 Agent & Assistant Guidelines
 
