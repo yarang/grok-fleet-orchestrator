@@ -1,0 +1,941 @@
+openapi: 3.0.3
+info:
+  title: Grok Fleet Orchestrator — HTTP API
+  description: >-
+    Worker registration/heartbeat/join, bootstrap-token management, worker
+    credentials, host inventory registration, and Prometheus metrics for
+    `fleet serve`'s `/v1` HTTP API.
+
+
+    This spec covers only the `/v1` and `/metrics` surface served by the
+    `fleet-api` crate. The separate dashboard HTTP API (`fleet-dashboard`,
+    `--dashboard-bind`, cookie-session + RBAC authenticated, ~30 more routes
+    under `/api/*`) is out of scope — see
+    `docs/architecture/api-reference.md` for a partial reference.
+
+
+    Hand-maintained from `crates/fleet-api/src/{schema.rs,handlers.rs,app.rs}`.
+    If it drifts from the code, the code is the source of truth — please
+    file a correction.
+  version: "0.1.0"
+  license:
+    name: (see repository LICENSE)
+externalDocs:
+  description: Full architecture reference (includes the MCP tool surface too)
+  url: https://git.agentthread.dev/yarang/grok-fleet-orchestrator/src/branch/main/docs/architecture/api-reference.md
+
+servers:
+  - url: /v1
+    description: Default mount point (bind address configured via `--http-bind`)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+    description: Liveness/readiness probe (unauthenticated)
+  - name: workers
+    description: Worker lifecycle — register, join, heartbeat, list, deregister
+  - name: credentials
+    description: Per-worker LLM API credential storage (Phase 8.6)
+  - name: bootstrap-tokens
+    description: One-time/multi-use join tokens consumed by `POST /v1/workers/join`
+  - name: hosts
+    description: Host inventory registration (used by `fleet provision`)
+  - name: metrics
+    description: Prometheus text-format metrics (unauthenticated, outside `/v1`)
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [health]
+      summary: Liveness probe
+      description: >-
+        Registered ahead of the auth middleware — always reachable without a
+        bearer token, regardless of `--api-tokens`/`FLEET_API_TOKENS`
+        configuration. Intended for load balancer health checks.
+      security: []
+      responses:
+        "200":
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /workers/register:
+    post:
+      operationId: registerWorker
+      tags: [workers]
+      summary: Register or re-register a worker
+      description: >-
+        Used when the orchestrator already knows the worker's endpoint
+        (e.g. `fleet provision`). For self-service join with a bootstrap
+        token, use `POST /workers/join` instead. When `--transport acp` is
+        active, registration immediately attempts to open the ACP WebSocket
+        session; a connection failure still updates the Store but leaves the
+        worker undispatchable until HealthChecker demotes it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /workers/join:
+    post:
+      operationId: joinWorker
+      tags: [workers, bootstrap-tokens]
+      summary: Self-service worker join using a bootstrap token
+      description: >-
+        Consumes a bootstrap token atomically (single `UPDATE ... RETURNING`,
+        so two concurrent submissions of the same single-use token cannot
+        both succeed) and renders a complete `worker.toml` for the caller to
+        write to disk.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JoinRequest"
+      responses:
+        "200":
+          description: Joined
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JoinResponse"
+        "401":
+          description: Token not found, expired, or exhausted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: An active worker with the same `name` already exists at a different endpoint
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /workers/heartbeat:
+    post:
+      operationId: heartbeatWorker
+      tags: [workers]
+      summary: Periodic worker status update
+      description: >-
+        `grok_version`/`fleet_worker_version`/`os_info` are not just
+        recorded — every heartbeat upserts the corresponding `hosts`
+        inventory row. Omitting them means the host inventory view goes
+        stale for that worker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+        "404":
+          description: Unknown worker_id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /workers:
+    get:
+      operationId: listWorkers
+      tags: [workers]
+      summary: List workers
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/WorkerStatus"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+        - name: label_*
+          in: query
+          description: >-
+            Label filter, one query param per label key, e.g.
+            `?label_arch=arm64&label_gpu=true`. Not a literal parameter
+            named `label_*` — OpenAPI has no first-class syntax for a
+            dynamic-key query param family, so this row documents the
+            convention instead.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Worker summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkerSummary"
+
+  /workers/{id}:
+    get:
+      operationId: getWorker
+      tags: [workers]
+      summary: Get a single worker
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Worker detail (same shape as the list items)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerSummary"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deregisterWorker
+      tags: [workers]
+      summary: Deregister a worker
+      description: >-
+        Calls transport.unregister (tearing down the ACP WebSocket session,
+        if any) before deleting the Store row.
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeregisterRequest"
+      responses:
+        "200":
+          description: >-
+            Deregistered. Note: 200 with a JSON body, not 204 No Content.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeregisterResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{name}/credentials:
+    put:
+      operationId: putWorkerCredential
+      tags: [credentials]
+      summary: Set or rotate a worker's LLM API credential
+      description: >-
+        Sets exactly one (model_id, api_key) pair per call. `api_key` is
+        sent in plaintext over this authenticated channel and encrypted at
+        rest (AES-256-GCM via `FLEET_MASTER_KEY`). Requires the master key
+        to be configured — returns 503 otherwise.
+      parameters:
+        - $ref: "#/components/parameters/WorkerName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutCredentialRequest"
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PutCredentialResponse"
+        "503":
+          description: Master key not configured — credentials API disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: listWorkerCredentials
+      tags: [credentials]
+      summary: List a worker's stored credentials (metadata only)
+      description: Never returns the decrypted `api_key` — see the `/export` endpoint for that.
+      parameters:
+        - $ref: "#/components/parameters/WorkerName"
+      responses:
+        "200":
+          description: Credential summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CredentialSummary"
+
+  /workers/{name}/credentials/{model_id}/export:
+    get:
+      operationId: exportWorkerCredential
+      tags: [credentials]
+      summary: Export a decrypted credential (provisioning use only)
+      description: >-
+        Returns the decrypted `api_key` plus a rendered `grok_config_section`
+        TOML snippet for the worker's `~/.grok/config.toml`. Requires bearer
+        auth like every other `/v1` route — there is no additional
+        elevated-permission check.
+      parameters:
+        - $ref: "#/components/parameters/WorkerName"
+        - $ref: "#/components/parameters/ModelId"
+      responses:
+        "200":
+          description: Decrypted credential
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportedCredential"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{name}/credentials/{model_id}:
+    delete:
+      operationId: deleteWorkerCredential
+      tags: [credentials]
+      summary: Remove a stored credential
+      parameters:
+        - $ref: "#/components/parameters/WorkerName"
+        - $ref: "#/components/parameters/ModelId"
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: boolean
+                    description: false if no matching credential existed
+
+  /bootstrap-tokens:
+    post:
+      operationId: createBootstrapToken
+      tags: [bootstrap-tokens]
+      summary: Issue a new bootstrap token
+      description: >-
+        Despite the name, there is no admin/operator role distinction in
+        fleet-api — any caller holding a valid bearer token for this server
+        may call this endpoint.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBootstrapTokenRequest"
+      responses:
+        "201":
+          description: >-
+            Token created. The full token string is returned here and is
+            also returned unmasked by every subsequent `GET` — there is no
+            masking anywhere in the implementation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateBootstrapTokenResponse"
+        "400":
+          description: bytes out of [8, 256] range, or max_uses < 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      operationId: listBootstrapTokens
+      tags: [bootstrap-tokens]
+      summary: List all bootstrap tokens
+      description: >-
+        No `status` or `created_by` field is returned — clients must compute
+        usability themselves from `use_count`/`max_uses`/`expires_at`.
+      responses:
+        "200":
+          description: Token summaries, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BootstrapTokenSummary"
+
+  /bootstrap-tokens/{token}:
+    delete:
+      operationId: revokeBootstrapToken
+      tags: [bootstrap-tokens]
+      summary: Revoke (permanently delete) a bootstrap token
+      description: >-
+        Deletes the row outright — this is not a use_count bump or a soft
+        disable. Already-joined workers are unaffected.
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: The full token string (percent-encode if it contains reserved characters)
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, token]
+                properties:
+                  status:
+                    type: string
+                    enum: [revoked]
+                  token:
+                    type: string
+        "404":
+          description: No token with that value exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /hosts/register:
+    post:
+      operationId: registerHost
+      tags: [hosts]
+      summary: Register a provisioned host
+      description: >-
+        Called by `fleet provision` (or `fleet host-keys` tooling) after SSH
+        provisioning completes, independent of worker registration —
+        upserts a `hosts` row and appends a `host_events` entry
+        (`provision_ok`/`provision_fail`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostRegisterRequest"
+      responses:
+        "200":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostRegisterResponse"
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [metrics]
+      summary: Prometheus metrics
+      description: >-
+        Served *outside* the `/v1` prefix and outside the bearer-auth
+        middleware (standard Prometheus scrape convention) — but still
+        behind Cloudflare Access if `--cf-audience` is configured.
+      security: []
+      servers:
+        - url: /
+          description: Root-mounted, not under /v1
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP fleet_up Liveness indicator (always 1 if scrape succeeded).
+                  # TYPE fleet_up gauge
+                  fleet_up 1
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        `Authorization: Bearer <token>` against the `--api-tokens`/
+        `FLEET_API_TOKENS` allow-list (constant-time compare). If
+        `--cf-audience` is set, `CF-Access-Jwt-Assertion` is checked first
+        and satisfies auth on its own — this spec doesn't model that
+        alternate scheme. If neither is configured, the server runs in
+        no-auth mode (dev only) and this requirement is not enforced.
+
+  parameters:
+    WorkerId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WorkerName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+    ModelId:
+      name: model_id
+      in: path
+      required: true
+      description: The grok config `[model.<id>]` key, e.g. `grok-build`
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: No matching resource
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - bad_request
+                - unauthorized
+                - not_found
+                - conflict
+                - store_error
+                - internal_error
+            message:
+              type: string
+
+    WorkerStatus:
+      type: string
+      enum: [online, degraded, offline, circuit_open]
+
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+
+    RegisterRequest:
+      type: object
+      required: [name, agent_endpoint]
+      properties:
+        name:
+          type: string
+          description: DNS-safe worker name; rejected on conflict
+        agent_endpoint:
+          type: string
+          example: "wss://10.0.1.10:2419/ws?server-key=secret"
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+        capabilities:
+          type: array
+          items:
+            type: string
+          default: []
+        max_concurrent_tasks:
+          type: integer
+          default: 4
+        worker_version:
+          type: string
+          nullable: true
+        existing_worker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Preserve this worker_id across re-registration if provided
+
+    RegisterResponse:
+      type: object
+      required: [worker_id, heartbeat_interval_secs, config_revision, orchestrator_version, status]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        heartbeat_interval_secs:
+          type: integer
+        config_revision:
+          type: integer
+          description: Currently always 1 — not a real revision counter yet
+        orchestrator_version:
+          type: string
+        status:
+          type: string
+          enum: [registered]
+
+    JoinRequest:
+      type: object
+      required: [token, name, agent_endpoint]
+      properties:
+        token:
+          type: string
+        name:
+          type: string
+        agent_endpoint:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          default: {}
+        max_concurrent_tasks:
+          type: integer
+          default: 4
+        worker_version:
+          type: string
+          nullable: true
+
+    JoinResponse:
+      allOf:
+        - $ref: "#/components/schemas/RegisterResponse"
+        - type: object
+          required: [worker_config_toml]
+          properties:
+            worker_config_toml:
+              type: string
+              description: Complete worker.toml content for the caller to write to disk
+
+    OsInfo:
+      type: object
+      properties:
+        os_type:
+          type: string
+        distro:
+          type: string
+        kernel:
+          type: string
+        arch:
+          type: string
+        hostname:
+          type: string
+
+    HeartbeatRequest:
+      type: object
+      required: [worker_id]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        active_tasks:
+          type: integer
+          default: 0
+        load_avg:
+          type: array
+          items:
+            type: number
+          description: "1/5/15-minute Unix load averages"
+        mem_available_mb:
+          type: integer
+          default: 0
+        disk_free_mb:
+          type: integer
+          default: 0
+        agent_healthy:
+          type: boolean
+          default: true
+        grok_version:
+          type: string
+          nullable: true
+        fleet_worker_version:
+          type: string
+          nullable: true
+        os_info:
+          allOf:
+            - $ref: "#/components/schemas/OsInfo"
+          nullable: true
+
+    HeartbeatResponse:
+      type: object
+      required: [ok, desired_state, server_time]
+      properties:
+        ok:
+          type: boolean
+        desired_state:
+          type: string
+          enum: [running]
+          description: Reserved for future shutdown-signal use; always "running" today
+        server_time:
+          type: string
+          format: date-time
+
+    WorkerSummary:
+      type: object
+      required:
+        - id
+        - name
+        - endpoint
+        - status
+        - labels
+        - active_tasks
+        - max_concurrent
+        - circuit_state
+        - registered_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        endpoint:
+          type: string
+        status:
+          $ref: "#/components/schemas/WorkerStatus"
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        active_tasks:
+          type: integer
+        max_concurrent:
+          type: integer
+        circuit_state:
+          type: string
+          enum: [closed, open, half_open]
+        last_seen:
+          type: string
+          format: date-time
+          nullable: true
+        registered_at:
+          type: string
+          format: date-time
+
+    DeregisterRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          nullable: true
+
+    DeregisterResponse:
+      type: object
+      required: [worker_id, status]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [deregistered]
+        reason:
+          type: string
+          nullable: true
+
+    PutCredentialRequest:
+      type: object
+      required: [model_id, base_url, api_key]
+      properties:
+        model_id:
+          type: string
+        base_url:
+          type: string
+        api_key:
+          type: string
+          description: Sent in plaintext over this authenticated channel; encrypted at rest
+        api_backend:
+          type: string
+          enum: [chat_completions, responses]
+          default: chat_completions
+        context_window:
+          type: integer
+          default: 200000
+        model_name:
+          type: string
+          nullable: true
+
+    PutCredentialResponse:
+      type: object
+      required: [status, worker_name, model_id, rotated_at]
+      properties:
+        status:
+          type: string
+        worker_name:
+          type: string
+        model_id:
+          type: string
+        rotated_at:
+          type: string
+          format: date-time
+
+    CredentialSummary:
+      type: object
+      required: [worker_name, model_id, base_url, api_backend, context_window, created_at, rotated_at]
+      properties:
+        worker_name:
+          type: string
+        model_id:
+          type: string
+        base_url:
+          type: string
+        api_backend:
+          type: string
+        context_window:
+          type: integer
+        model_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        rotated_at:
+          type: string
+          format: date-time
+
+    ExportedCredential:
+      allOf:
+        - $ref: "#/components/schemas/CredentialSummary"
+        - type: object
+          required: [api_key, grok_config_section]
+          properties:
+            api_key:
+              type: string
+              description: Decrypted plaintext — this endpoint exists specifically to expose it
+            grok_config_section:
+              type: string
+              description: Rendered TOML snippet for ~/.grok/config.toml
+
+    CreateBootstrapTokenRequest:
+      type: object
+      properties:
+        prefix:
+          type: string
+          default: fleet
+        bytes:
+          type: integer
+          minimum: 8
+          maximum: 256
+          default: 32
+        max_uses:
+          type: integer
+          minimum: 1
+          default: 1
+        expires_in_secs:
+          type: integer
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        created_by:
+          type: string
+          nullable: true
+
+    CreateBootstrapTokenResponse:
+      type: object
+      required: [token, created_at, max_uses]
+      properties:
+        token:
+          type: string
+          example: "fleet_9f3a7c2bdeadbeef..._H8x"
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        max_uses:
+          type: integer
+
+    BootstrapTokenSummary:
+      type: object
+      required: [token, created_at, max_uses, use_count, remaining_uses]
+      properties:
+        token:
+          type: string
+          description: Returned unmasked — no masking logic exists anywhere in the server
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        max_uses:
+          type: integer
+        use_count:
+          type: integer
+        remaining_uses:
+          type: integer
+        notes:
+          type: string
+          nullable: true
+        last_used_by:
+          type: string
+          nullable: true
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    HostRegisterRequest:
+      type: object
+      required: [hostname, ssh_host, ssh_user, succeeded]
+      properties:
+        hostname:
+          type: string
+        ssh_host:
+          type: string
+        ssh_port:
+          type: integer
+          default: 22
+        ssh_user:
+          type: string
+        succeeded:
+          type: boolean
+          description: Whether the provisioning run this call reports on succeeded
+        message:
+          type: string
+          nullable: true
+
+    HostRegisterResponse:
+      type: object
+      required: [ok, host_id]
+      properties:
+        ok:
+          type: boolean
+        host_id:
+          type: string
+          format: uuid

@@ -212,6 +212,10 @@ pub fn build_app(state: Arc<AppState>) -> Router {
                 }
             }),
         )
+        // OpenAPI 스펙 (로드맵 #21) — /metrics와 동일한 이유로 인증 미들웨어
+        // 바깥: API 스펙 자체는 비밀이 아니고, 클라이언트 도구(Swagger UI 등)가
+        // 토큰 없이 바로 불러올 수 있어야 발견성이 생긴다.
+        .route("/openapi.yaml", get(openapi_spec))
         // HTTP 지연 기록 — 모든 라우트를 감싼다. 인증 미들웨어보다 바깥이라
         // 인증 실패로 거부된 요청의 지연도 함께 관측된다(부하 판단에 필요).
         .layer({
@@ -254,6 +258,21 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         // 브라우저 교차 출처 요청이 차단됨 (permissive 제거).
         .layer(cors_layer(&state.cors_allowed_origins))
         .with_state(state)
+}
+
+/// `/v1` HTTP API의 OpenAPI 3.0.3 스펙 (로드맵 #21). `schema.rs`/`handlers.rs`
+/// 기준으로 수기 작성 — 코드가 바뀌면 이 파일도 함께 갱신해야 한다(자동
+/// 생성 아님). 대시보드 API(`/api/*`, `fleet-dashboard` 크레이트)는 별도
+/// 크레이트이자 훨씬 큰 표면(~30개 라우트)이라 이 스펙의 범위 밖이다.
+const OPENAPI_YAML: &str = include_str!("openapi.yaml");
+
+/// `GET /openapi.yaml` 핸들러. `/metrics`와 동일하게 인증 미들웨어 바깥에
+/// 등록되어 토큰 없이도 조회 가능.
+async fn openapi_spec() -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
+        OPENAPI_YAML,
+    )
 }
 
 /// JSON 전용 API용 CSP — 스크립트/이미지/프레임 등 모든 서브리소스 로드 금지.
@@ -554,5 +573,70 @@ mod tests {
     fn circuit_state_unused_marker() {
         // CircuitState가 이 모듈에서 미사용이더라도 다른 곳에서 쓰이므로 re-export
         let _ = CircuitState::Closed;
+    }
+
+    // ── OpenAPI 스펙 (로드맵 #21) ────────────────────────────────────────
+
+    #[test]
+    fn openapi_yaml_is_valid_and_covers_known_paths() {
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(OPENAPI_YAML).expect("openapi.yaml must be valid YAML");
+        assert_eq!(
+            doc["openapi"].as_str(),
+            Some("3.0.3"),
+            "unexpected or missing openapi version field"
+        );
+        let paths = doc["paths"]
+            .as_mapping()
+            .expect("paths must be a mapping");
+        for expected in [
+            "/health",
+            "/workers/register",
+            "/workers/join",
+            "/workers/heartbeat",
+            "/workers",
+            "/workers/{id}",
+            "/workers/{name}/credentials",
+            "/bootstrap-tokens",
+            "/bootstrap-tokens/{token}",
+            "/hosts/register",
+            "/metrics",
+        ] {
+            assert!(
+                paths.contains_key(serde_yaml::Value::String(expected.to_string())),
+                "openapi.yaml is missing path: {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn openapi_yaml_route_is_reachable_without_auth() {
+        use tower::ServiceExt;
+        // 토큰이 설정돼 있어도 /openapi.yaml은 인증 없이 조회 가능해야 한다
+        // (/metrics와 동일한 이유 — 발견성).
+        let state = AppState::new(MemStore::new_arc()).with_tokens(vec!["secret".into()]);
+        let app = build_app(Arc::new(state));
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/openapi.yaml")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("yaml"),
+            "unexpected content-type: {content_type}"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).starts_with("openapi: 3.0.3"));
     }
 }
