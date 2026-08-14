@@ -1029,6 +1029,47 @@
     SIGINT/TTY 동작, 동시 세션 생성 레이스 등)을 `#49` Phase 0 검증
     스파이크와 함께 확인. 그 전까지는 착수 대상 아님.
 
+51. ⏳ **에이전트 하네스 구성 (Skill · 프로젝트 헌법 · 계층 모델)** (P2,
+    신규 기능, `#49`의 도구 바인딩 위에 쌓이는 확장) — **설계 완료, 구현
+    대기**. 사용자 요청으로 신규 등록: "에이전트-호스트-custom 프롬프트-tool의
+    관계와 층위를 분석하고, project/task/skill까지 결합하며, 하네스
+    엔지니어링 요소 도입도 검토하라."
+
+    **핵심 분석**: 지금까지 하나로 뭉뚱그려졌던 설계를 세 축으로 분리 —
+    (1) WHERE(물리적 배치, `#48`/`#49`에서 이미 완성 — Host는 순수
+    인프라적, 행동을 규정하지 않음), (2) WHAT(행동 구성 — custom_prompt
+    "정체성" → **Skill(신규)** "절차" → Tool "실행"의 3계층, Claude Code
+    자신의 하네스 구조와 동형), (3) WHEN/스코프(Project 기본값 → Template
+    프리셋 → Agent 인스턴스 → Task 1회성, Tool이 이미 따르는 체인을
+    Skill도 그대로 복제). 이 분석 과정에서 Host↔Tool 관계의 실제 성격도
+    재정의 — Host는 Tool의 "출처"가 아니라 "가용성 제약"(stdio 도구는
+    host에 바이너리가 있어야 함, 신규 `hosts.labels`/
+    `mcp_servers.required_host_labels` 가드로 보강)이라는 걸 명확히 함.
+
+    **핵심 설계 결정** (AskUserQuestion, 2026-08-15): Skill 신규 도입(`#49`
+    1차 요구사항 10번 "tool 혹은 skill"에서 skill이 누락돼 있던 것을 채움),
+    내용 저장은 **DB 텍스트**(`mcp_servers`와 동일 패턴 — 파일/git 기반은
+    스크립트 실행이 가능해지면 보안 검토가 커져 이번엔 순수 지침형으로
+    범위를 좁힘). **프로젝트 헌법**(`Project.constitution_prompt`, CLAUDE.md
+    유사 개념)도 함께 도입해 축 3에 비어 있던 "Project 레벨" 층을 채움.
+
+    **하네스 엔지니어링 요소 검토**: Skill·프로젝트 헌법은 채택, **Hooks**
+    (세션 내부 도구 호출 후킹)와 **Permission Mode**는 ACP의 개입 가능
+    범위가 `#49` §5.2와 동일하게 미검증이라 개념만 기록하고 설계 보류,
+    **서브에이전트 위임**은 `fleet_dispatch_task`를 자기 참조형
+    `mcp_servers` 항목으로 등록하는 것만으로 이미 자연히 가능해 새 엔티티
+    불필요.
+
+    전체 설계(3축 분석, 프롬프트 조립 순서 전체 확정, 데이터 모델,
+    Host↔Tool 가용성 가드, 하네스 엔지니어링 요소 검토표, RBAC/API/CLI/UI
+    표면, 단계별 구현 계획)는
+    [`docs/architecture/agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md)에
+    정리했습니다.
+
+    **다음 단계**: `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은
+    Phase에서 함께 구현 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI
+    패턴이 완전히 동일해 분리 구현하면 낭비.
+
 ---
 
 ## 현재 진행 상황 (2026-08-11 기준)
@@ -1038,17 +1079,20 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #48, #49, #50 |
+| 미배정 | #48, #49, #50, #51 |
 
 > **2026-08-14 기준**: `#14`(다크모드/정렬/필터) 완료, `#26`(시크릿 매니저)은
 > 재평가 후 🔵 최하위 강등, 그 외 전 항목 ✅ 해결/🔵 재평가-강등 상태였다가,
 > 같은 날 사용자 요청으로 `#48`(프로젝트 기능 도입) → `#49`(에이전트 동적
 > 프로비저닝/메모리/스레드 요약, `#48` 요구사항의 확장) → `#50`(에이전트
-> 터미널 모니터링·CLI 직접 접속, `#49`에 전적으로 의존) 순서로 신규
-> 등록됐다 — 셋 다 설계는 완료([`project-feature-design.md`](../architecture/project-feature-design.md),
+> 터미널 모니터링·CLI 직접 접속, `#49`에 전적으로 의존) → `#51`(에이전트
+> 하네스 구성: Skill·프로젝트 헌법·계층 모델, `#49`의 도구 바인딩 확장,
+> 2026-08-15) 순서로 신규 등록됐다 — 넷 다 설계는 완료
+> ([`project-feature-design.md`](../architecture/project-feature-design.md),
 > [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md),
-> [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)),
-> 구현은 아직 시작 전이라 미배정 상태. 세 문서 모두 "현재 확정된 설계"만
+> [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md),
+> [`agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md)),
+> 구현은 아직 시작 전이라 미배정 상태. 문서들 모두 "현재 확정된 설계"만
 > 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는
 > [`docs/architecture/log.md`](../architecture/log.md)에 별도로 정리돼 있다.
 

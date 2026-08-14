@@ -423,6 +423,12 @@ Agent 생성을 막지 않습니다(같은 프로젝트에 새 에이전트가 �
 
 ## 5. Custom 프롬프트 및 도구(MCP) 바인딩
 
+> **Skill(신규, `#51`)**: custom_prompt(정체성)와 Tool(실행) 사이에
+> "절차적 지식" 계층을 추가하는 [`agent-harness-composition-design.md`](agent-harness-composition-design.md)를
+> 참고하세요 — Tool과 완전히 같은 바인딩 패턴(템플릿 스냅샷 + 필수/옵션)을
+> 그대로 재사용하며, 전체 프롬프트 조립 순서(Project 헌법 → custom_prompt
+> → Skill → 메모리 → 스레드 → 새 프롬프트)도 그 문서 §5가 정본입니다.
+
 ### 5.1 Custom 프롬프트 — 프롬프트 조립 시점 주입
 
 `custom_prompt`는 grok CLI 인자로 넘기지 않습니다(grok 프로세스 수준
@@ -660,5 +666,7 @@ Design System**([`ui-design.md`](../ui-dashboard/ui-design.md) §2)임에
 - [`docs/architecture/project-feature-design.md`](project-feature-design.md) — `#48`.
 - [`docs/architecture/agent-terminal-access-design.md`](agent-terminal-access-design.md) — `#50`,
   `#49` Phase 4에 전적으로 의존하는 후속 확장(tmux 기반 터미널 모니터링/attach).
+- [`docs/architecture/agent-harness-composition-design.md`](agent-harness-composition-design.md) — `#51`,
+  이 문서의 도구 바인딩·프롬프트 조립을 Skill·프로젝트 헌법으로 확장.
 - [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.11~§3.14 —
   화면 설계 정본.

@@ -1,0 +1,61 @@
+erDiagram
+    %% 기존 엔티티(#48/#49)는 이 신규 확장과 맞닿는 최소 필드만 표시.
+    %% 전체 스키마는 project-data-model.mermaid / agent-data-model.mermaid 참고.
+
+    PROJECTS ||--o{ HOSTS : "owns exclusively (#48)"
+    HOSTS ||--o{ AGENTS : "runs (#49)"
+    AGENT_TEMPLATES |o--o{ AGENTS : "instantiates (#49)"
+
+    AGENT_TEMPLATES ||--o{ AGENT_TEMPLATE_SKILLS : "declares required/optional"
+    AGENTS ||--o{ AGENT_SKILLS : "resolved binding (스냅샷, 개별 오버라이드 가능)"
+    SKILLS ||--o{ AGENT_TEMPLATE_SKILLS : "referenced by (ON DELETE RESTRICT)"
+    SKILLS ||--o{ AGENT_SKILLS : "referenced by (ON DELETE RESTRICT)"
+
+    MCP_SERVERS }o--o{ HOSTS : "required_host_labels ⊆ host.labels (신규 가드, stdio만 해당)"
+
+    TASKS |o--o| PROJECTS : "project_id (#48)"
+    TASKS }o..o{ SKILLS : "requested_optional_skills (이름 배열, FK 아님)"
+
+    PROJECTS {
+        uuid id PK
+        text constitution_prompt "신규 — 이 프로젝트 모든 에이전트에 항상 선행 주입"
+    }
+
+    HOSTS {
+        uuid id PK
+        jsonb labels "신규 — Worker.labels와 동일 패턴(키 존재 여부만 검사)"
+    }
+
+    MCP_SERVERS {
+        uuid id PK
+        text transport "stdio | http | sse"
+        jsonb required_host_labels "신규, nullable — stdio에서만 의미, http/sse는 항상 NULL"
+    }
+
+    SKILLS {
+        uuid id PK
+        text name UK
+        text description
+        text content "markdown 지침 원문 — 순수 텍스트, 실행 리소스 없음"
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    AGENT_TEMPLATE_SKILLS {
+        uuid template_id FK
+        uuid skill_id FK
+        text requirement "required | optional"
+    }
+
+    AGENT_SKILLS {
+        uuid agent_id FK
+        uuid skill_id FK
+        text requirement "required | optional — 템플릿에서 복사, 개별 오버라이드 가능"
+    }
+
+    TASKS {
+        uuid id PK
+        uuid project_id FK
+        jsonb requested_optional_skills "nullable — 이 태스크에서만 켤 optional skill 이름 배열"
+    }

@@ -248,3 +248,48 @@ fleet-worker 수명 동안의 모니터링/attach"로 좁히고, "재시작 시 
 세션만 재활용해선 지연이 줄지 않음. 진짜 시작 지연을 줄이려면 "agent_id에
 묶이지 않은 범용 grok 웜풀"이라는 완전히 별개의(더 큰) 기능이 필요 —
 이번 스코프에서는 설계하지 않고 §9에 향후 후보로만 기록.
+
+---
+
+## `agent-harness-composition-design.md` (로드맵 [`#51`](../roadmap/roadmap.md))
+
+### 2026-08-15, 1차 — 최초 설계
+사용자 요청("에이전트-호스트-custom 프롬프트-tool의 관계와 층위를
+분석하고, project/task/skill까지 결합하며, 하네스 엔지니어링 요소 도입도
+검토하라")으로 신규 등록. `#49` 1차 요구사항 10번("tool 혹은 skill과
+연결")이 애초에 skill을 요구했으나 지금까지 tool만 설계되고 skill은
+누락돼 있었음을 확인.
+
+**관계·층위 분석**: 기존 설계를 세 축으로 분리 — 축 1(WHERE, `#48`/`#49`가
+이미 완성 — Host는 순수 인프라적), 축 2(WHAT, custom_prompt "정체성" →
+Skill(신규) "절차" → Tool "실행"의 3계층, Claude Code 자신의 하네스
+구조와 동형), 축 3(WHEN/스코프, Project→Template→Agent→Task 체인, Tool이
+이미 따르는 걸 Skill도 복제). 이 과정에서 Host↔Tool 관계를 재정의 — Host는
+Tool의 "출처"가 아니라 "가용성 제약"(stdio 도구는 host에 바이너리가
+있어야 함)이라는 걸 명확히 하고, `hosts.labels`/
+`mcp_servers.required_host_labels` 가드를 신규 설계(기존 Worker의
+`labels`/`required_labels` 패턴 재사용, 새 메커니즘 발명 안 함).
+
+**핵심 설계 결정**(AskUserQuestion): Skill 내용은 **DB 텍스트**로 저장
+(`mcp_servers`와 동일 패턴) — 파일/git 기반(Claude Code 스타일)도 검토했으나
+호스트 배포 메커니즘이 새로 필요하고 스크립트 실행이 가능해지면 보안
+검토가 훨씬 커져, 순수 지침형 스킬로 범위를 좁혀 구현 비용을 낮춤. Skill
+바인딩은 `agent_template_tools`/`agent_tools`와 완전히 동일한 구조
+(`agent_template_skills`/`agent_skills`, required/optional, `#49`가
+이미 정한 스냅샷 원칙 재사용)로 설계 — 새 패턴을 만들지 않음.
+`Project.constitution_prompt`(CLAUDE.md 유사 개념)도 함께 도입해 축 3에
+비어 있던 "Project 레벨" 층을 채움 — 이 저장소 자신이 `agent.md`/
+`CLAUDE.md`로 쓰는 패턴과 정확히 같은 개념이라는 메타적 관찰도 있었음.
+
+**하네스 엔지니어링 요소 검토**(Claude Code 하네스 개념 대입): Skill·
+프로젝트 헌법은 지금 도입. **Hooks**(세션 내부 도구 호출 후킹)와
+**Permission Mode**는 grok/ACP가 그 수준의 개입을 지원하는지 자체가
+`#49` §5.2의 도구 바인딩 메커니즘과 똑같이 미검증이라 개념만 기록하고
+설계는 보류(검증 안 된 능력 위에 설계하지 않는다는 `#49`의 기존 원칙을
+그대로 따름). **서브에이전트 위임**은 `fleet_dispatch_task`를 자기
+참조형 `mcp_servers` 카탈로그 항목으로 등록하는 것만으로 이미 자연히
+가능함을 확인 — 새 엔티티 불필요, 문서화만.
+
+구현은 `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은 Phase에서 함께
+하는 것을 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI 패턴이
+완전히 동일해 분리 구현하면 낭비.

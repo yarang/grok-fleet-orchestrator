@@ -1,0 +1,39 @@
+flowchart TB
+    subgraph Axis1["축 1 — WHERE (물리적 배치, #48/#49 기존)"]
+        direction LR
+        Proj1[Project] --> Host1[Host<br/>+labels 신규] --> Agent1[Agent] --> Worker1[Worker]
+    end
+
+    subgraph Axis3["축 3 — WHEN/스코프 (누가 어느 범위에서 결정하는가)"]
+        direction TB
+        L1["Project 레벨<br/>constitution_prompt (신규) — 항상 적용"]
+        L2["Template 레벨<br/>기본 custom_prompt + 필수/옵션 Tool·Skill 프리셋"]
+        L3["Agent 레벨<br/>생성 시 템플릿 스냅샷 + 개별 오버라이드"]
+        L4["Task 레벨<br/>requested_optional_tools / requested_optional_skills (1회성)"]
+        L1 --> L2 --> L3 --> L4
+    end
+
+    subgraph Axis2["축 2 — WHAT (행동 구성, 프롬프트 조립 순서)"]
+        direction TB
+        A["1. Project.constitution_prompt<br/>(신규 — 이 프로젝트의 모든 에이전트가 항상 지킴)"]
+        B["2. Agent.custom_prompt<br/>(정체성/페르소나 — 언제 어떤 스킬을 쓸지 판단)"]
+        C["3. Skill 내용 (신규)<br/>필수는 항상, 옵션은 task가 이름으로 요청한 것만"]
+        D["4. Agent Memory<br/>(agent_id 지정 시 최근 N개)"]
+        E["5. 스레드 이력"]
+        F["6. 새 태스크 프롬프트"]
+        A --> B --> C --> D --> E --> F
+    end
+
+    Tool["Tool/MCP (기존)<br/>실제 실행 — Skill의 절차 안에서<br/>호출되는 경우가 많음"]
+    C -.공유 카탈로그.-> Tool
+
+    HostConstraint["Host.labels ⊇ McpServer.required_host_labels<br/>(신규 가드) — stdio 도구만 해당,<br/>불만족 시 에이전트 생성 자체를 409로 차단"]
+    Host1 -.제약 검사.-> HostConstraint
+    Tool -.검증.-> HostConstraint
+
+    Axis1 -.determines who runs it.-> Axis2
+    Axis3 -.각 레벨이 축2의 재료를 채움.-> Axis2
+
+    style HostConstraint fill:#fff3cd,stroke:#e0a800
+    style A fill:#e8f0fe,stroke:#4285f4
+    style C fill:#e8f0fe,stroke:#4285f4

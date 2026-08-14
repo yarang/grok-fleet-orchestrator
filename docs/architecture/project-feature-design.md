@@ -57,6 +57,9 @@ CREATE TABLE projects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- updated_at 자동 갱신 트리거는 007_hosts.sql의 update_hosts_updated_at() 패턴을 재사용.
+-- `#51`(agent-harness-composition-design.md)이 이후 마이그레이션에서
+-- constitution_prompt TEXT 컬럼을 추가한다 — 이 프로젝트의 모든 에이전트에
+-- 항상 선행 주입되는 프로젝트 전역 지침("이 프로젝트의 CLAUDE.md").
 
 -- 013_task_threads.sql이 예약해 둔 컬럼에 이제야 FK를 건다. 기존 행은
 -- project_id IS NULL인 채로 계속 유효(013의 설계 의도 그대로).
@@ -297,5 +300,7 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 - [`docs/architecture/log.md`](log.md) — 이 설계에 도달한 경위(개정 이력).
 - [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
   이 하드 격리 모델 위에 host 내 동적 에이전트 생성을 쌓는 후속 설계.
+- [`docs/architecture/agent-harness-composition-design.md`](agent-harness-composition-design.md) — `#51`,
+  `constitution_prompt` 컬럼을 이 `projects` 테이블에 추가하는 후속 확장.
 - [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.9~§3.10 —
   화면 설계 정본.

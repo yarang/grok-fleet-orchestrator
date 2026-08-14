@@ -802,6 +802,9 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 1. **헤더**: 이름/설명, `agent_provisioning_mode` Badge, (automatic일 때만)
    `agent_idle_timeout_secs`·`default_agent_template_id` 표시, `workdir_template`,
+   `constitution_prompt` 존재 여부/미리보기(2026-08-15 신설,
+   `agent-harness-composition-design.md` `#51` — "이 프로젝트의 모든
+   에이전트가 항상 따르는 지침", 접이식으로 전체 텍스트 펼침 가능),
    Edit/Delete.
 2. **배정된 Host/Worker**: `list_project_hosts` 기반 DataTable(호스트 행마다
    연결된 worker와 `has_capacity` 상태를 함께 표시). `+ Assign Host` 모달은
@@ -1003,15 +1006,22 @@ Memory 패널 아래에 읽기 전용 "Terminal" 패널을 추가합니다 —
 > SSH 키 금고)와 동일한 관리자 전용 컨벤션을 따릅니다 — 별도 신규 패턴
 > 없음.
 
-**라우트**: `/admin/agent-templates`, `/admin/mcp-servers`  **권한**: `AgentTemplateManage`(admin 기본)  **스타일**: Apple auth surface
+**라우트**: `/admin/agent-templates`, `/admin/mcp-servers`, `/admin/skills`(2026-08-15 신설)
+**권한**: `AgentTemplateManage`/`SkillManage`(admin 기본)  **스타일**: Apple auth surface
 
 - **`/admin/agent-templates`**: Template DataTable(name, custom_prompt 미리보기,
-  필수/옵션 도구 칩 목록, 사용 중인 Agent 수) + 생성/편집 모달.
+  필수/옵션 도구·스킬 칩 목록, 사용 중인 Agent 수) + 생성/편집 모달(도구
+  선택기 옆에 스킬 선택기 추가 — 동일 UI 패턴).
 - **`/admin/mcp-servers`**: `mcp_servers` 카탈로그 DataTable(name, transport
-  badge, 참조 중인 template/agent 수) + 등록 모달. **삭제 시 참조 중이면
-  409**(`agent-provisioning-design.md` §3/§10, `ON DELETE RESTRICT` 정책) —
-  삭제 버튼 클릭 시 참조 목록을 먼저 보여주고, 참조가 하나도 없을 때만
-  실제 삭제 버튼을 활성화.
+  badge, 필요 host 레이블 칩(`agent-harness-composition-design.md` §6,
+  stdio만 해당), 참조 중인 template/agent 수) + 등록 모달. **삭제 시 참조
+  중이면 409**(`agent-provisioning-design.md` §3/§10, `ON DELETE RESTRICT`
+  정책) — 삭제 버튼 클릭 시 참조 목록을 먼저 보여주고, 참조가 하나도
+  없을 때만 실제 삭제 버튼을 활성화.
+- **`/admin/skills`**(2026-08-15 신설, `agent-harness-composition-design.md` `#51`):
+  `skills` 카탈로그 DataTable(name, description, 참조 중인 template/agent
+  수) + 등록 모달(markdown `content` 입력 — 미리보기 탭 포함). 삭제 정책은
+  `/admin/mcp-servers`와 동일(참조 중이면 409).
 
 ---
 
