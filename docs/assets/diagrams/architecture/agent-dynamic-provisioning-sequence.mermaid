@@ -2,19 +2,19 @@ sequenceDiagram
     actor Admin as 관리자/프로젝트(대시보드·MCP)
     participant API as fleet-api / fleet-dashboard
     participant Store as fleet-store<br/>(agents, agent_commands)
-    participant FW as fleet-worker<br/>(대상 host)
+    participant FW as fleet-worker<br/>(대상 host, agent_id 키드 프로세스 레지스트리)
     participant Grok as grok agent serve<br/>(신규 프로세스)
 
-    Note over Admin,Store: fleet-worker는 오케스트레이터로 인바운드 연결을 받지 않는다<br/>(#42에서 확인된 "워커는 항상 아웃바운드만" 설계 원칙 유지) —<br/>그래서 명령은 새 인바운드 채널이 아니라 기존 heartbeat 폴링에 얹는다.
+    Note over Admin,Store: 제어 플레인(등록/하트비트)은 아웃바운드 폴링만 쓴다는<br/>원칙(#42)은 유지하되, 2026-08-14 재검토로 범위를 정정 —<br/>mTLS 배포는 실제로 인바운드 리스너(MtlsProxy, 기본 2420포트)가<br/>이미 존재한다(태스크/세션 데이터 플레인용). 다만 그건 grok 세션<br/>프로토콜 전용이라 agent 제어 커맨드에는 부적합 — 기존 heartbeat<br/>폴링에 얹는 선택 자체는 유지, 근거만 "인바운드 자체가 없다"에서<br/>"제어 커맨드 채널로 쓸 인바운드가 없다"로 좁힘.
 
     Admin->>API: POST /api/agents {host_id, project_id?, custom_prompt}
     API->>API: require_permission(AgentCreate)
-    API->>Store: host의 여유 확인<br/>(count(running agents on host) < hosts.max_agents)
+    API->>Store: BEGIN; SELECT hosts WHERE id=host_id FOR UPDATE;<br/>count(agents WHERE host_id=? AND status NOT IN ('stopped','failed')) 확인<br/>(2026-08-14 재검토: 락 없이 count만 하면 동시 요청 2개가<br/>둘 다 "여유 있음"으로 읽어 max_agents를 초과하는 TOCTOU 레이스 — FOR UPDATE로 차단)
     alt 여유 없음
-        Store-->>API: 거부
+        Store-->>API: 거부, ROLLBACK
         API-->>Admin: 409 Conflict "host at agent capacity"
     else 여유 있음
-        API->>Store: insert_agent(status=Pending) + insert_agent_command(type=start)
+        API->>Store: insert_agent(status=Pending, idle_timeout_secs=project.agent_idle_timeout_secs 스냅샷)<br/>+ insert_agent_command(type=start); COMMIT
         Store-->>API: Ok(agent_id)
         API-->>Admin: 202 Accepted {agent_id, status: "Pending"}
     end
@@ -23,25 +23,38 @@ sequenceDiagram
         FW->>API: POST /v1/workers/heartbeat {worker_id, ...}
         API->>Store: list_pending_agent_commands(host_id)
         Store-->>API: [{command_id, type: start, agent_id, custom_prompt}]
-        API-->>FW: HeartbeatResponse { ..., pending_commands: [...] }
+        API-->>FW: HeartbeatResponse { ..., pending_commands: [...] }<br/>(2026-08-14 재검토: 현재 HeartbeatResponse는 확장 불가능한<br/>고정 구조{ok, desired_state:&str, server_time} — pending_commands<br/>필드 추가 자체가 Phase 4의 스키마 변경 범위임을 명시)
     end
 
-    FW->>FW: GrokRunner가 새 grok agent serve 서브프로세스<br/>spawn(빈 포트 자동 할당) — 기존 1-프로세스 관리에서<br/>N-프로세스 관리로 확장된 부분
+    FW->>FW: 커맨드 실행 전 자기 자신 dedup —<br/>local registry에 이미 이 agent_id의 프로세스가 있으면 스킵(ack만 재전송)<br/>(agent_commands 멱등성은 command_id가 아니라<br/>"agent_id당 프로세스 1개"라는 효과 단위로 보장, §12)
+    FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: acked}
+    API->>Store: agent_command.status = acked; agent.status = Pending → Starting<br/>(2026-08-14 재검토 신설 — 이전엔 Starting 전이 시점이<br/>문서 어디에도 정의돼 있지 않아, AgentAutoProvisioner가<br/>Pending 상태를 "에이전트 없음"으로 오판해 중복 생성하는<br/>레이스가 있었음. §4.1 eligibility 체크는 이제 Pending도 포함)
+    FW->>FW: agent_id 키드 프로세스 레지스트리에 등록(Phase 4 재작성 —<br/>기존 GrokRunner는 host당 프로세스 1개만 관리했음) —<br/>grok agent serve 서브프로세스 spawn(빈 포트 자동 할당)
     FW->>Grok: grok agent serve --bind 127.0.0.1:<동적 포트> --secret ...
-    Grok-->>FW: 기동 완료(헬스체크 TCP probe 통과)
-    FW->>API: POST /v1/workers/register<br/>{name: "<host>-agent-<agent_id 앞 8자리>", agent_endpoint, ...}
-    Note right of API: 기존 register 플로우 그대로 재사용 —<br/>worker.name에 agent_id를 인코딩해 상관관계 확보.
-    API->>Store: upsert_worker(...) → worker_id 발급
-    API->>Store: link_agent_worker(agent_id, worker_id), agent.status = Running
-    FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: done}
-    API->>Store: agent_command.status = done
+    alt 기동 실패(포트 충돌/바이너리 오류 등)
+        Grok-->>FW: spawn 실패 또는 헬스체크 타임아웃
+        FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: failed, error}
+        API->>Store: agent_command.status = failed; agent.status = Starting → Failed
+    else 기동 성공
+        Grok-->>FW: 기동 완료(헬스체크 TCP probe 통과)
+        FW->>API: POST /v1/workers/register<br/>{name: "<host>-agent-<agent_id 전체 UUID>", agent_endpoint, ...}
+        Note right of API: 기존 register 플로우 재사용 — /v1/workers/register는<br/>이름 유일성을 검사하지 않고 upsert하므로(2026-08-14 재검토 확인),<br/>worker.name에는 agent_id를 축약 없이 전체 포함해<br/>스킴 자체로 충돌을 원천 차단한다(짧게 자르면 두 agent가<br/>같은 이름을 만들 경우 조용히 서로의 워커 레코드를 덮어씀).
+        API->>Store: upsert_worker(...) → worker_id 발급
+        API->>Store: link_agent_worker(agent_id, worker_id), agent.status = Starting → Running
+        FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: done}
+        API->>Store: agent_command.status = done
+    end
 
     Note over Admin,Grok: 이 시점부터 이 agent로의 디스패치는<br/>기존 Dispatcher/WorkerSelector 경로를 그대로 탄다<br/>(worker_id가 채워졌으므로) — custom_prompt/메모리는<br/>디스패치 시점에 프롬프트에 주입될 뿐, 별도 프로토콜 불필요.
 
-    Note over Admin,Grok: 종료도 동일 패턴
+    Note over Admin,Grok: 종료도 동일 패턴, 단 기존 GrokRunner의<br/>"비정상 종료 시 자동 재시작" 루프를 반드시 먼저 무력화해야 함
     Admin->>API: POST /api/agents/:id/stop
-    API->>Store: insert_agent_command(type=stop, agent_id)
+    API->>Store: insert_agent_command(type=stop, agent_id); agent.status = Stopping
     FW->>API: (다음 heartbeat) pending_commands에서 stop 수신
+    FW->>API: POST /v1/workers/agent-commands/:command_id/ack {status: acked}
+    FW->>FW: 이 agent_id 전용 shutdown 채널로 "의도된 종료" 먼저 신호<br/>(2026-08-14 재검토 신설 — 신호 없이 바로 kill하면 기존<br/>GrokRunner의 자동 재시작 루프가 죽은 프로세스를 다시 살려버림)
     FW->>Grok: SIGTERM → 5초 대기 → SIGKILL (기존 GrokRunner 종료 정책 재사용)
-    FW->>API: POST /v1/workers/deregister (기존 흐름) + agent-commands ack
+    FW->>API: POST /v1/workers/deregister (기존 흐름) + agent-commands ack {status: done}
     API->>Store: agent.status = Stopped, worker 행 정리
+
+    Note over Admin,Store: 호스트가 offline_worker_grace(기존 Reconciler 값, 300초)를<br/>넘겨 하트비트가 끊기면(2026-08-14 재검토 신설): 그 호스트의<br/>pending 커맨드는 failed로, Running/Starting agent는 Failed로<br/>일괄 전이하는 스윕을 AgentAutoProvisioner 주기에 추가.

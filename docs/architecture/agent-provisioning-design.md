@@ -17,7 +17,16 @@
 > 유휴 판단 기준을 프로세스 신호가 아닌 fleet 자체 신뢰 소스 기반으로 전면
 > 재작성, §12에 메모리 보존 정책을 열린 질문으로 추가, §13(설치·운영 고려
 > 사항)과 §UI/UX 절을 신설했습니다 — 자세한 경위는 `roadmap.md` #49 항목의
-> 4차 개정 기록 참고. 아직 구현되지 않았습니다 — 진행 상황은
+> 4차 개정 기록 참고.
+> **개정 (2026-08-14, 5차 — 프로토콜/절차 재검토)**: 실제 코드(하트비트
+> 프로토콜, `GrokRunner`, 서킷브레이커, `Reconciler`)를 확인해 §4의 절차를
+> 재검증했습니다. "인바운드 연결 없음(#42)" 주장의 범위를 정정, `agents`에
+> `idle_timeout_secs` 스냅샷 컬럼 신설(프로젝트 삭제 시 좀비 방지),
+> `AgentAutoProvisioner`의 `Pending` 상태 누락으로 인한 중복 생성 레이스
+> 수정, `agent_commands` ACK 프로토콜(`Starting` 전이 시점 포함) 구체화,
+> `hosts.max_agents` 체크의 TOCTOU 레이스 수정, `worker.name` 유일성 요구사항
+> 명시, 호스트 삭제 가드(RESTRICT 정책) 신설. 자세한 경위는 `roadmap.md`
+> `#49` 항목의 5차 개정 기록 참고. 아직 구현되지 않았습니다 — 진행 상황은
 > `roadmap.md` #49 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 사용자 요구사항 원문 요약
@@ -155,6 +164,16 @@ pub struct Agent {
     /// §4.1이 서술하는 "Manual로 만든 에이전트는 자동 종료 대상 아님" 규칙을
     /// 구현할 방법이 없었음).
     pub provisioned_by: AgentProvisionedBy,
+    /// 생성 시점에 `project.agent_idle_timeout_secs`를 그대로 복사한 스냅샷
+    /// (2026-08-14 5차 개정 — 프로토콜/절차 재검토에서 발견한 버그 수정).
+    /// `#48` §6의 "왜 스냅샷인가(템플릿 라이브 참조 금지)"와 동일한 이유:
+    /// 프로젝트를 매번 라이브 조회하면, 이 에이전트의 소속 프로젝트가
+    /// 나중에 삭제(`agents.project_id`는 `ON DELETE SET NULL`)돼도 이 행
+    /// 자체는 남는데, §4.1의 유휴 스윕이 "project → agent" 방향으로
+    /// 순회하므로 프로젝트가 사라진 자동생성 에이전트는 영원히 스윕
+    /// 대상에서 빠지는 좀비가 된다. 스냅샷하면 스윕이 agent 자체를 기준으로
+    /// 순회할 수 있어 이 문제가 원천적으로 없어진다.
+    pub idle_timeout_secs: Option<u32>,
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -212,6 +231,17 @@ pub enum ToolRequirement { Required, Optional }
 ### 신규 마이그레이션 (`016_agents.sql`, `#48`의 `015_projects.sql` 다음 번호)
 
 ```sql
+-- host_id는 ON DELETE CASCADE를 유지한다(mcp_servers와 달리 RESTRICT로
+-- 바꾸지 않음) — Stopped/Failed로 끝난 과거 agent 기록까지 호스트 삭제를
+--막으면 지나치게 엄격하다. 대신 "실행 중(Running/Starting/Pending/Stopping)
+-- agent가 있으면 호스트 삭제 자체를 애플리케이션 레벨에서 409로 차단"하는
+-- 가드를 hosts 삭제 핸들러에 추가한다(2026-08-14 5차 개정, 정책 결정 —
+-- 이전엔 이 가드가 없어 호스트 삭제 즉시 실행 중이던 agent 행과
+-- agent_commands가 CASCADE로 조용히 사라지고 실제 grok 프로세스만 고아로
+-- 남는 문제가 있었다). RESTRICT처럼 FK 제약으로 강제하지 않는 이유는
+-- 이 조건이 status 값에 달려 있어 순수 SQL CHECK/FK로 표현할 수 없기
+-- 때문 — mcp_servers RESTRICT는 무조건 차단이라 FK로 충분했지만, 이건
+-- 상태 조건부 차단이라 애플리케이션 코드가 필요하다.
 CREATE TABLE agents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
@@ -224,6 +254,9 @@ CREATE TABLE agents (
     -- 'manual' | 'automatic' — §4.1 유휴 자동 종료 대상 판단에 필수.
     -- 2026-08-14 4차 개정으로 추가(재검토에서 발견한 누락 컬럼).
     provisioned_by TEXT NOT NULL DEFAULT 'manual',
+    -- 생성 시점 project.agent_idle_timeout_secs 스냅샷. 2026-08-14 5차
+    -- 개정으로 추가 — 위 fleet-core 타입 주석과 동일한 이유(좀비 방지).
+    idle_timeout_secs INTEGER,
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -234,6 +267,10 @@ CREATE INDEX idx_agents_project_id ON agents(project_id);
 ALTER TABLE hosts ADD COLUMN IF NOT EXISTS max_agents INTEGER NOT NULL DEFAULT 1;
 -- 기존 host는 전부 1로 시작 — "host당 최대 1워커"이던 기존 실질 동작을
 -- 조용히 바꾸지 않는다. 운영자가 명시적으로 올려야 다중 에이전트가 열린다.
+-- "여유" 카운트/체크는 반드시 host 행을 SELECT ... FOR UPDATE로 잠근
+-- 트랜잭션 안에서 수행한다(2026-08-14 5차 개정 — 잠금 없이 카운트만
+-- 하면 동시에 들어온 두 POST /api/agents 요청이 둘 다 "여유 있음"으로
+-- 읽어 max_agents를 초과하는 TOCTOU 레이스가 실제로 가능했음).
 
 CREATE TABLE agent_commands (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -320,26 +357,82 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_optional_tools JSONB;
 
 ![Agent Dynamic Provisioning Sequence](../assets/diagrams/architecture/agent-dynamic-provisioning-sequence.mermaid)
 
-`fleet-worker`는 오케스트레이터로부터 인바운드 연결을 받지 않는다는 기존 설계
-원칙(`#42`에서 확인)을 유지하기 위해, 새 인바운드 채널을 만들지 않고 **기존
-heartbeat 폴링에 커맨드를 얹는 방식**을 씁니다. (전체 흐름은 최초 설계와
-동일 — 세부 단계는 다이어그램 참고.) 요약:
+> ⚠️ **정정 (2026-08-14, 5차 개정 — 프로토콜/절차 재검토)**: "`fleet-worker`는
+> 오케스트레이터로부터 인바운드 연결을 받지 않는다"는 원래 서술은 실측과
+> 다릅니다. mTLS 배포에서는 `fleet-worker`가 실제로 인바운드 리스너를
+> 엽니다(`MtlsProxy::bind`, 기본 `mtls.listen_addr=0.0.0.0:2420` —
+> `crates/fleet-transport/src/mtls_proxy.rs`, `crates/fleet-worker/src/
+> runner.rs`). 논-mTLS 배포도 SSH 역터널로 사실상 인바운드가 닿습니다.
+> 정확한 원칙은 **"제어 플레인(등록/하트비트/디레지스터)은 항상 아웃바운드
+> 폴링만 쓴다"** — 위 인바운드 채널은 태스크/세션 데이터 플레인(grok ACP
+> 세션) 전용이라 agent 제어 커맨드에는 부적합합니다. 그래서 아래처럼
+> **기존 heartbeat 폴링에 커맨드를 얹는 선택 자체는 유지**하되, 근거
+> 문구만 정정합니다. (전체 흐름은 다이어그램 참고, 이번 개정으로 함께
+> 갱신됨.) 요약:
 
-1. `POST /api/agents`가 host 여유(`max_agents` 대비 현재 실행 개수)를 확인하고
-   `agents`(Pending) + `agent_commands`(start)를 만든다.
-2. 다음 하트비트 응답에 `pending_commands`가 실려 온다.
-3. `fleet-worker`의 `GrokRunner`가 새 grok 프로세스를 spawn(동적 포트).
-4. 새 프로세스가 기존 `/v1/workers/register` 흐름으로 자기 등록 —
-   `worker.name`에 `agent_id`를 인코딩해 상관관계 확보.
-5. 오케스트레이터가 `agents.worker_id`를 채우고 `status=Running` 전이,
-   커맨드 ack.
-6. 이후 디스패치는 기존 `Dispatcher`/`WorkerSelector` 경로 그대로.
-7. 종료(`stop`)도 동일한 커맨드 큐 패턴 재사용.
+1. `POST /api/agents`가 host 여유를 확인하고(아래 "여유" 판단 기준 — **호스트
+   행을 `SELECT ... FOR UPDATE`로 잠근 트랜잭션 안에서** 확인/기록) `agents`
+   (Pending, `idle_timeout_secs`는 프로젝트 설정을 스냅샷) + `agent_commands`
+   (start)를 만든다.
+2. 다음 하트비트 응답에 `pending_commands`가 실려 온다 — **이를 위해
+   `HeartbeatResponse`(현재 `{ok, desired_state: &'static str, server_time}`
+   고정 구조, `crates/fleet-api/src/schema.rs`)를 확장해야 한다는 것 자체가
+   Phase 4의 스키마 변경 범위임을 명시**(이전 문서는 이미 확장 가능한
+   구조인 것처럼 서술했음).
+3. `fleet-worker`가 커맨드를 실행하기 전 **자기 자신 dedup**을 먼저 한다 —
+   로컬 `agent_id` 키드 프로세스 레지스트리에 이미 그 agent용 프로세스가
+   있으면 spawn을 스킵하고 ack만 재전송한다(하트비트 ack 유실로 같은
+   `start` 커맨드가 두 번 내려와도 프로세스가 중복 spawn되지 않도록 —
+   `agent_commands` 멱등성은 `command_id` 단위가 아니라 "agent_id당
+   프로세스 1개"라는 **효과** 단위로 보장한다, §12).
+4. 신규 `POST /v1/workers/agent-commands/:command_id/ack {status}` 엔드포인트로
+   먼저 `status: acked`를 보고한다 — 이 시점에 `agent.status`가
+   `Pending → Starting`으로 전이한다. **이 전이 시점을 명시하는 것 자체가
+   이번 개정의 버그 수정이다**: 이전 문서는 `Starting` 상태로 언제 바뀌는지
+   전혀 정의하지 않았고, 그 결과 §4.1의 `AgentAutoProvisioner` eligibility
+   체크("Running/Starting 에이전트가 없으면 생성")가 아직 ack되지 않은
+   `Pending` 에이전트를 "없음"으로 오판해 **같은 대기 태스크에 대해
+   에이전트를 중복 생성**할 수 있는 레이스가 있었다(§4.1에서 수정).
+5. `fleet-worker`의 (재작성된, Phase 4) 프로세스 레지스트리가 새 grok
+   프로세스를 spawn(동적 포트). 기존 `GrokRunner`는 host당 프로세스
+   **1개만** 관리했으므로(`crates/fleet-worker/src/grok_process.rs`), 이번
+   확장은 "설정 조정"이 아니라 **agent_id 키드 레지스트리로의 재작성**이다.
+   spawn 실패/헬스체크 타임아웃 시 `status: failed`로 ack하고
+   `agent.status → Failed` 전이(§4.1엔 없던 실패 경로 — 다이어그램에 반영).
+6. 기동 성공 시 새 프로세스가 기존 `/v1/workers/register` 흐름으로 자기
+   등록 — `worker.name`에 `agent_id`를 **축약 없이 전체 UUID로** 인코딩해
+   상관관계를 확보한다. **왜 전체 UUID인가(이번 개정에서 명시)**:
+   `/v1/workers/register`는 이름 유일성을 검사하지 않고 **upsert**한다
+   (`crates/fleet-api/src/handlers.rs` — 유일성 검사는 별도의
+   `/v1/workers/join`에만 있음). 이름을 짧게 자르면 서로 다른 두 agent가
+   같은 축약 이름을 만들어낼 경우 조용히 서로의 워커 레코드를 덮어쓰는
+   실제 위험이 있으므로, 스킴 자체로 충돌이 구조적으로 불가능하도록
+   전체 UUID를 포함해야 한다.
+7. 오케스트레이터가 `agents.worker_id`를 채우고 `status: Starting → Running`
+   전이, `status: done`으로 ack.
+8. 이후 디스패치는 기존 `Dispatcher`/`WorkerSelector` 경로 그대로.
+9. 종료(`stop`)도 동일한 커맨드 큐 패턴을 재사용하되, **기존 `GrokRunner`가
+   비정상 종료 시 자동으로 프로세스를 재시작하는 루프**(`restart_delay_secs`
+   후 재spawn)를 갖고 있다는 점을 반드시 고려해야 한다 — 신호 없이 바로
+   kill하면 그 재시작 루프가 죽은 프로세스를 곧바로 되살려버린다. 그래서
+   stop 처리는 **먼저 해당 agent 전용 shutdown 채널로 "의도된 종료"임을
+   신호한 뒤에** kill해야 한다(이전 문서에 없던 요구사항 — 이번 개정에서
+   명시, 다이어그램 반영).
+10. 호스트가 `offline_worker_grace`(기존 `Reconciler` 값, 300초)를 넘겨
+    하트비트가 끊기면, 그 호스트의 `pending` 커맨드는 `failed`로, 그 위의
+    `Running`/`Starting` 에이전트는 `Failed`로 일괄 전이하는 스윕을
+    `AgentAutoProvisioner` 주기에 추가한다(이전엔 이 정리 절차 자체가
+    없어서, 호스트가 영구히 오프라인이 되면 그 위 에이전트/커맨드가
+    무기한 `Running`/`pending`으로 남아 있었음).
 
 ### "여유" 판단 기준
 
-1단계는 `hosts.max_agents`(운영자 설정 정수 상한)와 현재 `Running`/`Starting`
-개수 비교만 씁니다. `HostMetrics` 기반 자동 판단은 §12 열린 질문으로 보류.
+`hosts.max_agents`(운영자 설정 정수 상한)와 현재 **터미널 상태(`Stopped`/
+`Failed`)가 아닌** 에이전트 개수를 비교합니다 — `Running`/`Starting`뿐
+아니라 **`Pending`도 포함**해야 합니다(2026-08-14 5차 개정: `Pending`은
+"아직 실행 중은 아니지만 이미 슬롯을 예약한" 상태이므로 여유 계산에서
+빠지면 위 §4 1단계의 `FOR UPDATE` 잠금과 무관하게 과다 생성이 가능해짐).
+`HostMetrics` 기반 자동 판단은 §12 열린 질문으로 보류.
 
 ### 4.1 수동/자동 프로비저닝 모드 (`#48` 3차 결정 반영)
 
@@ -364,8 +457,13 @@ pub enum AgentProvisioningMode { Manual, Automatic }
   `interval`과 같은 관례) 다음을 확인합니다:
   1. `agent_provisioning_mode = 'automatic'`인 프로젝트 중, `project_id`가
      일치하는 `Pending` 태스크가 있고
-  2. 그 프로젝트에 `Running`/`Starting` 상태인 Agent가 하나도 없거나 전부
-     `has_capacity() == false`이며
+  2. 그 프로젝트에 **터미널 상태(`Stopped`/`Failed`)가 아닌** Agent(`Pending`/
+     `Starting`/`Running`)가 하나도 없거나, 존재하는 것들이 전부
+     `Running`이면서 `has_capacity() == false`이며(2026-08-14 5차 개정 —
+     이전엔 `Running`/`Starting`만 체크해, 방금 커맨드는 발행했지만 아직
+     `Starting`으로 ack되지 않은 `Pending` 에이전트를 "없음"으로 오판하는
+     레이스가 있었음: 같은 30초 스윕 주기 안에 두 번째 틱이 돌면 같은
+     대기 태스크에 대해 에이전트를 중복 생성할 수 있었음 — §4 4단계 참고)
   3. 그 프로젝트에 배정된 host 중 `max_agents` 여유가 있는 host가 있으면
   → `default_agent_template_id`로 새 Agent를 만들고(`provisioned_by =
   'automatic'`) `agent_commands`(start)를 발행합니다(§4의 수동 흐름과 완전히
@@ -384,12 +482,17 @@ stdio/CPU 사용률 같은 저수준 신호는 쓰지 않습니다 — 노이즈
 **"동작 중" 판정**: 에이전트가 다음 중 **하나라도** 참이면 동작 중으로
 간주해 타임아웃 대상에서 제외합니다.
 
-1. 그 에이전트의 `worker_id`에 대해 `Worker.active_tasks > 0`(이미 존재하는
-   필드 — `WorkerHeartbeat`로 갱신되는, "지금 세션이 몇 개 도는가"에 대해
-   가장 신뢰할 수 있는 지표).
-2. `tasks` 테이블에 이 `agent_id`를 참조하며 `status = Dispatched`인 행이
-   하나라도 있음(진행 중인 태스크 — `active_tasks`와 이론상 일치해야 하지만
-   레이스 대비 이중 확인).
+1. `tasks` 테이블에 이 `agent_id`를 참조하며 `status = Dispatched`인 행이
+   하나라도 있음 — **오케스트레이터가 디스패치 시점에 직접 쓰는 값이라
+   실시간·권위 있는 1차 신호**(2026-08-14 5차 개정으로 우선순위 정정: 이전
+   문서는 아래 2번을 "가장 신뢰할 수 있는 지표"라고 서술했으나, 실측 확인
+   결과 `Worker.active_tasks`는 오케스트레이터가 아니라 **워커 프로세스
+   자신이 하트비트로 자기 보고**하는 값이라 최대 한 하트비트 주기(기본
+   15초)만큼 지연될 수 있음 — 방금 디스패치된 태스크가 다음 하트비트
+   전까지는 `active_tasks`에 반영되지 않는 창이 실제로 존재).
+2. 그 에이전트의 `worker_id`에 대해 `Worker.active_tasks > 0`(하트비트로
+   갱신, 위 1번의 지연 창을 보강하는 2차 확인 — 1번이 놓칠 수 있는 경우를
+   메꾸는 이중 확인이지 그 반대가 아님).
 3. `agent_commands`에 이 agent에 대한 `status = 'pending'`인 명령이 있음
    (방금 시작 명령을 냈는데 아직 등록도 끝나지 않은 상태 — 이때 끄면 안 됨).
 
@@ -404,16 +507,22 @@ ms~수백 ms) 새 태스크가 들어왔을 극히 드문 경우를 방어합니
 
 **적용 대상**: 위 판단 기준 자체는 `Manual`/`Automatic` 공통 인프라로
 구현하지만, 유휴 자동 종료의 **적용 대상은 `Automatic`으로 생성된 에이전트
-(`provisioned_by = 'automatic'`)로 한정**합니다 — `Project.agent_idle_timeout_secs`
-(`#48` §3, `NULL`이면 자동 종료 안 함)가 설정돼 있으면, `AgentAutoProvisioner`가
-같은 주기에 위 기준으로 "동작 중이 아니고" 타이머가 만료된 `automatic`
-에이전트를 찾아 `agent_commands`(stop)를 발행합니다. **이 정책이 없으면
-자동 생성된 에이전트가 영원히 host 여유를 점유하게 되어, "여유가 있을 때만
-만든다"는 원래 동기 자체가 무의미해집니다** — 자동 생성은 반드시 자동
-회수와 짝을 이뤄야 합니다. `Manual`로 만든 에이전트(`provisioned_by =
-'manual'`)는 판단 기준이 아무리 정교해져도 이 정책의 대상이 아닙니다 —
-사람이 명시적으로 만든 것을 시스템이 임의로 끄는 것은 최소 놀람 원칙에
-어긋나므로, 이는 판단 정확도와 무관하게 유지되는 정책적 결정입니다.
+(`provisioned_by = 'automatic'`)로 한정**합니다 — `agents.idle_timeout_secs`
+(생성 시점에 `Project.agent_idle_timeout_secs`를 스냅샷한 값, §3 — **2026-08-14
+5차 개정: 프로젝트를 매번 라이브 조회하지 않고 Agent 행 자체에 스냅샷한
+값을 쓴다.** 라이브 조회 방식이었다면, 이 에이전트의 소속 프로젝트가
+나중에 삭제돼도(`agents.project_id`는 `ON DELETE SET NULL`) 이 agent 행
+자체는 남는데, 스윕이 "project → agent" 방향으로 순회하다 보니 프로젝트가
+사라진 자동생성 에이전트는 영원히 스윕 대상에서 빠지는 좀비가 되는 버그가
+있었음)가 `NULL`이 아니면, `AgentAutoProvisioner`가 같은 주기에 위 기준으로
+"동작 중이 아니고" 타이머가 만료된 `automatic` 에이전트를 찾아
+`agent_commands`(stop)를 발행합니다. **이 정책이 없으면 자동 생성된
+에이전트가 영원히 host 여유를 점유하게 되어, "여유가 있을 때만 만든다"는
+원래 동기 자체가 무의미해집니다** — 자동 생성은 반드시 자동 회수와 짝을
+이뤄야 합니다. `Manual`로 만든 에이전트(`provisioned_by = 'manual'`)는
+판단 기준이 아무리 정교해져도 이 정책의 대상이 아닙니다 — 사람이 명시적으로
+만든 것을 시스템이 임의로 끄는 것은 최소 놀람 원칙에 어긋나므로, 이는 판단
+정확도와 무관하게 유지되는 정책적 결정입니다.
 
 ## 5. Custom 프롬프트 및 도구(MCP) 바인딩
 
@@ -530,6 +639,19 @@ attach(session) = agent_tools(agent_id, requirement='required')
 `fleet_stop_agent`, `fleet_get_agent_memory`. `fleet_dispatch_task`는
 `agent_id`/`requested_optional_tools` 입력을 추가로 받습니다.
 
+**호스트 삭제 가드**(2026-08-14 5차 개정 신설, 정책 결정): `DELETE
+/api/hosts/:hostname`은 이 문서가 아니라 기존 호스트 인벤토리 기능(§3.2.5,
+`ui-design.md`)이 소유한 엔드포인트지만, `#49`가 그 위에 Agent를 도입하면서
+새로운 위험이 생겼습니다 — 삭제 시 `agents.host_id`가 `ON DELETE CASCADE`라
+실행 중인 agent 행과 `agent_commands`가 조용히 사라지고 실제 grok
+프로세스만 고아로 남습니다. **호스트 핸들러에 가드를 추가해, 그 호스트에
+터미널 상태가 아닌(`Pending`/`Starting`/`Running`/`Stopping`) agent가 하나라도
+있으면 삭제를 `409 Conflict`로 차단**합니다(참조 중인 agent 목록을 응답
+본문에 포함 — `mcp_servers` RESTRICT와 동일한 사용자 경험). 운영자는 먼저
+각 agent를 stop해 `Stopped`로 만든 뒤에만 호스트를 삭제할 수 있습니다.
+DB 레벨 FK를 RESTRICT로 바꾸지 않는 이유는 §3 SQL 주석 참고(상태 조건부라
+순수 FK로 표현 불가).
+
 ## 11. 단계별 구현 계획
 
 `#48`보다 리스크가 커 더 잘게 쪼갭니다. **Phase 0을 신설**해 가장 위험한
@@ -551,9 +673,13 @@ attach(session) = agent_tools(agent_id, requirement='required')
 3. **Phase 3 — 메모리 + 스레드 요약**: `agent_memory`/`thread_summaries`
    저장소, §7/§8의 프롬프트 조립 로직.
 4. **Phase 4 — 동적 프로비저닝**(최고 위험도): `agent_commands` 큐,
-   `HeartbeatResponse.pending_commands`, `GrokRunner` 다중 프로세스 관리자
-   재작성, §4.1의 `AgentAutoProvisioner`(Automatic 모드 + 유휴 자동 종료).
-   실기기 대상 수동 검증 필수.
+   `HeartbeatResponse` 확장(현재 고정 구조 `{ok, desired_state, server_time}`에
+   `pending_commands` 추가) + 신규 `POST /v1/workers/agent-commands/:id/ack`
+   엔드포인트, `GrokRunner`를 host당 1프로세스에서 `agent_id` 키드
+   프로세스 레지스트리로 재작성(자동 재시작 루프를 agent별 의도된 종료
+   신호로 무력화하는 로직 포함, §4 9단계), §4.1의 `AgentAutoProvisioner`
+   (Automatic 모드 + 유휴 자동 종료 + 호스트 오프라인 정리 스윕). 실기기
+   대상 수동 검증 필수.
 5. **Phase 5 — API + CLI + MCP + 대시보드 UI**: §10 표면 전체.
 
 ## 12. 열린 질문
@@ -565,8 +691,13 @@ attach(session) = agent_tools(agent_id, requirement='required')
   `agent_memory`를 복합 키로 바꿀 필요가 없어졌습니다.
 - **호스트 리소스 기반 자동 "여유" 판단**: 1단계는 명시적 `max_agents`만
   (§4.1의 `AgentAutoProvisioner`도 동일 기준 사용).
-- **`agent_commands` 유실/중복 처리**: ack 유실 시 중복 실행 방지를 위한
-  `agent_commands.id` 기준 멱등 처리가 Phase 4 구현에서 필수.
+- ~~**`agent_commands` 유실/중복 처리**~~ — **2026-08-14 5차 개정으로 구체화**:
+  멱등 단위를 `agent_commands.id`가 아니라 **"agent_id당 프로세스 1개"라는
+  효과**로 잡습니다 — `fleet-worker`가 커맨드 실행 전 로컬 `agent_id` 키드
+  프로세스 레지스트리를 먼저 확인해, 이미 그 agent용 프로세스가 있으면
+  spawn을 스킵하고 ack만 재전송합니다(§4 3단계). 완전히 닫힌 질문은
+  아님 — 정확한 ack 재전송 규칙(예: 몇 번까지 재시도)은 Phase 4 구현 시
+  확정.
 - **스레드 요약 생성 방법**: 규칙 기반 vs 모델 기반, Phase 3에서 결정.
 - **`mcp_servers.env`의 시크릿 처리**: 1단계는 평문 저장 — API 키 등 민감값이
   섞이면 `fleet-credentials`(기존 AES-256-GCM 마스터키 암호화)와 연동할지

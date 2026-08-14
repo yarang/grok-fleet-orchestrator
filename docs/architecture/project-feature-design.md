@@ -12,6 +12,10 @@
 > `AgentProvisioningMode` 소유권, `workdir_template` 누락, 워커 재등록 시
 > `project_id` 드리프트, `unassign_*` 명명 비대칭)을 반영하고, §UI/UX 절을
 > 신설했습니다 — 자세한 경위는 `roadmap.md` #48 항목의 4차 개정 기록 참고.
+> **개정 (2026-08-14, 4차)**: 실제 코드(`#38` 디스패치/재시도 로직) 대비
+> 절차·에러 처리를 재검토 — dead-letter 시 실패 사유 텍스트가 손실되는
+> 기존 동작을 확인하고 개선안을 §5에 기록했습니다(`#38` 구현 범위, 이
+> 문서는 `#48`이 그 개선에 의존한다는 사실만 기록).
 > 이 문서는 **설계 확정** 단계이며, 아직 구현되지 않았습니다 —
 > 구현 진행 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요.
 
@@ -215,6 +219,20 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
     올린 뒤 `Ok(task_id)` 반환 — `Reconciler`가 다음 tick에 재시도(예: 그
     사이 `#49`의 Automatic 모드가 새 에이전트를 프로비저닝했다면 그때 성공).
     소진되면 기존처럼 dead-letter(`Failed`).
+  - ⚠️ **개정(2026-08-14, 4차 — 프로토콜/절차 재검토에서 발견)**: 기존
+    `#38` dead-letter 로직(`reconcile.rs`)은 소진 시
+    `TaskFailure.error`를 `"dispatch retries exhausted (N attempts)"`로
+    **덮어씁니다** — 원래의 `SelectionError` 메시지(예:
+    `NoWorkerForProject`)는 사라집니다. 그 결과 프로젝트 전용 워커가 없어
+    죽은 태스크와 다른 이유로 죽은 태스크가 `Failed` 상태에서 구분되지
+    않습니다. Pending 상태일 때는 `ui-design.md` §3.10의
+    `waiting (no project worker)` 배지로 조회 시점 계산이 가능하지만, 일단
+    `Failed`로 dead-letter된 뒤에는 저장된 데이터만으로 사유를 복원할 수
+    없습니다. **개선 제안**(신규 재시도 로직을 만들지 않는다는 원칙은
+    유지, 메시지 포맷만 개선): dead-letter 시
+    `error = format!("dispatch retries exhausted ({attempts} attempts) — last error: {last_error}")`처럼
+    마지막 `SelectionError`/`DispatchError` 텍스트를 보존 — `#38` 구현
+    변경 범위이지만 `#48`이 이 개선에 실질적으로 의존하므로 여기에 기록.
 - `server_hint`는 이 필터 **이후**에 평가되므로, 힌트 워커가 그 프로젝트
   소속이 아니면 애초에 후보 풀에 없어 `HintedNotFound`/`HintedUnavailable`로
   자연히 걸러집니다 — 별도 처리 불필요, 하드 격리가 힌트에도 일관되게

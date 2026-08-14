@@ -813,6 +813,14 @@
     정리했습니다 — 이 항목의 구현 진행 상황을 갱신할 때마다 그 문서도 함께
     최신화합니다.
 
+    ⚠️ **4차 개정 (프로토콜/절차 재검토, 2026-08-14)**: `#38`의 실제 dead-letter
+    코드(`reconcile.rs`)를 확인한 결과, 재시도 소진 시 `TaskFailure.error`가
+    `"dispatch retries exhausted (N attempts)"`로 원래 `SelectionError` 메시지를
+    덮어써 `NoWorkerForProject`로 죽은 태스크와 다른 이유로 죽은 태스크가
+    `Failed` 상태에서 구분되지 않는다는 걸 발견 — 마지막 에러 텍스트를 보존하는
+    개선안을 [`project-feature-design.md`](../architecture/project-feature-design.md) §5에
+    기록(`#38` 구현 범위, 이 항목이 실질적으로 의존).
+
     **다음 단계**: 설계 문서 §8의 Phase 1(스키마 + Store + RBAC)부터 순차 구현.
 
 49. ⏳ **에이전트(Agent) 동적 프로비저닝 · 메모리 · 스레드 요약 · 도구 바인딩**
@@ -905,6 +913,36 @@
     신설했습니다. 자세한 내용은
     [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
     개정 이력 참고.
+
+    ⚠️ **5차 개정 (프로토콜/절차 재검토, 2026-08-14)**: 구현 착수 전, 실제 코드
+    (하트비트 프로토콜 `crates/fleet-api/src/schema.rs`, `GrokRunner`
+    `crates/fleet-worker/src/grok_process.rs`, 서킷브레이커
+    `crates/fleet-scheduler/src/breaker.rs`, `Reconciler`)를 근거로 §4의 절차와
+    에러 처리를 재검증했습니다. 실제 발견/수정 사항: (1) "워커는 인바운드
+    연결을 받지 않는다(#42)"는 원칙이 mTLS 배포에선 부정확함을 확인 —
+    범위를 "제어 플레인만 아웃바운드"로 정정. (2) `HeartbeatResponse`가
+    현재 확장 불가능한 고정 구조라 `pending_commands` 필드 추가 자체가
+    Phase 4 스키마 변경 범위임을 명시. (3) **`AgentAutoProvisioner`가
+    막 생성돼 아직 ack되지 않은 `Pending` 에이전트를 "없음"으로 오판해
+    같은 대기 태스크에 중복 에이전트를 생성할 수 있는 레이스**를 발견 —
+    eligibility 체크에 `Pending` 포함하도록 수정. (4) `agent_idle_timeout_secs`를
+    프로젝트에서 매번 라이브 조회하면 프로젝트 삭제 시 그 소속이던 자동생성
+    에이전트가 영원히 유휴 스윕에서 빠지는 좀비가 됨을 발견 — `agents.idle_timeout_secs`
+    스냅샷 컬럼으로 전환. (5) `hosts.max_agents` 체크가 TOCTOU 레이스임을
+    발견 — `SELECT ... FOR UPDATE` 트랜잭션으로 수정. (6) `/v1/workers/register`가
+    이름 유일성을 검사하지 않는(upsert) 것을 확인 — `worker.name`에 `agent_id`
+    전체 UUID를 포함해 충돌을 구조적으로 차단하도록 명시. (7) `agent_commands`
+    ACK 프로토콜(신규 `POST /v1/workers/agent-commands/:id/ack` 엔드포인트,
+    `Pending→Starting→Running` 전이 시점, 실패 경로)을 구체화하고 멱등성을
+    "agent_id당 프로세스 1개" 효과 단위로 확정. (8) 기존 `GrokRunner`의
+    "비정상 종료 시 자동 재시작" 루프가 `stop` 커맨드의 kill을 그대로
+    되살릴 수 있음을 발견 — 의도된 종료 신호를 먼저 보내도록 명시. (9)
+    호스트 삭제 시 `agents.host_id`의 `ON DELETE CASCADE`로 실행 중 agent가
+    조용히 사라지고 프로세스가 고아로 남는 문제를 발견 — **정책 결정: 터미널
+    상태가 아닌 agent가 있으면 호스트 삭제를 애플리케이션 레벨 409로
+    차단**(RESTRICT, `mcp_servers` 정책과 동일 기조). 자세한 내용은
+    [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
+    개정 이력과 `agent-dynamic-provisioning-sequence.mermaid` 참고.
 
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.

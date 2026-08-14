@@ -1,5 +1,5 @@
 erDiagram
-    HOSTS ||--o{ AGENTS : "runs (host_id)"
+    HOSTS ||--o{ AGENTS : "runs (host_id, ON DELETE CASCADE at DB level, but app-level 409 guard blocks host deletion while any non-terminal agent exists — 2026-08-14 5차 개정)"
     PROJECTS |o--o{ AGENTS : "owns (project_id, nullable — 0 = general pool)"
     AGENTS |o--o| WORKERS : "worker_id, Some once Running (self-registers via existing /v1/workers/register)"
     AGENTS ||--o{ AGENT_MEMORY : "accumulates"
@@ -23,6 +23,7 @@ erDiagram
         text custom_prompt "system-prompt prefix, applied at dispatch-time prompt composition (NOT a grok CLI flag) — inherited from template.custom_prompt at creation, overridable"
         text status "Pending | Starting | Running | Stopping | Stopped | Failed"
         text provisioned_by "manual | automatic — 2026-08-14 4차 개정 추가, required for §4.1 idle-teardown eligibility"
+        integer idle_timeout_secs "nullable — 2026-08-14 5차 개정 추가, snapshot of project.agent_idle_timeout_secs at creation (avoids zombie agents if the owning project is later deleted)"
         timestamptz created_at
         timestamptz updated_at
     }
