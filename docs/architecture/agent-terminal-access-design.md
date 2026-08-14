@@ -11,10 +11,23 @@
 > tmux 서버가 `fleet-worker`/systemd 재시작에서 실제로 살아남는지 등)과
 > **아예 언급조차 안 한 새 갭**(동시 세션 생성 레이스, tmux 소켓 권한,
 > `capture_terminal` 큐잉 모델, 결과 텍스트 보존 정책 등)을 다수 발견해
-> §9를 전면 재작성했습니다. **이 설계는 여전히 다수의 미검증 가정 위에
-> 있습니다** — 특히 tmux 서버 생존성(§9 최우선 항목)과 russh PTY 지원
-> 여부는 설계의 실현 가능성 자체를 좌우하므로, Phase 0 성격의 실기기
-> 검증 없이는 구현 착수를 권장하지 않습니다.
+> §9를 전면 재작성했습니다.
+> **개정 (2026-08-14, 3차 — 최우선 2개 항목 실제 검증)**: docs.rs로
+> `russh 0.46.0`(`Cargo.lock` 고정 버전) API를 직접 확인한 결과
+> **PTY 지원은 확인됨**(`request_pty`/`request_shell`/`exec`/
+> `window_change`/`data` 전부 존재) — §5는 그대로 구현 가능합니다.
+> 반면 **tmux 서버 생존성은 실제로 검증해보니 틀렸습니다** — 실제 배포
+> 유닛 파일 `examples/fleet-worker.service`가 `KillMode=mixed`를
+> 명시적으로 설정하고 "grok 서브프로세스도 함께 종료"라는 주석까지
+> 남겨뒀습니다(systemd 공식 문서로 재확인: `mixed`는 `TimeoutStopSec`
+> 이후 cgroup에 남은 모든 프로세스에 SIGKILL — daemonize해도 cgroup을
+> 벗어나지 못함). 즉 tmux는 **fleet-worker 재시작에서 살아남지
+> 못합니다** — 이건 버그가 아니라 이 프로젝트가 이미 의도적으로 선택한
+> 운영 철학(재시작 시 깔끔한 전체 정리)이라, AskUserQuestion으로 이
+> 철학을 유지할지 뒤집을지 확인했고 **유지하기로 결정**했습니다. 그 결과
+> §3의 "재시작 시 세션 재발견" 절차를 **폐기**했습니다(아래 §3, §9 참고) —
+> tmux는 이제 "fleet-worker 재시작 생존"이 아니라 **"같은 fleet-worker
+> 수명 동안의 모니터링/attach"로 가치 제안을 좁혀 확정**합니다.
 > 아직 구현되지 않았습니다.
 
 ## 1. 배경 및 요구사항
@@ -44,6 +57,7 @@
 | tmux 세션 소유 위치 | **호스트 위, `GrokRunner`가 grok을 tmux 세션 안에서 spawn** | 운영자가 호스트에 SSH로 직접 붙어 `tmux attach`만 해도 동작하는 최소 경로를 항상 보장 — 오케스트레이터가 죽어 있어도 로컬 디버깅 가능 |
 | 인터랙티브 attach의 실제 경유 경로 | **오케스트레이터가 SSH 홉을 대신 함**(운영자가 직접 호스트 SSH 키를 갖지 않음) | 기존 SSH 키 볼트(`#`호스트 프로비저닝, `fleet-dashboard/src/provisioning.rs`)가 이미 서버 사이드에서만 복호화되는 모델 — 운영자에게 원본 개인키를 노출하지 않는 기존 보안 경계를 그대로 유지 |
 | tmux를 grok 실행의 기본 envelope로 삼을지, 태스크 디스패치 메커니즘까지 바꿀지 | **실행 envelope만** — 태스크 디스패치는 기존 ACP WebSocket을 그대로 유지, tmux는 grok 프로세스의 생명주기(spawn/종료)와 보조 모니터링만 담당 | 2026-08-14 후속 논의(AskUserQuestion)로 확인. ACP를 tmux 터미널 상호작용(`send-keys`/`capture-pane`)으로 대체하는 안도 검토했으나, 구조화된 프로토콜(스트리밍 부분결과·도구호출 가시성·세션관리)을 raw 터미널 파싱으로 바꾸는 건 훨씬 큰 체급의 변경이라 기각 |
+| `fleet-worker` 재시작에도 grok/tmux가 살아남게 할지 | **아니오 — 기존 운영 철학(`KillMode=mixed`, 재시작 시 전부 정리) 유지** | 2026-08-14 3차 개정, 실제 검증 후 AskUserQuestion으로 확인. `examples/fleet-worker.service`가 이미 `KillMode=mixed` + "grok 서브프로세스도 함께 종료" 주석으로 의도적으로 선택한 설계였음을 발견 — 이걸 `KillMode=process`로 뒤집으면 systemd의 고아 프로세스 자동 정리 안전망이 사라져 `#49` `GrokRunner`가 그 책임을 전부 떠안아야 함. tmux의 가치 제안을 "재시작 생존"에서 "같은 fleet-worker 수명 동안의 모니터링/attach"로 좁힘 — §3의 "재시작 시 세션 재발견" 절차는 폐기(§3 참고) |
 
 ## 3. 아키텍처 개요
 
@@ -72,28 +86,16 @@
 - **호스트 요구사항 변경**: `tmux`가 호스트에 설치돼 있어야 합니다 —
   `fleet-provisioner`의 프로비저닝 플레이북(`crates/fleet-provisioner`)에
   설치 스텝 추가 필요(§7).
-- **`fleet-worker` 재시작 시 세션 재발견(2026-08-14 신설 — 후속 논의에서
-  발견한 공백)**: tmux를 채택하는 핵심 이점은 `fleet-worker` 프로세스가
-  재시작(배포/크래시)되더라도 grok 프로세스 자체는 tmux 데몬 아래에서
-  계속 살아있다는 것입니다 — 그런데 `agent_id → tmux 세션` 매핑이
-  `fleet-worker`의 **메모리 레지스트리에만** 있으면 재시작 시 그 매핑이
-  사라져 이 이점이 무의미해집니다. `fleet-worker` 기동 시
-  `tmux list-sessions -F '#{session_name}'`으로 `fleet-agent-*` 패턴을
-  스캔해 로컬 레지스트리를 복구하는 절차를 필수로 추가합니다 — 이렇게
-  복구된 세션은 각각 `POST /v1/workers/heartbeat`의 다음 호출에서
-  오케스트레이터에도 "이 host에 이런 agent_id의 프로세스가 살아있다"고
-  보고해(신규 필드, Phase 4 구현 시 확정) DB의 `agents.status`와 재동기화
-  합니다. 이 절차가 없으면 워커 재시작 후 실제로는 살아있는 grok
-  프로세스를 오케스트레이터가 죽은 것으로 오판해 중복 재생성을 시도할
-  위험이 있습니다. ⚠️ **(2026-08-14 2차 개정 — 이 절차 전체가 성립하려면
-  전제가 하나 필요합니다: tmux 서버 자체가 `fleet-worker`보다 오래
-  살아야 합니다.** `fleet-worker`가 systemd 유닛으로 돌고 그 유닛이
-  `KillMode=control-group`(또는 유사 설정)이면, 유닛 정지/재시작 시
-  **cgroup 안의 모든 자식 프로세스(tmux 서버 포함)가 함께 죽습니다** —
-  이 경우 위 재발견 절차는 항상 "재발견할 세션 없음"으로 끝나는 죽은
-  코드가 됩니다. tmux 서버가 실제로 그 cgroup 밖으로 reparent되는지,
-  현재/향후 배포 스크립트의 systemd unit 설정이 어떤지 전혀 확인하지
-  않았습니다 — §9 최우선 항목.**
+- ~~**`fleet-worker` 재시작 시 세션 재발견**~~ — **2026-08-14 3차 개정으로
+  폐기.** 원래는 "`fleet-worker` 재시작 후 살아있는 tmux 세션을
+  `tmux list-sessions`로 재발견해 레지스트리를 복구"하는 절차였으나,
+  실제 검증 결과(§2 표, §9 항목 1) `examples/fleet-worker.service`가
+  `KillMode=mixed`를 명시적으로 선택해 grok/tmux가 **항상**
+  `fleet-worker`와 함께 종료됩니다 — 이 철학을 유지하기로 결정했으므로
+  (AskUserQuestion), 재발견할 세션이 존재하는 상황 자체가 발생하지
+  않습니다. `fleet-worker` 기동 시에는 대신 (혹시 남아있을 수 있는 고아
+  세션에 대비해) `tmux kill-server`로 이전 세션을 **전부 정리하고
+  시작**하는 편이 이 운영 철학과 일관됩니다 — Phase 4 구현 시 반영.
 - **동시 생성 레이스(2026-08-14 2차 개정 신설)**: `#49`의 `agent_commands`
   dedup 로직(§4 3단계, agent_id당 프로세스 1개)에 버그가 있거나 레이스가
   발생해 같은 `start` 커맨드가 두 번 실행되면, `tmux new-session -d -s
@@ -250,28 +252,30 @@ manual` 기본값만 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이�
 | 워커용 API | `agent_commands.command_type`에 `'capture_terminal'` 추가, `POST /v1/workers/agent-commands/:id/ack` 요청 바디에 `result: Option<String>` 추가 |
 | 대시보드 UI | Agent 상세 페이지(`ui-design.md` §3.13)에 "Terminal" 패널 신설 — 상세는 `ui-design.md` 참고 |
 
-## 9. 열린 질문 (2026-08-14 2차 개정 — 전면 재작성)
+## 9. 열린 질문 (2026-08-14 3차 개정 — 최우선 2개 검증 완료)
 
 > 사용자가 "tmux 이슈가 완전히 해결됐나, 숨긴 게 있나"고 직접 반문해
-> 자체 재감사를 거쳤습니다. 아래는 **본문에 확정처럼 서술된 것 중 실은
-> 검증 안 된 가정**과 **아예 언급이 없던 새 갭**을 전부 포함한 목록이며,
-> 심각도순으로 정렬했습니다. 앞 두 항목은 설계의 실현 가능성 자체를
-> 좌우하므로 **구현 착수 전 Phase 0 성격의 검증이 사실상 필수**입니다.
+> 2차로 자체 재감사, 3차로 실제 검증(코드/문서/실기기)까지 거쳤습니다.
 
-### 최우선 — 설계 실현 가능성 자체를 좌우
+### 검증 완료
 
-1. **tmux 서버가 `fleet-worker` 재시작에서 실제로 살아남는지 미검증**:
-   §3의 "재시작 시 세션 재발견" 절차 전체가 여기 달려 있습니다. `fleet-worker`가
-   systemd 유닛으로 돌 때 `KillMode=control-group`(또는 유사 설정)이면
-   유닛 재시작 시 cgroup 안의 tmux 서버까지 함께 죽습니다 — 이러면 tmux
-   채택의 핵심 가치 제안 자체가 무효화됩니다. 실제 배포 스크립트/systemd
-   unit 설정 확인 + 실기기에서 `fleet-worker` 재시작 후 tmux 세션 생존
-   여부 검증이 최우선입니다.
-2. **`russh`가 PTY+exec(또는 shell) 조합을 실제로 지원하는지 미검증**:
-   §5의 `open_interactive_shell` 메서드 시그니처는 순수 가정입니다 —
-   인터랙티브 attach 전체가 이 라이브러리 기능 존재 여부에 달려 있습니다.
+1. ✅ **`russh` PTY+exec 지원 — 확인됨(긍정)**: docs.rs로
+   `russh 0.46.0`(`Cargo.lock` 고정 버전) API를 직접 확인 —
+   `request_pty`/`request_shell`/`exec`/`window_change`/`data` 전부
+   존재. §5의 `open_interactive_shell` 설계 그대로 구현 가능합니다.
+2. ✅ **tmux 서버가 `fleet-worker` 재시작에서 살아남는지 — 확인됨(부정) +
+   정책 결정**: `examples/fleet-worker.service`가 `KillMode=mixed` +
+   "grok 서브프로세스도 함께 종료" 주석으로 이미 의도적으로 선택한
+   설계였음을 발견. systemd 공식 문서로 재확인한 결과 `mixed`는
+   `TimeoutStopSec` 이후 cgroup에 남은 모든 프로세스에 SIGKILL —
+   daemonize해도 cgroup을 벗어나지 못하므로 tmux/grok은 항상
+   `fleet-worker`와 함께 죽습니다. AskUserQuestion으로 **기존 철학
+   유지를 확정**(`KillMode=process`로 뒤집지 않음) — §2·§3에 반영,
+   "재시작 시 세션 재발견" 절차는 폐기했습니다. tmux의 가치 제안은
+   "재시작 생존"이 아니라 "같은 fleet-worker 수명 동안의
+   모니터링/attach"로 확정됐습니다.
 
-### 본문에 확정처럼 썼지만 실은 미검증인 가정
+### 여전히 미검증 — 본문에 확정처럼 썼지만 실은 가정인 것
 
 3. **`tmux send-keys C-c`가 grok에 대해 그레이스풀 종료로 작동하는지
    미검증**(§3) — SIGINT를 SIGTERM과 다르게 처리하는 CLI가 흔합니다.
@@ -281,7 +285,7 @@ manual` 기본값만 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이�
 5. **동시 세션 생성 레이스 미검증**(§3) — 같은 `start` 커맨드가 두 번
    실행되면 `tmux new-session`이 어떻게 반응하는지 실측 안 함.
 
-### 아예 설계하지 않은 새 갭
+### 여전히 설계하지 않은 갭
 
 6. **`capture_terminal` 커맨드의 큐잉/멱등성 모델**(§4) — 반복 발행되는
    성격이 `start`/`stop`과 달라 기존 dedup 로직을 그대로 못 씀.
@@ -293,7 +297,7 @@ manual` 기본값만 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이�
 10. **`HostKeyPolicy` 재사용 여부 미정**(§5) — 프로비저닝과 attach가
     같은 신뢰 저장소를 쓰는지 불명확.
 
-### 이미 알려진 세부 정책 미확정 (심각도 낮음, 설계 자체는 유효)
+### 세부 정책 미확정 (심각도 낮음, 설계 자체는 유효)
 
 11. **읽기 전용 스냅샷의 실시간성**(15초 지연) 개선 여부, 스크롤백
     200줄 고정 여부 — 실사용 피드백 이후 결정.
@@ -302,14 +306,13 @@ manual` 기본값만 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이�
 13. **`SshClient`의 PTY 지원이 `RemoteExecutor` 트레이트에 들어갈지
     별도 분리될지** — 시맨틱 차이(1회성 vs 장수명 양방향)상 분리가
     유력하나 미확정.
-14. **tmux 세션 정리(좀비 세션) 스윕 필요 여부** — `#49` 호스트 오프라인
-    정리 스윕(§4.1)에 얹을 수 있어 보이나 미확정.
+14. **tmux 세션 정리(좀비 세션) 스윕 필요 여부** — `fleet-worker` 기동 시
+    `tmux kill-server`로 일괄 정리하는 §3의 새 방침으로 사실상 완화됐으나,
+    비정상 잔존 세션이 남는 경로가 있는지는 Phase 구현 시 재확인.
 
-**권장 다음 단계**: 1·2번(최우선)을 실기기에서 검증하는 작은 스파이크를
-먼저 수행 — 결과가 부정적이면(tmux 서버가 실제로 안 살아남는다면, 또는
-russh가 PTY를 지원하지 않는다면) §2의 핵심 설계 결정 자체를 다시 논의해야
-합니다(예: systemd unit을 `KillMode=process`로 바꾸거나, PTY 확보를
-`russh` 대신 시스템 `ssh` 바이너리 셸아웃으로 우회하는 대안 등).
+**권장 다음 단계**: 3·4·5번(여전히 미검증, 실기기 필요)을 `#49` Phase 0
+검증 스파이크와 함께 확인 — 나머지는 설계 자체의 실현 가능성과 무관한
+세부 정책이라 Phase 4 구현 착수 시 확정해도 무방합니다.
 
 ## 관련 문서
 
