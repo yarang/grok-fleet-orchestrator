@@ -9,8 +9,8 @@ erDiagram
 
     AGENT_TEMPLATES |o--o{ AGENTS : "template_id, nullable — instantiation preset"
     AGENT_TEMPLATES ||--o{ AGENT_TEMPLATE_TOOLS : "declares required/optional"
-    MCP_SERVERS ||--o{ AGENT_TEMPLATE_TOOLS : "referenced by"
-    MCP_SERVERS ||--o{ AGENT_TOOLS : "bound to"
+    MCP_SERVERS ||--o{ AGENT_TEMPLATE_TOOLS : "referenced by (ON DELETE RESTRICT — 2026-08-14 4차 개정, was CASCADE)"
+    MCP_SERVERS ||--o{ AGENT_TOOLS : "bound to (ON DELETE RESTRICT — 2026-08-14 4차 개정, was CASCADE)"
     AGENTS ||--o{ AGENT_TOOLS : "resolved binding (copied from template at creation, per-agent overridable)"
 
     AGENTS {
@@ -22,6 +22,7 @@ erDiagram
         text name
         text custom_prompt "system-prompt prefix, applied at dispatch-time prompt composition (NOT a grok CLI flag) — inherited from template.custom_prompt at creation, overridable"
         text status "Pending | Starting | Running | Stopping | Stopped | Failed"
+        text provisioned_by "manual | automatic — 2026-08-14 4차 개정 추가, required for §4.1 idle-teardown eligibility"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -103,8 +104,9 @@ erDiagram
         uuid id PK
         text name UK
         text agent_provisioning_mode "manual | automatic — §4.1"
-        uuid default_agent_template_id FK "nullable, automatic 모드 필수"
+        uuid default_agent_template_id FK "nullable, automatic 모드 필수, no FK until #49 Phase 1 creates agent_templates"
         integer agent_idle_timeout_secs "nullable — automatic 모드 에이전트 유휴 자동 종료 기준"
+        text workdir_template "nullable — 2026-08-14 3/4차 개정 추가, §9 결과물 디렉토리 기본 경로"
     }
 
     TASKS {

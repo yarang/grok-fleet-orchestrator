@@ -9,7 +9,15 @@
 > 전면 개정(다대다 → 1:N 배타적)함에 따라, 이 문서도 그 위에 다시 정렬 —
 > Agent는 항상 자신이 도는 host의 project_id를 그대로 물려받고(§3),
 > `AgentProvisioningMode`(수동/자동)와 자동 생성 에이전트의 유휴 자동 종료
-> 정책을 신설했습니다(§4.1). 아직 구현되지 않았습니다 — 진행 상황은
+> 정책을 신설했습니다(§4.1).
+> **개정 (2026-08-14, 4차)**: 구현 착수 전 `#48`/`#49` 설계 문서 전체를
+> 재검토했습니다. `AgentProvisioningMode`의 정의 소유권을 `#48`(`fleet-core::project`)로
+> 이전(이 문서는 재수출만 참조), `agents.provisioned_by` 컬럼 신설,
+> `mcp_servers` 삭제를 `ON DELETE CASCADE`에서 `RESTRICT`로 변경, §4.1
+> 유휴 판단 기준을 프로세스 신호가 아닌 fleet 자체 신뢰 소스 기반으로 전면
+> 재작성, §12에 메모리 보존 정책을 열린 질문으로 추가, §13(설치·운영 고려
+> 사항)과 §UI/UX 절을 신설했습니다 — 자세한 경위는 `roadmap.md` #49 항목의
+> 4차 개정 기록 참고. 아직 구현되지 않았습니다 — 진행 상황은
 > `roadmap.md` #49 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 사용자 요구사항 원문 요약
@@ -142,10 +150,17 @@ pub struct Agent {
     pub name: String,
     pub custom_prompt: Option<String>,   // 템플릿에서 상속, 개별 오버라이드 가능
     pub status: AgentStatus,
+    /// "manual" | "automatic" — §4.1의 유휴 자동 종료 대상 판단에 필수
+    /// (2026-08-14 4차 개정, 재검토에서 발견한 버그 수정: 이 컬럼 없이는
+    /// §4.1이 서술하는 "Manual로 만든 에이전트는 자동 종료 대상 아님" 규칙을
+    /// 구현할 방법이 없었음).
+    pub provisioned_by: AgentProvisionedBy,
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+pub enum AgentProvisionedBy { Manual, Automatic }
 
 pub enum AgentStatus { Pending, Starting, Running, Stopping, Stopped, Failed }
 
@@ -206,6 +221,9 @@ CREATE TABLE agents (
     name TEXT NOT NULL UNIQUE,
     custom_prompt TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
+    -- 'manual' | 'automatic' — §4.1 유휴 자동 종료 대상 판단에 필수.
+    -- 2026-08-14 4차 개정으로 추가(재검토에서 발견한 누락 컬럼).
+    provisioned_by TEXT NOT NULL DEFAULT 'manual',
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -271,9 +289,14 @@ CREATE TABLE mcp_servers (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- mcp_server_id는 ON DELETE RESTRICT(2026-08-14 4차 개정, 정책 결정) —
+-- CASCADE였다면 관리자가 카탈로그 항목을 지웠을 때 이를 참조하는
+-- 템플릿/에이전트에서 도구 바인딩이 조용히 사라진다(운영 리스크). 참조 중인
+-- mcp_server는 삭제를 막고, API(`DELETE /api/mcp-servers/:id`)도 참조 존재 시
+-- 409 + 참조 중인 template/agent 목록을 응답 본문에 포함한다(§10).
 CREATE TABLE agent_template_tools (
     template_id UUID NOT NULL REFERENCES agent_templates(id) ON DELETE CASCADE,
-    mcp_server_id UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    mcp_server_id UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
     requirement TEXT NOT NULL,   -- 'required' | 'optional'
     PRIMARY KEY (template_id, mcp_server_id)
 );
@@ -281,7 +304,7 @@ CREATE TABLE agent_template_tools (
 -- 에이전트 인스턴스화 시점에 template_tools에서 복사, 이후 개별 오버라이드 가능.
 CREATE TABLE agent_tools (
     agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-    mcp_server_id UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    mcp_server_id UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE RESTRICT,
     requirement TEXT NOT NULL,
     PRIMARY KEY (agent_id, mcp_server_id)
 );
@@ -321,6 +344,8 @@ heartbeat 폴링에 커맨드를 얹는 방식**을 씁니다. (전체 흐름은
 ### 4.1 수동/자동 프로비저닝 모드 (`#48` 3차 결정 반영)
 
 ```rust
+// crates/fleet-core/src/project.rs — 정의 소유권은 #48(2026-08-14 4차 개정,
+// 재검토에서 소유권 불명확 문제를 바로잡음). 이 문서는 재수출만 참조한다.
 pub enum AgentProvisioningMode { Manual, Automatic }
 ```
 
@@ -329,7 +354,8 @@ pub enum AgentProvisioningMode { Manual, Automatic }
 자동화가 시작됨):
 
 - **`Manual`**(기본): 관리자/프로젝트가 `POST /api/agents`로 명시적으로만
-  에이전트를 만듭니다 — 지금까지 §4에서 설명한 흐름 그대로.
+  에이전트를 만듭니다 — 지금까지 §4에서 설명한 흐름 그대로. 생성된 Agent의
+  `provisioned_by = 'manual'`.
 - **`Automatic`**: `default_agent_template_id`가 설정돼 있어야 하며(없으면
   자동 프로비저닝이 동작하지 않음 — 어떤 custom_prompt/도구로 만들지 알
   방법이 없으므로), 신규 백그라운드 루프 **`AgentAutoProvisioner`**가 기존
@@ -341,18 +367,53 @@ pub enum AgentProvisioningMode { Manual, Automatic }
   2. 그 프로젝트에 `Running`/`Starting` 상태인 Agent가 하나도 없거나 전부
      `has_capacity() == false`이며
   3. 그 프로젝트에 배정된 host 중 `max_agents` 여유가 있는 host가 있으면
-  → `default_agent_template_id`로 새 Agent를 만들고 `agent_commands`(start)를
-  발행합니다(§4의 수동 흐름과 완전히 동일한 커맨드 큐 메커니즘 — 트리거만
-  다름).
-- **유휴 자동 종료**: `Project.agent_idle_timeout_secs`(`#48` §3에 필드 추가
-  완료, `NULL`이면 자동 종료 안 함)가 설정돼 있으면, `AgentAutoProvisioner`가
-  같은 주기에 "`Automatic` 모드로 만들어진 Agent 중 마지막 태스크 완료 후
-  이 시간이 지났고 현재 대기 중인 태스크도 없는" 것을 찾아 `agent_commands`
-  (stop)를 발행합니다. **이 정책이 없으면 자동 생성된 에이전트가 영원히
-  host 여유를 점유하게 되어, "여유가 있을 때만 만든다"는 원래 동기 자체가
-  무의미해집니다** — 자동 생성은 반드시 자동 회수와 짝을 이뤄야 합니다.
-  `Manual` 모드로 만든 에이전트는 이 정책의 대상이 아닙니다(사람이 명시적으로
-  만들었으면 사람이 명시적으로 끄는 게 원칙).
+  → `default_agent_template_id`로 새 Agent를 만들고(`provisioned_by =
+  'automatic'`) `agent_commands`(start)를 발행합니다(§4의 수동 흐름과 완전히
+  동일한 커맨드 큐 메커니즘 — 트리거만 다름).
+
+#### 유휴 판단 기준 (2026-08-14 4차 개정 — 전면 재작성)
+
+기존 초안은 "마지막 태스크 완료 후 시간 경과 + 대기 중인 태스크 없음"만
+기준으로 삼았으나, 재검토 과정에서 사용자가 **"동작 중인지 판단하는 근거가
+정확히 뭐냐, 프로세스 stdio만 본다면 실제로 조용히 작업 중인 에이전트도
+타임아웃으로 오판될 수 있다"**고 지적했습니다 — 맞는 지적입니다. 아래처럼
+**fleet가 이미 신뢰하는 소스만** 사용하도록 다시 설계합니다. 프로세스
+stdio/CPU 사용률 같은 저수준 신호는 쓰지 않습니다 — 노이즈가 많고, "조용히
+추론 중"인 정상 동작과 실제 유휴 상태를 구분하지 못합니다.
+
+**"동작 중" 판정**: 에이전트가 다음 중 **하나라도** 참이면 동작 중으로
+간주해 타임아웃 대상에서 제외합니다.
+
+1. 그 에이전트의 `worker_id`에 대해 `Worker.active_tasks > 0`(이미 존재하는
+   필드 — `WorkerHeartbeat`로 갱신되는, "지금 세션이 몇 개 도는가"에 대해
+   가장 신뢰할 수 있는 지표).
+2. `tasks` 테이블에 이 `agent_id`를 참조하며 `status = Dispatched`인 행이
+   하나라도 있음(진행 중인 태스크 — `active_tasks`와 이론상 일치해야 하지만
+   레이스 대비 이중 확인).
+3. `agent_commands`에 이 agent에 대한 `status = 'pending'`인 명령이 있음
+   (방금 시작 명령을 냈는데 아직 등록도 끝나지 않은 상태 — 이때 끄면 안 됨).
+
+**타이머 기준 시각**: `GREATEST(agents.created_at, 그 agent의 가장 최근
+완료 태스크의 완료 시각)`. 방금 만들어져 아직 태스크를 한 번도 받지 못한
+에이전트가 즉시 타임아웃되는 것을 방지합니다.
+
+**레이스 방지**: `AgentAutoProvisioner`의 스윕이 "타임아웃 대상"으로 판단한
+직후, 실제로 `agent_commands`(stop)를 발행하기 **직전에 위 3개 조건을 한 번
+더 재확인**합니다 — 스윕 판단과 커맨드 발행 사이(같은 tick 내, 보통 수
+ms~수백 ms) 새 태스크가 들어왔을 극히 드문 경우를 방어합니다.
+
+**적용 대상**: 위 판단 기준 자체는 `Manual`/`Automatic` 공통 인프라로
+구현하지만, 유휴 자동 종료의 **적용 대상은 `Automatic`으로 생성된 에이전트
+(`provisioned_by = 'automatic'`)로 한정**합니다 — `Project.agent_idle_timeout_secs`
+(`#48` §3, `NULL`이면 자동 종료 안 함)가 설정돼 있으면, `AgentAutoProvisioner`가
+같은 주기에 위 기준으로 "동작 중이 아니고" 타이머가 만료된 `automatic`
+에이전트를 찾아 `agent_commands`(stop)를 발행합니다. **이 정책이 없으면
+자동 생성된 에이전트가 영원히 host 여유를 점유하게 되어, "여유가 있을 때만
+만든다"는 원래 동기 자체가 무의미해집니다** — 자동 생성은 반드시 자동
+회수와 짝을 이뤄야 합니다. `Manual`로 만든 에이전트(`provisioned_by =
+'manual'`)는 판단 기준이 아무리 정교해져도 이 정책의 대상이 아닙니다 —
+사람이 명시적으로 만든 것을 시스템이 임의로 끄는 것은 최소 놀람 원칙에
+어긋나므로, 이는 판단 정확도와 무관하게 유지되는 정책적 결정입니다.
 
 ## 5. Custom 프롬프트 및 도구(MCP) 바인딩
 
@@ -455,6 +516,10 @@ attach(session) = agent_tools(agent_id, requirement='required')
 
 **REST**: `/api/agents/*`, `/api/agent-templates/*`, `/api/mcp-servers/*` —
 `#48`과 동일한 `/<resource>` + `/api/<resource>` 페어링 관례.
+`DELETE /api/mcp-servers/:id`는 `agent_template_tools`/`agent_tools`가 여전히
+그 항목을 참조 중이면 `ON DELETE RESTRICT`(§3)로 인해 실패하므로, API가 이를
+`409 Conflict`로 변환하고 응답 본문에 참조 중인 template/agent 목록을
+포함합니다(2026-08-14 4차 개정, 정책 결정).
 
 **CLI**(신규 `fleet agent` 명령 그룹, `fleet-cli`의 기존 `Workers`/`Tasks`/`Token`
 패턴과 동일): `fleet agent create --template <name> --project <id> --host <id>`,
@@ -506,6 +571,61 @@ attach(session) = agent_tools(agent_id, requirement='required')
 - **`mcp_servers.env`의 시크릿 처리**: 1단계는 평문 저장 — API 키 등 민감값이
   섞이면 `fleet-credentials`(기존 AES-256-GCM 마스터키 암호화)와 연동할지
   검토 필요(신규 발견, 구현 착수 전 재확인 권고).
+- **`agent_memory` 보존/정리 정책 미정**(2026-08-14 4차 개정, 재검토에서
+  발견한 누락 항목): 현재 설계는 `agent_memory`를 완전히 무제한 누적합니다
+  (자동 요약 없음, 삭제 로직 없음) — 장수명 에이전트는 이 테이블이 무한정
+  자랍니다. 기존 `SessionCleanup`(로그인 시도 로그의 보존 기간 정리)과 동일한
+  패턴으로 보존 기간 또는 최대 건수 기준 정리 잡을 두는 것이 필요할 것으로
+  예상됩니다 — Phase 3(메모리 구현) 착수 시 확정. 1단계 설계/구현 자체를
+  막지는 않되, 무기한 방치는 안 되므로 명문화해 둡니다.
+
+## 13. 설치·운영 고려 사항 (2026-08-14 4차 개정 신설)
+
+두 설계 문서 모두 "무엇을 만드는가"는 상세하지만 "운영자가 이걸 어떻게
+운영하는가"가 비어 있었습니다. 이번 단계에서 전부 해결하지는 않되, 최소한
+알려진 리스크로 명문화합니다:
+
+1. **다중 grok 프로세스 로그 수집 부재**: Phase 4에서 host당 여러 grok
+   프로세스가 뜨는데, 각 프로세스의 stdout/stderr를 어디로 보낼지 설계가
+   없습니다(현재 단일 프로세스도 `fleet-worker`가 별도로 리다이렉트하지 않고
+   상속 — 다중 프로세스가 되면 뒤섞입니다). Phase 4 착수 전 확정이 필요한
+   항목으로 명시합니다.
+2. **동적 포트 할당 범위 미정**: 방화벽/보안그룹이 고정 포트만 열어둔
+   클라우드 배포 환경(`docs/deployment/nginx-gateway.md` 등 기존 배포
+   문서가 고정 포트를 전제)과 충돌할 수 있습니다 — host별 포트 **범위**(예:
+   `agent_port_range_start`/`_end`)를 `hosts` 테이블에 추가하는 안을 열린
+   질문으로 기록합니다.
+3. **기존 단일 워커 배포와의 업그레이드 경로**: 기본값들(`max_agents = 1`,
+   `agent_provisioning_mode = 'manual'`)이 기존 동작을 그대로 보존하도록
+   설계돼 있습니다 — 마이그레이션 적용 직후에는 host당 워커 1개까지만
+   허용되고 자동 프로비저닝도 꺼져 있어, 운영자가 명시적으로 설정을 올리기
+   전까지는 기존 "host당 워커 1개" 동작과 관찰 가능한 차이가 없습니다.
+4. **프로비저닝 실패 알림 경로 없음**: `agent_commands.status = 'failed'`가
+   쌓여도 관리자가 능동적으로 조회하지 않으면 알 방법이 없습니다 — 최소
+   대시보드 배지/카운트(예: overview 페이지에 "실패한 에이전트 명령 N건")
+   정도는 필요하다고 열린 질문에 기록합니다.
+
+## UI/UX 논의 — 열린 질문 (2026-08-14 4차 개정 신설)
+
+세부 와이어프레임/상호작용 설계는 다음 라운드로 미루고, 이번 재검토에서
+확인된 에이전트 관련 UI/UX 논의 대상만 기록합니다:
+
+- **에이전트 생성 흐름의 형태**: `mcp_servers` 카탈로그·`agent_templates`를
+  고르는 흐름이 단일 폼인지, 마법사(host 선택 → 템플릿 선택 → 도구 확인 →
+  생성)인지 — 후속 라운드에서 결정.
+- **에이전트 메모리 열람/삭제 UI 필요 여부**: 현재는 읽기 전용 누적만
+  설계돼 있습니다(§7) — 사람이 직접 보고 지울 수 있는 UI가 필요한지는 §12의
+  보존 정책 논의와 함께 결정.
+- **`agents.name`과 `worker.name`의 혼동 위험**: 사용자가 지정하는
+  `agents.name`과, 그 에이전트가 등록될 때 `agent_id`를 인코딩해 자동 생성되는
+  `worker.name`(§4 — 정확한 포맷은 미확정)은 서로 다른 문자열입니다 —
+  대시보드/CLI는 항상 `agents.name`만 노출하고 내부 `worker.name`은 숨겨야
+  합니다(이번 재검토에서 발견한 잠재적 혼란 포인트).
+- **CLI 대화형 모드 제공 여부**: `fleet agent create`가 완전 플래그 기반인지,
+  `fleet-worker join`처럼 대화형 모드도 제공할지 — 후속 라운드에서 결정.
+- **신규 페이지 컨벤션 상속**: `/agents`, `/agent-templates`, `/mcp-servers`도
+  `#14`에서 이미 확립한 대시보드 컨벤션(다크 모드, 컬럼 정렬, `.table .row`
+  모바일 collapse)을 그대로 물려받습니다 — 새 컨벤션을 만들지 않습니다.
 
 ## 관련 문서
 

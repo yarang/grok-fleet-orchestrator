@@ -787,6 +787,25 @@
     워커가 없으면 `Pending` 유지 → `Reconciler` 재시도 → 소진 시 dead-letter).
     구현 전이라 재작업 비용 없이 바로잡을 수 있었습니다.
 
+    ⚠️ **4차 개정 (재검토, 2026-08-14)**: 구현 착수 전 사용자 요청으로
+    `#48`/`#49` 설계 문서 전체를 처음부터 다시 정독해 실제 버그/모순 8건,
+    설치·운영 편의성 이슈 4건을 찾고 바로잡았습니다. 이 항목에 해당하는
+    수정: (1) `Project.default_agent_template_id`가 아직 정의되지 않은
+    `#49`의 `AgentTemplateId`를 참조해 `#48` Phase 1이 컴파일 자체가 안 되는
+    전방 참조 버그를 발견 — `tasks.project_id`의 FK-후행 예약 패턴과 동일하게
+    원시 `Uuid`로 두고 FK/강타입은 `#49` Phase 1에서 추가하도록 수정. (2)
+    `AgentProvisioningMode` enum의 정의 소유권이 불명확했던 것을 `#48`
+    (`fleet-core::project`)로 명확화. (3) `workdir_template` 필드가 프로즈에서만
+    언급되고 실제 스키마/구조체에 없던 것을 `projects` 테이블에 추가. (4)
+    워커 재등록 시 `project_id`가 host의 현재 값으로 매번 재동기화돼야 한다는
+    불변식을 명시. (5) `unassign_worker`/`unassign_host`를
+    `unassign_worker_from_project`/`unassign_host_from_project`로 개명해
+    `assign_*` 계열과 명명을 통일. 또한 정책 결정 1건 확인: 재배치된 워커/호스트의
+    진행 중 태스크는 그대로 완료까지 진행(재배치는 향후 디스패치 자격에만
+    영향). 문서에 §UI/UX(열린 질문 목록) 절도 신설했습니다. 자세한 내용은
+    [`docs/architecture/project-feature-design.md`](../architecture/project-feature-design.md)의
+    개정 이력 참고.
+
     전체 설계(ER 다이어그램, `WorkerSelector` 파이프라인의 5.5단계 하드 필터,
     `Store` 트레이트 확장, RBAC 권한 4종, REST/MCP API 표면, 4단계 구현 계획,
     열린 질문)는
@@ -864,6 +883,28 @@
     부분 — 실기기 대상 수동 검증 병행 필수. (2) 도구 바인딩 메커니즘(경로 A:
     ACP unstable 피처, 경로 B: grok 자체 설정 파일)이 둘 다 미검증 — Phase 0을
     건너뛰고 바로 구현하지 말 것.
+
+    ⚠️ **4차 재검토 (2026-08-14)**: `#48`과 함께 구현 착수 전 전체 재검토를
+    거쳤습니다. 이 항목에 해당하는 수정: (1) `agents` 테이블에 `provisioned_by`
+    컬럼이 없어 §4.1의 "Manual로 만든 에이전트는 유휴 타임아웃 대상 아님"
+    규칙을 구현할 방법이 없던 버그를 발견 — `provisioned_by TEXT NOT NULL
+    DEFAULT 'manual'` 컬럼 추가. (2) `mcp_servers` 삭제가 `ON DELETE CASCADE`로
+    조용히 전파돼 운영 중인 에이전트가 도구를 잃을 수 있던 리스크를
+    `ON DELETE RESTRICT` + API 409 응답으로 차단(정책 결정). (3) `agent_memory`
+    보존/정리 정책이 아예 없던 누락을 열린 질문으로 명문화(`SessionCleanup`과
+    동일 패턴 예정). (4) §4.1의 유휴 판단 기준을 **전면 재설계** — 사용자가
+    "동작 중인지 판단하는 근거가 정확히 뭐냐, stdio만 보면 동작 중에도
+    타임아웃될 수 있다"고 지적해, 프로세스 저수준 신호 대신 fleet가 이미
+    신뢰하는 소스(`Worker.active_tasks`, `Dispatched` 태스크 존재,
+    `agent_commands` pending 여부)만으로 판단하도록 재작성하고, 타이머 기준
+    시각을 `GREATEST(created_at, 마지막 완료 시각)`으로, 커맨드 발행 직전
+    재확인을 통한 레이스 방지도 추가. 적용 대상은 여전히 `Automatic`으로 생성된
+    에이전트로 한정(Manual 생성분은 정책적으로 제외 유지). 설치·운영
+    편의성 이슈 4건(다중 프로세스 로그 수집, 동적 포트 범위, 업그레이드 경로,
+    프로비저닝 실패 알림)을 신설 §13에 정리하고, §UI/UX(열린 질문 목록) 절도
+    신설했습니다. 자세한 내용은
+    [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
+    개정 이력 참고.
 
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.

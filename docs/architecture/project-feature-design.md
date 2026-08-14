@@ -6,7 +6,13 @@
 > 격리가 기본이어야 한다"고 재검토를 요청 — 워커 M:N 공유도 결국 같은 host의
 > 물리 자원과 워커 프로세스 자체의 세션 슬롯을 여러 프로젝트가 경합하게 만든다는
 > 점을 재확인하고, **워커/호스트 모두 배타적 소유 + 하드 디스패치**로
-> 전면 개정했습니다. 이 문서는 **설계 확정** 단계이며, 아직 구현되지 않았습니다 —
+> 전면 개정했습니다.
+> **개정 (2026-08-14, 3차)**: 구현 착수 전 `#48`/`#49` 설계 문서 전체를
+> 재검토해 발견한 버그 8건 중 이 문서에 해당하는 항목(전방 참조 컴파일 오류,
+> `AgentProvisioningMode` 소유권, `workdir_template` 누락, 워커 재등록 시
+> `project_id` 드리프트, `unassign_*` 명명 비대칭)을 반영하고, §UI/UX 절을
+> 신설했습니다 — 자세한 경위는 `roadmap.md` #48 항목의 4차 개정 기록 참고.
+> 이 문서는 **설계 확정** 단계이며, 아직 구현되지 않았습니다 —
 > 구현 진행 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 동기
@@ -64,8 +70,15 @@ CREATE TABLE projects (
     -- #49 통합: 이 프로젝트의 에이전트를 수동으로만 만들지, 오케스트레이터가
     -- 자동으로도 만들지(agent-provisioning-design.md §3 AgentProvisioningMode).
     agent_provisioning_mode TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'automatic'
-    default_agent_template_id UUID,  -- automatic 모드에서 쓸 기본 템플릿(agent_templates FK, #49 도입 후 연결)
+    -- automatic 모드에서 쓸 기본 템플릿. FK 없음 — #49의 agent_templates 테이블이
+    -- 아직 존재하지 않으므로(#48이 #49보다 먼저/독립적으로 구현될 수 있어야 함),
+    -- 013_task_threads.sql의 tasks.project_id 예약과 동일한 패턴으로 원시 UUID만
+    -- 둔다. #49 Phase 1이 agent_templates 테이블을 만들 때
+    -- `ALTER TABLE projects ADD CONSTRAINT ... REFERENCES agent_templates(id)`로
+    -- FK 제약을 추가한다(2026-08-14 3차 개정, 재검토에서 발견한 전방 참조 버그 수정).
+    default_agent_template_id UUID,
     agent_idle_timeout_secs INTEGER,  -- automatic 모드로 만든 에이전트의 유휴 자동 종료 기준(NULL이면 자동 종료 안 함)
+    workdir_template TEXT,  -- 결과물 디렉토리 기본 경로 템플릿(agent-provisioning-design.md §9), nullable — 2026-08-14 3차 개정으로 추가
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -92,18 +105,43 @@ CREATE INDEX idx_hosts_project_id   ON hosts(project_id);
 (`#49`에서 `agents.host_id`도 이 불변식을 그대로 물려받음 — host가 없는
 관계로 남는 워커는 없어야 항상 정합성이 유지됩니다).
 
+**워커 재등록 시 재동기화 규칙(2026-08-14 3차 개정 — 재검토에서 발견한
+동시성 버그 수정)**: `upsert_worker`가 이미 알려진 워커를 재등록(heartbeat
+재연결 등)할 때, `project_id`는 그 워커가 현재 연결된 host의 `project_id`로
+**매번 무조건 재동기화**합니다(host가 정본, 워커는 항상 파생값). 예를 들어
+호스트가 다른 프로젝트로 재배정된 사이 그 host 위의 워커 프로세스가
+재연결하면, 워커의 예전 `project_id`를 그대로 유지하지 않고 host의 현재
+값으로 덮어써야 위 불변식이 항상 유지됩니다 — 워커 쪽 `project_id`를
+독립적으로 신뢰하지 않습니다.
+
 ### `fleet-core` 신규 타입
 
 ```rust
 // crates/fleet-core/src/project.rs (신규 파일)
+
+/// 이 프로젝트의 에이전트를 수동으로만 만들지, 오케스트레이터가 자동으로도
+/// 만들지(agent-provisioning-design.md §4.1 AgentAutoProvisioner가 소비).
+/// `Project`의 필드이므로 정의 소유권도 여기(#48/fleet-core::project)에
+/// 둔다 — `#49` 문서는 이 타입을 재수출만 참조한다(2026-08-14 3차 개정,
+/// 재검토에서 소유권이 불명확했던 점을 바로잡음).
+pub enum AgentProvisioningMode { Manual, Automatic }
+
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub description: Option<String>,
     pub created_by: Option<String>,
-    pub agent_provisioning_mode: AgentProvisioningMode,  // #49 참고, 기본 Manual
-    pub default_agent_template_id: Option<AgentTemplateId>,
+    pub agent_provisioning_mode: AgentProvisioningMode,  // 기본 Manual
+    /// `AgentTemplateId`는 `#49`에서 정의됨 — `#48` Phase 1은 원시 `Uuid`로만
+    /// 다룬다(013_task_threads.sql의 `tasks.project_id` 예약과 동일 패턴).
+    /// `#49` Phase 1이 `agent_templates` 테이블을 만들 때 FK 제약과 강타입
+    /// 변환(`.map(AgentTemplateId)`)을 추가한다(2026-08-14 3차 개정, 전방
+    /// 참조 컴파일 오류 수정).
+    pub default_agent_template_id: Option<Uuid>,
     pub agent_idle_timeout_secs: Option<u32>,
+    /// 결과물 디렉토리 기본 경로 템플릿(agent-provisioning-design.md §9).
+    /// 2026-08-14 3차 개정 — 이전엔 프로즈에서만 언급되고 구조체에 없었음.
+    pub workdir_template: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -138,15 +176,19 @@ async fn delete_project(&self, id: ProjectId) -> Result<bool, StoreError>;
 /// 그 배정을 덮어쓴다(호출자가 먼저 확인 없이 재배정하면 이전 프로젝트에서
 /// 조용히 빠진다는 뜻이므로, API/CLI 레벨에서 확인 프롬프트를 두는 것을 권장).
 async fn assign_worker_to_project(&self, project_id: ProjectId, worker_id: WorkerId) -> Result<(), StoreError>;
-/// project_id를 NULL로(일반 풀로 되돌림).
-async fn unassign_worker(&self, worker_id: WorkerId) -> Result<(), StoreError>;
+/// project_id를 NULL로(일반 풀로 되돌림). (2026-08-14 3차 개정 —
+/// `unassign_worker` → `unassign_worker_from_project`로 개명, `assign_*`
+/// 계열과 접미사를 통일. 내부 Rust API에만 영향, REST/CLI 표면은 이미
+/// `PUT/DELETE .../project`라 무관.)
+async fn unassign_worker_from_project(&self, worker_id: WorkerId) -> Result<(), StoreError>;
 async fn list_project_worker_ids(&self, project_id: ProjectId) -> Result<Vec<WorkerId>, StoreError>;
 async fn list_project_workers(&self, project_id: ProjectId) -> Result<Vec<Worker>, StoreError>;
 
 /// host를 프로젝트에 배타적으로 배정 — §3의 불변식대로, 이 host에 연결된
 /// 워커(hosts.worker_id)가 있으면 그 워커의 project_id도 함께 동기화한다.
 async fn assign_host_to_project(&self, project_id: ProjectId, host_id: Uuid) -> Result<(), StoreError>;
-async fn unassign_host(&self, host_id: Uuid) -> Result<(), StoreError>;
+/// (2026-08-14 3차 개정 — `unassign_host` → `unassign_host_from_project`로 개명.)
+async fn unassign_host_from_project(&self, host_id: Uuid) -> Result<(), StoreError>;
 async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, StoreError>;
 ```
 
@@ -253,6 +295,27 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
   자체가 사라졌으므로 이번 개정으로 사실상 해소됨(같은 프로젝트 내 여러
   워커 간 로드밸런싱은 기존 최소부하 선택 그대로).
 - **project_id 없는 태스크의 취급**: 계속 완전히 허용(일반 풀 워커 후보).
+- **장수명 에이전트의 메모리 보존 정책**: 이 문서의 범위 밖(`agent_memory`는
+  `#49`의 엔티티) — 상세 열린 질문은
+  [`agent-provisioning-design.md`](agent-provisioning-design.md) §12 참고
+  (2026-08-14 3차 개정, 재검토에서 발견한 누락 항목의 상호 참조).
+
+## UI/UX 논의 — 열린 질문 (2026-08-14 3차 개정 신설)
+
+세부 와이어프레임/상호작용 설계는 다음 라운드로 미루고, 이번 재검토에서
+확인된 프로젝트 관련 UI/UX 논의 대상만 기록합니다:
+
+- **프로젝트 상세 페이지 우선순위**: 배정 host/worker 목록, 실행 중 agent,
+  최근 태스크, agent 메모리 브라우저 중 무엇을 우선 노출할지 — 후속 라운드에서
+  결정.
+- **하드 격리발 대기 상태의 대시보드 표시**: "이 태스크는 프로젝트 전용
+  워커가 없어 대기 중"(`SelectionError::NoWorkerForProject` 재시도 경로)을
+  일반 실패/정체와 시각적으로 구분해야 사용자 혼란을 방지할 수 있음(이번
+  재검토에서 발견한 UX 리스크) — 구분 방식은 후속 라운드에서 결정.
+- **신규 페이지 컨벤션 상속**: `/projects`, `/projects/:id`, `/projects/new`는
+  `#14`에서 이미 확립한 대시보드 컨벤션(다크 모드 CSS custom properties +
+  `data-theme`, 컬럼 정렬 `data-sort-key`/`data-sort-dir`, `.table .row` 모바일
+  collapse)을 그대로 물려받는다 — 새 컨벤션을 만들지 않음.
 
 ## 관련 문서
 

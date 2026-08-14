@@ -10,8 +10,9 @@ erDiagram
         text description
         text created_by
         text agent_provisioning_mode "manual | automatic — #49"
-        uuid default_agent_template_id "nullable — #49, used when automatic"
+        uuid default_agent_template_id "nullable, no FK yet — #49 adds the agent_templates FK in its Phase 1 (2026-08-14 3차 개정, forward-ref fix)"
         integer agent_idle_timeout_secs "nullable — #49, auto-teardown for automatic-mode agents"
+        text workdir_template "nullable — #49 §9, default artifact directory (2026-08-14 3차 개정 추가)"
         timestamptz created_at
         timestamptz updated_at
     }

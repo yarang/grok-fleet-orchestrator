@@ -38,7 +38,7 @@ sequenceDiagram
 
     Note over Admin,Store: 4. 배정 해제 / 프로젝트 삭제
     Admin->>API: DELETE /api/workers/:id/project
-    API->>Store: unassign_worker(worker_id) — project_id를 NULL로(일반 풀 복귀)
+    API->>Store: unassign_worker_from_project(worker_id) — project_id를 NULL로(일반 풀 복귀)
     Admin->>API: DELETE /api/projects/:id
     API->>API: require_permission(ProjectDelete)
     API->>Store: delete_project(project_id)
