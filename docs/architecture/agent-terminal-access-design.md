@@ -338,6 +338,6 @@ manual` 기본값만 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이�
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #50 — 구현 진행 상황 정본.
 - [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
   이 문서가 전적으로 의존하는 선행 설계(특히 §4 동적 프로비저닝 프로토콜,
-  §13 설치·운영 고려 사항).
+  §4.2 전체 생명주기 상태 다이어그램, §13 설치·운영 고려 사항).
 - [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.13 —
   Agent 상세 페이지의 Terminal 패널.

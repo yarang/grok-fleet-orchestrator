@@ -1,0 +1,40 @@
+stateDiagram-v2
+    [*] --> Pending: "[오케스트레이터] POST /api/agents(Manual) 또는\nAgentAutoProvisioner 적격 판정(Automatic)\n— host를 SELECT...FOR UPDATE로 잠그고 여유 확인 후\nagent_commands(start) 발행 + idle_timeout_secs 스냅샷"
+
+    Pending --> Starting: "[fleet-worker] 다음 heartbeat로 커맨드 수신\n→ agent_id 로컬 프로세스 레지스트리 dedup 통과\n→ ack{status: acked}"
+    Pending --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕\n(offline_worker_grace 300초 초과)"
+
+    Starting --> Running: "[오케스트레이터] grok이 /v1/workers/register 성공\n→ link_agent_worker + status=Running\n→ ack{status: done}"
+    Starting --> Failed: "[fleet-worker] tmux 스폰 실패 또는 헬스체크 타임아웃\n→ ack{status: failed, error}"
+    Starting --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
+
+    Running --> Stopping: "[오케스트레이터] 관리자 POST /api/agents/:id/stop(Manual)\n또는 AgentAutoProvisioner 유휴 판정(Automatic 한정)\n— 아래 note의 3개 신호 전부 거짓 + idle_timeout_secs 만료\n+ 커맨드 발행 직전 재확인(레이스 방지)"
+    Running --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
+
+    Stopping --> Stopped: "[fleet-worker] ack{acked} → 의도된 종료 신호 선행(재시작 루프 무력화)\n→ tmux kill-session → grok 종료 → deregister → ack{status: done}"
+    Stopping --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
+    Stopping --> Stopped: "[오케스트레이터] 정체 타임아웃(5분) 강제 확정\n— fleet-worker가 종료 처리 도중 재시작해 완료 ack 유실 시,\nkill-server 기동 정책(#50 §3)이 실제 정리를 이미 보장하므로\nFailed가 아닌 Stopped로 낙관적 확정 + 경고 이벤트 기록"
+
+    Failed --> [*]: "터미널 — 자동 재시도 없음.\nAgentAutoProvisioner eligibility 체크에서\n'터미널 상태'로 취급돼 새 Agent 생성을 막지 않음"
+    Stopped --> [*]: "터미널"
+
+    note right of Running
+        "동작 중" 판정(§4.1, 유휴 타임아웃 게이트) — 하나라도 참이면 동작 중:
+        1) tasks.status=Dispatched 존재 — 오케스트레이터 직접 기록, 실시간(1차 신호)
+        2) Worker.active_tasks > 0 — 워커 자기보고, 최대 heartbeat 간격 지연(2차 신호)
+        3) agent_commands에 pending 있음 — 방금 커맨드 낸 직후 보호
+        타이머 기준: GREATEST(agents.created_at, 마지막 완료 태스크 시각)
+        capture_terminal 조회·인터랙티브 attach는 이 상태를 바꾸지 않는
+        읽기 전용 보조 동작(Running 위에서 반복 가능, 별도 상태 아님)
+    end note
+
+    note left of Pending
+        Manual 생성: provisioned_by='manual' — 유휴 타임아웃 정책 적용 대상 아님
+        Automatic 생성: provisioned_by='automatic' — 위 유휴 판정의 적용 대상
+    end note
+
+    note left of Stopping
+        2026-08-14 6차 개정으로 Pending/Stopping의 호스트 오프라인
+        전이 + Stopping 정체 타임아웃을 신설 — 이전 설계는 이 두
+        상태가 정리 스윕에서 누락돼 무기한 정체될 수 있었음(§4.2)
+    end note

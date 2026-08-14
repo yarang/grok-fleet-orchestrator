@@ -944,6 +944,20 @@
     [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
     개정 이력과 `agent-dynamic-provisioning-sequence.mermaid` 참고.
 
+    ⚠️ **6차 개정 (전체 생명주기 다이어그램 + 협업 분석, 2026-08-14)**:
+    사용자 요청으로 여러 라운드에 흩어진 상태 전이(§4 프로토콜, §4.1 유휴
+    판정, `#50`의 tmux 매핑, 호스트 오프라인 스윕)를 하나의 상태 다이어그램
+    (`agent-lifecycle-state-machine.mermaid`, 신규 §4.2)으로 통합하고
+    오케스트레이터/`fleet-worker` 협업 패턴(의도 큐잉 → 폴링 실행 → ack
+    보고 → 상태 확정)을 정리. 이 과정에서 처음 드러난 갭 2건 발견·수정:
+    (1) 호스트 오프라인 스윕이 `Pending`/`Stopping` 상태를 언급하지 않아
+    무기한 정체될 수 있던 문제 — 스윕 대상을 전체 비-터미널 상태로 확장.
+    (2) `Stopping`은 호스트가 정상인데 `fleet-worker`가 종료 처리 도중
+    재시작해 완료 ack이 유실되는 경로가 있는데도 별도 정리 규칙이 없던
+    문제 — `Stopping` 정체 전용 타임아웃(5분) 규칙 신설, `#50`의
+    `tmux kill-server` 기동 정책이 실제 정리를 보장하므로 `Stopped`로
+    낙관적 확정.
+
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
 

@@ -26,7 +26,13 @@
 > 수정, `agent_commands` ACK 프로토콜(`Starting` 전이 시점 포함) 구체화,
 > `hosts.max_agents` 체크의 TOCTOU 레이스 수정, `worker.name` 유일성 요구사항
 > 명시, 호스트 삭제 가드(RESTRICT 정책) 신설. 자세한 경위는 `roadmap.md`
-> `#49` 항목의 5차 개정 기록 참고. 아직 구현되지 않았습니다 — 진행 상황은
+> `#49` 항목의 5차 개정 기록 참고.
+> **개정 (2026-08-14, 6차 — 전체 생명주기 다이어그램 + 협업 분석)**: 여러
+> 라운드에 흩어져 있던 상태 전이를 하나의 상태 다이어그램(§4.2)으로 통합해
+> 오케스트레이터/`fleet-worker` 협업 패턴을 분석했습니다. 이 과정에서
+> 처음 드러난 갭 2건 — 호스트 오프라인 스윕이 `Pending`/`Stopping`
+> 상태를 누락해 무기한 정체될 수 있던 문제 — 을 발견해 §4 10~11단계에
+> 바로 반영했습니다. 아직 구현되지 않았습니다 — 진행 상황은
 > `roadmap.md` #49 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 사용자 요구사항 원문 요약
@@ -420,10 +426,23 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_optional_tools JSONB;
    명시, 다이어그램 반영).
 10. 호스트가 `offline_worker_grace`(기존 `Reconciler` 값, 300초)를 넘겨
     하트비트가 끊기면, 그 호스트의 `pending` 커맨드는 `failed`로, 그 위의
-    `Running`/`Starting` 에이전트는 `Failed`로 일괄 전이하는 스윕을
-    `AgentAutoProvisioner` 주기에 추가한다(이전엔 이 정리 절차 자체가
-    없어서, 호스트가 영구히 오프라인이 되면 그 위 에이전트/커맨드가
-    무기한 `Running`/`pending`으로 남아 있었음).
+    **터미널이 아닌 모든 상태(`Pending`/`Starting`/`Running`/`Stopping`)**
+    에이전트는 `Failed`로 일괄 전이하는 스윕을 `AgentAutoProvisioner`
+    주기에 추가한다(이전엔 이 정리 절차 자체가 없어서, 호스트가 영구히
+    오프라인이 되면 그 위 에이전트/커맨드가 무기한 남아 있었음).
+    2026-08-14 6차 개정으로 대상을 `Running`/`Starting`에서 전체
+    비-터미널 상태로 확장 — 전체 생명주기 다이어그램(§4.2)을 그리며
+    `Pending`/`Stopping`이 누락돼 있던 갭을 발견해 바로잡음.
+11. **`Stopping` 정체 방지(2026-08-14 6차 개정 신설)**: 위 10단계는
+    호스트가 오프라인일 때만 발동하므로, 호스트는 정상인데
+    `fleet-worker` 자체가 종료 처리 도중 재시작해 완료 ack이 유실되는
+    경우는 못 잡는다 — `fleet-worker` 기동 시 `tmux kill-server`로 이전
+    세션을 이미 정리했으므로(`#50` §3) 실제로는 종료가 달성됐지만
+    DB에는 반영되지 않는다. `AgentAutoProvisioner` 스윕에 "`Stopping`
+    상태가 하트비트 간격의 여러 배(예: 5분)를 넘기면 `Stopped`로 강제
+    전이 + 경고 이벤트 기록" 규칙을 추가한다 — `Failed`가 아니라
+    `Stopped`로 낙관적으로 확정하는 이유는 `kill-server` 정책이 실제
+    정리를 이미 보장하기 때문(의도한 종료가 사실상 달성됨).
 
 ### "여유" 판단 기준
 
@@ -524,7 +543,68 @@ ms~수백 ms) 새 태스크가 들어왔을 극히 드문 경우를 방어합니
 만든 것을 시스템이 임의로 끄는 것은 최소 놀람 원칙에 어긋나므로, 이는 판단
 정확도와 무관하게 유지되는 정책적 결정입니다.
 
-## 5. Custom 프롬프트 및 도구(MCP) 바인딩
+### 4.2 전체 생명주기 상태 다이어그램 (2026-08-14 6차 개정 신설)
+
+> 지금까지 여러 라운드에 걸쳐 흩어져 결정된 것(§4 프로토콜, 본 §4.1 유휴
+> 판정, `#50`의 tmux 매핑, §4 10단계 호스트 오프라인 스윕)을 하나의 상태
+> 다이어그램으로 모아 오케스트레이터·`fleet-worker`가 각 전이를 어떻게
+> "판단"하는지 정리했습니다. 이 과정에서 기존에 문서 어디에도 없던 갭
+> 2건을 새로 발견했습니다.
+
+![Agent Lifecycle State Machine](../assets/diagrams/architecture/agent-lifecycle-state-machine.mermaid)
+
+#### 협업 패턴 요약
+
+`orchestrator`와 `fleet-worker`는 대칭적인 실시간 채널이 아니라 **"오케스트레이터가
+의도를 큐에 쌓는다 → `fleet-worker`가 폴링해서 실행한다 → ack로 보고한다 →
+오케스트레이터가 상태를 확정한다"는 비대칭 폴링 패턴**으로만 협업합니다 —
+`#42`/`#50`에서 확인한 "제어 플레인은 항상 아웃바운드"라는 원칙이 상태
+전이 전체에 일관되게 적용되는 걸 이 다이어그램에서 다시 확인할 수 있습니다.
+
+| 전이 | 트리거 | 판단 주체 | 근거 데이터 |
+|---|---|---|---|
+| `[*] → Pending` | `POST /api/agents`(Manual) 또는 `AgentAutoProvisioner` 적격 판정(Automatic) | 오케스트레이터 | host `FOR UPDATE` 잠금 + 비-터미널 agent 카운트(§4 "여유" 판단 기준) |
+| `Pending → Starting` | 다음 heartbeat로 `pending_commands` 수신, 로컬 dedup 통과 | `fleet-worker` | `agent_id` 키드 로컬 프로세스 레지스트리 |
+| `Starting → Running` | grok의 `/v1/workers/register` 성공 | 오케스트레이터 | `link_agent_worker` 성공 여부 |
+| `Starting → Failed` | tmux/grok 스폰 실패, 헬스체크 타임아웃 | `fleet-worker` → 오케스트레이터 | ack `{status: failed, error}` |
+| `Running → Stopping` | 관리자 명시 요청(Manual) 또는 유휴 판정(Automatic) | 오케스트레이터 | §4.1의 3개 "동작 중" 신호 + `idle_timeout_secs` 스냅샷 타이머 |
+| `Stopping → Stopped` | 의도된 종료 신호 → tmux 종료 → deregister | `fleet-worker` → 오케스트레이터 | ack `{status: done}` |
+| `(Pending\|Starting\|Running\|Stopping) → Failed` | 호스트 하트비트 유실 300초(`offline_worker_grace`) | 오케스트레이터 | 기존 `Reconciler` 패턴 재사용 스윕(6차 개정으로 `Pending`/`Stopping` 포함 확장) |
+| `Stopping → Stopped`(정체 타임아웃) | `Stopping` 정체 5분 초과(호스트는 정상) | 오케스트레이터 | `fleet-worker` 재시작 시 `kill-server`가 실제 정리를 보장한다는 전제로 낙관적 확정(6차 개정 신설) |
+
+#### 새로 발견한 갭 2건
+
+이 다이어그램을 그리면서 처음 드러난, 지금까지 어느 문서에도 없던
+빈틈입니다:
+
+1. **[갭] 호스트 오프라인 스윕이 `Pending` 상태를 언급하지 않음**: §4
+   10단계는 "그 호스트의 `Running`/`Starting` 에이전트는 `Failed`로
+   일괄 전이"라고만 서술합니다 — 아직 `fleet-worker`가 커맨드를
+   ack하기 전(`Pending`)에 그 호스트가 오프라인이 되면, 해당 `agent_commands`는
+   `failed`로 처리되는데(§4 10단계 앞부분) 정작 **Agent 자체는 `Pending`에
+   무기한 남습니다.** **수정**: 스윕 대상을 "`Running`/`Starting`"에서
+   "**터미널이 아닌 모든 상태(`Pending`/`Starting`/`Running`/`Stopping`)**"로
+   확장합니다(아래 2번과 함께 처리).
+2. **[갭] `Stopping`이 호스트 오프라인 스윕에서도, 별도 정체 처리에서도
+   빠져 있음**: (a) 위와 같은 이유로 호스트가 오프라인이 되면
+   `Stopping`도 무기한 남고, (b) 호스트는 정상인데 **`fleet-worker`
+   자체가 종료 처리 도중 재시작**(배포·크래시)하면 — `#50` §3에서 이번에
+   확정한 "기동 시 `tmux kill-server`로 이전 세션 일괄 정리" 정책 덕분에
+   실제로는 grok/tmux가 확실히 정리되지만, 그 사실을 알리는 완료
+   ack(`{status: done}`)은 재시작된 `fleet-worker`가 보낼 이유가 없어
+   영원히 오지 않습니다 — Agent가 `Stopping`에 무기한 정체됩니다. 호스트
+   오프라인(300초) 스윕만으로는 이 경우를 못 잡습니다(호스트 자체는 계속
+   정상 하트비트하므로). **수정 제안**: `AgentAutoProvisioner` 스윕에
+   "`Stopping` 상태가 일정 시간(예: 하트비트 간격의 여러 배, 5분)을
+   넘겼으면 `Stopped`로 강제 전이" 규칙을 추가합니다 — `fleet-worker`
+   재시작 시 `kill-server`가 이미 실제 정리를 보장하므로 `Stopped`로
+   낙관적으로 확정하는 게 `Failed`보다 정확합니다(의도한 종료가 사실상
+   달성됐으므로). 경고 이벤트는 함께 기록해 운영자가 이례적 정체였음을
+   알 수 있게 합니다.
+
+두 갭 모두 §4 10단계 문구와 `AgentAutoProvisioner` 스윕 로직에 반영해야
+하는 구현 범위이며, `#48`/`#49`의 다른 재검토 라운드와 동일하게 구현
+착수 전이라 재작업 비용 없이 지금 바로잡습니다(§12에도 기록).
 
 ### 5.1 Custom 프롬프트 — 프롬프트 조립 시점 주입
 
@@ -698,6 +778,11 @@ DB 레벨 FK를 RESTRICT로 바꾸지 않는 이유는 §3 SQL 주석 참고(상
   spawn을 스킵하고 ack만 재전송합니다(§4 3단계). 완전히 닫힌 질문은
   아님 — 정확한 ack 재전송 규칙(예: 몇 번까지 재시도)은 Phase 4 구현 시
   확정.
+- ~~**`Pending`/`Stopping` 상태가 정리 스윕에서 누락돼 무기한 정체될 수
+  있는 문제**~~ — **2026-08-14 6차 개정으로 해소됨**: 전체 생명주기
+  상태 다이어그램(§4.2)을 처음 그리면서 발견 — 호스트 오프라인 스윕
+  대상을 전체 비-터미널 상태로 확장하고, `Stopping` 정체 전용 타임아웃
+  규칙을 신설(§4 10~11단계).
 - **스레드 요약 생성 방법**: 규칙 기반 vs 모델 기반, Phase 3에서 결정.
 - **`mcp_servers.env`의 시크릿 처리**: 1단계는 평문 저장 — API 키 등 민감값이
   섞이면 `fleet-credentials`(기존 AES-256-GCM 마스터키 암호화)와 연동할지
