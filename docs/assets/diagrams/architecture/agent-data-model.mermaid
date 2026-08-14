@@ -7,16 +7,57 @@ erDiagram
     TASKS |o--o| AGENTS : "agent_id, nullable — resolves to worker_id at dispatch time"
     TASKS |o--o| THREAD_SUMMARIES : "thread_id (project_id IS NULL 태스크만 해당)"
 
+    AGENT_TEMPLATES |o--o{ AGENTS : "template_id, nullable — instantiation preset"
+    AGENT_TEMPLATES ||--o{ AGENT_TEMPLATE_TOOLS : "declares required/optional"
+    MCP_SERVERS ||--o{ AGENT_TEMPLATE_TOOLS : "referenced by"
+    MCP_SERVERS ||--o{ AGENT_TOOLS : "bound to"
+    AGENTS ||--o{ AGENT_TOOLS : "resolved binding (copied from template at creation, per-agent overridable)"
+
     AGENTS {
         uuid id PK
         uuid host_id FK
         uuid project_id FK "nullable — 0 or 1 project (M:N with Worker via #48 is separate concern)"
         uuid worker_id FK "nullable — set once the spawned grok process registers"
+        uuid template_id FK "nullable — which AgentTemplate this was instantiated from, if any"
         text name
-        text custom_prompt "system-prompt prefix, applied at dispatch-time prompt composition (NOT a grok CLI flag)"
+        text custom_prompt "system-prompt prefix, applied at dispatch-time prompt composition (NOT a grok CLI flag) — inherited from template.custom_prompt at creation, overridable"
         text status "Pending | Starting | Running | Stopping | Stopped | Failed"
         timestamptz created_at
         timestamptz updated_at
+    }
+
+    AGENT_TEMPLATES {
+        uuid id PK
+        text name UK
+        text description
+        text custom_prompt "default system-prompt for agents created from this template"
+        text created_by
+        timestamptz created_at
+    }
+
+    MCP_SERVERS {
+        uuid id PK
+        text name UK
+        text description
+        text transport "stdio | http | sse — verification spike TBD (§5.2)"
+        text command "stdio only"
+        jsonb args "stdio only"
+        text url "http/sse only"
+        jsonb env
+        text created_by
+        timestamptz created_at
+    }
+
+    AGENT_TEMPLATE_TOOLS {
+        uuid template_id FK
+        uuid mcp_server_id FK
+        text requirement "required | optional"
+    }
+
+    AGENT_TOOLS {
+        uuid agent_id FK
+        uuid mcp_server_id FK
+        text requirement "required | optional — copied from template, per-agent overridable"
     }
 
     AGENT_MEMORY {
@@ -66,5 +107,6 @@ erDiagram
         uuid id PK
         uuid project_id FK "nullable, #48에서 이미 도입"
         uuid agent_id FK "nullable, 신규 — 지정 시 그 agent의 worker_id로 해석돼 디스패치"
+        jsonb requested_optional_tools "nullable — 이 태스크에서만 켤 optional mcp_server 이름 배열"
         uuid thread_id "nullable 아님, 013에서 이미 도입"
     }
