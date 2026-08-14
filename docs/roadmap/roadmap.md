@@ -1048,7 +1048,9 @@
 > 등록됐다 — 셋 다 설계는 완료([`project-feature-design.md`](../architecture/project-feature-design.md),
 > [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md),
 > [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)),
-> 구현은 아직 시작 전이라 미배정 상태.
+> 구현은 아직 시작 전이라 미배정 상태. 세 문서 모두 "현재 확정된 설계"만
+> 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는
+> [`docs/architecture/log.md`](../architecture/log.md)에 별도로 정리돼 있다.
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
