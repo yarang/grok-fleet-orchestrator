@@ -1006,12 +1006,14 @@ Memory 패널 아래에 읽기 전용 "Terminal" 패널을 추가합니다 —
 > SSH 키 금고)와 동일한 관리자 전용 컨벤션을 따릅니다 — 별도 신규 패턴
 > 없음.
 
-**라우트**: `/admin/agent-templates`, `/admin/mcp-servers`, `/admin/skills`(2026-08-15 신설)
-**권한**: `AgentTemplateManage`/`SkillManage`(admin 기본)  **스타일**: Apple auth surface
+**라우트**: `/admin/agent-templates`, `/admin/mcp-servers`, `/admin/skills`(2026-08-15 신설),
+`/admin/agent-runtimes`(2026-08-15 신설)
+**권한**: `AgentTemplateManage`/`SkillManage`/`AgentRuntimeManage`(admin 기본)  **스타일**: Apple auth surface
 
 - **`/admin/agent-templates`**: Template DataTable(name, custom_prompt 미리보기,
-  필수/옵션 도구·스킬 칩 목록, 사용 중인 Agent 수) + 생성/편집 모달(도구
-  선택기 옆에 스킬 선택기 추가 — 동일 UI 패턴).
+  필수/옵션 도구·스킬 칩 목록, runtime Badge(2026-08-15 신설, 예: "grok"/
+  "gemini-cli"), 사용 중인 Agent 수) + 생성/편집 모달(도구 선택기 옆에
+  스킬 선택기, 런타임 드롭다운 추가 — 동일 UI 패턴).
 - **`/admin/mcp-servers`**: `mcp_servers` 카탈로그 DataTable(name, transport
   badge, 필요 host 레이블 칩(`agent-harness-composition-design.md` §6,
   stdio만 해당), 참조 중인 template/agent 수) + 등록 모달. **삭제 시 참조
@@ -1022,6 +1024,12 @@ Memory 패널 아래에 읽기 전용 "Terminal" 패널을 추가합니다 —
   `skills` 카탈로그 DataTable(name, description, 참조 중인 template/agent
   수) + 등록 모달(markdown `content` 입력 — 미리보기 탭 포함). 삭제 정책은
   `/admin/mcp-servers`와 동일(참조 중이면 409).
+- **`/admin/agent-runtimes`**(2026-08-15 신설, `agent-runtime-vendor-design.md`
+  `#52`): `agent_runtimes` 카탈로그 DataTable(name, vendor, transport_kind
+  badge("network_bind"/"stdio_bridge"), 필요 host 레이블 칩, 사용 중인
+  template/agent 수) + 등록 모달. 기본 시드 행 `grok`은 삭제 버튼 비활성화
+  (기존 배포 호환성 보장 — 참조 중인 template/agent가 항상 있을 수밖에
+  없음).
 
 ---
 

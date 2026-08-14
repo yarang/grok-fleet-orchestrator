@@ -584,7 +584,12 @@ agent 행과 `agent_commands`가 조용히 사라지고 실제 grok 프로세스
    신호로 무력화하는 로직 포함, §4 9단계), §4.1의 `AgentAutoProvisioner`
    (Automatic 모드 + 유휴 자동 종료 + 호스트 오프라인 정리 스윕). **`#50`
    설계를 함께 반영**(grok spawn을 tmux 세션으로 감싸는 것으로 다중
-   프로세스 로그 수집 문제도 함께 해결). 실기기 대상 수동 검증 필수.
+   프로세스 로그 수집 문제도 함께 해결). **`GrokRunner`는 처음부터
+   `#52`의 `AgentRunner` 트레잇(`NetworkBindRunner` 구현체)으로 작성**하는
+   것을 권장 — grok 전용으로 만든 뒤 나중에 일반화하는 것보다, 벤더
+   중립 인터페이스 위에 grok 구현체 하나만 있는 상태로 시작하는 게
+   재작업이 없습니다(`agent-runtime-vendor-design.md` §4). 실기기 대상
+   수동 검증 필수.
 5. **Phase 5 — API + CLI + MCP + 대시보드 UI**: §10 표면 전체.
 
 ## 12. 열린 질문
@@ -668,5 +673,7 @@ Design System**([`ui-design.md`](../ui-dashboard/ui-design.md) §2)임에
   `#49` Phase 4에 전적으로 의존하는 후속 확장(tmux 기반 터미널 모니터링/attach).
 - [`docs/architecture/agent-harness-composition-design.md`](agent-harness-composition-design.md) — `#51`,
   이 문서의 도구 바인딩·프롬프트 조립을 Skill·프로젝트 헌법으로 확장.
+- [`docs/architecture/agent-runtime-vendor-design.md`](agent-runtime-vendor-design.md) — `#52`,
+  `GrokRunner`를 벤더 중립 `AgentRunner` 트레잇으로 일반화(grok build/Gemini CLI 등).
 - [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.11~§3.14 —
   화면 설계 정본.

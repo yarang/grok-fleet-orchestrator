@@ -242,6 +242,14 @@ Claude Code의 PreToolUse/PostToolUse류 후킹을 대입하면 두 레벨로 �
   똑같이 **미검증**입니다 — 검증 안 된 능력 위에 설계하면 `#49`가 이미
   겪은 것과 같은 위험(방금 드린 답변을 정정해야 하는 상황)을 반복하게
   됩니다. Phase 0 검증 스파이크(§5.2)의 결과가 나온 뒤 재검토합니다.
+- **2026-08-15 추가 발견**: 공개 문서 조사 결과 grok build(fleet이 실제로
+  spawn하는 `grok agent serve`와 같은 바이너리로 추정 —
+  [`agent-runtime-vendor-design.md`](agent-runtime-vendor-design.md)
+  `#52` §1) 자체가 이미 네이티브 **Hooks** 시스템을 갖고 있는 것으로
+  확인됐습니다(`grok inspect`로 노출). 즉 위 "세션 내부 레벨" Hooks가
+  fleet이 처음부터 새로 만들 필요 없이 **grok의 네이티브 기능을 그대로
+  노출/설정**하는 문제일 수 있습니다 — 이 가능성도 `#52`가 확장한 Phase 0
+  스파이크 범위에 포함됩니다.
 
 ### 7.4 서브에이전트 위임 — 새 엔티티 불필요
 
@@ -333,5 +341,8 @@ ACP 개입이 필요할 수 있습니다 — 두 항목이 같은 미검증 전�
 - [`docs/architecture/log.md`](log.md) — 개정 이력.
 - [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
   이 문서가 확장하는 도구 바인딩·프롬프트 조립·템플릿 설계.
+- [`docs/architecture/agent-runtime-vendor-design.md`](agent-runtime-vendor-design.md) — `#52`,
+  이 문서의 `hosts.labels`/`required_host_labels` 가드 패턴을 재사용하고,
+  grok build 네이티브 Skill/Hook과의 관계를 검증 스파이크로 다룸.
 - [`docs/architecture/project-feature-design.md`](project-feature-design.md) — `#48`,
   `constitution_prompt`를 추가하는 `Project` 엔티티 정본.

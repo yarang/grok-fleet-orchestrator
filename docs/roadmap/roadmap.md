@@ -1070,6 +1070,47 @@
     Phase에서 함께 구현 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI
     패턴이 완전히 동일해 분리 구현하면 낭비.
 
+52. ⏳ **멀티 벤더 에이전트 런타임 (grok build · Gemini CLI 등)** (P2, 신규
+    기능, `#49` Phase 4 + `#51`의 Host 레이블 가드 위에 쌓이는 확장) —
+    **설계 완료, 구현 대기**. 사용자 질문("이 설계를 grok-build cli에
+    적용할 수 있는가? gemini cli에도 적용할 수 있는가?")에 대한 조사·분석
+    결과를 설계로 확정.
+
+    **핵심 조사 결과**(공개 문서 확인, [xAI 공식 문서](https://docs.x.ai/build/overview),
+    [Gemini CLI ACP 모드 문서](https://geminicli.com/docs/cli/acp-mode/)):
+    (1) `grok agent serve`는 별개 제품이 아니라 **Grok Build(`grok`
+    바이너리) 자신의 headless/ACP 서버 모드** — 이미 네이티브 Skills·
+    Hooks·Plugins·MCP servers 시스템을 갖고 있어 `#51`이 fleet 레벨에
+    새로 설계한 Skill/Hooks와 개념이 겹침. (2) **Gemini CLI도 ACP를
+    지원하지만(`gemini --acp`) 전송 방식이 근본적으로 다름** — grok은
+    `--bind`로 네트워크에 스스로 리슨하는데 Gemini는 **stdio 기반
+    JSON-RPC**(인증 플래그 없음)라 설정값 차이가 아니라 트랜스포트
+    아키텍처 차이. `fleet-transport::WorkerTransport`/`AcpTransport`는
+    코드 그라운딩으로 이미 프로토콜 중립적임을 확인(grok 문자열 리터럴
+    없음) — 걸림돌은 `fleet-worker`의 프로세스 스폰 계층뿐.
+
+    **핵심 설계 결정**: `GrokRunner`를 `AgentRunner` 트레잇으로 일반화하고
+    벤더별 구현체 2종으로 분리 — `NetworkBindRunner`(grok류, 기존 동작
+    그대로) / `StdioBridgeRunner`(Gemini류 신규 — fleet-worker가 로컬
+    stdio↔WebSocket 브릿지를 자체 구현). **핵심 통찰**: 브릿지가 grok과
+    똑같은 네트워크 엔드포인트 모양을 오케스트레이터에 제공하므로, 오케스트레이터
+    측 코드(`AcpTransport`/`Dispatcher`/`WorkerSelector`)는 단 한 줄도
+    바뀌지 않음 — 벤더 차이가 전적으로 `fleet-worker` 안에 갇힘. 벤더별
+    바이너리/인자는 신규 `agent_runtimes` 카탈로그(`mcp_servers`/`skills`와
+    동일 패턴)로 데이터화해 코드 변경 없이 새 벤더 추가 가능. grok build
+    네이티브 Skill/Hook과 `#51`의 fleet 자체 계층 중 어느 쪽을 실제로 쓸지는
+    `#49` Phase 0 스파이크 범위를 확장해 결정(설계 시점에 미리 정하지 않음
+    — `#49` §5.2와 동일한 원칙).
+
+    전체 설계(데이터 모델, `AgentRunner` 트레잇, RBAC/API/CLI 표면, 열린
+    질문)는
+    [`docs/architecture/agent-runtime-vendor-design.md`](../architecture/agent-runtime-vendor-design.md)에
+    정리했습니다.
+
+    **다음 단계**: `#49` Phase 0 검증 스파이크 범위에 grok build 네이티브
+    설정 파일 조사와 `grok --help`로 서브커맨드 관계 확정을 포함해 함께
+    진행.
+
 ---
 
 ## 현재 진행 상황 (2026-08-11 기준)
@@ -1079,19 +1120,21 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #48, #49, #50, #51 |
+| 미배정 | #48, #49, #50, #51, #52 |
 
 > **2026-08-14 기준**: `#14`(다크모드/정렬/필터) 완료, `#26`(시크릿 매니저)은
 > 재평가 후 🔵 최하위 강등, 그 외 전 항목 ✅ 해결/🔵 재평가-강등 상태였다가,
 > 같은 날 사용자 요청으로 `#48`(프로젝트 기능 도입) → `#49`(에이전트 동적
 > 프로비저닝/메모리/스레드 요약, `#48` 요구사항의 확장) → `#50`(에이전트
 > 터미널 모니터링·CLI 직접 접속, `#49`에 전적으로 의존) → `#51`(에이전트
-> 하네스 구성: Skill·프로젝트 헌법·계층 모델, `#49`의 도구 바인딩 확장,
-> 2026-08-15) 순서로 신규 등록됐다 — 넷 다 설계는 완료
+> 하네스 구성: Skill·프로젝트 헌법·계층 모델, `#49`의 도구 바인딩 확장) →
+> `#52`(멀티 벤더 에이전트 런타임: grok build·Gemini CLI, 2026-08-15)
+> 순서로 신규 등록됐다 — 다섯 다 설계는 완료
 > ([`project-feature-design.md`](../architecture/project-feature-design.md),
 > [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md),
 > [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md),
-> [`agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md)),
+> [`agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md),
+> [`agent-runtime-vendor-design.md`](../architecture/agent-runtime-vendor-design.md)),
 > 구현은 아직 시작 전이라 미배정 상태. 문서들 모두 "현재 확정된 설계"만
 > 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는
 > [`docs/architecture/log.md`](../architecture/log.md)에 별도로 정리돼 있다.

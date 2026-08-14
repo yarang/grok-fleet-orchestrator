@@ -293,3 +293,32 @@ Tool의 "출처"가 아니라 "가용성 제약"(stdio 도구는 host에 바이�
 구현은 `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은 Phase에서 함께
 하는 것을 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI 패턴이
 완전히 동일해 분리 구현하면 낭비.
+
+---
+
+## `agent-runtime-vendor-design.md` (로드맵 [`#52`](../roadmap/roadmap.md))
+
+### 2026-08-15, 1차 — 최초 설계
+사용자 질문("이 설계를 grok-build cli에 적용할 수 있는가? gemini cli에도
+적용할 수 있는가?")에 답하기 위해 WebSearch/WebFetch로 공개 문서를 조사.
+
+**조사 결과**: (1) `grok agent serve`는 별개 제품이 아니라 Grok Build
+(`grok` 바이너리) 자신의 headless/ACP 서버 모드 — 이미 네이티브 Skills·
+Hooks·Plugins·MCP servers 시스템을 갖고 있어(`grok inspect`로 확인
+가능) `#51`이 fleet 레벨에 새로 설계한 Skill/Hooks와 개념이 겹침을 발견.
+(2) Gemini CLI도 ACP를 지원하지만(`gemini --acp`) grok의 네트워크 bind
+방식과 달리 stdio 기반 JSON-RPC — 트랜스포트 아키텍처가 근본적으로
+다름을 확인. `fleet-transport::WorkerTransport`/`AcpTransport`는 코드
+그라운딩으로 이미 프로토콜 중립적(grok 문자열 리터럴 없음)임을 재확인 —
+걸림돌이 `fleet-worker`의 프로세스 스폰 계층뿐임을 좁혀냄.
+
+**핵심 설계 결정**(사용자가 "지금 바로 설계 문서화" 선택): `GrokRunner`를
+`AgentRunner` 트레잇으로 일반화, 벤더별 구현체 2종
+(`NetworkBindRunner`/`StdioBridgeRunner`) 분리. 핵심 통찰 — stdio 브릿지가
+grok과 동일한 네트워크 엔드포인트 모양을 오케스트레이터에 제공하므로
+오케스트레이터 측 코드는 전혀 안 바뀜, 벤더 차이가 전적으로
+`fleet-worker` 안에 갇힘. 벤더별 바이너리/인자는 신규 `agent_runtimes`
+카탈로그로 데이터화(`mcp_servers`/`skills`와 동일 패턴). grok build
+네이티브 Skill/Hook vs `#51`의 fleet 자체 계층 중 어느 쪽을 쓸지는
+`#49` Phase 0 스파이크 범위를 확장해 실기기로 결정하기로 함(설계
+시점에 미리 정하지 않음 — `#49` §5.2가 이미 겪은 원칙을 그대로 따름).

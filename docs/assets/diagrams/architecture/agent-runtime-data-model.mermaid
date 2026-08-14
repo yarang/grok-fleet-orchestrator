@@ -1,0 +1,35 @@
+erDiagram
+    %% 기존 엔티티(#48/#49/#51)는 이 신규 확장과 맞닿는 최소 필드만 표시.
+
+    AGENT_TEMPLATES }o--|| AGENT_RUNTIMES : "runtime_id (기본값 'grok', 기존 배포 호환)"
+    AGENTS }o--|| AGENT_RUNTIMES : "runtime_id (템플릿에서 스냅샷, 생성 후 불변)"
+    AGENT_RUNTIMES }o--o{ HOSTS : "required_host_labels ⊆ host.labels (#51과 동일 가드 패턴)"
+
+    AGENT_RUNTIMES {
+        uuid id PK
+        text name UK "예: grok, gemini-cli"
+        text vendor "자유 텍스트 — 새 벤더 추가가 스키마 변경 없이 가능"
+        text transport_kind "network_bind | stdio_bridge"
+        text bin_path_template
+        text invocation_args "network_bind 전용, 예: 'agent serve --bind {bind_addr} --secret {secret}'"
+        text stdio_invocation_args "stdio_bridge 전용, 예: '--acp'"
+        jsonb required_host_labels "nullable"
+        text created_by
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    AGENT_TEMPLATES {
+        uuid id PK
+        uuid runtime_id FK
+    }
+
+    AGENTS {
+        uuid id PK
+        uuid runtime_id FK "ON DELETE RESTRICT — 이미 뜬 에이전트는 런타임을 잃을 수 없음"
+    }
+
+    HOSTS {
+        uuid id PK
+        jsonb labels "#51에서 신설"
+    }
