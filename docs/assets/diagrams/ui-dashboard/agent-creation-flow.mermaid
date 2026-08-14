@@ -1,0 +1,22 @@
+flowchart TD
+    A[/agents/new 진입] --> B{쿼리스트링에<br/>project_id/host_id 있음?}
+    B -->|Yes| C[Host 드롭다운을<br/>해당 프로젝트로 사전 필터]
+    B -->|No| D[전체 host 중<br/>여유 있는 host만 노출]
+    C --> E[Host 선택]
+    D --> E
+    E --> F[Project 필드 자동 채움<br/>host.project_id 상속, 읽기 전용]
+    F --> G{Template 선택함?}
+    G -->|No| H[Custom Prompt/도구 체크박스<br/>빈 값으로 시작]
+    G -->|Yes| I{Custom Prompt/도구를<br/>이미 손으로 편집했음?}
+    I -->|No| J[템플릿 값으로 프리필]
+    I -->|Yes| K[확인 모달: 템플릿 값으로 덮어쓸까요?]
+    K -->|확인| J
+    K -->|취소| L[기존 편집값 유지]
+    J --> M[Name 자동 제안<br/>편집 가능]
+    H --> M
+    L --> M
+    M --> N[생성 버튼 클릭]
+    N --> O{POST /api/agents}
+    O -->|성공| P[/agents/:id 로 이동<br/>status=Pending]
+    O -->|409 host 가득 참| Q[인라인 에러<br/>다른 host 선택 유도]
+    O -->|409 name 중복| R[인라인 에러<br/>Name 필드 포커스]

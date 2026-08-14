@@ -605,29 +605,40 @@ attach(session) = agent_tools(agent_id, requirement='required')
    대시보드 배지/카운트(예: overview 페이지에 "실패한 에이전트 명령 N건")
    정도는 필요하다고 열린 질문에 기록합니다.
 
-## UI/UX 논의 — 열린 질문 (2026-08-14 4차 개정 신설)
+## UI/UX 설계 (2026-08-14 4차 개정 신설, 같은 날 후속 라운드에서 상세 설계로 확정)
 
-세부 와이어프레임/상호작용 설계는 다음 라운드로 미루고, 이번 재검토에서
-확인된 에이전트 관련 UI/UX 논의 대상만 기록합니다:
+> ⚠️ **정정**: 최초 이 절은 "다크 모드/`data-theme` 컨벤션을 물려받는다"고
+> 서술했으나, 대시보드 정본 [`ui-design.md`](../ui-dashboard/ui-design.md)
+> §2를 확인한 결과 실제로는 사용자 토글형 다크 모드가 아니라 **단일 Apple
+> Design System**입니다 — 아래를 그에 맞게 정정하고, 아래 각 질문에 대한
+> 답을 실제로 확정했습니다.
 
-- **에이전트 생성 흐름의 형태**: `mcp_servers` 카탈로그·`agent_templates`를
-  고르는 흐름이 단일 폼인지, 마법사(host 선택 → 템플릿 선택 → 도구 확인 →
-  생성)인지 — 후속 라운드에서 결정.
-- **에이전트 메모리 열람/삭제 UI 필요 여부**: 현재는 읽기 전용 누적만
-  설계돼 있습니다(§7) — 사람이 직접 보고 지울 수 있는 UI가 필요한지는 §12의
-  보존 정책 논의와 함께 결정.
-- **`agents.name`과 `worker.name`의 혼동 위험**: 사용자가 지정하는
-  `agents.name`과, 그 에이전트가 등록될 때 `agent_id`를 인코딩해 자동 생성되는
-  `worker.name`(§4 — 정확한 포맷은 미확정)은 서로 다른 문자열입니다 —
-  대시보드/CLI는 항상 `agents.name`만 노출하고 내부 `worker.name`은 숨겨야
-  합니다(이번 재검토에서 발견한 잠재적 혼란 포인트).
-- **CLI 대화형 모드 제공 여부**: `fleet agent create`가 완전 플래그 기반인지,
-  `fleet-worker join`처럼 대화형 모드도 제공할지 — 후속 라운드에서 결정.
-- **신규 페이지 컨벤션 상속**: `/agents`, `/agent-templates`, `/mcp-servers`도
-  `#14`에서 이미 확립한 대시보드 컨벤션(다크 모드, 컬럼 정렬, `.table .row`
-  모바일 collapse)을 그대로 물려받습니다 — 새 컨벤션을 만들지 않습니다.
+에이전트 관련 화면은 `ui-design.md`에 아래와 같이 추가했습니다 — 데이터/API는
+이 문서가, 화면은 `ui-design.md`가 각각 정본을 담당합니다:
+
+- **에이전트 생성 흐름**: [`ui-design.md`](../ui-dashboard/ui-design.md) §3.12 —
+  **단일 폼(진행형 공개), 마법사 아님**으로 결정. `/tasks/new`·`/projects/new`와
+  같은 단순 폼 컨벤션을 유지하는 게 다단계 마법사보다 구현 비용이 낮고,
+  host→project가 자동 파생이라 실제로 분기하는 단계가 없기 때문.
+- **에이전트 메모리 UI**: [`ui-design.md`](../ui-dashboard/ui-design.md) §3.13 —
+  **읽기 전용 목록 + 항목별 수동 삭제**로 결정(자동 보존/정리 정책은 여전히
+  위 §12 열린 질문이나, 구현 전까지 이 수동 삭제가 유일한 정리 수단이 되도록
+  UI에 미리 반영).
+- **`agents.name`과 `worker.name`의 혼동 위험**: [`ui-design.md`](../ui-dashboard/ui-design.md)
+  §3.11 인터랙션에 명시 — 대시보드/CLI는 항상 `agents.name`만 노출하고 내부 `worker.name`은
+  어디에도 노출하지 않는 규칙으로 확정.
+- **CLI 대화형 모드**: `fleet agent create`는 §10과 동일하게 **완전 플래그
+  기반을 기본**으로 하되, 필수 플래그(`--host`, `--name`)가 비어 있고 stdin이
+  TTY이면 대화형으로 값을 물어보는 보조 경로를 추가합니다 —
+  `fleet-worker join`처럼 완전히 별도인 대화형 서브커맨드를 새로 만들지
+  않아 구현 비용이 낮고, 스크립팅 시엔 플래그만으로 완결됩니다.
+- **신규 페이지 컨벤션 상속**: `/agents`, `/admin/agent-templates`,
+  `/admin/mcp-servers`도 `ui-design.md` §2 디자인 시스템·§6 공통 컴포넌트·
+  §8 반응형 전략을 그대로 물려받습니다 — 새 컨벤션을 만들지 않습니다.
 
 ## 관련 문서
 
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #49 — 구현 진행 상황 정본.
 - [`docs/architecture/project-feature-design.md`](project-feature-design.md) — `#48`.
+- [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.11~§3.14 —
+  화면 설계 정본(2026-08-14 신설).

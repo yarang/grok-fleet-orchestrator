@@ -57,8 +57,22 @@ fleet.agentthread.dev/
 ├── /admin/users                # 사용자 관리                     [P1]
 ├── /admin/activity             # 활동 로그 (작업·워커 이벤트)     [P2]
 ├── /admin/tools                # MCP 도구 탐색기                 [P2]
-└── /admin/ssh-keys             # SSH 키 금고 관리                 [구현됨] (⚠️ 신규 추가, 실제 존재)
+├── /admin/ssh-keys             # SSH 키 금고 관리                 [구현됨] (⚠️ 신규 추가, 실제 존재)
+│
+├── /projects                   # 프로젝트 목록                   [P2] (⚠️ 미구현 — #48, 설계만 완료, 아래 §3.9)
+├── /projects/:id               # 프로젝트 상세                   [P2] (⚠️ 미구현 — #48, §3.10)
+├── /projects/new               # 프로젝트 생성                   [P2] (⚠️ 미구현 — #48)
+├── /agents                     # 에이전트 목록 (전체 host 가로지름) [P2] (⚠️ 미구현 — #49, §3.11)
+├── /agents/:id                 # 에이전트 상세 (메모리 브라우저 포함) [P2] (⚠️ 미구현 — #49, §3.13)
+├── /agents/new                 # 에이전트 생성                   [P2] (⚠️ 미구현 — #49, §3.12)
+├── /admin/agent-templates      # 에이전트 템플릿 관리             [P2] (⚠️ 미구현 — #49, §3.14)
+└── /admin/mcp-servers          # MCP 도구 카탈로그 관리           [P2] (⚠️ 미구현 — #49, §3.14)
 ```
+
+> `/projects*`·`/agents*`·`/admin/agent-templates`·`/admin/mcp-servers`는
+> 2026-08-14 재검토(`roadmap.md` `#48`/`#49` 4차 개정) 결과 이 문서에 추가된
+> **설계만 완료된 미구현 라우트**입니다 — 다른 라우트처럼 실측 확인된 것이
+> 아니라, `#48`/`#49` 구현 착수 시 이 IA 트리를 정본으로 따르라는 목적입니다.
 
 ### 라우트 가드 매트릭스
 
@@ -86,6 +100,14 @@ auth.rs`)입니다.
 | `/admin/activity`| ✓    | viewer       | `EventsList` — 전 역할 열람   |
 | `/admin/tools`   | ✓    | viewer       | ⚠️ 정정: `DashboardView`만 검사, operator+ 강제 없음 |
 | `/admin/ssh-keys`| ✓    | admin        | `HostProvision` 권한 필요(기본 admin 전용) |
+| `/projects`      | ✓    | viewer       | `ProjectRead` — 읽기 전용 (⚠️ 미구현, #48) |
+| `/projects/:id`  | ✓    | viewer       | `ProjectRead`, 배정/삭제 액션은 `ProjectAssign`/`ProjectDelete` (⚠️ 미구현) |
+| `/projects/new`  | ✓    | admin        | `ProjectCreate` 권한 필요(기본 admin 전용, operator는 열람만) (⚠️ 미구현) |
+| `/agents`        | ✓    | viewer       | `AgentRead` — 읽기 전용 (⚠️ 미구현, #49) |
+| `/agents/:id`    | ✓    | viewer       | `AgentRead`, 정지/편집은 `AgentDelete`/`AgentManage` (⚠️ 미구현) |
+| `/agents/new`    | ✓    | admin        | `AgentCreate` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
+| `/admin/agent-templates` | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
+| `/admin/mcp-servers`     | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
 
 ---
 
@@ -686,6 +708,301 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 
 ---
 
+### 3.9 페이지 #9 — 프로젝트 목록 (Projects)
+
+> 🆕 **설계 제안 (2026-08-14)**: `#48`(프로젝트 기능) 재검토에서 범위만
+> 정리했던 UI/UX 열린 질문을 이번에 구체화했습니다. 아직 구현되지
+> 않았습니다 — [`project-feature-design.md`](../architecture/project-feature-design.md)를
+> 데이터/API 정본으로, 이 절을 화면 정본으로 삼습니다.
+
+**라우트**: `/projects`  **권한**: `ProjectRead`(viewer+)  **스타일**: Apple tile system
+
+**목적**: 등록된 프로젝트 전체 조망 — 배정 규모(host/worker 수)와 실행 중
+에이전트 수를 한눈에 비교해, 어느 프로젝트가 리소스를 쓰고 있는지 파악.
+
+#### 데이터 소스
+
+| 데이터 | 소스 | 비고 |
+| --- | --- | --- |
+| 프로젝트 목록 | `GET /api/projects` | `project-feature-design.md` §7 |
+| Host/Worker 배정 수 | `list_project_hosts`/`list_project_worker_ids` 카운트 | 목록 응답에 집계 포함하도록 API 확장 필요(현재 설계엔 없음 — 구현 시 반영) |
+| 실행 중 Agent 수 | `#49` `agents` 테이블, `status IN ('Starting','Running')` 카운트 | 위와 동일하게 집계 확장 필요 |
+
+#### 레이아웃 (SVG wireframe)
+
+<svg viewBox="0 0 900 480" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="440" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="660" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="712" y="40" width="148" height="56" rx="28" fill="#0066cc" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Projects</text>
+  <text x="740" y="72" font-family="Inter, sans-serif" font-size="13" fill="#ffffff">+ New Project</text>
+  <rect x="40" y="112" width="820" height="328" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <line x1="60" y1="152" x2="820" y2="152" stroke="#e0e0e0" />
+  <line x1="60" y1="200" x2="820" y2="200" stroke="#e0e0e0" />
+  <line x1="60" y1="248" x2="820" y2="248" stroke="#e0e0e0" />
+  <text x="60" y="136" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Name • Mode • Hosts • Workers • Running agents • Created</text>
+  <text x="60" y="184" font-family="Inter, sans-serif" font-size="13" fill="#111">payments-migration • automatic • 3 • 3 • 2 • 2026-08-01</text>
+  <text x="60" y="232" font-family="Inter, sans-serif" font-size="13" fill="#111">docs-refresh • manual • 1 • 1 • 0 • 2026-08-05</text>
+  <text x="60" y="280" font-family="Inter, sans-serif" font-size="13" fill="#111">infra-audit • manual • 2 • 2 • 1 • 2026-08-10</text>
+</svg>
+
+#### 인터랙션
+
+| 요소 | 동작 |
+| --- | --- |
+| 행 클릭 | `/projects/:id` 상세로 이동 |
+| `+ New Project` | `/projects/new` (name, description, agent_provisioning_mode, workdir_template 입력하는 단일 폼 — 마법사 아님, 기존 `/tasks/new` 같은 단순 폼 컨벤션 재사용) |
+| Mode 컬럼 | Badge(`manual` = parchment, `automatic` = Action Blue) |
+| 데이터 갱신 주기 | 10s 폴링(기존 Overview/Workers와 동일 관례) |
+
+#### 빈 상태
+
+- No projects: "No projects yet. Create one to scope hosts and agents."(EmptyState, `+ New Project` CTA 포함)
+
+---
+
+### 3.10 페이지 #10 — 프로젝트 상세 (Project Detail)
+
+> 🆕 **설계 제안 (2026-08-14)**: 재검토에서 확정한 섹션 우선순위 — 배정
+> host/worker, 실행 중 agent, 최근 태스크 순. **Agent 메모리 브라우저는 이
+> 페이지에 두지 않습니다** — 메모리는 `agent_id`로 스코프되므로 §3.13
+> 에이전트 상세 페이지가 정본입니다(프로젝트 상세에서는 각 agent 행에서
+> 링크만 제공).
+
+**라우트**: `/projects/:id`  **권한**: `ProjectRead`(viewer+), 배정/삭제는 `ProjectAssign`/`ProjectDelete`(admin 기본)  **스타일**: Apple tile system
+
+**목적**: 프로젝트 하나의 리소스 배정과 실행 상태를 단일 화면에서 확인·조작.
+
+#### 레이아웃 (SVG wireframe)
+
+<svg viewBox="0 0 900 700" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="660" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="80" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Projects / payments-migration • automatic</text>
+  <text x="60" y="96" font-family="Inter, sans-serif" font-size="13" fill="#444">idle timeout 900s • workdir /srv/agents/payments-migration</text>
+  <rect x="40" y="136" width="820" height="140" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="160" font-family="Inter, sans-serif" font-size="14" fill="#444">배정된 Host / Worker  [+ Assign Host]</text>
+  <line x1="60" y1="196" x2="820" y2="196" stroke="#e0e0e0" />
+  <text x="60" y="220" font-family="Inter, sans-serif" font-size="13" fill="#111">worker-ec1 (10.0.1.10) → worker#a1b2 • online • 2/5 agents</text>
+  <text x="60" y="252" font-family="Inter, sans-serif" font-size="13" fill="#111">worker-ec2 (10.0.1.11) → worker#c3d4 • online • 1/5 agents</text>
+  <rect x="40" y="292" width="820" height="140" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="316" font-family="Inter, sans-serif" font-size="14" fill="#444">실행 중 Agent  [+ New Agent]</text>
+  <line x1="60" y1="352" x2="820" y2="352" stroke="#e0e0e0" />
+  <text x="60" y="376" font-family="Inter, sans-serif" font-size="13" fill="#111">code-reviewer-1 • running • automatic • worker-ec1 →</text>
+  <text x="60" y="408" font-family="Inter, sans-serif" font-size="13" fill="#111">migration-bot • starting • manual • worker-ec2 →</text>
+  <rect x="40" y="448" width="820" height="212" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="472" font-family="Inter, sans-serif" font-size="14" fill="#444">최근 태스크(이 프로젝트 스코프)</text>
+  <line x1="60" y1="508" x2="820" y2="508" stroke="#e0e0e0" />
+  <text x="60" y="532" font-family="Inter, sans-serif" font-size="13" fill="#111">#8f21 • dispatched • code-reviewer-1</text>
+  <text x="60" y="564" font-family="Inter, sans-serif" font-size="13" fill="#111">#8f19 • ● waiting (no project worker) • retry 2/5</text>
+  <text x="60" y="596" font-family="Inter, sans-serif" font-size="13" fill="#111">#8f10 • completed • migration-bot</text>
+</svg>
+
+#### 섹션 우선순위 (재검토에서 확정)
+
+1. **헤더**: 이름/설명, `agent_provisioning_mode` Badge, (automatic일 때만)
+   `agent_idle_timeout_secs`·`default_agent_template_id` 표시, `workdir_template`,
+   Edit/Delete.
+2. **배정된 Host/Worker**: `list_project_hosts` 기반 DataTable(호스트 행마다
+   연결된 worker와 `has_capacity` 상태를 함께 표시). `+ Assign Host` 모달은
+   `project_id IS NULL`인 host만 선택지로 노출(다른 프로젝트 소속 host는
+   먼저 그쪽에서 해제해야 함 — 배타적 소유 원칙을 UI에서도 강제). Worker는
+   host를 통해 종속적으로만 표시(§3 불변식 — host 배정 시 worker.project_id가
+   자동 동기화되므로 독립적인 worker 배정 UI는 두지 않음, 다만 host 없이
+   존재하는 워커의 예외 케이스는 별도 "독립 Worker 배정" 접이식 섹션으로
+   숨겨둠).
+3. **실행 중 Agent**: `agents` 테이블(project_id 일치) DataTable — Name,
+   Status pill(Pending/Starting/Running/Stopping/Stopped/Failed), Host,
+   `provisioned_by` Badge, Stop 버튼(`AgentDelete`). 행 클릭 시 §3.13
+   에이전트 상세로 이동(메모리는 거기서 확인). `+ New Agent` → §3.12.
+4. **최근 태스크**: 기존 §3.3 태스크 큐 DataTable을 `project_id` 필터로
+   재사용(별도 컴포넌트 신설 없음). 아래 "하드 격리 대기 상태 표시" 참고.
+
+#### 하드 격리 대기 상태 표시 (재검토에서 발견한 UX 리스크 해소)
+
+`SelectionError::NoWorkerForProject`로 재시도 중인 태스크(`project-aware-
+dispatch-logic.mermaid` 참고)는 일반 `pending`/`failed`와 시각적으로 구분해야
+사용자가 "이 프로젝트에 워커를 안 붙여서 멈춘 것"임을 즉시 알 수 있습니다.
+저장된 상태를 늘리지 않고(스키마 변경 없음) **API가 조회 시점에 파생
+계산**합니다:
+
+```text
+pending_no_project_worker =
+    task.status == Pending
+    AND task.project_id IS NOT NULL
+    AND (list_project_worker_ids(task.project_id) ∩ {online workers}) IS EMPTY
+```
+
+- StatusPill 신규 변형: `● waiting (no project worker)` — amber/violet(§6.1
+  `circuit_open`과는 다른 색으로, "회로 차단"이 아니라 "배정 자체가 없음"임을
+  구분). 일반 재시도 대기(`pending`, gray)와 나란히 놓여도 헷갈리지 않도록
+  라벨 텍스트에 사유를 그대로 노출.
+- 클릭 시 툴팁/확장: "이 프로젝트에 배정된 워커가 없거나 전부 오프라인입니다.
+  `/projects/:id`에서 host를 배정하세요" + 해당 프로젝트로 링크.
+
+#### 인터랙션
+
+| 요소 | 동작 |
+| --- | --- |
+| `+ Assign Host` | 모달, `project_id IS NULL` host만 선택 가능 |
+| Host 행의 Unassign | `DELETE /api/hosts/:id/project` 확인 모달("이 host의 워커도 함께 일반 풀로 돌아갑니다") |
+| Agent 행 클릭 | `/agents/:id` |
+| `+ New Agent` | `/agents/new?project_id=:id` (§3.12, host 선택지가 이 프로젝트로 사전 필터됨) |
+| Task 행의 `waiting (no project worker)` 클릭 | 사유 툴팁 확장 |
+| 데이터 갱신 주기 | 10s 폴링 |
+
+---
+
+### 3.11 페이지 #11 — 에이전트 목록 (Agents)
+
+> 🆕 **설계 제안 (2026-08-14)**. 프로젝트 상세(§3.10)가 프로젝트별 뷰라면,
+> 이 페이지는 host를 가로지르는 전체 에이전트 뷰입니다 — "이 host가 지금
+> 얼마나 바쁜가"를 프로젝트 경계 없이 확인할 때 씁니다.
+
+**라우트**: `/agents`  **권한**: `AgentRead`(viewer+)  **스타일**: Apple tile system
+
+#### 레이아웃 (SVG wireframe)
+
+<svg viewBox="0 0 900 460" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="420" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Agents</text>
+  <rect x="40" y="112" width="820" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="148" font-family="Inter, sans-serif" font-size="13" fill="#444">FilterBar: Project ▾  Status ▾  Host ▾  Search</text>
+  <rect x="40" y="188" width="820" height="232" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <line x1="60" y1="228" x2="820" y2="228" stroke="#e0e0e0" />
+  <line x1="60" y1="268" x2="820" y2="268" stroke="#e0e0e0" />
+  <line x1="60" y1="308" x2="820" y2="308" stroke="#e0e0e0" />
+  <text x="60" y="212" font-family="Inter, sans-serif" font-size="13" fill="#7a7a7a">Name • Project • Host • Status • Provisioned by • Last active</text>
+  <text x="60" y="252" font-family="Inter, sans-serif" font-size="13" fill="#111">code-reviewer-1 • payments-migration • worker-ec1 • running • automatic • 2m ago</text>
+  <text x="60" y="292" font-family="Inter, sans-serif" font-size="13" fill="#111">migration-bot • payments-migration • worker-ec2 • starting • manual • —</text>
+  <text x="60" y="332" font-family="Inter, sans-serif" font-size="13" fill="#111">docs-writer • (일반 풀) • worker-ec3 • running • manual • 14m ago</text>
+</svg>
+
+#### 인터랙션
+
+| 요소 | 동작 |
+| --- | --- |
+| 행 클릭 | `/agents/:id` |
+| Project 컬럼 값 없음 | "일반 풀"로 표시(§48 host가 project 미소속) — `agents.name`만 노출, 내부 `worker.name`은 어디에도 노출하지 않음(재검토에서 발견한 혼동 방지 규칙, §3.13에서도 동일) |
+| FilterBar | Project/Status/Host 드롭다운 + 이름 검색, URL 쿼리스트링에 반영(기존 §7.1 관례) |
+| 데이터 갱신 주기 | 10s 폴링 |
+
+#### 빈 상태
+
+- No agents: "No agents running. Create one from a project or `/agents/new`."
+
+---
+
+### 3.12 페이지 #12 — 에이전트 생성 (New Agent)
+
+> 🆕 **설계 제안 (2026-08-14)**: 재검토에서 "마법사 vs 단일 폼"을 단일 폼
+> **(진행형 공개, progressive disclosure)**으로 결정 — 기존 `/tasks/new`,
+> `/projects/new` 같은 단순 폼 컨벤션과 일관되고, 다단계 마법사보다 구현
+> 비용이 낮습니다. 다단계가 필요할 만큼 입력이 분기하지 않는다고 판단했습니다
+> (host→project는 자동 파생, template은 선택적 프리필일 뿐).
+
+**라우트**: `/agents/new`(`?project_id=`, `?host_id=` 쿼리로 사전 필터 가능)
+**권한**: `AgentCreate`(admin 기본)  **스타일**: Apple auth surface(단일 폼 레이아웃)
+
+#### 폼 구성 (위→아래)
+
+1. **Host** 드롭다운 — `max_agents` 대비 여유 있는 host만(`"worker-ec1 (2/5 agents used)"`).
+   `?project_id=`로 진입 시 그 프로젝트 소속 host로 사전 필터.
+2. **Project**(읽기 전용 표시) — 선택한 host의 `project_id`를 그대로 보여줌
+   (일반 풀이면 "—"). 사용자가 별도로 고르지 않음 — `#48`의 배타적 소유상
+   host가 project를 결정하므로 편집 불가 필드로 명시해 혼동을 방지.
+3. **Template**(선택, "직접 입력" 옵션 포함) — 선택 시 아래 4·6번 필드를
+   템플릿 값으로 프리필(스냅샷 — 이후 템플릿을 고쳐도 이미 만든 Agent는
+   영향받지 않음, §6 참고).
+4. **Name** — 기본값 자동 제안(예: `<template-name>-N`), 편집 가능, 저장 시
+   `agents.name` UNIQUE 검증.
+5. **Custom Prompt**(textarea) — 템플릿 미선택 시 빈 값.
+6. **도구 바인딩** — `mcp_servers` 카탈로그 체크박스 목록. 필수 도구는 항상
+   체크·비활성화, 옵션 도구만 토글 가능. 카탈로그에 없으면 "관리자에게
+   `/admin/mcp-servers`에서 등록을 요청하세요" 안내.
+7. **생성**(pill CTA) → `POST /api/agents`.
+
+![Agent Creation Prefill Flow](../assets/diagrams/ui-dashboard/agent-creation-flow.mermaid)
+
+#### 인터랙션
+
+| 요소 | 동작 |
+| --- | --- |
+| Host 변경 | Project 읽기 전용 필드 즉시 갱신, 이미 선택한 Template이 그 host의 프로젝트와 무관하므로 유지(템플릿은 host/project와 독립적인 프리셋) |
+| Template 변경 | Custom Prompt/도구 체크박스를 템플릿 값으로 재프리필 — 사용자가 이미 손으로 고친 값이 있으면 덮어쓰기 전에 확인 모달("템플릿 값으로 덮어쓸까요?") |
+| 필수 도구 체크박스 | 항상 체크된 채 비활성화(해제 불가) |
+| 생성 실패(host 여유 없음) | 인라인 에러 "이 host는 이미 가득 찼습니다 — 다른 host를 선택하세요" |
+
+---
+
+### 3.13 페이지 #13 — 에이전트 상세 (Agent Detail)
+
+> 🆕 **설계 제안 (2026-08-14)**: 재검토에서 확정 — 메모리 브라우저는
+> **읽기 전용 + 개별 삭제**만 제공합니다(자동 보존/정리 정책은
+> `agent-provisioning-design.md` §12 열린 질문, 구현 전까지는 이 수동 삭제가
+> 유일한 정리 수단).
+
+**라우트**: `/agents/:id`  **권한**: `AgentRead`(viewer+), Stop/편집은 `AgentDelete`/`AgentManage`  **스타일**: Apple tile system
+
+#### 레이아웃 (SVG wireframe)
+
+<svg viewBox="0 0 900 640" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="600" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+  <rect x="40" y="40" width="820" height="72" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Agents / code-reviewer-1 • running • automatic</text>
+  <text x="60" y="96" font-family="Inter, sans-serif" font-size="13" fill="#444">host worker-ec1 • project payments-migration • template code-reviewer</text>
+  <rect x="40" y="128" width="820" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="152" font-family="Inter, sans-serif" font-size="14" fill="#444">Custom Prompt / Tools  [Manage]</text>
+  <line x1="60" y1="184" x2="820" y2="184" stroke="#e0e0e0" />
+  <text x="60" y="208" font-family="Inter, sans-serif" font-size="13" fill="#111">required: linter-mcp, github-mcp  •  optional: slack-mcp</text>
+  <rect x="40" y="264" width="820" height="240" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="288" font-family="Inter, sans-serif" font-size="14" fill="#444">Memory  [kind: all ▾]</text>
+  <line x1="60" y1="324" x2="820" y2="324" stroke="#e0e0e0" />
+  <line x1="60" y1="368" x2="820" y2="368" stroke="#e0e0e0" />
+  <line x1="60" y1="412" x2="820" y2="412" stroke="#e0e0e0" />
+  <text x="60" y="348" font-family="Inter, sans-serif" font-size="13" fill="#111">note • "reviewed PR #221, flagged 2 issues" • task #8f21 • 2m ago  [🗑]</text>
+  <text x="60" y="392" font-family="Inter, sans-serif" font-size="13" fill="#111">fact • "repo uses pnpm, not npm" • task #8f10 • 1h ago  [🗑]</text>
+  <text x="60" y="436" font-family="Inter, sans-serif" font-size="13" fill="#111">note • "initial setup complete" • task #8e99 • 3h ago  [🗑]</text>
+  <rect x="40" y="520" width="820" height="90" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="544" font-family="Inter, sans-serif" font-size="14" fill="#444">이 Agent로 디스패치된 최근 태스크</text>
+</svg>
+
+#### 인터랙션
+
+| 요소 | 동작 |
+| --- | --- |
+| `Manage` | 모달 — custom_prompt 편집, 옵션 도구 토글(필수 도구는 여기서도 해제 불가) — `AgentManage` |
+| Memory kind 필터 | note / summary / fact 드롭다운 |
+| Memory 행 `🗑` | `DELETE /api/agents/:id/memory/:entry_id` 확인 후 즉시 목록에서 제거 — `AgentManage` |
+| Memory 행 텍스트 클릭 | 잘린 content 전체 펼침(inline expand) |
+| `Stop` (헤더) | `agent_commands`(stop) 발행 확인 모달, 상태를 `Stopping`으로 즉시 반영 — `AgentDelete` |
+| 데이터 갱신 주기 | 10s 폴링(상태), Memory는 진입 시 1회 로드 + 수동 새로고침 |
+
+#### 빈 상태
+
+- No memory yet: "This agent hasn't completed any tasks yet."
+
+---
+
+### 3.14 페이지 #14 — 에이전트 템플릿 · MCP 카탈로그 관리 (Admin)
+
+> 🆕 **설계 제안 (2026-08-14)**. 다른 `/admin/*` 관리 페이지(사용자 관리,
+> SSH 키 금고)와 동일한 관리자 전용 컨벤션을 따릅니다 — 별도 신규 패턴
+> 없음.
+
+**라우트**: `/admin/agent-templates`, `/admin/mcp-servers`  **권한**: `AgentTemplateManage`(admin 기본)  **스타일**: Apple auth surface
+
+- **`/admin/agent-templates`**: Template DataTable(name, custom_prompt 미리보기,
+  필수/옵션 도구 칩 목록, 사용 중인 Agent 수) + 생성/편집 모달.
+- **`/admin/mcp-servers`**: `mcp_servers` 카탈로그 DataTable(name, transport
+  badge, 참조 중인 template/agent 수) + 등록 모달. **삭제 시 참조 중이면
+  409**(`agent-provisioning-design.md` §3/§10, `ON DELETE RESTRICT` 정책) —
+  삭제 버튼 클릭 시 참조 목록을 먼저 보여주고, 참조가 하나도 없을 때만
+  실제 삭제 버튼을 활성화.
+
+---
+
 ## 4. 사용자 흐름도
 
 ### 4.1 온보딩 플로우 (최초 설치 직후)
@@ -999,6 +1316,28 @@ Login / Bootstrap 페이지는 **글로벌 헤더 없음**. 카드 자체가 전
 | #8 MCP 도구 탐색기    | 자가발견성, AI 클라이언트 온보딩           |
 
 **예상 LOC**: ~600
+
+### 10.5 P2 — 프로젝트/에이전트 (`#48`/`#49`, 2026-08-14 설계 신설)
+
+> 🆕 각 페이지 설계는 §3.9~§3.14 참고. `#48` 백엔드(Phase 1~4)와 `#49`
+> 백엔드(Phase 0~5)가 최소 Phase 1~3까지 진행된 뒤에야 이 UI 작업을 시작할
+> 수 있습니다 — 데이터 소스 자체가 아직 없는 상태에서 화면부터 만들 수는
+> 없습니다.
+
+| 페이지 | 이유 |
+| --- | --- |
+| #9 프로젝트 목록, #10 프로젝트 상세 | `#48` 배타적 소유/하드 디스패치 모델의 유일한 조작 표면(현재는 REST/MCP만 존재) |
+| #11 에이전트 목록, #12 에이전트 생성, #13 에이전트 상세 | `#49` 동적 프로비저닝·메모리의 유일한 조작 표면 |
+| #14 템플릿/카탈로그 관리 | `#49` §6 중앙 카탈로그를 관리자가 직접 유지보수하는 유일한 경로(CLI 대체 가능하나 발견성이 낮음) |
+
+**선행 조건**: `#48` Phase 3(API+MCP), `#49` Phase 1~2(스키마+정적 등록,
+템플릿/카탈로그) 완료. `#49` Phase 4(동적 프로비저닝)는 완료되지 않아도
+§3.12 생성 폼 자체는 Phase 1(정적 등록) 단계에서부터 동작 가능(§4 dynamic
+provisioning은 백그라운드에서 나중에 붙는 계층).
+
+**예상 LOC**: 참고용, 실측 안 함 — Host Inventory(§10.3, 페이지 2종 기준
+~1,000 LOC 중 스키마/heartbeat 제외분)보다 페이지 수가 많아(6종) 그
+비례치로 어림하면 ~1,500~2,000 예상.
 
 ---
 

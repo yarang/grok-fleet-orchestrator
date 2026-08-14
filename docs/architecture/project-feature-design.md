@@ -300,25 +300,35 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
   [`agent-provisioning-design.md`](agent-provisioning-design.md) §12 참고
   (2026-08-14 3차 개정, 재검토에서 발견한 누락 항목의 상호 참조).
 
-## UI/UX 논의 — 열린 질문 (2026-08-14 3차 개정 신설)
+## UI/UX 설계 (2026-08-14 3차 개정 신설, 4차 개정에서 상세 설계로 확정)
 
-세부 와이어프레임/상호작용 설계는 다음 라운드로 미루고, 이번 재검토에서
-확인된 프로젝트 관련 UI/UX 논의 대상만 기록합니다:
+> ⚠️ **정정 (2026-08-14, 4차 개정)**: 최초 이 절은 "다크 모드/`data-theme`
+> 컨벤션을 물려받는다"고 서술했으나, 실제 대시보드 정본
+> [`ui-design.md`](../ui-dashboard/ui-design.md) §2를 확인한 결과 **다크
+> 모드 토글은 존재하지 않습니다** — 대시보드는 사용자가 전환하는 이중 테마가
+> 아니라 **단일 Apple Design System**(white/parchment/dark *tile 섹션*을
+> 페이지 구성 요소로 고정 배치하는 방식, 사용자 토글 없음)으로 통일돼
+> 있습니다. 아래 내용을 그에 맞게 정정하고, 세부 와이어프레임/인터랙션
+> 설계를 실제로 완료했습니다.
 
-- **프로젝트 상세 페이지 우선순위**: 배정 host/worker 목록, 실행 중 agent,
-  최근 태스크, agent 메모리 브라우저 중 무엇을 우선 노출할지 — 후속 라운드에서
-  결정.
-- **하드 격리발 대기 상태의 대시보드 표시**: "이 태스크는 프로젝트 전용
-  워커가 없어 대기 중"(`SelectionError::NoWorkerForProject` 재시도 경로)을
-  일반 실패/정체와 시각적으로 구분해야 사용자 혼란을 방지할 수 있음(이번
-  재검토에서 발견한 UX 리스크) — 구분 방식은 후속 라운드에서 결정.
-- **신규 페이지 컨벤션 상속**: `/projects`, `/projects/:id`, `/projects/new`는
-  `#14`에서 이미 확립한 대시보드 컨벤션(다크 모드 CSS custom properties +
-  `data-theme`, 컬럼 정렬 `data-sort-key`/`data-sort-dir`, `.table .row` 모바일
-  collapse)을 그대로 물려받는다 — 새 컨벤션을 만들지 않음.
+프로젝트 관련 화면은 `ui-design.md`(대시보드 화면 설계 정본)에 아래와 같이
+추가했습니다 — 데이터/API는 이 문서가, 화면은 `ui-design.md`가 각각 정본을
+담당합니다(중복 서술 방지):
+
+- [`ui-design.md`](../ui-dashboard/ui-design.md) §3.9 프로젝트 목록
+- [`ui-design.md`](../ui-dashboard/ui-design.md) §3.10 프로젝트 상세 —
+  섹션 우선순위(헤더 → 배정 host/worker → 실행 중 agent → 최근 태스크 순,
+  agent 메모리 브라우저는 agent 상세로 위임)와 **하드 격리발 대기 상태를
+  일반 pending/failed와 구분하는 StatusPill 변형**(`waiting (no project
+  worker)`, API가 조회 시점에 파생 계산 — 스키마 변경 없음)을 확정.
+- 신규 페이지는 `ui-design.md` §2 디자인 시스템(Apple 단일 테마, StatusPill/
+  Badge/Card/DataTable/EmptyState 공통 컴포넌트, §6)과 §8 반응형 전략을
+  그대로 물려받습니다 — 새 컨벤션을 만들지 않습니다.
 
 ## 관련 문서
 
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #48 — 구현 진행 상황 정본.
 - [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
   이 하드 격리 모델 위에 host 내 동적 에이전트 생성을 쌓는 후속 설계.
+- [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.9~§3.10 —
+  화면 설계 정본(2026-08-14 신설).
