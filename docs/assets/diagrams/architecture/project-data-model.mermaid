@@ -1,30 +1,19 @@
 erDiagram
-    PROJECTS ||--o{ PROJECT_WORKERS : "has assigned"
-    PROJECTS ||--o{ PROJECT_HOSTS : "has assigned"
+    PROJECTS ||--o{ WORKERS : "owns exclusively (workers.project_id, nullable — NULL = general pool)"
+    PROJECTS ||--o{ HOSTS : "owns exclusively (hosts.project_id, nullable — NULL = general pool)"
     PROJECTS ||--o{ TASKS : "scopes (optional)"
-    WORKERS ||--o{ PROJECT_WORKERS : "assigned to (M:N)"
-    HOSTS ||--o{ PROJECT_HOSTS : "assigned to (M:N)"
-    HOSTS |o--o| WORKERS : "worker_id (existing, unrelated to project membership)"
+    HOSTS |o--o| WORKERS : "worker_id (existing) — invariant: worker.project_id must match host.project_id when linked"
 
     PROJECTS {
         uuid id PK
         text name UK
         text description
         text created_by
+        text agent_provisioning_mode "manual | automatic — #49"
+        uuid default_agent_template_id "nullable — #49, used when automatic"
+        integer agent_idle_timeout_secs "nullable — #49, auto-teardown for automatic-mode agents"
         timestamptz created_at
         timestamptz updated_at
-    }
-
-    PROJECT_WORKERS {
-        uuid project_id FK
-        uuid worker_id FK
-        timestamptz assigned_at
-    }
-
-    PROJECT_HOSTS {
-        uuid project_id FK
-        uuid host_id FK
-        timestamptz assigned_at
     }
 
     WORKERS {
@@ -32,15 +21,17 @@ erDiagram
         text name UK
         text endpoint
         text status
+        uuid project_id FK "nullable, exclusive — 2026-08-14 2차 개정: M:N project_workers 조인 테이블을 대체"
     }
 
     HOSTS {
         uuid id PK
         text hostname UK
-        uuid worker_id FK "nullable, ON DELETE SET NULL"
+        uuid worker_id FK "nullable, existing"
+        uuid project_id FK "nullable, exclusive — 2026-08-14 2차 개정: M:N project_hosts 조인 테이블을 대체"
     }
 
     TASKS {
         uuid id PK
-        uuid project_id FK "nullable, ON DELETE SET NULL — already exists since 013_task_threads.sql"
+        uuid project_id FK "nullable, #48에서 이미 도입"
     }

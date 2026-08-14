@@ -16,7 +16,7 @@ erDiagram
     AGENTS {
         uuid id PK
         uuid host_id FK
-        uuid project_id FK "nullable — 0 or 1 project (M:N with Worker via #48 is separate concern)"
+        uuid project_id FK "nullable — derived/inherited from host_id's hosts.project_id (#48 3차 개정, exclusive ownership, not independently set)"
         uuid worker_id FK "nullable — set once the spawned grok process registers"
         uuid template_id FK "nullable — which AgentTemplate this was instantiated from, if any"
         text name
@@ -90,6 +90,7 @@ erDiagram
     HOSTS {
         uuid id PK
         text hostname UK
+        uuid project_id FK "#48 2026-08-14 3차 개정 — 배타적 소유. 이 host 위의 모든 Agent는 이 project_id를 그대로 상속받는다(§2.3)"
         integer max_agents "신규 — 이 host에 동시 운영 가능한 agent 상한(운영자 설정, 여유 판단 기준)"
     }
 
@@ -101,6 +102,9 @@ erDiagram
     PROJECTS {
         uuid id PK
         text name UK
+        text agent_provisioning_mode "manual | automatic — §4.1"
+        uuid default_agent_template_id FK "nullable, automatic 모드 필수"
+        integer agent_idle_timeout_secs "nullable — automatic 모드 에이전트 유휴 자동 종료 기준"
     }
 
     TASKS {

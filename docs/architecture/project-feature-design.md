@@ -1,8 +1,13 @@
 # 프로젝트(Project) 기능 설계
 
 > 작성일: 2026-08-14. 로드맵 [`#48`](../roadmap/roadmap.md)에 대응하는 설계 문서입니다.
-> 이 문서는 **설계 확정** 단계이며, 아직 구현되지 않았습니다 — 구현 진행 상황은
-> `roadmap.md` #48 항목을 정본으로 확인하세요.
+> **개정 (2026-08-14, 2차)**: 최초 설계는 host/worker↔project를 다대다(M:N) +
+> 소프트 디스패치로 확정했으나, 사용자가 "리소스 경쟁/충돌 예방을 위해 하드
+> 격리가 기본이어야 한다"고 재검토를 요청 — 워커 M:N 공유도 결국 같은 host의
+> 물리 자원과 워커 프로세스 자체의 세션 슬롯을 여러 프로젝트가 경합하게 만든다는
+> 점을 재확인하고, **워커/호스트 모두 배타적 소유 + 하드 디스패치**로
+> 전면 개정했습니다. 이 문서는 **설계 확정** 단계이며, 아직 구현되지 않았습니다 —
+> 구현 진행 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 동기
 
@@ -14,30 +19,35 @@
 
 이 설계는 그 자리표시자를 실제 기능으로 채우는 것을 목표로 합니다:
 
-1. **프로젝트가 여러 host와 agent(워커)를 담을 수 있어야 한다** — 하나의 인프라
-   풀을 여러 프로젝트가 공유하는 멀티 프로젝트 운영을 지원.
-2. **하나의 프로젝트에 여러 agent가 배치될 수 있어야 한다** — 즉 프로젝트
-   스코프 태스크가 여러 워커에 분산 디스패치될 수 있어야 한다(단일 워커 전용이
-   아님).
-3. 위 둘을 지원하는 **디스패치 프로토콜과 배치/해제 절차**를 정의한다.
+1. **프로젝트가 여러 host와 agent(워커)를 담을 수 있어야 한다.**
+2. **하나의 프로젝트에 여러 agent가 배치될 수 있어야 한다** — 프로젝트 스코프
+   태스크가 여러 워커에 분산 디스패치될 수 있어야 함(단일 워커 전용 아님).
+3. 위 둘을 지원하는 **배치/해제 절차와 디스패치 프로토콜**을 정의하되,
+   **프로젝트 간 리소스 경쟁/충돌을 구조적으로 예방**한다.
 
-## 2. 핵심 설계 결정 (사용자 확인 완료, 2026-08-14)
+## 2. 핵심 설계 결정
 
-이 두 결정은 스키마·API·디스패처 로직에 직접 영향을 주므로, 구현 착수 전에
-사용자에게 확인받았습니다.
+### 2.1 최종 결정 (2026-08-14, 2차 개정)
 
 | 결정 사항 | 채택안 | 근거 |
 |---|---|---|
-| 프로젝트 ↔ host/agent 소속 관계 | **다대다(M:N)** — 하나의 host/worker가 여러 프로젝트에 동시 배치 가능 | 인프라 풀을 여러 프로젝트가 공유하는 운영 형태를 지원. 조인 테이블(`project_workers`/`project_hosts`)로 구현 |
-| project_id 지정 태스크의 디스패치 범위 | **소프트 힌트(soft)** — 배치된 agent가 없거나 전부 불가하면 전체 풀로 폴백 | 가용성 우선. 프로젝트 경계가 자원 격리를 강제하지 않음(엄격 격리가 필요해지면 후속 항목으로 재검토) |
+| 프로젝트 ↔ host/worker 소속 관계 | **배타적(exclusive) 1:N** — host/worker는 최대 1개 프로젝트에만 소속, 미소속이면 일반 풀 | `workers.project_id`/`hosts.project_id` 직접 FK. host의 물리 자원과 그 위에서 도는 워커 프로세스의 세션 슬롯을 여러 프로젝트가 나눠 쓰면, "소프트"로 표현해도 실제로는 항상 경쟁 상태가 생긴다 — 스키마 레벨에서 원천 차단하는 게 더 단순하고 확실함 |
+| project_id 지정 태스크의 디스패치 범위 | **하드(strict)** — 그 프로젝트 소유 워커만 후보. 후보가 없으면 전체 풀로 폴백하지 않음 | §5 참고 — 새 에러/재시도 메커니즘을 만들지 않고 **`#38`의 기존 `WorkerUnavailable` 재시도/Dead-Letter 경로를 그대로 재사용** |
 
-M:N 소속을 택했기 때문에 "한 워커가 여러 프로젝트의 태스크를 동시에 받을 때
-용량을 어떻게 나눌 것인가?"라는 질문이 남는데, §5에서 다루듯 **별도의 쿼터/공정
-분배 메커니즘을 신설하지 않습니다** — 기존 `Worker.active_tasks`/`max_concurrent`
-기반 최소부하 선택이 이미 프로젝트 출처와 무관하게 워커의 총 부하를 반영하므로,
-바쁜 워커는 어느 프로젝트에서 오는 요청이든 자연히 후순위로 밀립니다. 이것으로
-1단계 구현 범위에서는 충분하다고 판단했습니다 — 엄격한 프로젝트별 용량 예약이
-필요해지면 별도 로드맵 항목으로 분리합니다.
+### 2.2 1차 결정에서 뒤집힌 이유 (경위 기록)
+
+최초 설계(1차)는 M:N + 소프트를 사용자 확인 후 채택했었습니다. 이후 사용자가
+`#49`(에이전트 동적 프로비저닝) 설계 논의 중 "host에는 여유가 있을 때만
+agent를 만든다"는 요구사항을 구체화하면서 "프로젝트의 하드 격리가 기본이어야
+충돌/경쟁을 예방한다"는 원칙을 제시했습니다. 처음에는 "host 소유권만 하드로
+하고 `#48`의 기존 워커 M:N은 안 건드리는" 절충안을 제안했으나, 사용자가
+**"host 소유권이 비배타적이어도 워커를 실행하면서 리소스 경쟁이 생기지
+않는가?"**라고 되물었고 — 맞는 지적이었습니다. 워커가 M:N으로 여러
+프로젝트에 공유되면, 그 워커 프로세스가 도는 host의 물리 자원과 워커 자체의
+`max_concurrent` 세션 슬롯을 다른 프로젝트의 태스크와 항상 경합하게 됩니다.
+"소프트"라는 이름을 붙여도 경쟁 상태 자체는 없어지지 않습니다. 그래서
+워커/호스트 양쪽 모두 배타적 소유로 전면 개정했습니다 — 아직 구현 전이라
+재작업 비용 없이 지금 바로잡는 게 맞다고 판단했습니다.
 
 ## 3. 데이터 모델
 
@@ -50,41 +60,37 @@ CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL UNIQUE,
     description TEXT,
-    created_by TEXT,                          -- username, audit_log의 actor_label과 동일한
-                                                -- "하드 FK 아님" 패턴 — 계정 삭제로 프로젝트
-                                                -- 이력이 끊기지 않도록.
+    created_by TEXT,
+    -- #49 통합: 이 프로젝트의 에이전트를 수동으로만 만들지, 오케스트레이터가
+    -- 자동으로도 만들지(agent-provisioning-design.md §3 AgentProvisioningMode).
+    agent_provisioning_mode TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'automatic'
+    default_agent_template_id UUID,  -- automatic 모드에서 쓸 기본 템플릿(agent_templates FK, #49 도입 후 연결)
+    agent_idle_timeout_secs INTEGER,  -- automatic 모드로 만든 에이전트의 유휴 자동 종료 기준(NULL이면 자동 종료 안 함)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- updated_at 자동 갱신 트리거는 007_hosts.sql의 update_hosts_updated_at() 패턴을 재사용.
-
-CREATE TABLE project_workers (
-    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    worker_id  UUID NOT NULL REFERENCES workers(id)  ON DELETE CASCADE,
-    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, worker_id)
-);
-CREATE INDEX idx_project_workers_worker_id ON project_workers(worker_id);
-
-CREATE TABLE project_hosts (
-    project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    host_id    UUID NOT NULL REFERENCES hosts(id)    ON DELETE CASCADE,
-    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (project_id, host_id)
-);
-CREATE INDEX idx_project_hosts_host_id ON project_hosts(host_id);
 
 -- 013_task_threads.sql이 예약해 둔 컬럼에 이제야 FK를 건다. 기존 행은
 -- project_id IS NULL인 채로 계속 유효(013의 설계 의도 그대로).
 ALTER TABLE tasks
     ADD CONSTRAINT tasks_project_id_fkey
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL;
+
+-- 배타적 소유 — M:N 조인 테이블이 아니라 직접 FK. 워커/호스트는 최대 1개
+-- 프로젝트에만 소속되며, NULL이면 일반 풀(어느 프로젝트에도 안 속함).
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE SET NULL;
+ALTER TABLE hosts   ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE SET NULL;
+CREATE INDEX idx_workers_project_id ON workers(project_id);
+CREATE INDEX idx_hosts_project_id   ON hosts(project_id);
 ```
 
-조인 테이블을 `hosts`/`workers`처럼 별도 `id` PK 없이 복합 PK(`project_id`,
-`worker_id`)로 둔 것은 "배치 여부"만 표현하면 충분하고 배치 자체를 참조하는
-하위 엔티티가 없기 때문입니다(`host_events`처럼 자체 이력을 갖는 엔티티가
-아님).
+**일관성 불변식(애플리케이션 레벨로 강제, Postgres는 테이블 간 CHECK를 지원하지
+않음)**: 워커가 `hosts.worker_id`로 특정 host에 연결돼 있다면, 그 워커의
+`project_id`는 host의 `project_id`와 일치해야 합니다 — host를 프로젝트에
+배정/해제할 때 그 host에 연결된 워커의 `project_id`도 함께 동기화합니다
+(`#49`에서 `agents.host_id`도 이 불변식을 그대로 물려받음 — host가 없는
+관계로 남는 워커는 없어야 항상 정합성이 유지됩니다).
 
 ### `fleet-core` 신규 타입
 
@@ -95,34 +101,31 @@ pub struct Project {
     pub name: String,
     pub description: Option<String>,
     pub created_by: Option<String>,
+    pub agent_provisioning_mode: AgentProvisioningMode,  // #49 참고, 기본 Manual
+    pub default_agent_template_id: Option<AgentTemplateId>,
+    pub agent_idle_timeout_secs: Option<u32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 pub struct ProjectFilter {
-    pub limit: usize,   // WorkerFilter/TaskFilter와 동일한 관례, 기본 100
+    pub limit: usize,
     pub offset: usize,
 }
 ```
 
-기존 `TaskFilter`/`WorkerFilter` 관례(`Option<T>` 필드 + `limit`/`offset`)를
-그대로 따릅니다. 1단계에서는 이름 검색 등 세부 필터는 추가하지 않습니다(필요성이
-확인되면 후속으로 추가).
+`Worker`/`Host`에도 `project_id: Option<ProjectId>` 필드가 추가됩니다(기존
+구조체 확장, 새 파일 아님).
 
 ### `Task`/`TaskRequest`에 대한 변경
 
 `Task.project_id: Option<ProjectId>`는 이미 존재합니다. `TaskRequest`에도 동일
-필드를 추가해 `fleet_dispatch_task`/대시보드 태스크 생성 폼에서 지정할 수 있게
-합니다(현재 `TaskRequest`에는 이 필드가 없음 — `Task::from_request()`가 항상
-`project_id: None`으로 채우는 중).
+필드를 추가합니다(현재는 없음 — `Task::from_request()`가 항상 `None`으로 채움).
 
 ## 4. `Store` 트레이트 확장
 
-Task/Worker CRUD와 동일하게 **필수(mandatory) 메서드**로 추가합니다 — RBAC용
-메서드들처럼 `Unsupported` 기본 구현에 기대지 않습니다. 이유: 프로젝트 배치
-조회(`list_project_workers`)가 `WorkerSelector`(핵심 디스패치 경로)에서 호출되므로
-`fleet_store::mem::MemStore`(테스트 전용)도 반드시 실제 동작해야 스케줄러
-단위 테스트가 의미를 가집니다 — RBAC처럼 "이 경로는 PgStore만 있으면 됨"이 아닙니다.
+Task/Worker CRUD와 동일하게 **필수(mandatory) 메서드**로 추가합니다(RBAC류
+`Unsupported` 기본 구현에 기대지 않음 — `WorkerSelector`가 직접 호출).
 
 ```rust
 // ── Project ──────────────────────────────────────────────────────
@@ -131,130 +134,128 @@ async fn get_project(&self, id: ProjectId) -> Result<Option<Project>, StoreError
 async fn list_projects(&self, filter: &ProjectFilter) -> Result<Vec<Project>, StoreError>;
 async fn delete_project(&self, id: ProjectId) -> Result<bool, StoreError>;
 
+/// 워커를 프로젝트에 배타적으로 배정 — 이미 다른 프로젝트에 배정돼 있으면
+/// 그 배정을 덮어쓴다(호출자가 먼저 확인 없이 재배정하면 이전 프로젝트에서
+/// 조용히 빠진다는 뜻이므로, API/CLI 레벨에서 확인 프롬프트를 두는 것을 권장).
 async fn assign_worker_to_project(&self, project_id: ProjectId, worker_id: WorkerId) -> Result<(), StoreError>;
-async fn unassign_worker_from_project(&self, project_id: ProjectId, worker_id: WorkerId) -> Result<bool, StoreError>;
-/// WorkerSelector가 소프트 우선순위 판단에 직접 호출하는 경로 — 워커 ID만
-/// 필요하므로 전체 Worker를 반환하지 않고 ID 목록만 반환한다(불필요한
-/// 조인/변환 비용 회피).
+/// project_id를 NULL로(일반 풀로 되돌림).
+async fn unassign_worker(&self, worker_id: WorkerId) -> Result<(), StoreError>;
 async fn list_project_worker_ids(&self, project_id: ProjectId) -> Result<Vec<WorkerId>, StoreError>;
-/// 대시보드 프로젝트 상세 페이지용 — 전체 Worker 반환.
 async fn list_project_workers(&self, project_id: ProjectId) -> Result<Vec<Worker>, StoreError>;
 
+/// host를 프로젝트에 배타적으로 배정 — §3의 불변식대로, 이 host에 연결된
+/// 워커(hosts.worker_id)가 있으면 그 워커의 project_id도 함께 동기화한다.
 async fn assign_host_to_project(&self, project_id: ProjectId, host_id: Uuid) -> Result<(), StoreError>;
-async fn unassign_host_from_project(&self, project_id: ProjectId, host_id: Uuid) -> Result<bool, StoreError>;
+async fn unassign_host(&self, host_id: Uuid) -> Result<(), StoreError>;
 async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, StoreError>;
 ```
-
-`assign_worker_to_project`는 이미 배치된 워커를 다시 배치하면 `ON CONFLICT
-(project_id, worker_id) DO NOTHING`(멱등)으로 처리해 재시도 안전성을 보장합니다.
 
 ## 5. 디스패치 프로토콜 확장 (`WorkerSelector`)
 
 ![Project-Aware Dispatch Logic](../assets/diagrams/architecture/project-aware-dispatch-logic.mermaid)
 
-기존 파이프라인(`crates/fleet-scheduler/src/selector.rs`, §1 조사 결과 참고)에
-**5.5단계**로 프로젝트 소프트 선호 필터를 삽입합니다 — 회로차단기/용량 필터
-(4~5단계, `retain()`으로 후보를 제거) 뒤, `server_hint` 처리(6단계) 앞입니다:
+기존 파이프라인(`crates/fleet-scheduler/src/selector.rs`)에 **5.5단계**로
+프로젝트 하드 필터를 삽입합니다 — 회로차단기/용량 필터(4~5단계, `retain()`)
+뒤, `server_hint` 처리(6단계) 앞입니다. `required_labels`/`model` 필터와 정확히
+같은 방식(하드 `retain()`)입니다 — 특별 취급 없음:
 
-- `task.project_id`가 `None`이면 이 단계는 완전히 스킵(기존 동작과 100% 동일 —
-  회귀 없음).
-- `Some(project_id)`이면 `list_project_worker_ids(project_id)`로 배치된 워커
-  ID 집합을 조회하고, 현재 후보 풀과의 교집합을 계산합니다.
-  - 교집합이 비어있지 않으면 후보 풀을 그 교집합으로 좁힙니다(§2에서 확정한
-    "소프트 선호").
-  - 교집합이 비어있으면(배치된 워커가 없거나 전부 온라인/용량/회로 필터에서
-    걸러짐) **후보 풀을 그대로 유지**합니다 — 에러를 내지 않고 전체 풀로
-    폴백합니다(§2에서 확정한 "소프트 폴백").
-- `server_hint`는 이 필터와 무관하게 항상 그대로 존중됩니다 — 힌트는 명시적
-  단일 워커 지정이라 소프트 선호보다 우선순위가 높습니다. 즉 `project_id`와
-  `server_hint`를 동시에 지정했는데 힌트 워커가 그 프로젝트에 배치돼 있지
-  않아도 힌트가 이깁니다(모순처럼 보일 수 있으나, "소프트" 설계 원칙과 일관됨
-  — 프로젝트는 자원 격리를 강제하지 않으므로 더 명시적인 신호인 힌트를 막을
-  이유가 없음).
+- `task.project_id`가 `None`이면 스킵(기존 동작과 100% 동일 — 회귀 없음).
+- `Some(project_id)`이면 후보 풀을 `worker.project_id == Some(project_id)`인
+  워커로 `retain()`합니다.
+  - 결과가 비어있지 않으면 계속 진행(6단계 `server_hint` 또는 최소부하 선택).
+  - **결과가 비어있으면 새 에러 `SelectionError::NoWorkerForProject(ProjectId)`를
+    반환합니다** — `NoMatchingLabels`/`NoWorkerForModel`과 동일한 패턴(신규
+    변형 하나 추가, 기존 5개 변형 그대로).
+- `dispatch_existing()`은 이 에러를 **기존 `WorkerUnavailable` 실패 종류와
+  동일하게 취급**합니다 — 새 재시도 로직을 만들지 않습니다:
+  - `submit()`이 재시도 비활성(`max_dispatch_retries == 0`)이면 즉시 `Failed`.
+  - 재시도 활성이면(기본, `#38`) 작업을 `Pending`으로 남기고 `retry_count`를
+    올린 뒤 `Ok(task_id)` 반환 — `Reconciler`가 다음 tick에 재시도(예: 그
+    사이 `#49`의 Automatic 모드가 새 에이전트를 프로비저닝했다면 그때 성공).
+    소진되면 기존처럼 dead-letter(`Failed`).
+- `server_hint`는 이 필터 **이후**에 평가되므로, 힌트 워커가 그 프로젝트
+  소속이 아니면 애초에 후보 풀에 없어 `HintedNotFound`/`HintedUnavailable`로
+  자연히 걸러집니다 — 별도 처리 불필요, 하드 격리가 힌트에도 일관되게
+  적용됩니다(1차 설계의 "힌트가 소프트 선호보다 우선"이라는 예외를 이번
+  개정으로 제거 — 하드 원칙과 모순되는 예외를 남기지 않기 위함).
 
 ## 6. RBAC 권한 추가
 
-기존 `PermissionKind`(콜론 구분 `resource:action` 네이밍, §1 조사 결과)에 맞춰
-4개 변형을 추가합니다:
+(1차와 동일, 변경 없음)
 
 | 변형 | 직렬화 이름 | 의미 |
 |---|---|---|
 | `ProjectCreate` | `project:create` | 프로젝트 생성 |
 | `ProjectRead` | `project:read` | 프로젝트 목록/상세 조회 |
 | `ProjectDelete` | `project:delete` | 프로젝트 삭제 |
-| `ProjectAssign` | `project:assign` | host/worker 배치·해제(양쪽 다 이 하나로 커버 — 세분화가 필요해지면 `ProjectAssignHost`/`ProjectAssignWorker`로 쪼갤 수 있으나, 1단계에서는 과설계로 판단해 보류) |
+| `ProjectAssign` | `project:assign` | host/worker 배정·해제 |
 
-`BuiltinRole` 매핑: `Admin`은 전부, `Operator`는 `ProjectRead`+`ProjectAssign`
-(운영자가 배치 조정은 하되 프로젝트 생성/삭제는 admin 전용으로 유지 — 기존
-`Operator`가 워커 등록/삭제는 못 하지만 태스크 관리는 하는 것과 동일한 결의
-패턴), `Viewer`는 `ProjectRead`만.
+`Admin`은 전부, `Operator`는 `ProjectRead`+`ProjectAssign`, `Viewer`는 `ProjectRead`만.
 
 ## 7. API 표면
 
-### 대시보드 REST (`/api/projects/*`, 기존 `/<resource>` + `/api/<resource>` 페어링 관례)
+### 대시보드 REST
 
 | Method | Path | 권한 | 설명 |
 |---|---|---|---|
 | GET | `/projects` | 세션 | 프로젝트 목록 페이지 |
-| GET | `/projects/:id` | 세션 | 프로젝트 상세 페이지 (배치된 host/worker + 최근 태스크) |
+| GET | `/projects/:id` | 세션 | 프로젝트 상세 페이지 |
 | GET | `/projects/new` | 세션 | 생성 폼 |
 | GET | `/api/projects` | `ProjectRead` | 목록 JSON |
 | POST | `/api/projects` | `ProjectCreate` | 생성 |
 | GET | `/api/projects/:id` | `ProjectRead` | 상세 JSON |
 | DELETE | `/api/projects/:id` | `ProjectDelete` | 삭제 |
-| POST | `/api/projects/:id/workers` | `ProjectAssign` | 워커 배치 (`{worker_id}`) |
-| DELETE | `/api/projects/:id/workers/:worker_id` | `ProjectAssign` | 워커 배치 해제 |
-| POST | `/api/projects/:id/hosts` | `ProjectAssign` | 호스트 배치 (`{host_id}`) |
-| DELETE | `/api/projects/:id/hosts/:host_id` | `ProjectAssign` | 호스트 배치 해제 |
+| PUT | `/api/workers/:id/project` | `ProjectAssign` | 워커를 프로젝트에 배정(`{project_id}`, 배타적 — 이전 배정 덮어씀) |
+| DELETE | `/api/workers/:id/project` | `ProjectAssign` | 워커 배정 해제(일반 풀로) |
+| PUT | `/api/hosts/:id/project` | `ProjectAssign` | 호스트 배정(동일 패턴) |
+| DELETE | `/api/hosts/:id/project` | `ProjectAssign` | 호스트 배정 해제 |
 
-### MCP 도구 (`fleet_*`, 기존 12개에 추가)
+기존 `POST /api/projects/:id/workers`(M:N 추가) 대신 `PUT /api/workers/:id/project`
+(배타적 단일값 설정)로 바뀐 점에 주의 — REST 시맨틱이 "컬렉션에 추가"에서
+"단일 리소스 값을 설정"으로 달라졌습니다(배타적 소유이므로).
+
+### MCP 도구 (`fleet_*`)
 
 | 도구 | 입력 | 비고 |
 |---|---|---|
 | `fleet_create_project` | `name`(필수), `description` | |
 | `fleet_list_projects` | `limit`, `offset` | |
 | `fleet_delete_project` | `project_id`(필수) | |
-| `fleet_assign_worker_to_project` | `project_id`, `worker_id`(둘 다 필수) | |
-| `fleet_unassign_worker_from_project` | 위와 동일 | |
+| `fleet_assign_worker_to_project` | `project_id`, `worker_id`(둘 다 필수) | 배타적 — 이전 배정 덮어씀 |
 
-`fleet_dispatch_task`는 새 도구를 만들지 않고 기존 입력 스키마에 `project_id`
-(선택) 필드만 추가합니다 — `server_hint`와 동일한 패턴.
-
-`fleet_assign_host_to_project`/`unassign`은 1단계 MCP 범위에서는 제외합니다(호스트
-프로비저닝 자체가 현재 대시보드 UI/SSH 흐름 중심이라 MCP로 조작할 실사용 시나리오가
-약함 — 필요해지면 후속 추가). 대시보드 REST API에는 포함합니다(§7 표 참고).
+`fleet_dispatch_task`는 기존 입력 스키마에 `project_id`(선택) 필드만 추가.
+`fleet_assign_host_to_project`는 1단계 MCP 범위에서 제외(대시보드 REST만).
 
 ## 8. 단계별 구현 계획
 
-과거 `#38`/`#41`/`#42`와 동일하게, 스키마 → 백엔드 → 디스패치 통합 → UI 순으로
-쪼갭니다. 각 단계는 독립적으로 커밋·검증·배포 가능해야 합니다.
+1. **Phase 1 — 스키마 + Store + RBAC**: `015_projects.sql`,
+   `fleet-core::Project`/`ProjectFilter`, `workers.project_id`/`hosts.project_id`
+   확장, `Store` 확장(PgStore+MemStore), `PermissionKind` 4종. 신규 테스트:
+   배정 시 이전 배정 덮어쓰기 동작, host↔worker `project_id` 동기화 불변식,
+   `ON DELETE SET NULL` 동작(실제 Postgres 대상).
+2. **Phase 2 — 디스패치 통합**: `WorkerSelector`에 5.5단계 하드 필터 +
+   `SelectionError::NoWorkerForProject` 삽입, `dispatch_existing()`이 이를
+   `WorkerUnavailable`과 동일하게 재시도 경로로 태우는지 확인,
+   `TaskRequest.project_id` 추가. 신규 테스트: 프로젝트 없음(회귀 없음)/소속
+   워커로 정상 디스패치/소속 워커 없음 → Pending+재시도 → 소진 시 dead-letter
+   3가지 경로, 힌트가 다른 프로젝트 워커를 가리킬 때 자연히 거부되는지.
+3. **Phase 3 — API + MCP**: §7 엔드포인트.
+4. **Phase 4 — 대시보드 UI**: `/projects`, `/projects/:id`, `/projects/new`.
 
-1. **Phase 1 — 스키마 + Store + RBAC**: `015_projects.sql`, `fleet-core::Project`/`ProjectFilter`,
-   `Store` 트레이트 확장(`PgStore` + `MemStore` 둘 다 구현), `PermissionKind` 4종
-   추가. 신규 테스트: `fleet-store` 통합 테스트(assign/unassign 멱등성, M:N 배치,
-   `ON DELETE CASCADE`/`SET NULL` 동작 검증 — 실제 Postgres 대상).
-2. **Phase 2 — 디스패치 통합**: `WorkerSelector`에 5.5단계 삽입, `TaskRequest.project_id`
-   추가, `fleet_dispatch_task` 입력 스키마 확장. 신규 테스트: `fleet-scheduler`
-   단위 테스트(프로젝트 없음/소속 워커 있음/소속 워커 전부 불가 → 폴백 3가지
-   경로), 기존 selector 테스트 전부 그린 유지(회귀 없음 확인).
-3. **Phase 3 — API + MCP**: §7의 REST 엔드포인트 + MCP 도구 5종.
-4. **Phase 4 — 대시보드 UI**: `/projects`, `/projects/:id`, `/projects/new` 페이지.
-   기존 `tasks.html`/`hosts.html` 패턴(테이블 + 정렬, `#14` 참고) 재사용.
+## 9. 열린 질문
 
-## 9. 열린 질문 (구현 중 재검토 가능)
-
-- **하드 격리 옵션**: 소프트 폴백이 부적절한 운영 환경(예: 고객사별 프로젝트
-  격리가 계약상 필수인 경우)이 생기면, 프로젝트 자체에 `strict_isolation: bool`
-  플래그를 추가해 선택적으로 하드 실패(§2에서 보류한 옵션)로 전환하는 안을 고려.
-  1단계에서는 구현하지 않음.
-- **워커별 프로젝트 우선순위/쿼터**: 현재는 최소부하 선택에 암묵적으로 의존.
-  실사용 중 특정 프로젝트가 항상 밀리는 문제가 관측되면 가중치 기반 선택으로
-  재검토.
-- **project_id 없는 태스크의 취급**: 계속 완전히 허용(모든 워커 후보). 프로젝트
-  도입이 기존 미배정 태스크 흐름을 전혀 바꾸지 않음.
+- **하드 격리를 다시 완화해야 하는 경우**: 실사용 중 프로젝트에 배정된 워커가
+  전부 다운됐을 때 태스크가 무기한 대기하는 게 문제가 되면(현재는 `#38`의
+  `max_dispatch_retries` 소진 후 dead-letter로 끝남), 프로젝트별
+  `strict_isolation: bool` 오버라이드를 재검토할 수 있습니다 — 1단계에서는
+  하드가 기본이자 유일한 동작.
+- **워커별 프로젝트 우선순위/쿼터**: 배타적 소유라 프로젝트 간 쿼터 경합
+  자체가 사라졌으므로 이번 개정으로 사실상 해소됨(같은 프로젝트 내 여러
+  워커 간 로드밸런싱은 기존 최소부하 선택 그대로).
+- **project_id 없는 태스크의 취급**: 계속 완전히 허용(일반 풀 워커 후보).
 
 ## 관련 문서
 
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #48 — 구현 진행 상황 정본.
-- [`docs/architecture/overview.md`](overview.md) §데이터 모델 — 구현 완료 후 이
-  문서의 요약을 그쪽에도 반영.
+- [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
+  이 하드 격리 모델 위에 host 내 동적 에이전트 생성을 쌓는 후속 설계.

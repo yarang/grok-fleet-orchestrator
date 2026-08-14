@@ -8,16 +8,16 @@ flowchart TD
     FilterBreaker --> FilterCapacity[5. has_capacity 실패 워커 제외]
     FilterCapacity --> CheckProject{"신규 5.5. project_id가 지정되었는가?"}
     CheckProject -- No --> CheckHint{server_hint가 지정되었는가?}
-    CheckProject -- Yes --> ProjectMembers["project_workers에서<br/>이 project_id에 배치된 워커 조회"]
-    ProjectMembers --> AnyMembers{"후보 풀 ∩ 배치된 워커 ≠ ∅?"}
-    AnyMembers -- "Yes — 소프트 선호 적용" --> NarrowToProject["후보 풀을 프로젝트 배치 워커로 좁힘"]
-    AnyMembers -- "No — 소프트 폴백" --> KeepFullPool["후보 풀 그대로 유지<br/>(전체 풀로 폴백, 에러 아님)"]
-    NarrowToProject --> CheckHint
-    KeepFullPool --> CheckHint
-    CheckHint -- Yes --> HintLookup["6a. 힌트 워커를 이름으로 조회<br/>(project 필터와 무관하게 항상 존중 — 명시적 힌트가 소프트 선호보다 강함)"]
+    CheckProject -- Yes --> FilterProject["worker.project_id == project_id가<br/>아닌 워커 제외 (하드 retain, required_labels/model과 동일한 취급)"]
+    FilterProject --> AnyLeft{후보가 남아있는가?}
+    AnyLeft -- Yes --> CheckHint
+    AnyLeft -- "No — 하드 실패" --> RejectProject(["SelectionError::NoWorkerForProject<br/>— 전체 풀로 폴백하지 않음"])
+    RejectProject --> RetryPath["dispatch_existing()이 WorkerUnavailable과 동일하게 취급<br/>→ #38 재시도 경로 재사용:<br/>재시도 비활성이면 즉시 Failed,<br/>활성이면 Pending 유지 + retry_count 증가 → Reconciler가 재시도<br/>(그 사이 #49 Automatic 모드가 새 agent를 띄웠을 수도 있음)<br/>→ 소진되면 dead-letter(Failed)"]
+
+    CheckHint -- Yes --> HintLookup["6a. 힌트 워커를 이름으로 조회<br/>(5.5단계 이후 평가 — 힌트 워커가 다른 프로젝트 소속이면<br/>이미 후보 풀에서 빠져 있어 자연히 거부됨)"]
     HintLookup --> HintExists{조회 결과}
     HintExists -- 워커 자체가 없음 --> RejectNotFound([HintedNotFound 에러])
-    HintExists -- "존재하지만 4/5단계에서 제외됨" --> RejectUnavailable([HintedUnavailable 에러])
+    HintExists -- "존재하지만 4/5/5.5단계에서 제외됨" --> RejectUnavailable([HintedUnavailable 에러])
     HintExists -- 후보 풀에 존재 --> Dispatch
-    CheckHint -- No --> FilterLeastLoaded["6b. active_tasks 최소인 워커 선택<br/>(동률이면 name 순 — 여러 프로젝트에<br/>공유 배치된 워커는 총 부하로 자연히 견제됨)"]
+    CheckHint -- No --> FilterLeastLoaded["6b. active_tasks 최소인 워커 선택<br/>(동률이면 name 순)"]
     FilterLeastLoaded --> Dispatch([선택된 워커로 Dispatch])

@@ -2,11 +2,15 @@
 
 > 작성일: 2026-08-14. 로드맵 [`#49`](../roadmap/roadmap.md)에 대응하는 설계 문서입니다.
 > [`#48` 프로젝트 기능 설계](project-feature-design.md) 위에 쌓이는 후속 확장입니다.
-> **개정 (2026-08-14, 같은 날 2차 확장)**: 최초 작성 이후 사용자가 "custom
-> 프롬프트/도구를 통한 에이전트 생성" 요구사항을 추가로 명확히 해 §5(도구
-> 바인딩)·§6(중앙 카탈로그·템플릿)을 신설하고 단계별 계획을 재구성했습니다.
-> 아직 구현되지 않았습니다 — 진행 상황은 `roadmap.md` #49 항목을 정본으로
-> 확인하세요.
+> **개정 (2026-08-14, 2차)**: 최초 작성 이후 사용자가 "custom 프롬프트/도구를
+> 통한 에이전트 생성" 요구사항을 추가로 명확히 해 §5(도구 바인딩)·§6(중앙
+> 카탈로그·템플릿)을 신설하고 단계별 계획을 재구성했습니다.
+> **개정 (2026-08-14, 3차)**: `#48`이 host/worker↔project를 배타적 소유로
+> 전면 개정(다대다 → 1:N 배타적)함에 따라, 이 문서도 그 위에 다시 정렬 —
+> Agent는 항상 자신이 도는 host의 project_id를 그대로 물려받고(§3),
+> `AgentProvisioningMode`(수동/자동)와 자동 생성 에이전트의 유휴 자동 종료
+> 정책을 신설했습니다(§4.1). 아직 구현되지 않았습니다 — 진행 상황은
+> `roadmap.md` #49 항목을 정본으로 확인하세요.
 
 ## 1. 배경 및 사용자 요구사항 원문 요약
 
@@ -90,6 +94,28 @@
   "Agent가 어떻게 만들어지는가"의 본질적인 부분이라 별도 기능이 아니라
   `#49`의 확장이라고 판단했습니다.
 
+### 2.3 3차 결정 (`#48` 하드 격리 개정에 따른 재정렬, 2026-08-14)
+
+`#48`이 host/worker↔project를 배타적 1:N으로 개정하면서(리소스 경쟁 예방이
+사용자가 제시한 원칙), 이 문서에도 두 가지가 자연히 딸려 왔습니다:
+
+- **Agent의 project_id는 항상 host에서 상속**: `agents.host_id`가 가리키는
+  host의 `project_id`가 곧 그 Agent의 project입니다(host가 일반 풀 소속이면
+  `NULL`인 Agent도 만들어질 수 있음 — 프로젝트 전용이 아닌 범용 에이전트).
+  §2.2에서 "에이전트가 여러 프로젝트에 공유되는 경우"를 열린 질문으로
+  남겨뒀었는데, `#48`의 하드 모델에서는 **host 자체가 이미 배타적으로 한
+  프로젝트에만 소속**되므로 그 host 위의 Agent도 자동으로 모호함 없이
+  하나의 프로젝트에만 속하게 됩니다 — 이 열린 질문은 사실상 해소됐습니다
+  (§12에서 갱신).
+- **`AgentProvisioningMode`(수동/자동) 신설**: 사용자가 "동작할 수 있는
+  agent를 사용자가 직접 설정하는 방법과 오케스트레이터가 만들어서 사용하는
+  것을 허용하는 옵션"을 요청 — `Project.agent_provisioning_mode`로 모델링하고
+  (`#48` §3에 필드 추가 완료), `Automatic`일 때 오케스트레이터가 주기적으로
+  "이 프로젝트에 대기 태스크가 있고 배정된 host에 여유가 있는가"를 확인해
+  자동으로 `agent_commands`(start)를 발행하는 백그라운드 루프를 신설합니다
+  (§4.1) — 기존 `Reconciler`/`HealthChecker`/`SessionCleanup` 패턴을 그대로
+  재사용합니다.
+
 ## 3. 데이터 모델
 
 ![Agent Data Model](../assets/diagrams/architecture/agent-data-model.mermaid)
@@ -106,6 +132,10 @@ pub struct McpServerId(pub Uuid);
 pub struct Agent {
     pub id: AgentId,
     pub host_id: Uuid,
+    /// host_id가 가리키는 host의 project_id를 그대로 상속(#48의 배타적 소유
+    /// 모델 — host 자체가 이미 1개 프로젝트에만 속하므로 그 위의 Agent도
+    /// 자동으로 모호함 없이 결정됨). 별도로 지정하지 않음 — 생성 시점에
+    /// host에서 읽어와 채우는 파생 필드.
     pub project_id: Option<ProjectId>,
     pub worker_id: Option<WorkerId>,
     pub template_id: Option<AgentTemplateId>,
@@ -288,6 +318,42 @@ heartbeat 폴링에 커맨드를 얹는 방식**을 씁니다. (전체 흐름은
 1단계는 `hosts.max_agents`(운영자 설정 정수 상한)와 현재 `Running`/`Starting`
 개수 비교만 씁니다. `HostMetrics` 기반 자동 판단은 §12 열린 질문으로 보류.
 
+### 4.1 수동/자동 프로비저닝 모드 (`#48` 3차 결정 반영)
+
+```rust
+pub enum AgentProvisioningMode { Manual, Automatic }
+```
+
+`Project.agent_provisioning_mode`(기본값 `Manual` — 이 세션에서 계속 지켜온
+"더 보수적인 옵션을 기본값으로" 원칙과 일관됨, 운영자가 명시적으로 켜야
+자동화가 시작됨):
+
+- **`Manual`**(기본): 관리자/프로젝트가 `POST /api/agents`로 명시적으로만
+  에이전트를 만듭니다 — 지금까지 §4에서 설명한 흐름 그대로.
+- **`Automatic`**: `default_agent_template_id`가 설정돼 있어야 하며(없으면
+  자동 프로비저닝이 동작하지 않음 — 어떤 custom_prompt/도구로 만들지 알
+  방법이 없으므로), 신규 백그라운드 루프 **`AgentAutoProvisioner`**가 기존
+  `Reconciler`(`fleet-scheduler/src/reconcile.rs`)와 동일한 "설정 + spawn +
+  JoinHandle 기반 abort" 패턴으로 주기적으로(예: 30초, `Reconciler`의
+  `interval`과 같은 관례) 다음을 확인합니다:
+  1. `agent_provisioning_mode = 'automatic'`인 프로젝트 중, `project_id`가
+     일치하는 `Pending` 태스크가 있고
+  2. 그 프로젝트에 `Running`/`Starting` 상태인 Agent가 하나도 없거나 전부
+     `has_capacity() == false`이며
+  3. 그 프로젝트에 배정된 host 중 `max_agents` 여유가 있는 host가 있으면
+  → `default_agent_template_id`로 새 Agent를 만들고 `agent_commands`(start)를
+  발행합니다(§4의 수동 흐름과 완전히 동일한 커맨드 큐 메커니즘 — 트리거만
+  다름).
+- **유휴 자동 종료**: `Project.agent_idle_timeout_secs`(`#48` §3에 필드 추가
+  완료, `NULL`이면 자동 종료 안 함)가 설정돼 있으면, `AgentAutoProvisioner`가
+  같은 주기에 "`Automatic` 모드로 만들어진 Agent 중 마지막 태스크 완료 후
+  이 시간이 지났고 현재 대기 중인 태스크도 없는" 것을 찾아 `agent_commands`
+  (stop)를 발행합니다. **이 정책이 없으면 자동 생성된 에이전트가 영원히
+  host 여유를 점유하게 되어, "여유가 있을 때만 만든다"는 원래 동기 자체가
+  무의미해집니다** — 자동 생성은 반드시 자동 회수와 짝을 이뤄야 합니다.
+  `Manual` 모드로 만든 에이전트는 이 정책의 대상이 아닙니다(사람이 명시적으로
+  만들었으면 사람이 명시적으로 끄는 게 원칙).
+
 ## 5. Custom 프롬프트 및 도구(MCP) 바인딩
 
 ### 5.1 Custom 프롬프트 — 프롬프트 조립 시점 주입
@@ -421,16 +487,19 @@ attach(session) = agent_tools(agent_id, requirement='required')
    저장소, §7/§8의 프롬프트 조립 로직.
 4. **Phase 4 — 동적 프로비저닝**(최고 위험도): `agent_commands` 큐,
    `HeartbeatResponse.pending_commands`, `GrokRunner` 다중 프로세스 관리자
-   재작성. 실기기 대상 수동 검증 필수.
+   재작성, §4.1의 `AgentAutoProvisioner`(Automatic 모드 + 유휴 자동 종료).
+   실기기 대상 수동 검증 필수.
 5. **Phase 5 — API + CLI + MCP + 대시보드 UI**: §10 표면 전체.
 
 ## 12. 열린 질문
 
 - **도구 바인딩 메커니즘 최종 확정**: Phase 0 결과로 확정(§5.2).
-- **에이전트가 여러 프로젝트에 공유되는 경우**: 현재 Agent는 최대 1개
-  프로젝트에 귀속. 공유가 필요해지면 `agent_memory`를 `(agent_id, project_id)`
-  복합 키로 바꿔야 함 — Phase 3 전에 필요성 확인되면 재검토.
-- **호스트 리소스 기반 자동 "여유" 판단**: 1단계는 명시적 `max_agents`만.
+- ~~**에이전트가 여러 프로젝트에 공유되는 경우**~~ — **2026-08-14 3차 개정으로
+  해소됨**: `#48`이 host↔project를 배타적 1:N으로 확정하면서, host 위의
+  Agent도 자동으로 모호함 없이 하나의 프로젝트에만 속하게 됩니다(§2.3).
+  `agent_memory`를 복합 키로 바꿀 필요가 없어졌습니다.
+- **호스트 리소스 기반 자동 "여유" 판단**: 1단계는 명시적 `max_agents`만
+  (§4.1의 `AgentAutoProvisioner`도 동일 기준 사용).
 - **`agent_commands` 유실/중복 처리**: ack 유실 시 중복 실행 방지를 위한
   `agent_commands.id` 기준 멱등 처리가 Phase 4 구현에서 필수.
 - **스레드 요약 생성 방법**: 규칙 기반 vs 모델 기반, Phase 3에서 결정.
