@@ -1,0 +1,34 @@
+flowchart TB
+    subgraph Operator["운영자"]
+        CLI[fleet-cli]
+        Dash[대시보드 브라우저]
+    end
+
+    subgraph Orch["오케스트레이터 (fleet-api / fleet-dashboard)"]
+        API[REST: /api/agents/:id/terminal<br/>/api/agents/:id/attach/ws]
+        Queue[(agent_commands<br/>capture_terminal)]
+        SSH[SshClient russh<br/>+ 신규 PTY 지원]
+        Vault[(SSH 키 볼트<br/>MasterKey 암호화)]
+    end
+
+    subgraph Host["대상 Host"]
+        FW[fleet-worker]
+        Tmux1[["tmux: fleet-agent-&lt;agent_id&gt;"]]
+        Grok[grok agent serve]
+    end
+
+    CLI -- "fleet agent terminal &lt;id&gt;<br/>(읽기 전용, 폴링)" --> API
+    Dash -- "Terminal 패널 폴링" --> API
+    API -- "capture_terminal 커맨드 큐잉" --> Queue
+    Queue -- "다음 heartbeat pending_commands" --> FW
+    FW -- "tmux capture-pane -p" --> Tmux1
+    FW -- "ack{result: 캡처 텍스트}" --> API
+
+    CLI -- "fleet agent attach &lt;id&gt;<br/>(WebSocket, raw byte relay)" --> API
+    API -- "PTY 채널 오픈" --> SSH
+    SSH -- "키 복호화(요청 시점만)" --> Vault
+    SSH -- "ssh + tmux attach -t &lt;session&gt;" --> Tmux1
+    Tmux1 --- Grok
+
+    style Queue fill:#f5f5f7,stroke:#999
+    style Vault fill:#f5f5f7,stroke:#999

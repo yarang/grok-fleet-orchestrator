@@ -979,6 +979,18 @@ pending_no_project_worker =
 | `Stop` (헤더) | `agent_commands`(stop) 발행 확인 모달, 상태를 `Stopping`으로 즉시 반영 — `AgentDelete` |
 | 데이터 갱신 주기 | 10s 폴링(상태), Memory는 진입 시 1회 로드 + 수동 새로고침 |
 
+#### Terminal 패널 (2026-08-14 신설, `#50` 참고)
+
+Memory 패널 아래에 읽기 전용 "Terminal" 패널을 추가합니다 —
+`tmux capture-pane` 스냅샷 텍스트를 모노스페이스로 표시(§6.5 `EventLog`
+컴포넌트 재사용), "새로고침" 버튼 클릭 시 `POST /api/agents/:id/terminal`
+큐잉 후 폴링. `AgentAttach` 권한 보유자에게는 헤더에 `[Attach]` 버튼도
+추가로 노출 — 클릭 시 대시보드에서는 지원하지 않고(브라우저 PTY는 범위
+밖), `fleet agent attach <id>` CLI 명령을 복사해 안내하는 팝오버만
+표시합니다. 상세 프로토콜은
+[`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)
+§4/§5가 정본.
+
 #### 빈 상태
 
 - No memory yet: "This agent hasn't completed any tasks yet."

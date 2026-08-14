@@ -1,0 +1,28 @@
+sequenceDiagram
+    actor Op as 운영자(fleet-cli)
+    participant API as fleet-api (WebSocket relay)
+    participant Vault as SSH 키 볼트
+    participant SSH as russh (신규 PTY 채널)
+    participant Host as 대상 Host (sshd)
+    participant Tmux as tmux 세션
+
+    Op->>API: fleet agent attach <id> [--write]<br/>WS upgrade, 세션 토큰 인증
+    API->>API: require_permission(AgentAttach)<br/>(Admin 기본 전용, AgentManage/Delete보다 상위 등급)
+    API->>API: agent.status == Running 확인, host/session_name 조회
+    API->>Vault: 호스트 SSH 키 복호화(요청 시점만, temp 파일 미사용 — 메모리 내 처리)
+    Vault-->>API: decrypted key
+    API->>SSH: open_interactive_shell(host, key) — 신규 메서드,<br/>기존 exec()와 별개(PTY 필요)
+    SSH->>Host: SSH 연결 + channel.request_pty + channel.exec("tmux attach -t <session> [-r]")
+    Host->>Tmux: attach (다른 클라이언트 있으면 -r 읽기전용 기본)
+    Tmux-->>Host: 화면 스트림
+    Host-->>SSH: PTY 바이트 스트림
+    SSH-->>API: PTY 바이트 스트림
+    API-->>Op: WebSocket 프레임(raw 바이트)
+
+    Note over Op,API: fleet-cli는 로컬 터미널을 raw 모드로 전환.<br/>stdin → WS, WS → stdout. SIGWINCH는 별도<br/>제어 메시지로 전송 → API가 channel.window_change로 반영.
+
+    API->>API: FleetEvent::agent_attached(agent_id, user, write_mode) 기록
+
+    Op->>API: Ctrl-b d (tmux 기본 detach) 또는 WS 연결 종료
+    API->>SSH: 채널 종료(grok 프로세스는 tmux 안에서 계속 실행)
+    API->>API: FleetEvent::agent_detached(agent_id, user) 기록

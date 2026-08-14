@@ -947,6 +947,37 @@
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
 
+50. ⏳ **에이전트 터미널 모니터링·CLI 직접 접속 (tmux 기반)** (P2, 신규 기능,
+    `#49`에 전적으로 의존) — **설계 완료, 구현 대기**. 사용자 요청으로 신규
+    등록: "worker의 동작을 tmux로 터미널 동작을 모니터링하고 cli로 직접
+    연결하는 것을 지원하고 싶다."
+
+    **핵심 설계 결정** (AskUserQuestion, 2026-08-14): 연결 방식은
+    **하이브리드**(기본 읽기 전용 모니터링 + 필요 시 SSH+tmux 인터랙티브
+    attach로 에스컬레이션), 적용 범위는 **`#49` 이후부터**(에이전트별 다중
+    프로세스가 생긴 뒤). `#49` Phase 4가 `GrokRunner`를 재작성하며 이미
+    지적했던 "다중 프로세스 로그 수집 부재"(§13) 문제를, grok을 tmux
+    세션 안에서 실행하는 것만으로 사실상 함께 해소하도록 설계했습니다.
+
+    읽기 전용 스냅샷은 `#49`의 `agent_commands`/heartbeat 폴링 큐를 그대로
+    재사용(`command_type=capture_terminal` 신설, ack 응답에 `result` 필드
+    추가)해 새 인바운드 채널을 만들지 않았습니다. 인터랙티브 attach는
+    새 WebSocket 릴레이(오케스트레이터가 기존 SSH 키 볼트로 호스트에 붙어
+    PTY를 열고, `fleet-cli`와는 raw 바이트로 중계)가 필요해 신규 RBAC
+    권한 `AgentAttach`(Admin 기본 전용, `AgentManage`/`AgentDelete`보다
+    상위 등급)를 신설했습니다 — 사실상 호스트 셸 접근과 동급의 민감한
+    작업이므로 별도 감사 로그(`agent_attached`/`agent_detached`)도
+    필수로 뒀습니다.
+
+    전체 설계(아키텍처 다이어그램, 읽기 전용/인터랙티브 두 시퀀스
+    다이어그램, RBAC, API/CLI 표면, 호스트 프로비저닝 변경, 동시 attach
+    정책, 열린 질문)는
+    [`docs/architecture/agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)에
+    정리했습니다.
+
+    **다음 단계**: `#49` Phase 4가 완료된 뒤 이 설계 문서 기준으로 구현
+    착수 — 그 전까지는 착수 대상 아님.
+
 ---
 
 ## 현재 진행 상황 (2026-08-11 기준)
@@ -956,14 +987,16 @@
 ### 남은 작업 배정
 | 담당 | 항목 |
 |---|---|
-| 미배정 | #48, #49 |
+| 미배정 | #48, #49, #50 |
 
 > **2026-08-14 기준**: `#14`(다크모드/정렬/필터) 완료, `#26`(시크릿 매니저)은
 > 재평가 후 🔵 최하위 강등, 그 외 전 항목 ✅ 해결/🔵 재평가-강등 상태였다가,
 > 같은 날 사용자 요청으로 `#48`(프로젝트 기능 도입) → `#49`(에이전트 동적
-> 프로비저닝/메모리/스레드 요약, `#48` 요구사항의 확장) 순서로 신규 등록됐다
-> — 둘 다 설계는 완료([`project-feature-design.md`](../architecture/project-feature-design.md),
-> [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)),
+> 프로비저닝/메모리/스레드 요약, `#48` 요구사항의 확장) → `#50`(에이전트
+> 터미널 모니터링·CLI 직접 접속, `#49`에 전적으로 의존) 순서로 신규
+> 등록됐다 — 셋 다 설계는 완료([`project-feature-design.md`](../architecture/project-feature-design.md),
+> [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md),
+> [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)),
 > 구현은 아직 시작 전이라 미배정 상태.
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고

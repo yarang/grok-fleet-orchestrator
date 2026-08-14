@@ -1,0 +1,29 @@
+sequenceDiagram
+    actor Op as 운영자(대시보드/CLI)
+    participant API as fleet-api / fleet-dashboard
+    participant Store as fleet-store (agent_commands)
+    participant FW as fleet-worker
+    participant Tmux as tmux 세션<br/>(fleet-agent-&lt;agent_id&gt;)
+
+    Op->>API: POST /api/agents/:id/terminal
+    API->>API: require_permission(AgentRead)
+    API->>Store: insert_agent_command(type=capture_terminal, agent_id)
+    Store-->>API: Ok(command_id)
+    API-->>Op: 202 Accepted
+
+    loop 기존 heartbeat 주기 (기본 15초, #49와 동일)
+        FW->>API: POST /v1/workers/heartbeat
+        API->>Store: list_pending_agent_commands(host_id)
+        Store-->>API: [{command_id, type: capture_terminal, agent_id}]
+        API-->>FW: HeartbeatResponse { pending_commands: [...] }
+    end
+
+    FW->>Tmux: tmux capture-pane -t <session> -p -S -200
+    Tmux-->>FW: 최근 200줄 텍스트
+    FW->>API: POST /v1/workers/agent-commands/:command_id/ack<br/>{status: done, result: "<캡처 텍스트>"}
+    API->>Store: agent_command.status = done, result 저장
+
+    Op->>API: GET /api/agents/:id/terminal (폴링)
+    API->>Store: 가장 최근 done 상태 capture_terminal 조회
+    Store-->>API: {result, captured_at}
+    API-->>Op: {result, captured_at, stale: captured_at 기준 경과시간}
