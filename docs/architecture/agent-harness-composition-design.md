@@ -33,7 +33,7 @@
 | 계층 | 성격 | 질문 |
 |---|---|---|
 | **custom_prompt**(기존) | 정체성/페르소나. 에이전트당 단일 텍스트, 항상 컨텍스트에 있음, 거의 안 바뀜 | "이 에이전트가 누구인가" |
-| **Skill**(신규) | 절차적 지식. 필요할 때만 로드되는 모듈형 "어떻게 하는가" 묶음. 여러 개를 조합 가능, 여러 에이전트/템플릿이 공유 참조 | "이 상황에서 어떤 절차를 따르는가" |
+| **Skill**(신규) | 절차적 지식 묶음. **필수(required) skill은 custom_prompt와 마찬가지로 매 디스패치마다 항상 주입**되고, **옵션(optional) skill만 태스크가 이름으로 명시 요청할 때 로드**됩니다(§5) — "필요할 때만 로드"는 옵션 skill에만 해당하는 설명입니다(팀 검토 major로 이 축2 서술과 §5 조립 메커니즘 사이의 불일치를 발견해 이번에 정정). 여러 개를 조합 가능, 여러 에이전트/템플릿이 공유 참조 | "이 상황에서 어떤 절차를 따르는가" |
 | **Tool/MCP**(기존) | 외부 API 표면. 실제로 뭔가를 "하게" 해주는 손 | "무엇을 실행할 수 있는가" |
 
 custom_prompt가 상황에 따라 어떤 스킬을 꺼낼지 판단하는 상위 판단자이고,
@@ -70,7 +70,7 @@ stdio 도구를 바인딩했는데 정작 에이전트가 배정된 host엔 그 
 | 결정 사항 | 채택안 | 근거 |
 |---|---|---|
 | Skill을 신규 엔티티로 도입할지 | **도입** — Tool과 완전히 같은 패턴(카탈로그 + 템플릿/에이전트 바인딩 + 태스크 1회성 요청) | `#49` 1차 요구사항 10번이 애초에 요구했으나 누락돼 있던 것을 채움 |
-| Skill 내용 저장 방식 | **DB 텍스트**(`skills.content TEXT`, `mcp_servers`와 동일 패턴) | AskUserQuestion으로 확인(2026-08-15). 파일/git 기반(Claude Code 스타일)은 더 강력하지만 host 배포 메커니즘이 새로 필요하고 스크립트 실행이 가능해지면 보안 검토가 훨씬 커짐 — 순수 지침형 스킬로 범위를 좁혀 구현 비용을 낮춤 |
+| Skill 내용 저장 방식 | **DB 텍스트**(`skills.content TEXT`, `mcp_servers`와 동일 패턴) | AskUserQuestion으로 확인(2026-08-15). 파일/git 기반(Claude Code 스타일)은 더 강력하지만 host 배포 메커니즘이 새로 필요하고 스크립트 실행이 가능해지면 보안 검토가 훨씬 커짐 — 순수 지침형 스킬로 범위를 좁혀 구현 비용을 낮춤. ⚠️ **재검토 필요(팀 검토 major)**: 이 결정 이후 `#52` 조사로 grok build 자신이 이미 네이티브 skill 시스템을 갖고 있다는 게 밝혀졌는데(§7.3에서만 인용되고 이 결정에는 재적용되지 않았던 공백), 이 문서의 "DB 텍스트 + 프롬프트 주입" 방식과 grok 네이티브 포맷 중 어느 쪽이 실제로 더 적합한지는 `#49` Phase 0 스파이크가 grok build의 skill 파일 포맷/위치를 조사한 뒤 다시 판단해야 합니다 — 지금의 DB 텍스트 결정은 "1단계 최소 구현"으로 재해석하고, 확정이 아니라 Phase 0 결과로 뒤집힐 수 있는 잠정 결정으로 취급합니다 |
 | 프로젝트 헌법(constitution) 도입 여부 | **도입** — `projects.constitution_prompt`, 그 프로젝트의 모든 에이전트에 템플릿/개별 custom_prompt보다 먼저 항상 주입 | 축 3에 비어 있던 "Project 레벨" 층을 채움. 이 저장소 자신이 `agent.md`/`CLAUDE.md`로 쓰는 패턴과 정확히 같은 개념이라 메타적으로도 일관됨 |
 | Host↔Tool 가용성 제약 | **`hosts.labels` 신규 추가 + `mcp_servers.required_host_labels`로 stdio 도구만 필터** | Worker에 이미 있는 `labels`/`required_labels` 패턴을 Host에도 확장 — 새 메커니즘을 발명하지 않음 |
 | Hooks(PreToolUse 등) 도입 여부 | **개념만 기록, 이번엔 설계 보류**(§7.3) | 오케스트레이터 레벨(디스패치 전/완료 후)은 지금도 구현 가능하지만, grok 세션 **내부** 도구 호출 단위 후킹은 ACP가 그 수준의 개입을 지원하는지 자체가 미검증(`#49` §5.2와 같은 리스크) — 검증 안 된 능력 위에 설계하지 않음 |
@@ -93,8 +93,12 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS constitution_prompt TEXT;
 ALTER TABLE hosts ADD COLUMN IF NOT EXISTS labels JSONB NOT NULL DEFAULT '{}';
 
 -- mcp_servers는 #49가 만든 테이블 — stdio 전송 도구에만 의미 있는
--- host 요구 레이블 컬럼 추가. http/sse는 host 무관이라 항상 NULL.
-ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS required_host_labels JSONB;
+-- host 요구 레이블 컬럼 추가. http/sse는 항상 빈 배열(⚠️ 팀 검토 minor —
+-- 이전 버전은 이 컬럼을 nullable로 두고 hosts.labels는 NOT NULL DEFAULT
+-- '{}'로 서로 다르게 처리했습니다. "레이블 없음"을 두 컬럼이 각각 NULL과
+-- 빈 값으로 다르게 표현하면 "IS NULL"과 "= '[]'"를 둘 다 신경 써야 하는
+-- 불필요한 혼란이 생기므로, 이 컬럼도 NOT NULL DEFAULT로 통일합니다).
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS required_host_labels JSONB NOT NULL DEFAULT '[]';
 
 -- ── Skill 카탈로그 ─────────────────────────────────────────────
 CREATE TABLE skills (
@@ -216,7 +220,7 @@ Skill은 도구처럼 세션에 "부착"되는 별도 채널이 아니라 **프�
 Claude Code 자신의 하네스 개념을 이 fleet에 대입해 무엇을 지금 들여오고
 무엇을 보류할지 정리합니다.
 
-### 7.1 Skill — 도입 (§2~§6)
+### 7.1 Skill — 도입 (§2~§6, 저장 방식은 §3에서 재검토 대상으로 표시됨)
 
 ### 7.2 프로젝트 헌법(Constitution) — 도입
 
@@ -294,10 +298,15 @@ ACP 개입이 필요할 수 있습니다 — 두 항목이 같은 미검증 전�
 **MCP 도구**: `fleet_register_skill`, `fleet_list_skills`. `fleet_create_agent`/
 `fleet_dispatch_task`는 `requested_optional_skills` 입력을 추가로 받습니다.
 
-**대시보드 UI**: `/admin/skills` 페이지(`ui-design.md` §3.14 "에이전트
-템플릿 · MCP 카탈로그 관리"와 같은 절에 세 번째 탭으로 추가 — 새 페이지
-패턴을 만들지 않음). 프로젝트 상세(`ui-design.md` §3.10) 헤더에
-`constitution_prompt` 존재 여부/미리보기 노출.
+**대시보드 UI**: `/admin/skills`는 `ui-design.md` §3.14 "에이전트 템플릿 ·
+MCP 카탈로그 관리"와 **같은 절 안에 있지만 독립된 라우트**입니다(⚠️ 팀
+검토 major로 정정 — 이전 서술의 "세 번째 탭"이라는 표현은 실제
+`ui-design.md` §3.14의 설계, 즉 `/admin/agent-templates`·`/admin/mcp-servers`·
+`/admin/skills`가 하나의 페이지 안 탭이 아니라 각각 별도 라우트/페이지라는
+사실과 어긋났습니다 — 같은 관리자 메뉴 그룹에 속할 뿐입니다). 새 페이지
+패턴을 만들지 않는다는 결론 자체는 그대로 유지됩니다. 프로젝트 상세
+(`ui-design.md` §3.10) 헤더에 `constitution_prompt` 존재 여부/미리보기
+노출.
 
 ## 9. 단계별 구현 계획
 

@@ -21,7 +21,7 @@ erDiagram
 
     AGENT_TEMPLATES {
         uuid id PK
-        uuid runtime_id FK
+        uuid runtime_id FK "NOT NULL — 컬럼 추가 후 백필+SET NOT NULL로 확정(DEFAULT 서브쿼리 버그 수정)"
     }
 
     AGENTS {

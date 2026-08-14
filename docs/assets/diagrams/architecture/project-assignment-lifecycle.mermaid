@@ -19,7 +19,12 @@ sequenceDiagram
     Store-->>API: Ok(())
     Admin->>API: PUT /api/workers/:id/project {project_id}
     API->>Store: assign_worker_to_project(project_id, worker_id)
-    Store-->>API: Ok(())
+    alt 이 worker가 host에 연결돼 있고 그 host.project_id와 불일치(팀 검토 발견 가드)
+        Store-->>API: Err(Conflict)
+        API-->>Admin: 409 "host와 다른 프로젝트로 개별 재배정 불가"
+    else 독립 worker이거나 host.project_id와 일치
+        Store-->>API: Ok(())
+    end
 
     Note over Admin,Sel: 3. 프로젝트 스코프 태스크 제출 및 하드 디스패치
     Admin->>API: fleet_dispatch_task {prompt, project_id}

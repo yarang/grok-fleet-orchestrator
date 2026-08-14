@@ -1,0 +1,54 @@
+flowchart TB
+    subgraph L0["0. 클라이언트 — 어떤 MCP 클라이언트든 동일 인터페이스로 접근(구현됨)"]
+        direction LR
+        C1[Claude Code] ~~~ C2[grok build] ~~~ C3[Gemini CLI] ~~~ C4[Cursor / Codex 등]
+    end
+
+    subgraph L1["1. 인프라·운영 계층 (구현됨)"]
+        direction LR
+        I1[Host 프로비저닝<br/>SSH·키 볼트] ~~~ I2[Worker 등록·하트비트<br/>서킷브레이커] ~~~ I3[RBAC·대시보드<br/>감사로그·mTLS]
+    end
+
+    subgraph L2["2. 스케줄링·디스패치 계층 (구현됨)"]
+        direction LR
+        S1[태스크 큐·재시도<br/>Dead-Letter #38] ~~~ S2[WorkerSelector<br/>라벨·모델·용량·회로] ~~~ S3[스레드 기반<br/>태스크 연속성]
+    end
+
+    subgraph L3["3. 멀티테넌시 계층 — 프로젝트 격리 (#48, 설계)"]
+        direction LR
+        P1[Project 배타적 소유<br/>host/worker 1:N] ~~~ P2[프로젝트 스코프<br/>하드 디스패치]
+    end
+
+    subgraph L4["4. 에이전트 생명주기 계층 (#49, 설계)"]
+        direction LR
+        A1[동적 프로비저닝<br/>여유 기반 생성/회수] ~~~ A2[메모리·맥락 연속성<br/>스레드 요약] ~~~ A3[템플릿·중앙 카탈로그]
+    end
+
+    subgraph L5["5. 하네스 구성 계층 — 행동을 이루는 3층 (#51, 설계)"]
+        direction LR
+        H1["Project 헌법<br/>(CLAUDE.md 유사)"] --> H2["custom_prompt<br/>(정체성)"] --> H3["Skill<br/>(절차)"] --> H4["Tool/MCP<br/>(실행)"]
+    end
+
+    subgraph L6["6. 관측·개입 계층 (#50, 설계)"]
+        direction LR
+        O1[tmux 읽기 전용<br/>모니터링] ~~~ O2[권한 있는<br/>인터랙티브 attach]
+    end
+
+    subgraph L7["7. 벤더 중립성 계층 (#52, 설계)"]
+        direction LR
+        V1[AgentRunner 트레잇] --> V2[NetworkBindRunner<br/>grok build 등]
+        V1 --> V3[StdioBridgeRunner<br/>Gemini CLI 등]
+    end
+
+    L0 --> L1 --> L2 --> L3 --> L4 --> L5
+    L4 --> L6
+    L4 --> L7
+
+    style L0 fill:#f5f5f7,stroke:#999
+    style L1 fill:#e8f5e9,stroke:#4caf50
+    style L2 fill:#e8f5e9,stroke:#4caf50
+    style L3 fill:#e3f2fd,stroke:#2196f3
+    style L4 fill:#e3f2fd,stroke:#2196f3
+    style L5 fill:#e3f2fd,stroke:#2196f3
+    style L6 fill:#e3f2fd,stroke:#2196f3
+    style L7 fill:#e3f2fd,stroke:#2196f3

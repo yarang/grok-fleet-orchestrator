@@ -821,6 +821,19 @@
     개선안을 [`project-feature-design.md`](../architecture/project-feature-design.md) §5에
     기록(`#38` 구현 범위, 이 항목이 실질적으로 의존).
 
+    ⚠️ **5차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 사용자 요청으로
+    13개 관점 리뷰어 + 3표 적대적 검증으로 구성된 다중 에이전트 팀 검토를
+    실행(계정 사용량 한도로 일부 관점 검증 중도 실패 — 검증 통과분만 반영,
+    나머지는 추후 재검증 대기). 이 항목에서 확정 반영된 것: 호스트에 연결된
+    워커를 배타적 소유 불변식 없이 개별 재배정할 수 있던 **critical** 구멍에
+    409 가드 추가, 독립 워커가 재등록마다 `project_id`를 잃던 **major** 버그
+    수정, 재배정 시 진행 중 태스크 정책을 문서 본문에 정식 반영, 디스패치
+    단계 번호 정정, `ProjectAssign` 권한 등급 비일관을 열린 질문으로 기록.
+    Agent의 `project_id`가 host 재배정 시 재동기화되지 않던 미검증(critical)
+    발견 1건도 함께 반영(`assign_host_to_project`가 소속 Agent 전체의
+    `project_id`도 같은 트랜잭션에서 갱신). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: 설계 문서 §8의 Phase 1(스키마 + Store + RBAC)부터 순차 구현.
 
 49. ⏳ **에이전트(Agent) 동적 프로비저닝 · 메모리 · 스레드 요약 · 도구 바인딩**
@@ -958,6 +971,20 @@
     `tmux kill-server` 기동 정책이 실제 정리를 보장하므로 `Stopped`로
     낙관적 확정.
 
+    ⚠️ **7차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: `#48`과 동일한
+    팀 검토 라운드에서 이 항목에 해당하는 확정 발견 12건을 반영. 핵심만
+    요약: `016_agents.sql` 마이그레이션의 전방 참조 오류와 `#48`이 약속했던
+    `projects.default_agent_template_id` FK 누락(둘 다 **critical**) 수정,
+    §4.1/`AgentAutoProvisioner` 여유 판정이 `Stopping`을 누락해 `max_agents`를
+    우회할 수 있던 **critical** 버그 수정, 동적 프로비저닝된 Worker에
+    `project_id`를 설정하는 절차가 없어 `#48`의 하드 디스패치 필터가 신규
+    워커를 자기 프로젝트에서도 배제하던 **critical** 버그 수정, `Starting`/
+    `fleet-worker` 재시작 정체 방지 규칙 2건 신설(신규 `process_incarnation`
+    필드 도입), `POST /api/agents`에 남아있던 모순된 `project_id` 파라미터
+    제거, `Automatic` 모드 전환 전제조건에 `agent_idle_timeout_secs` 필수화,
+    인용 오류 정정 다수. 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
 
@@ -1025,6 +1052,17 @@
     지연을 줄이려면 "agent_id에 안 묶인 범용 grok 웜풀"이라는 별개의 더 큰
     기능이 필요한데, 이번 스코프에서는 설계하지 않고 향후 후보로만 기록.
 
+    ⚠️ **5차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 동일 팀 검토
+    라운드에서 이 항목에 해당하는 확정 발견 3건을 반영. §3 "생존 감지
+    방식"이 `tmux new-session -d`의 즉시 반환·detach 특성 때문에 런처
+    프로세스의 `child.wait()`로는 grok의 생사를 전혀 추적하지 못하던
+    **critical** 근본 결함을 발견 — `remain-on-exit on` 설정 + `tmux
+    list-panes`의 `pane_dead`/`pane_dead_status` 폴링 방식으로 §3 전면
+    재작성(크래시 출력이 즉시 사라지던 별도 major 발견도 함께 해소). 의도된
+    stop이 생존 폴링 루프와 경합할 수 있던 **major** 문제도 수정(stop
+    시작 전 폴링 대상에서 먼저 제거). 인용 오류 1건 정정. 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: `#49` Phase 4가 완료된 뒤, §9에 남은 미검증 항목(grok의
     SIGINT/TTY 동작, 동시 세션 생성 레이스 등)을 `#49` Phase 0 검증
     스파이크와 함께 확인. 그 전까지는 착수 대상 아님.
@@ -1066,6 +1104,16 @@
     [`docs/architecture/agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md)에
     정리했습니다.
 
+    ⚠️ **2차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 동일 팀 검토
+    라운드에서 이 항목에 해당하는 확정 발견 3건을 반영. §2 축 2 표의
+    "필요할 때만 로드"가 필수 Skill에도 적용되는 것처럼 서술돼 §5의 실제
+    합성 메커니즘(필수 Skill은 매 디스패치마다 주입)과 모순되던 **major**
+    문제 정정, Skill 저장 방식 결정이 `#52`의 grok 네이티브 Skill/Hook
+    발견 이전에 내려져 재검토가 누락됐던 것을 Phase 0 재검토 대상으로 명시
+    플래그 추가(**major**), §8 UI 서술("세 번째 탭") 정정(**major**,
+    실제로는 독립 라우트). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은
     Phase에서 함께 구현 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI
     패턴이 완전히 동일해 분리 구현하면 낭비.
@@ -1106,6 +1154,17 @@
     질문)는
     [`docs/architecture/agent-runtime-vendor-design.md`](../architecture/agent-runtime-vendor-design.md)에
     정리했습니다.
+
+    ⚠️ **2차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 동일 팀 검토
+    라운드에서 이 항목에 해당하는 확정 발견 3건을 반영. `018_agent_runtimes.sql`이
+    `ALTER TABLE ... DEFAULT (SELECT ...)` 형태로 `DEFAULT` 절에 서브쿼리를
+    넣어 PostgreSQL이 거부하는 **critical** 구문 오류를 발견 — 컬럼 추가 →
+    `UPDATE`로 백필 → `SET NOT NULL`의 3단계로 재작성. `StdioBridgeRunner`가
+    "raw 바이트 그대로 중계"한다고 서술해 WebSocket과 stdio의 메시지 경계
+    규약 차이로 프레이밍이 깨질 위험이 있던 **major** 문제 — 양쪽에서
+    완전한 JSON-RPC 메시지 단위로 파싱 후 재구성하도록 정정. §6 UI 서술
+    ("네 번째 탭") 정정(**minor**, 실제로는 독립 라우트). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
     **다음 단계**: `#49` Phase 0 검증 스파이크 범위에 grok build 네이티브
     설정 파일 조사와 `grok --help`로 서브커맨드 관계 확정을 포함해 함께

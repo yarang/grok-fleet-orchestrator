@@ -140,12 +140,19 @@ pub enum ToolRequirement { Required, Optional }
 -- 강제하지 않는 이유는 이 조건이 status 값에 달려 있어 순수 SQL CHECK/FK로
 -- 표현할 수 없기 때문 — mcp_servers RESTRICT는 무조건 차단이라 FK로
 -- 충분했지만, 이건 상태 조건부 차단이라 애플리케이션 코드가 필요하다.
+-- ⚠️ 팀 검토에서 발견(critical): agents가 agent_templates를 FK로 참조하는데
+-- 이 파일 안에서 agent_templates는 훨씬 아래(도구 바인딩 절)에서야
+-- 만들어집니다 — 그대로면 이 CREATE TABLE 자체가 실패합니다. 013/015가
+-- 이미 쓴 "FK 없이 원시 컬럼만 먼저 예약 → 참조 대상 테이블이 생긴 뒤
+-- ALTER TABLE로 제약 추가" 패턴을 여기도 그대로 적용합니다 — template_id는
+-- 아래에서 UUID 원시 컬럼으로만 두고, agent_templates 생성 직후(§3 하단)
+-- FK 제약을 별도로 겁니다.
 CREATE TABLE agents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host_id UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
     project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
     worker_id UUID REFERENCES workers(id) ON DELETE SET NULL,
-    template_id UUID REFERENCES agent_templates(id) ON DELETE SET NULL,
+    template_id UUID,  -- FK는 agent_templates 생성 후 아래에서 ALTER TABLE로 추가
     name TEXT NOT NULL UNIQUE,
     custom_prompt TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -205,6 +212,19 @@ CREATE TABLE agent_templates (
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 이제 agent_templates가 존재하므로 위에서 미뤄둔 FK를 건다(팀 검토
+-- critical 수정).
+ALTER TABLE agents
+    ADD CONSTRAINT agents_template_id_fkey
+    FOREIGN KEY (template_id) REFERENCES agent_templates(id) ON DELETE SET NULL;
+
+-- #48의 015_projects.sql이 "#49 Phase 1이 agent_templates를 만들 때 이
+-- FK를 추가한다"고 예고했던 것을 실제로 이행(팀 검토 major — 예고만 되고
+-- 실제로 추가된 적이 없었음).
+ALTER TABLE projects
+    ADD CONSTRAINT projects_default_agent_template_id_fkey
+    FOREIGN KEY (default_agent_template_id) REFERENCES agent_templates(id) ON DELETE SET NULL;
 
 CREATE TABLE mcp_servers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -291,7 +311,20 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_optional_tools JSONB;
    다른 두 agent가 같은 축약 이름을 만들어낼 경우 조용히 서로의 워커
    레코드를 덮어쓰는 위험이 있어 전체 UUID를 포함해야 합니다.
 7. 오케스트레이터가 `agents.worker_id`를 채우고 `status: Starting → Running`
-   전이, `status: done`으로 ack.
+   전이, `status: done`으로 ack. **이 시점에 새 Worker 행의 `project_id`를
+   그 Agent의 `project_id`로 직접 설정합니다**(팀 검토 critical — 이전
+   버전은 이 단계를 명시하지 않아, 동적으로 만들어진 워커가
+   `project_id`를 영영 못 받아 `#48`의 프로젝트 하드 디스패치 필터에
+   걸려 자기 자신에게 온 태스크조차 못 받는 구멍이 있었습니다). `#48`
+   §3의 "host에 연결된 워커는 heartbeat 재연결마다 host 기준으로
+   재동기화"라는 규칙을 여기 그대로 쓸 수 없다는 점에 주의하세요 — 그
+   규칙은 `hosts.worker_id`가 host당 워커를 최대 1개만 가리킬 수 있다고
+   가정하는데, `#49`는 host 하나에 여러 Agent(=여러 Worker)가 동시에
+   존재하므로 그 1:1 가정이 깨집니다. 그래서 이 워커는 `hosts.worker_id`를
+   통한 host-경유 재동기화 대상이 아니라, **자신이 속한 Agent를 통해
+   `project_id`를 직접(그리고 배타적으로) 받는 별도 경로**를 씁니다 —
+   이후 그 Agent가 다른 host로 옮겨가는 일은 없으므로(Agent는 `host_id`가
+   불변) 이 값은 최초 1회 설정으로 충분하고 재동기화가 필요 없습니다.
 8. 이후 디스패치는 기존 `Dispatcher`/`WorkerSelector` 경로 그대로.
 9. 종료(`stop`)도 동일한 커맨드 큐 패턴을 재사용하되, **기존 `GrokRunner`가
    비정상 종료 시 자동으로 프로세스를 재시작하는 루프**(`restart_delay_secs`
@@ -314,14 +347,51 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS requested_optional_tools JSONB;
     규칙을 추가합니다 — `Failed`가 아니라 `Stopped`로 낙관적으로 확정하는
     이유는 `kill-server` 정책이 실제 정리를 이미 보장하기 때문(의도한
     종료가 사실상 달성됨).
+12. **`Starting` 정체 방지**(팀 검토 critical — 신설): 4단계에서 `status:
+    acked` ack을 받아 `Starting`으로 전이한 직후, 5단계(실제 grok spawn)를
+    끝내기 전에 `fleet-worker`가 재시작하면 — ack은 이미 보냈으니
+    `agent_commands`는 더 이상 "pending"이 아니라 완료된 것으로 보이는데,
+    정작 grok 프로세스는 뜬 적이 없거나(재시작 전에 spawn 전이었다면)
+    떴어도 tmux와 함께 정리됐습니다(`#50` §3). 이 경우 11단계의 `Stopping`
+    처럼 낙관적으로 확정할 근거가 없습니다 — "의도한 시작"이 실제로
+    성공했는지 알 방법이 없기 때문입니다. `AgentAutoProvisioner` 스윕에
+    "`Starting` 상태가 하트비트 간격의 여러 배(예: 5분)를 넘기고 아직
+    `agents.worker_id`가 채워지지 않았으면(=register가 온 적 없으면)
+    `Failed`로 강제 전이" 규칙을 추가합니다 — `Stopped`가 아니라 `Failed`로
+    확정하는 이유는 시작이 성공했다는 근거가 전혀 없어 실패로 보는 게
+    안전하기 때문(운영자/`AgentAutoProvisioner`가 필요하면 새 Agent를
+    다시 만들면 됩니다).
+13. **`fleet-worker` 재시작 시 `Running` 에이전트 정리**(팀 검토 major —
+    신설): 10~12단계는 각각 "호스트 오프라인"과 "특정 커맨드의 ack
+    유실"만 다루는데, `fleet-worker`가 **호스트는 정상이고 그 자체만
+    빠르게 재시작**하면(배포·크래시 후 즉시 복구) 그 순간 `Running`이던
+    모든 Agent의 grok/tmux가 `kill-server`로 한꺼번에 죽는데, 어떤
+    `agent_commands`도 이 사실을 보고하지 않습니다(애초에 stop 커맨드가
+    발행된 적이 없으므로) — 그래서 10~12단계 중 어느 스윕도 이 경우를
+    잡지 못합니다. 이를 잡으려면 `fleet-worker`가 하트비트에 **자기
+    자신의 부팅 시각/난수 인스턴스 ID**(`process_incarnation`)를 함께
+    보고해야 합니다 — 오케스트레이터가 그 host에 대해 마지막으로 기록한
+    값과 다르면 "이 host의 `fleet-worker`가 방금 재시작했다"고 판단해,
+    그 host 위의 `Running`/`Starting` Agent 전부를 즉시 `Failed`로 일괄
+    전이합니다(11단계의 `Stopping`과 달리 `Running`은 "잘 돌고 있던
+    중"이었으므로 낙관적으로 `Stopped`가 아니라 `Failed`로 확정 — 그
+    시점에 진행 중이던 태스크가 있었을 수 있고, 그건 `#38`의 기존 orphan
+    `Dispatched` 태스크 정리 경로가 별도로 처리합니다). 이 필드는 §4 2단계의
+    `HeartbeatResponse` 확장과 같은 시점(Phase 4)에 `HeartbeatRequest`
+    쪽에 추가합니다.
 
 ### "여유" 판단 기준
 
 `hosts.max_agents`(운영자 설정 정수 상한)와 현재 **터미널 상태(`Stopped`/
-`Failed`)가 아닌** 에이전트 개수(`Pending`/`Starting`/`Running` 전부 포함 —
-`Pending`은 "아직 실행 중은 아니지만 이미 슬롯을 예약한" 상태이므로 여유
-계산에서 빠지면 과다 생성이 가능해짐)를 비교합니다. `HostMetrics` 기반
-자동 판단은 §12 열린 질문으로 보류.
+`Failed`)가 아닌** 에이전트 개수(`Pending`/`Starting`/`Running`/**`Stopping`**
+전부 포함)를 비교합니다 — `Pending`은 "아직 실행 중은 아니지만 이미
+슬롯을 예약한" 상태, `Stopping`은 "아직 실제로 프로세스/tmux 세션이
+정리되지 않은" 상태이므로 **둘 다 여유 계산에서 빠지면 `max_agents`
+상한이 우회될 수 있습니다**(팀 검토 critical — 이전 버전은 `Stopping`을
+빠뜨려서, 종료 처리 중인 agent가 아직 실제로는 host 자원을 점유하고
+있는데도 "여유 있음"으로 오판해 그 자리에 새 agent를 추가로 만들 수
+있는 구멍이 있었습니다). `HostMetrics` 기반 자동 판단은 §12 열린 질문으로
+보류.
 
 ### 4.1 수동/자동 프로비저닝 모드
 
@@ -337,17 +407,24 @@ pub enum AgentProvisioningMode { Manual, Automatic }
 - **`Manual`**(기본): 관리자/프로젝트가 `POST /api/agents`로 명시적으로만
   에이전트를 만듭니다 — §4의 흐름 그대로. 생성된 Agent의
   `provisioned_by = 'manual'`.
-- **`Automatic`**: `default_agent_template_id`가 설정돼 있어야 하며(없으면
-  자동 프로비저닝이 동작하지 않음 — 어떤 custom_prompt/도구로 만들지 알
-  방법이 없으므로), 신규 백그라운드 루프 **`AgentAutoProvisioner`**가 기존
+- **`Automatic`**: `default_agent_template_id`**와 `agent_idle_timeout_secs`
+  둘 다** 설정돼 있어야 합니다(팀 검토 major — 이전 버전은
+  `default_agent_template_id`만 필수로 서술했는데, `agent_idle_timeout_secs`가
+  `NULL`이어도 `Automatic`이 그냥 켜지면 자동 생성된 에이전트가 영원히
+  회수되지 않아 이 문서 스스로 "자동 생성은 반드시 자동 회수와 짝을
+  이뤄야 한다"고 규정한 원칙이 깨집니다). `Project`를 `Automatic`으로
+  전환하는 API/CLI 호출은 이 두 필드가 모두 채워져 있는지 확인하고, 아니면
+  `400 Bad Request`로 거부합니다. 이 전제가 갖춰지면 신규 백그라운드 루프
+  **`AgentAutoProvisioner`**가 기존
   `Reconciler`(`fleet-scheduler/src/reconcile.rs`)와 동일한 "설정 + spawn +
   JoinHandle 기반 abort" 패턴으로 주기적으로(예: 30초, `Reconciler`의
   `interval`과 같은 관례) 다음을 확인합니다:
   1. `agent_provisioning_mode = 'automatic'`인 프로젝트 중, `project_id`가
      일치하는 `Pending` 태스크가 있고
   2. 그 프로젝트에 **터미널 상태(`Stopped`/`Failed`)가 아닌** Agent(`Pending`/
-     `Starting`/`Running`)가 하나도 없거나, 존재하는 것들이 전부
-     `Running`이면서 `has_capacity() == false`이며
+     `Starting`/`Running`/`Stopping`)가 하나도 없거나, 존재하는 것들이 전부
+     `Running`이면서 `has_capacity() == false`이며(동일한 이유로 `Stopping`도
+     "존재하는 에이전트"로 카운트합니다 — 위 "여유" 판단 기준과 같은 근거)
   3. 그 프로젝트에 배정된 host 중 `max_agents` 여유가 있는 host가 있으면
   → `default_agent_template_id`로 새 Agent를 만들고(`provisioned_by =
   'automatic'`) `agent_commands`(start)를 발행합니다(§4의 수동 흐름과 완전히
@@ -413,7 +490,9 @@ pub enum AgentProvisioningMode { Manual, Automatic }
 | `Running → Stopping` | 관리자 명시 요청(Manual) 또는 유휴 판정(Automatic) | 오케스트레이터 | §4.1의 3개 "동작 중" 신호 + `idle_timeout_secs` 스냅샷 타이머 |
 | `Stopping → Stopped` | 의도된 종료 신호 → tmux 종료 → deregister | `fleet-worker` → 오케스트레이터 | ack `{status: done}` |
 | `(Pending\|Starting\|Running\|Stopping) → Failed` | 호스트 하트비트 유실 300초(`offline_worker_grace`) | 오케스트레이터 | 기존 `Reconciler` 패턴 재사용 스윕 |
-| `Stopping → Stopped`(정체 타임아웃) | `Stopping` 정체 5분 초과(호스트는 정상) | 오케스트레이터 | `fleet-worker` 재시작 시 `kill-server`가 실제 정리를 보장한다는 전제로 낙관적 확정 |
+| `Stopping → Stopped`(정체 타임아웃) | `Stopping` 정체 5분 초과(호스트는 정상) | 오케스트레이터 | `fleet-worker` 재시작 시 `kill-server`가 실제 정리를 보장한다는 전제로 낙관적 확정(§4 11단계) |
+| `Starting → Failed`(정체 타임아웃, 팀 검토 신설) | `Starting` 정체 5분 초과 + `worker_id` 미충족(호스트는 정상) | 오케스트레이터 | 시작 성공 근거가 없어 안전하게 `Failed` 확정(§4 12단계) |
+| `(Running\|Starting) → Failed`(팀 검토 신설) | `fleet-worker` 재시작 감지(`process_incarnation` 값 변경) | 오케스트레이터 | 호스트는 정상이지만 로컬 tmux 세션이 전부 정리됐음을 인스턴스 ID로 추론(§4 13단계) |
 
 `Failed`/`Stopped`는 터미널이며 자동 재시도가 없습니다 —
 `AgentAutoProvisioner` eligibility 체크에서 "터미널 상태"로 취급돼 새
@@ -434,7 +513,9 @@ Agent 생성을 막지 않습니다(같은 프로젝트에 새 에이전트가 �
 `custom_prompt`는 grok CLI 인자로 넘기지 않습니다(grok 프로세스 수준
 시스템 프롬프트 CLI 표면이 확인되지 않음). 대신 **디스패치 시점 프롬프트
 조립 단계**에서 텍스트로 앞에 붙입니다 — 기존
-`acp_transport.rs::build_threaded_prompt()`가 스레드 이력을 이어붙이는 것과
+`dispatcher.rs::build_threaded_prompt()`(⚠️ 팀 검토 minor로 소속 파일
+정정 — `acp_transport.rs`가 아니라 `crates/fleet-scheduler/src/
+dispatcher.rs`)가 스레드 이력을 이어붙이는 것과
 정확히 같은 위치, 같은 방식입니다. grok 프로세스 자체는 변경 없이 재사용되고,
 custom_prompt를 바꿔도 프로세스 재시작이 불필요합니다.
 
@@ -448,7 +529,16 @@ custom_prompt를 바꿔도 프로세스 재시작이 불필요합니다.
 - **경로 B**: grok 자체의 로컬 MCP 설정 파일(`grok build`의 `~/.config/grok/mcp.json`과
   유사한 것이 `grok agent serve`에도 있다면) — `fleet-worker`가 에이전트 기동
   직전에 그 host의 해당 경로에 설정 파일을 써주기만 하면 됨. unstable ACP
-  피처가 불필요해 리스크가 낮음.
+  피처가 불필요해 리스크가 낮음. ⚠️ **팀 검토 major — 이 경로는 host당
+  grok 프로세스가 1개일 때(`#49` 이전)를 전제로 한 설명이라, `#49`
+  자체가 도입하는 "host당 여러 Agent" 상황에서 설정 파일 경로가
+  프로세스 간에 공유되면 서로 충돌합니다.** `~/.config/grok/mcp.json`처럼
+  유저 홈 디렉토리 전역 경로면 같은 host 위의 서로 다른 Agent(서로 다른
+  도구 바인딩을 가짐)가 같은 파일을 두고 경합합니다 — 경로 B가 채택되면
+  **경로 자체를 agent별로 격리**(예: grok이 프로젝트-로컬
+  `.grok/mcp.json`도 지원한다면 `agent.workdir_template` 하위에, 아니면
+  `--config-dir` 류 CLI 플래그로 agent별 디렉토리를 지정할 수 있는지)해야
+  하며, 이것도 Phase 0 검증 스파이크 범위에 포함합니다.
 
 어느 경로든 **디스패치 로직의 도구 해석 규칙은 동일**합니다:
 
@@ -470,8 +560,14 @@ attach(session) = agent_tools(agent_id, requirement='required')
   프리셋 — `custom_prompt` 기본값 + `agent_template_tools`(필수/옵션 도구
   목록). 예: "코드 리뷰어" 템플릿 = custom_prompt "당신은 코드 리뷰 전문
   에이전트입니다..." + 필수[linter-mcp, github-mcp] + 옵션[slack-mcp].
-- **에이전트 생성 흐름**: `POST /api/agents {template_id, project_id, host_id,
-  name}` → 템플릿의 `custom_prompt`/`agent_template_tools`를 그대로
+- **에이전트 생성 흐름**: `POST /api/agents {template_id, host_id, name}`
+  (⚠️ 팀 검토 major — 이전 버전은 여기에 `project_id`도 입력받게
+  서술돼 있었는데, 이는 §2 결정표의 "Agent의 `project_id`는 host에서
+  상속(직접 지정 불가)"과 정면으로 모순됩니다 — `project_id`는 요청
+  바디에서 아예 받지 않고 `host_id`가 가리키는 host의 `project_id`를
+  서버가 그대로 채웁니다. 요청에 `project_id`가 포함돼 있으면 무시하는
+  게 아니라 `400 Bad Request`로 거부해 혼동을 방지합니다) → 템플릿의
+  `custom_prompt`/`agent_template_tools`를 그대로
   `agents.custom_prompt`/`agent_tools`에 복사(스냅샷) → 필요하면 생성 직후
   개별 오버라이드(`PATCH /api/agents/:id`, 도구 추가/제거는 별도 엔드포인트).
   템플릿 없이(`template_id: null`) 커스텀 프롬프트/도구를 처음부터 직접
@@ -507,9 +603,17 @@ attach(session) = agent_tools(agent_id, requirement='required')
 
 ## 9. 디렉토리 기반 결과물 관리
 
-`Agent`/`Project`에 `workdir_template` 필드를 둬 `DispatchRequest.cwd` 기본값을
-프로젝트별 하위 디렉토리로 맞추는 정도로 1단계 범위를 제한합니다. 오케스트레이터로의
-결과물 동기화(rsync/S3 등)는 범위 밖 — 필요성 확인 시 별도 항목.
+`Project.workdir_template`(`#48` §3, `projects` 테이블 컬럼) **하나만**
+둡니다 — ⚠️ 팀 검토(minor)에서 이전 서술이 "`Agent`/`Project`에
+`workdir_template` 필드를 둬"라고 해 마치 `Agent`도 자기 컬럼을 갖는
+것처럼 읽혔지만, 실제로 `agents` 스키마(§3)에는 그런 컬럼이 없고 추가할
+계획도 없습니다. `Agent`별 디렉토리는 별도 컬럼 없이
+**`{project.workdir_template}/{agent.name}`처럼 Agent 이름을 하위
+디렉토리로 붙이는 파생 규칙**으로 만듭니다 — `DispatchRequest.cwd` 기본값을
+계산할 때 §5의 프롬프트 조립과 같은 디스패치 시점 로직에서 처리하며,
+Phase 3(메모리+프롬프트 조립, §11)에서 이 계산 로직도 함께 구현합니다.
+오케스트레이터로의 결과물 동기화(rsync/S3 등)는 범위 밖 — 필요성 확인 시
+별도 항목.
 
 ## 10. RBAC 및 API/CLI/MCP 표면
 
@@ -532,8 +636,11 @@ attach(session) = agent_tools(agent_id, requirement='required')
 포함합니다.
 
 **CLI**(신규 `fleet agent` 명령 그룹, `fleet-cli`의 기존 `Workers`/`Tasks`/`Token`
-패턴과 동일): `fleet agent create --template <name> --project <id> --host <id>`,
-`fleet agent list`, `fleet agent stop <id>`, `fleet agent memory <id>`,
+패턴과 동일): `fleet agent create --template <name> --host <id>`(⚠️ 팀
+검토 major — `--project <id>` 플래그는 제공하지 않습니다, `POST
+/api/agents`와 동일하게 host에서 파생), `fleet agent list [--project
+<id>]`(조회 시 필터링은 여전히 가능), `fleet agent stop <id>`, `fleet
+agent memory <id>`,
 `fleet agent-template create/list`, `fleet mcp-server register/list`.
 `fleet agent create`는 완전 플래그 기반이 기본이되, 필수 플래그(`--host`,
 `--name`)가 비어 있고 stdin이 TTY이면 대화형으로 값을 물어보는 보조
@@ -546,7 +653,9 @@ attach(session) = agent_tools(agent_id, requirement='required')
 `agent_id`/`requested_optional_tools` 입력을 추가로 받습니다.
 
 **호스트 삭제 가드**(정책 결정): `DELETE /api/hosts/:hostname`은 이 문서가
-아니라 기존 호스트 인벤토리 기능(`ui-design.md` §3.9)이 소유한
+아니라 기존 호스트 인벤토리 기능(`ui-design.md` §3.2.5, ⚠️ 팀 검토 minor
+— 이전 서술의 §3.9는 `#48`이 이후 프로젝트 목록 페이지로 재사용한
+번호라 잘못된 참조였습니다)이 소유한
 엔드포인트지만, `#49`가 그 위에 Agent를 도입하면서 새로운 위험이
 생겼습니다 — 삭제 시 `agents.host_id`가 `ON DELETE CASCADE`라 실행 중인
 agent 행과 `agent_commands`가 조용히 사라지고 실제 grok 프로세스만

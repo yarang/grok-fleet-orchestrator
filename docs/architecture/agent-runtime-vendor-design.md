@@ -80,14 +80,25 @@ INSERT INTO agent_runtimes (name, vendor, transport_kind, bin_path_template, inv
 VALUES ('grok', 'grok', 'network_bind', '/usr/local/bin/grok',
         'agent serve --bind {bind_addr} --secret {secret}');
 
+-- ⚠️ 팀 검토에서 발견(critical): PostgreSQL은 컬럼 DEFAULT 절에 서브쿼리를
+-- 허용하지 않습니다(`DEFAULT (SELECT ...)`는 그대로 실행하면 구문
+-- 오류) — 컬럼 추가와 값 백필을 분리하는 표준 패턴으로 다시 씁니다.
 ALTER TABLE agent_templates ADD COLUMN IF NOT EXISTS runtime_id UUID
-    REFERENCES agent_runtimes(id) ON DELETE RESTRICT
-    DEFAULT (SELECT id FROM agent_runtimes WHERE name = 'grok');
+    REFERENCES agent_runtimes(id) ON DELETE RESTRICT;
+UPDATE agent_templates SET runtime_id = (SELECT id FROM agent_runtimes WHERE name = 'grok')
+    WHERE runtime_id IS NULL;
+ALTER TABLE agent_templates ALTER COLUMN runtime_id SET NOT NULL;
+
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS runtime_id UUID
-    REFERENCES agent_runtimes(id) ON DELETE RESTRICT NOT NULL
-    DEFAULT (SELECT id FROM agent_runtimes WHERE name = 'grok');
+    REFERENCES agent_runtimes(id) ON DELETE RESTRICT;
+UPDATE agents SET runtime_id = (SELECT id FROM agent_runtimes WHERE name = 'grok')
+    WHERE runtime_id IS NULL;
+ALTER TABLE agents ALTER COLUMN runtime_id SET NOT NULL;
 -- runtime_id도 다른 템플릿 바인딩처럼 생성 시점 스냅샷 — 이미 뜬 Agent는
 -- 카탈로그가 나중에 바뀌어도 영향받지 않는다(#49 §6 "왜 스냅샷인가"와 동일).
+-- (팀 검토에서 agent_templates.runtime_id가 "필수"라고 문서화됐으면서
+-- 실제 SQL은 nullable이었던 불일치도 함께 발견됨 — 위 SET NOT NULL로
+-- agents뿐 아니라 agent_templates도 정정.)
 ```
 
 ### `fleet-core` 신규 타입
@@ -145,14 +156,29 @@ pub trait AgentRunner: Send + Sync {
 - **`StdioBridgeRunner`**(vendor=gemini 등, `transport_kind=stdio_bridge`,
   신규): `<bin> <stdio_invocation_args>`를 로컬 자식 프로세스로 spawn하고,
   **`fleet-worker` 자신이 그 프로세스의 stdin/stdout 파이프를 로컬
-  루프백 WebSocket 리스너로 브릿지**한다(raw JSON-RPC 바이트를 그대로
-  중계 — `#50` §5의 인터랙티브 attach 릴레이와 같은 성격의 "바이트
-  파이프 연결" 코드를 재사용 가능). `spawn()`은 그 로컬 리스너의 주소를
-  반환 — **이 지점이 핵심 설계 통찰입니다: 브릿지가 grok과 똑같은
+  루프백 WebSocket 리스너로 브릿지**한다. `spawn()`은 그 로컬 리스너의
+  주소를 반환 — **이 지점이 핵심 설계 통찰입니다: 브릿지가 grok과 똑같은
   모양(network_bind 엔드포인트)을 오케스트레이터에 제공하므로,
   오케스트레이터 측 코드(`AcpTransport`/`Dispatcher`/`WorkerSelector`)는
   Gemini류 벤더를 위해 단 한 줄도 바뀌지 않습니다.** 벤더 차이는
   전적으로 `fleet-worker` 안에 갇힙니다.
+  ⚠️ **팀 검토(major)로 "raw JSON-RPC 바이트를 그대로 중계"라는 이전
+  서술이 부정확함을 발견 — 바로잡습니다**: WebSocket과 stdio는 메시지
+  경계를 표현하는 방식이 다릅니다(WebSocket은 프레임 단위로 메시지
+  경계가 이미 있고, ACP의 stdio 모드는 보통 개행으로 구분되는
+  newline-delimited JSON-RPC를 씁니다) — 바이트를 그냥 파이프로 이어
+  붙이면 TCP/파이프 버퍼링에 따라 한 JSON-RPC 메시지가 여러 조각으로
+  쪼개지거나 여러 메시지가 한 덩어리로 뭉쳐 전달될 수 있어, 양쪽의
+  메시지 경계가 어긋납니다. 게다가 `#49` §2.2에서 이미 확인했듯 grok
+  자신의 ACP 구현조차 표준 필드 배치에서 벗어나는 등 wire-format이
+  완전히 균일하지 않다는 전례가 있어, "그냥 이어붙이면 되겠지"라는
+  가정은 검증되지 않은 채로 두면 위험합니다. **수정**: 브릿지는 raw
+  바이트 패스스루가 아니라 **JSON-RPC 메시지 경계를 실제로 파싱해
+  재구성**해야 합니다 — stdio 쪽에서는 개행 단위로 완전한 JSON 메시지를
+  읽어 그 각각을 WebSocket 메시지 1개로 보내고, WebSocket 쪽에서 받은
+  메시지 1개를 그대로 stdin에 개행을 붙여 씁니다. 이 구현은 Phase 0
+  검증 스파이크에서 실제 Gemini CLI의 stdio 프레이밍을 실기기로 확인한
+  뒤 확정합니다(§7).
 - tmux 매핑(`#50`)은 두 구현체 모두에 적용됩니다 — `StdioBridgeRunner`도
   자식 프로세스를 tmux 세션 안에서 spawn해 모니터링/attach 이점을 그대로
   누립니다(브릿지 자체는 tmux 세션 밖, fleet-worker 프로세스 안에서
@@ -198,18 +224,21 @@ RESTRICT` — 이미 뜬 에이전트가 자기 런타임을 잃으면 안 되�
 **CLI**: `fleet agent-runtime register/list`. `fleet agent-template create`에
 `--runtime <name>` 플래그 추가(생략 시 `grok` 기본값 — 기존 동작 보존).
 
-**대시보드 UI**: `/admin/agent-runtimes`(`ui-design.md` §3.14에 네 번째
-탭으로 추가 — 기존 패턴 재사용). Agent 상세(§3.13) 헤더에 runtime Badge
-추가(예: "grok" / "gemini-cli").
+**대시보드 UI**: `/admin/agent-runtimes`는 `ui-design.md` §3.14와 같은
+관리자 메뉴 그룹에 속하는 **독립 라우트**입니다(`#51` 문서 검토에서 발견한
+것과 동일하게, "탭"이 아니라 별도 페이지라는 점을 여기서도 일관되게
+서술). Agent 상세(§3.13) 헤더에 runtime Badge 추가(예: "grok" /
+"gemini-cli").
 
 ## 7. 열린 질문
 
 - **런타임을 Agent 레벨에서 오버라이드 허용할지**: 현재는 템플릿
   스냅샷만이고 개별 변경 불가로 설계했습니다 — 실사용에서 "같은 템플릿을
   다른 벤더로 돌려보고 싶다" 요구가 나오면 재검토.
-- **`StdioBridgeRunner`의 실제 성능/안정성**: 로컬 파이프↔WebSocket
-  브릿지가 추가하는 지연/장애점을 실측해야 합니다 — Phase 0 스파이크
-  범위에 포함.
+- **`StdioBridgeRunner`의 실제 성능/안정성 + 메시지 프레이밍**: 로컬
+  파이프↔WebSocket 브릿지가 추가하는 지연/장애점, 그리고 §4에서 발견한
+  JSON-RPC 메시지 경계 재구성이 실제 Gemini CLI stdio 출력과 맞는지
+  실측해야 합니다 — Phase 0 스파이크 범위에 포함.
 - **Gemini CLI의 네이티브 확장 시스템 존재 여부**: grok build처럼
   skill/hook/plugin이 있는지 미확인 — 있다면 §5와 동일한 경로 A/B 갈림길이
   Gemini에도 생김.

@@ -4,16 +4,19 @@ stateDiagram-v2
     Pending --> Starting: "[fleet-worker] 다음 heartbeat로 커맨드 수신\n→ agent_id 로컬 프로세스 레지스트리 dedup 통과\n→ ack{status: acked}"
     Pending --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕\n(offline_worker_grace 300초 초과)"
 
-    Starting --> Running: "[오케스트레이터] grok이 /v1/workers/register 성공\n→ link_agent_worker + status=Running\n→ ack{status: done}"
+    Starting --> Running: "[오케스트레이터] grok이 /v1/workers/register 성공\n→ link_agent_worker + status=Running\n→ worker.project_id = agent.project_id 직접 설정(팀 검토 critical 수정)\n→ ack{status: done}"
     Starting --> Failed: "[fleet-worker] tmux 스폰 실패 또는 헬스체크 타임아웃\n→ ack{status: failed, error}"
     Starting --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
+    Starting --> Failed: "[오케스트레이터, 팀 검토 신설] 정체 타임아웃(5분) — worker_id 미충족 상태로\nack{acked} 이후 register가 끝내 안 옴(fleet-worker 재시작 등),\n성공 근거가 없어 Stopped가 아닌 Failed로 안전하게 확정"
 
     Running --> Stopping: "[오케스트레이터] 관리자 POST /api/agents/:id/stop(Manual)\n또는 AgentAutoProvisioner 유휴 판정(Automatic 한정)\n— 아래 note의 3개 신호 전부 거짓 + idle_timeout_secs 만료\n+ 커맨드 발행 직전 재확인(레이스 방지)"
     Running --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
+    Running --> Failed: "[오케스트레이터, 팀 검토 신설] fleet-worker 재시작 감지\n(하트비트의 process_incarnation 값이 이전과 다름)\n— 호스트는 정상이지만 kill-server로 tmux 세션이 전부\n정리됐음을 인스턴스 ID로 추론, 진행 중이던 태스크는\n#38의 기존 orphan Dispatched 정리 경로가 별도 처리"
 
     Stopping --> Stopped: "[fleet-worker] ack{acked} → 의도된 종료 신호 선행(재시작 루프 무력화)\n→ tmux kill-session → grok 종료 → deregister → ack{status: done}"
     Stopping --> Failed: "[오케스트레이터] 호스트 오프라인 정리 스윕(300초)"
     Stopping --> Stopped: "[오케스트레이터] 정체 타임아웃(5분) 강제 확정\n— fleet-worker가 종료 처리 도중 재시작해 완료 ack 유실 시,\nkill-server 기동 정책(#50 §3)이 실제 정리를 이미 보장하므로\nFailed가 아닌 Stopped로 낙관적 확정 + 경고 이벤트 기록"
+    Stopping --> Failed: "[오케스트레이터, 팀 검토 신설] fleet-worker 재시작 감지\n(process_incarnation 변경) — Running과 동일 근거로 즉시 확정,\n5분 정체 타임아웃을 기다리지 않음(인스턴스 ID로 즉시 알 수 있으므로)"
 
     Failed --> [*]: "터미널 — 자동 재시도 없음.\nAgentAutoProvisioner eligibility 체크에서\n'터미널 상태'로 취급돼 새 Agent 생성을 막지 않음"
     Stopped --> [*]: "터미널"

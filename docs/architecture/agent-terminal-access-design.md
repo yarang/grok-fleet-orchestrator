@@ -53,12 +53,37 @@
   버퍼·detach/reattach를 다 해주므로, 별도 로그 캡처 인프라를 새로 만들지
   않습니다 — `#49` §13의 "다중 프로세스 로그 수집 부재" 문제가 이 변경만으로
   사실상 해소됩니다.
-- **종료 변경**: 기존 `terminate_child()`(SIGTERM 대기 → SIGKILL)는 이제
-  프로세스가 아니라 **tmux 세션**을 대상으로 합니다 —
+- ⚠️ **생존 감지 방식 전면 재설계(팀 검토 critical 수정)**: 이전 설계는
+  기존 `GrokRunner`가 `tokio::process::Child`를 `child.wait()`해 종료
+  코드로 재시작 여부를 판단하던 방식을 그대로 유지한다고 암묵적으로
+  전제했지만, **`tmux new-session -d`는 세션을 만들자마자(수십~수백 ms
+  내) 종료 코드 0으로 리턴하는 명령입니다**(`-d`가 "detach"인 이유) —
+  `child.wait()`가 실제로 잡는 건 grok 프로세스가 아니라 이 순간적으로
+  끝나는 tmux 런처이므로, 기존 재시작 정책(종료 코드로 재시작 여부 판단)이
+  통째로 무력화됩니다. 그래서 생존 감지 자체를 다시 설계합니다:
+  1. 세션 생성 직후 `tmux set-option -t <session> remain-on-exit on`을
+     실행합니다 — grok이 죽어도 pane이 즉시 사라지지 않고 마지막 화면을
+     유지합니다(tmux 기본값은 `off`라 그대로 두면 죽자마자 pane이 닫혀
+     §4가 예로 든 "크래시 스택트레이스 캡처" 유스케이스 자체가 성립하지
+     않습니다 — 팀 검토 major, 같이 수정).
+  2. `AgentRunner`가 이 세션에 대해 주기적으로(예: 2~5초 간격)
+     `tmux list-panes -t <session> -F '#{pane_dead} #{pane_dead_status}'`로
+     생존 여부와 종료 코드를 폴링합니다 — `child.wait()`를 완전히
+     대체합니다.
+  3. `pane_dead == 1`을 감지하면: (a) 필요하면 `capture_terminal`과 같은
+     방식으로 마지막 화면을 캡처해 실패 사유로 남기고, (b) `#{pane_dead_status}`
+     값으로 기존과 동일한 재시작 판단(0 → 정상 종료로 간주, 재시작 안 함
+     / 0 아님 → `restart_delay_secs` 후 재spawn)을 적용한 뒤, (c)
+     `tmux kill-session -t <session>`으로 실제 정리하고 필요하면 새
+     세션으로 재spawn합니다.
+- **종료 변경(의도된 종료)**: 기존 `terminate_child()`(SIGTERM 대기 →
+  SIGKILL)는 이제 프로세스가 아니라 **tmux 세션**을 대상으로 합니다 —
   `tmux send-keys -t <session> C-c` 등으로 그레이스풀 종료를 시도한 뒤,
-  타임아웃 시 `tmux kill-session -t <session>`. `C-c`(SIGINT)가 grok에
-  대해 실제로 기존 SIGTERM 정책과 동등한 그레이스풀 종료로 작동하는지는
-  아직 검증하지 않았습니다(§9).
+  타임아웃 시 `tmux kill-session -t <session>`. 이때는 위 폴링 루프가
+  "의도된 종료였다"는 걸 알 수 있도록(재시작 로직이 오작동하지 않도록)
+  종료를 시작하기 전에 그 세션을 폴링 대상에서 먼저 제외합니다. `C-c`
+  (SIGINT)가 grok에 대해 실제로 기존 SIGTERM 정책과 동등한 그레이스풀
+  종료로 작동하는지는 아직 검증하지 않았습니다(§9).
 - **호스트 요구사항**: `tmux`가 호스트에 설치돼 있어야 합니다 —
   `fleet-provisioner`의 프로비저닝 플레이북(`crates/fleet-provisioner`)에
   설치 스텝 추가 필요(§7).
@@ -182,7 +207,8 @@ tmux는 한 세션에 여러 클라이언트가 동시에 `attach`하는 것을 
 경로" 항목은 `max_agents=1`/`agent_provisioning_mode=manual` 기본값만
 다뤘는데, 이 문서(`#50`)가 `#49` Phase 4에 얹이면서 tmux가 **새로 필수
 의존성**이 됩니다 — `#49` Phase 4 배포 전에 운영자가 전체 호스트
-인벤토리(`ui-design.md` §3.9)에서 tmux 설치 여부를 먼저 확인/일괄
+인벤토리(`ui-design.md` §3.2.5, `#49` 문서 검토에서 발견한 것과 동일한
+§3.9 오기 수정)에서 tmux 설치 여부를 먼저 확인/일괄
 재프로비저닝하도록 안내하는 절차가 필요합니다.
 
 ## 8. API/CLI 표면 요약

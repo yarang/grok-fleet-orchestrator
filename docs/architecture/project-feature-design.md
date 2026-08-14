@@ -29,6 +29,12 @@
 | 프로젝트 ↔ host/worker 소속 관계 | **배타적(exclusive) 1:N** — host/worker는 최대 1개 프로젝트에만 소속, 미소속이면 일반 풀 | `workers.project_id`/`hosts.project_id` 직접 FK. host의 물리 자원과 그 위에서 도는 워커 프로세스의 세션 슬롯을 여러 프로젝트가 나눠 쓰면 항상 경쟁 상태가 생긴다 — 스키마 레벨에서 원천 차단하는 게 더 단순하고 확실함 |
 | project_id 지정 태스크의 디스패치 범위 | **하드(strict)** — 그 프로젝트 소유 워커만 후보. 후보가 없으면 전체 풀로 폴백하지 않음 | §5 참고 — 새 에러/재시도 메커니즘을 만들지 않고 **`#38`의 기존 `WorkerUnavailable` 재시도/Dead-Letter 경로를 그대로 재사용** |
 
+전체 생성→배정→디스패치→해제 흐름은 아래 시퀀스 다이어그램 참고(팀
+검토에서 이 다이어그램이 어느 절에서도 참조되지 않는 고아 파일이었음을
+발견 — note, 이번에 참조를 추가):
+
+![Project Assignment Lifecycle](../assets/diagrams/architecture/project-assignment-lifecycle.mermaid)
+
 ## 3. 데이터 모델
 
 ![Project Data Model](../assets/diagrams/architecture/project-data-model.mermaid)
@@ -82,13 +88,43 @@ CREATE INDEX idx_hosts_project_id   ON hosts(project_id);
 (`#49`에서 `agents.host_id`도 이 불변식을 그대로 물려받음 — host가 없는
 관계로 남는 워커는 없어야 항상 정합성이 유지됩니다).
 
+⚠️ **이 불변식은 지금까지 `assign_host_to_project`(host→그 host에 연결된
+워커로 전파) 방향만 강제하고 있었고, 반대 방향인 `assign_worker_to_project`
+(워커를 직접 다른 프로젝트로 재배정)는 아무 체크도 하지 않아 이 불변식을
+그냥 깨뜨릴 수 있는 구멍이었습니다(팀 검토에서 발견, critical) — 리소스
+경쟁을 구조적으로 막는다는 이 기능의 존재 이유를 무력화하는 문제라
+`assign_worker_to_project`에도 반드시 같은 검사를 넣습니다**: 대상 워커가
+`hosts.worker_id`로 어떤 host에 연결돼 있다면, 요청한 `project_id`가 그
+host의 `project_id`와 다를 경우 `409 Conflict`("worker는 host
+`<hostname>`에 연결돼 있어 그 host와 다른 프로젝트로 개별 재배정할 수
+없습니다 — 먼저 host를 재배정하세요")로 차단합니다. host에 연결되지 않은
+독립 워커(아래 참고)만 `assign_worker_to_project`로 자유롭게 재배정할 수
+있습니다.
+
 **워커 재등록 시 재동기화 규칙**: `upsert_worker`가 이미 알려진 워커를
-재등록(heartbeat 재연결 등)할 때, `project_id`는 그 워커가 현재 연결된
-host의 `project_id`로 **매번 무조건 재동기화**합니다(host가 정본, 워커는
-항상 파생값). 예를 들어 호스트가 다른 프로젝트로 재배정된 사이 그 host
-위의 워커 프로세스가 재연결하면, 워커의 예전 `project_id`를 그대로
-유지하지 않고 host의 현재 값으로 덮어써야 위 불변식이 항상 유지됩니다 —
-워커 쪽 `project_id`를 독립적으로 신뢰하지 않습니다.
+재등록(heartbeat 재연결 등)할 때, 그 워커가 `hosts.worker_id`로 어떤
+host에 연결돼 있다면 `project_id`는 그 host의 `project_id`로 **매번
+무조건 재동기화**합니다(host가 정본, 워커는 항상 파생값) — 호스트가 다른
+프로젝트로 재배정된 사이 그 host 위의 워커 프로세스가 재연결하면, 워커의
+예전 `project_id`를 그대로 유지하지 않고 host의 현재 값으로 덮어써야 위
+불변식이 항상 유지됩니다. ⚠️ **host에 연결되지 않은 독립 워커(팀 검토에서
+발견, major — `ui-design.md` §3.10이 "독립 Worker 배정" 접이식 섹션으로
+이미 이 케이스를 예상하고 있었으나 이 문서엔 반영이 안 돼 있었습니다)는
+이 재동기화 대상이 아닙니다** — `upsert_worker`는 재등록 시 그 워커에
+연결된 host 행이 있는지 먼저 확인하고, 없으면 `project_id`를 건드리지
+않고 `assign_worker_to_project`로 직접 설정된 값을 그대로 보존합니다
+(host 연결이 없는데 무조건 재동기화하면 그 값이 매 재등록마다 조용히
+`NULL`로 초기화되는 버그가 생깁니다).
+
+또한 `#49`가 host당 여러 에이전트(=여러 워커)를 도입하면서
+`hosts.worker_id`가 표현할 수 있는 "그 host의 워커"는 최대 1개뿐이라는
+전제가 깨졌습니다 — `hosts.worker_id` 컬럼 자체에는 여전히 DB 레벨
+`UNIQUE` 제약이 없다는 것도 이번 검토에서 확인된 기존 공백입니다(minor,
+`crates/fleet-store/migrations/007_hosts.sql`). `#49`의 동적 프로비저닝
+워커는 이 host-단일-연결 재동기화 경로를 타지 않고 별도 경로로
+`project_id`를 직접 설정합니다 —
+[`agent-provisioning-design.md`](agent-provisioning-design.md) §4 6~7단계
+참고.
 
 ### `fleet-core` 신규 타입
 
@@ -148,6 +184,10 @@ async fn delete_project(&self, id: ProjectId) -> Result<bool, StoreError>;
 /// 워커를 프로젝트에 배타적으로 배정 — 이미 다른 프로젝트에 배정돼 있으면
 /// 그 배정을 덮어쓴다(호출자가 먼저 확인 없이 재배정하면 이전 프로젝트에서
 /// 조용히 빠진다는 뜻이므로, API/CLI 레벨에서 확인 프롬프트를 두는 것을 권장).
+/// **이 워커가 `hosts.worker_id`로 어떤 host에 연결돼 있고 그 host의
+/// `project_id`와 `project_id` 인자가 다르면 `StoreError::Conflict`를
+/// 반환하고 배정하지 않는다**(§3 불변식 가드 — 팀 검토에서 발견한 강제
+/// 누락 수정). 독립 워커(host 미연결)에만 자유롭게 적용된다.
 async fn assign_worker_to_project(&self, project_id: ProjectId, worker_id: WorkerId) -> Result<(), StoreError>;
 /// project_id를 NULL로(일반 풀로 되돌림).
 async fn unassign_worker_from_project(&self, worker_id: WorkerId) -> Result<(), StoreError>;
@@ -156,6 +196,15 @@ async fn list_project_workers(&self, project_id: ProjectId) -> Result<Vec<Worker
 
 /// host를 프로젝트에 배타적으로 배정 — §3의 불변식대로, 이 host에 연결된
 /// 워커(hosts.worker_id)가 있으면 그 워커의 project_id도 함께 동기화한다.
+/// **`#49` 이후: 이 host 위에 떠 있는 모든 Agent(`agents.host_id`
+/// 일치)의 `project_id`도 같은 트랜잭션에서 함께 갱신한다** — Agent의
+/// `project_id`는 생성 시점에 host에서 읽어와 채우는 파생 필드라서
+/// (`agent-provisioning-design.md` §3), host가 나중에 다른 프로젝트로
+/// 재배정되면 이 캐스케이드가 없는 한 기존 Agent들의 `project_id`가
+/// 영구히 옛 값에 고정된 채 남아 자신이 연결된 Worker의 `project_id`
+/// (위 규칙으로 정상 재동기화됨)와 서로 모순되는 상태가 됩니다(팀 검토
+/// critical — 미검증 상태로 보고됐으나 실제로 반영이 필요한 실질적 공백
+/// 이라 이번에 바로 반영).
 async fn assign_host_to_project(&self, project_id: ProjectId, host_id: Uuid) -> Result<(), StoreError>;
 async fn unassign_host_from_project(&self, host_id: Uuid) -> Result<(), StoreError>;
 async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, StoreError>;
@@ -165,15 +214,19 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 
 ![Project-Aware Dispatch Logic](../assets/diagrams/architecture/project-aware-dispatch-logic.mermaid)
 
-기존 파이프라인(`crates/fleet-scheduler/src/selector.rs`)에 **5.5단계**로
-프로젝트 하드 필터를 삽입합니다 — 회로차단기/용량 필터(4~5단계, `retain()`)
-뒤, `server_hint` 처리(6단계) 앞입니다. `required_labels`/`model` 필터와 정확히
-같은 방식(하드 `retain()`)입니다 — 특별 취급 없음:
+기존 파이프라인(`crates/fleet-scheduler/src/selector.rs`)에 프로젝트 하드
+필터를 삽입합니다 — 회로차단기 제외(실제 코드 3단계)·용량 필터(실제
+코드 3.5단계, `retain()`) 뒤, `server_hint` 처리(실제 코드 4단계) 앞입니다
+(⚠️ 팀 검토에서 발견 — 이전 서술의 "4~5단계"/"6단계"라는 번호는 실제
+`selector.rs`의 주석 번호와 일치하지 않았습니다, minor 수정). 새 필터는
+이 문서에서 편의상 "5.5단계"로 부르지만 실제 구현 시 위 실제 단계 번호
+사이에 삽입하면 됩니다. `required_labels`/`model` 필터와 정확히 같은
+방식(하드 `retain()`)입니다 — 특별 취급 없음:
 
 - `task.project_id`가 `None`이면 스킵(기존 동작과 100% 동일 — 회귀 없음).
 - `Some(project_id)`이면 후보 풀을 `worker.project_id == Some(project_id)`인
   워커로 `retain()`합니다.
-  - 결과가 비어있지 않으면 계속 진행(6단계 `server_hint` 또는 최소부하 선택).
+  - 결과가 비어있지 않으면 계속 진행(`server_hint` 또는 최소부하 선택 — 실제 코드 4단계).
   - **결과가 비어있으면 새 에러 `SelectionError::NoWorkerForProject(ProjectId)`를
     반환합니다** — `NoMatchingLabels`/`NoWorkerForModel`과 동일한 패턴(신규
     변형 하나 추가, 기존 5개 변형 그대로).
@@ -199,6 +252,16 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
   소속이 아니면 애초에 후보 풀에 없어 `HintedNotFound`/`HintedUnavailable`로
   자연히 걸러집니다 — 별도 처리 불필요, 하드 격리가 힌트에도 일관되게
   적용됩니다.
+
+### 재배정 시 진행 중 태스크 정책
+
+워커/호스트가 프로젝트 A에서 B로 재배정될 때, 그 워커에서 이미
+`Dispatched` 상태로 진행 중인 태스크는 **그대로 완료까지 진행합니다** —
+재배정을 이유로 강제 취소하거나 다른 워커로 옮기지 않습니다. 재배정은
+**향후 디스패치 자격에만 영향**을 줍니다(그 시점 이후의 신규 디스패치
+부터 새 프로젝트 소속으로 취급). 이 정책은 AskUserQuestion으로 확인된
+결정이었으나 이 문서 본문에는 반영이 안 되고 `roadmap.md`에만 기록돼
+있던 걸 팀 검토(major)로 발견해 이번에 정식으로 옮겨 적습니다.
 
 ## 6. RBAC 권한 추가
 
@@ -275,6 +338,13 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 - **장수명 에이전트의 메모리 보존 정책**: 이 문서의 범위 밖(`agent_memory`는
   `#49`의 엔티티) — 상세 열린 질문은
   [`agent-provisioning-design.md`](agent-provisioning-design.md) §12 참고.
+- **`ProjectAssign`을 `Operator` 기본 권한에 둘지 재검토**(팀 검토에서
+  발견, minor): host/worker를 프로젝트 간에 재배정하는 건 물리 자원의
+  소속을 바꾸는 조작인데, 이 코드베이스의 기존 관례상 `WorkerRegister`/
+  `WorkerDelete`/`HostProvision` 같은 비슷한 급의 인프라 변경 권한은 전부
+  `Admin` 전용입니다. `ProjectAssign`만 `Operator`에게 기본 부여하는 게
+  일관된 선택인지는 실사용 피드백을 보고 재검토 — 이번 라운드에서는
+  정책을 바꾸지 않고 이 열린 질문으로만 기록합니다.
 
 ## UI/UX 설계
 

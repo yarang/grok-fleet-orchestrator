@@ -60,6 +60,31 @@ attempts)"`로 원래 `SelectionError` 메시지를 덮어써, `NoWorkerForProje
 문제를 발견 — 마지막 에러 텍스트를 보존하는 개선안을 §5에 기록(`#38` 구현
 범위, `#48`이 그 개선에 의존한다는 사실만 기록).
 
+### 2026-08-15, 5차 — 다중 에이전트 팀 검토(13개 관점) + 확정 발견 반영
+사용자 요청("10회 이상의 검토와 분석을 진행하도록 팀을 구성하라")으로
+`Workflow` 도구를 이용해 13개 관점 리뷰어 + 3표 적대적 검증 + 종합으로
+구성된 다중 에이전트 팀을 실행(계정 월간 사용량 한도로 검증/종합 단계
+일부가 중도 실패 — 검증까지 끝까지 통과한 발견만 "확정"으로 취급).
+이 문서에 해당하는 확정 발견 6건을 반영: (1) **critical**
+`assign_worker_to_project`가 §3의 배타적 소유 불변식을 강제하지 않아
+host에 연결된 워커를 다른 프로젝트로 개별 재배정할 수 있던 구멍 — 409
+가드 추가. (2) **major** `upsert_worker` 재동기화 규칙이 host 미연결
+독립 워커를 다루지 않아 재등록마다 `project_id`가 조용히 `NULL`로
+초기화될 수 있던 문제 — 독립 워커는 재동기화 대상에서 제외하도록 명시.
+(3) **major** 재배정 시 진행 중 태스크 정책이 `roadmap.md`에만 있고 이
+문서 본문엔 없던 것 — §5에 정식 반영. (4) **minor** §5의 디스패치
+파이프라인 단계 번호가 실제 `selector.rs` 주석과 불일치 — 정정. (5)
+**minor** `ProjectAssign`이 `Operator` 기본 권한인 게 다른 인프라 변경
+권한(Admin 전용)과 비일관 — 정책 변경은 안 하고 §9 열린 질문으로 기록.
+(6) **note** `project-assignment-lifecycle.mermaid`가 어느 절에서도
+참조되지 않던 고아 다이어그램 — §3 앞에 참조 추가.
+
+미검증(예산 소진으로 검증 못 받음, critical) 1건도 함께 반영: **Agent의
+`project_id`가 host 재배정 시 재동기화 경로가 없어 Worker(재동기화됨)와
+Agent(옛 값 고정) 사이에 불일치가 생길 수 있는 문제** — `assign_host_to_project`가
+같은 트랜잭션에서 그 host 위의 모든 Agent의 `project_id`도 함께 갱신하도록
+Store 트레이트 doc comment에 명시.
+
 ---
 
 ## `agent-provisioning-design.md` (로드맵 [`#49`](../roadmap/roadmap.md))
@@ -186,6 +211,49 @@ stdio만 본다면 실제로 조용히 작업 중인 에이전트도 타임아�
 가능 — "정체 5분 초과 시 `Stopped`로 강제 확정" 규칙 신설(`#50`의
 `kill-server` 기동 정책이 실제 정리를 보장한다는 전제로 낙관적 확정).
 
+### 2026-08-15, 7차 — 다중 에이전트 팀 검토(13개 관점) + 확정 발견 반영
+`project-feature-design.md`와 동일한 팀 검토 라운드(13개 관점 리뷰 + 3표
+적대적 검증, 계정 사용량 한도로 일부 관점 검증 중도 실패). 이 문서에
+해당하는 확정 발견 12건을 반영: (1) **critical** `016_agents.sql`에서
+`agents.template_id`가 아직 생성되지 않은 `agent_templates` 테이블을
+인라인 `REFERENCES`로 참조하는 전방 참조 마이그레이션 오류 — 원시
+`UUID` 컬럼 선언 후 `agent_templates` 생성 직후 `ALTER TABLE ... ADD
+CONSTRAINT`로 FK 후행 추가(§48 3차의 동일 패턴 재사용). (2) **critical**
+같은 자리에서 `#48`이 약속했던 `projects.default_agent_template_id` FK도
+실제로는 한 번도 추가된 적이 없던 것을 함께 추가. (3) **critical** §4.1/
+`AgentAutoProvisioner` 여유 판정이 "터미널 상태가 아닌 에이전트"라면서
+`Stopping`을 누락해 `max_agents`를 우회할 수 있던 버그 — 명시적으로
+`Stopping` 포함. (4) **critical** §4 7단계에서 동적 프로비저닝된 Worker에
+`project_id`를 설정하는 절차가 없어 `#48`의 하드 디스패치 필터가 신규
+워커를 자기 프로젝트에서도 조용히 배제하던 문제 — 등록 직후
+`worker.project_id = agent.project_id` 직접 설정 단계 추가. (5) **major**
+신규 12단계 "`Starting` 정체 방지"(5분 초과 시 `Failed`로 강제 전이,
+`Stopped`가 아닌 이유는 시작 성공 증거가 아예 없기 때문). (6) **major**
+신규 13단계 "`fleet-worker` 재시작 시 `Running` 에이전트 정리" —
+`process_incarnation` 부팅 인스턴스 ID 필드 신설, 값이 바뀌면 그 host의
+`Running`/`Starting` 에이전트를 전부 `Failed`로 강제 전이(오프라인 스윕과
+개별 커맨드 ack 추적 둘 다 놓치던 "같은 host의 빠른 fleet-worker 재시작"
+갭을 닫음). (7) **major** `POST /api/agents`에 `project_id`/`--project`가
+남아 있어 "project_id는 host에서 파생, 직접 설정 불가" 결정과 모순 —
+요청에서 완전히 제거, 포함 시 400. (8) **major** `Automatic` 모드 전환
+전제조건이 `default_agent_template_id`만 요구해 `agent_idle_timeout_secs`
+없이도 전환 가능했던 문제 — 회수 불가능한 자동생성 에이전트를 막기 위해
+둘 다 필수로 확정. (9) **minor** §5.2 Path B(로컬 MCP 설정 파일) 방식이
+같은 host의 여러 에이전트 간 설정 파일 경로 충돌을 고려하지 않았던
+누락 — Phase 0 스파이크 범위에 추가. (10) **minor** §9 workdir_template이
+`Agent`에도 별도 컬럼이 있는 것처럼 서술된 모순 — `Project` 전용 필드로
+정정, 에이전트별 디렉토리는 디스패치 시점에 계산되는 파생 규칙
+(`{project.workdir_template}/{agent.name}`)으로 명시. (11) **minor**
+`build_threaded_prompt()` 위치 오기재(`acp_transport.rs`) — 실제 위치
+`dispatcher.rs`로 정정. (12) **minor** "호스트 인벤토리 기능
+(`ui-design.md` §3.9)" 인용 오류 — 실제 §3.2.5로 정정(§3.9는 `#48`이
+나중에 추가한 "프로젝트 목록").
+
+`agent-lifecycle-state-machine.mermaid`에 새 전이 3개 추가:
+`Starting → Failed`(정체 타임아웃), `Running → Failed`/`Stopping →
+Failed`(둘 다 `process_incarnation` 재시작 감지 경유), `Starting →
+Running` 전이에 `worker.project_id = agent.project_id` 단계 주석 추가.
+
 ---
 
 ## `agent-terminal-access-design.md` (로드맵 [`#50`](../roadmap/roadmap.md))
@@ -249,6 +317,23 @@ fleet-worker 수명 동안의 모니터링/attach"로 좁히고, "재시작 시 
 묶이지 않은 범용 grok 웜풀"이라는 완전히 별개의(더 큰) 기능이 필요 —
 이번 스코프에서는 설계하지 않고 §9에 향후 후보로만 기록.
 
+### 2026-08-15, 5차 — 다중 에이전트 팀 검토(13개 관점) + 확정 발견 반영
+동일 팀 검토 라운드에서 이 문서에 해당하는 확정 발견 3건을 반영: (1)
+**critical** §3 "생존 감지 방식"이 `tmux new-session -d`가 즉시 반환·detach
+되어 런처 프로세스의 `child.wait()`가 실제로는 grok 프로세스의 생사를
+전혀 추적하지 못하는데도 그 위에 재시작 판단 로직 전체가 서 있던 근본
+결함 — `remain-on-exit on`을 세션 생성 직후 설정(죽은 뒤 pane이 즉시
+사라지며 크래시 출력이 유실되던 별도 major 발견도 함께 해소)하고,
+`AgentRunner`가 `tmux list-panes -t <session> -F '#{pane_dead}
+#{pane_dead_status}'`를 2~5초 간격으로 폴링해 사망을 감지하고 종료 코드를
+얻는 방식으로 `child.wait()`를 완전히 대체하도록 §3 전면 재작성. (2)
+**major** 의도된 종료(그레이스풀 stop) 경로가 생존 폴링 루프와 경합할 수
+있던 문제 — stop을 시작하기 전에 해당 세션을 폴링 대상 집합에서 먼저
+제거하도록 명시(의도된 kill을 크래시로 오판해 재시작하는 것을 방지). (3)
+**minor** "호스트 인벤토리 기능(`ui-design.md` §3.9)" 인용 오류 — `#49`
+7차와 동일한 클래스의 오류가 이 문서에도 독립적으로 존재 — 실제 §3.2.5로
+정정.
+
 ---
 
 ## `agent-harness-composition-design.md` (로드맵 [`#51`](../roadmap/roadmap.md))
@@ -294,6 +379,20 @@ Tool의 "출처"가 아니라 "가용성 제약"(stdio 도구는 host에 바이�
 하는 것을 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI 패턴이
 완전히 동일해 분리 구현하면 낭비.
 
+### 2026-08-15, 2차 — 다중 에이전트 팀 검토(13개 관점) + 확정 발견 반영
+동일 팀 검토 라운드에서 이 문서에 해당하는 확정 발견 3건을 반영: (1)
+**major** §2 축 2 표에서 Skill 행의 "필요할 때만 로드"가 마치 모든
+Skill에 적용되는 것처럼 서술돼 §5의 실제 합성 메커니즘(필수 Skill은
+`custom_prompt`와 동일하게 매 디스패치마다 주입)과 모순 — "필요할 때만
+로드"는 옵션 Skill에만 해당함을 명시. (2) **major** §3 결정표의 Skill
+저장 방식(DB 텍스트 vs grok 네이티브 포맷) 결정이 `#52`가 grok build의
+네이티브 Skill/Hook 시스템을 발견하기 이전에 내려졌고, 그 발견은 §7.3
+Hooks 결정에만 반영되고 Skill 저장 결정 자체는 재검토되지 않았던 누락 —
+Skill 저장 결정도 Phase 0 스파이크에서 재검토 가능한 잠정 결정임을 명시
+플래그 추가. (3) **major** §8 UI 서술이 "세 번째 탭으로 추가"라 표현해
+`ui-design.md` §3.14가 실제로는 별도 라우트(`/admin/skills`)로 설계한
+것과 모순 — 같은 관리자 메뉴 그룹 내 독립 라우트로 정정.
+
 ---
 
 ## `agent-runtime-vendor-design.md` (로드맵 [`#52`](../roadmap/roadmap.md))
@@ -322,3 +421,26 @@ grok과 동일한 네트워크 엔드포인트 모양을 오케스트레이터�
 네이티브 Skill/Hook vs `#51`의 fleet 자체 계층 중 어느 쪽을 쓸지는
 `#49` Phase 0 스파이크 범위를 확장해 실기기로 결정하기로 함(설계
 시점에 미리 정하지 않음 — `#49` §5.2가 이미 겪은 원칙을 그대로 따름).
+
+### 2026-08-15, 2차 — 다중 에이전트 팀 검토(13개 관점) + 확정 발견 반영
+동일 팀 검토 라운드에서 이 문서에 해당하는 확정 발견 3건을 반영: (1)
+**critical** `018_agent_runtimes.sql`이 `ALTER TABLE ... ADD COLUMN ...
+DEFAULT (SELECT id FROM agent_runtimes WHERE name = 'grok')` 형태로
+`DEFAULT` 절에 서브쿼리를 넣었는데, PostgreSQL은 `DEFAULT` 절에 서브쿼리를
+허용하지 않아 마이그레이션 자체가 실패하는 구문 오류 — 컬럼을 기본값 없이
+추가 → `UPDATE ... SET runtime_id = (SELECT ...) WHERE runtime_id IS
+NULL`로 백필 → `ALTER COLUMN runtime_id SET NOT NULL`로 확정하는 3단계로
+재작성(`agent_templates.runtime_id`/`agents.runtime_id` 둘 다 동일하게
+수정 — `agent_templates.runtime_id`가 프로즈에서는 필수라면서 SQL에서는
+nullable로 남아 있던 별도 minor 불일치도 함께 해소). (2) **major**
+`StdioBridgeRunner`가 "raw JSON-RPC 바이트를 그대로 중계"한다고 서술한
+부분 — WebSocket 프레이밍과 stdio 개행 구분 JSON-RPC 프레이밍의 메시지
+경계 규약이 서로 달라 원시 바이트 그대로 중계하면 메시지가 분할/병합될
+위험이 있음 — 양쪽에서 완전한 JSON-RPC 메시지 단위로 파싱 후 각 프로토콜에
+맞게 재구성(stdio 쪽은 개행 구분, WS 쪽은 JSON-RPC 메시지당 WS 메시지 1개)
+하도록 정정, 정확한 방식 확정은 Phase 0 스파이크로 위임. (3) **minor**
+§6 "네 번째 탭"이라는 표현 — `#51` 2차와 동일한 클래스의 오류, 독립 라우트로
+정정.
+
+`agent-runtime-data-model.mermaid`에 `AGENT_TEMPLATES.runtime_id`를
+`NOT NULL`로 주석 갱신, `DEFAULT` 서브쿼리 버그 수정 경위 메모 추가.
