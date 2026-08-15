@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/agent-harness-composition-design.md"
+last_verified: "2026-08-15"
+---
+
 # 에이전트 하네스 구성 설계 (Skill · 프로젝트 헌법 · 계층 모델)
 
 > 작성일: 2026-08-15. 로드맵 [`#51`](../roadmap/roadmap.md)에 대응하는 설계

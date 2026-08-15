@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/agent-provisioning-design.md"
+last_verified: "2026-08-15"
+---
+
 # 에이전트(Agent) 동적 프로비저닝 · 메모리 · 스레드 요약 · 도구 바인딩 설계
 
 > 작성일: 2026-08-14. 로드맵 [`#49`](../roadmap/roadmap.md)에 대응하는 설계

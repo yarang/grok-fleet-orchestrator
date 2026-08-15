@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/project-feature-design.md"
+last_verified: "2026-08-15"
+---
+
 # 프로젝트(Project) 기능 설계
 
 > 작성일: 2026-08-14. 로드맵 [`#48`](../roadmap/roadmap.md)에 대응하는 설계

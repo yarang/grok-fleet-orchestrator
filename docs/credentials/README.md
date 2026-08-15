@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/credentials/README.md"
+last_verified: "2026-08-15"
+---
+
 # 시크릿·크리덴셜 관리 지침
 
 > Fleet이 운영하는 모든 호스트(orchestrator, worker)와 부속 서비스(wiki-mcp 등)의

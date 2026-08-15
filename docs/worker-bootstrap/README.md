@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/worker-bootstrap/README.md"
+last_verified: "2026-08-15"
+---
+
 # 워커 부트스트랩 & 가입 인증 (Worker Bootstrap & Join Auth)
 
 > 전체 문서 카탈로그는 [`../index.md`](../index.md).

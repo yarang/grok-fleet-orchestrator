@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/index.md"
+last_verified: "2026-08-15"
+---
+
 # Docs — 인덱스 (Index)
 
 > `docs/`의 모든 설계·운영 문서를 도메인별 하위 디렉토리로 재배치한 뒤의 콘텐츠 지향

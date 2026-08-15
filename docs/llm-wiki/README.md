@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/llm-wiki/README.md"
+last_verified: "2026-08-15"
+---
+
 # LLM 게이트웨이 및 프록시 위키 (LLM Gateway Wiki)
 
 > 최종 업데이트: 2026-08-13.

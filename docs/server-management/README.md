@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/server-management/README.md"
+last_verified: "2026-08-15"
+---
+
 # 서버 관리 & 자가 치유 (Server Management & Self-Healing)
 
 > 전체 문서 카탈로그는 [`../index.md`](../index.md). **이 도메인의 세 문서는 모두 로드맵

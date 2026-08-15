@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/README.md"
+last_verified: "2026-08-15"
+---
+
 # 핵심 아키텍처 & API (Core Reference)
 
 > 이 도메인은 시스템 내부 설계와 외부 API 계약을 다룬다. 전체 문서 카탈로그는

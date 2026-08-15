@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/agent-runtime-vendor-design.md"
+last_verified: "2026-08-15"
+---
+
 # 멀티 벤더 에이전트 런타임 설계 (grok build · Gemini CLI 등)
 
 > 작성일: 2026-08-15. 로드맵 [`#52`](../roadmap/roadmap.md)에 대응하는 설계

@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/architecture/agent-terminal-access-design.md"
+last_verified: "2026-08-15"
+---
+
 # 에이전트 터미널 모니터링·CLI 직접 접속 설계 (tmux 기반)
 
 > 작성일: 2026-08-14. 로드맵 [`#50`](../roadmap/roadmap.md)에 대응하는 설계

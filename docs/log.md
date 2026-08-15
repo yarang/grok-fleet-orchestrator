@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/log.md"
+last_verified: "2026-08-15"
+---
+
 # Docs — 변경 로그 (Log)
 
 > **Append-only.** 새 항목은 파일 맨 아래에 추가한다(시간순). 과거 항목은 수정하지 않는다(오탈자

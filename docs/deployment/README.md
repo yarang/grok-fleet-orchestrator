@@ -1,3 +1,10 @@
+---
+type: wiki
+status: canonical
+source: "docs/deployment/README.md"
+last_verified: "2026-08-15"
+---
+
 # 배포 & 인프라 (Deployment & Infra)
 
 > 전체 문서 카탈로그는 [`../index.md`](../index.md). 운영 규칙(정본/사본)은
