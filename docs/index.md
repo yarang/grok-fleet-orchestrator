@@ -39,6 +39,7 @@ last_verified: "2026-08-15"
 | [`architecture/agent-terminal-access-design.md`](./architecture/agent-terminal-access-design.md) | grok 에이전트를 tmux 내 실행하고 스냅샷 폴링 및 russh PTY WebSocket 중계를 통한 대화형 attach 기능 설계 문서 | 🟢 정본 | 2026-08-15 |
 | [`architecture/agent-harness-composition-design.md`](./architecture/agent-harness-composition-design.md) | prompt ➔ skill ➔ tool의 3계층 하네스 구조 및 프로젝트 헌법(constitution) 주입 규칙 설계 문서 | 🟢 정본 | 2026-08-15 |
 | [`architecture/agent-runtime-vendor-design.md`](./architecture/agent-runtime-vendor-design.md) | AgentRunner 트레잇 기반 NetworkBind(grok) 및 StdioBridge(Gemini CLI) 다중 벤더 수용 설계 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/system-entities-mapping.md`](./architecture/system-entities-mapping.md) | Project, Host, Worker, Agent, Task 간의 물리 배치(WHERE), 행동 구성(WHAT), 스코프 결정(WHEN) 관계 맵 및 매핑 불변식 명세 | 🟢 정본 | 2026-08-15 |
 | [`architecture/log.md`](./architecture/log.md) | 아키텍처 도메인 설계 개정 이력 기록용 append-only 로그 파일 | ⚪ 부기 문서 | 2026-08-15 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
