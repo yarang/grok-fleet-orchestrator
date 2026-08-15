@@ -41,6 +41,7 @@ last_verified: "2026-08-15"
 | [`architecture/agent-runtime-vendor-design.md`](./architecture/agent-runtime-vendor-design.md) | AgentRunner 트레잇 기반 NetworkBind(grok) 및 StdioBridge(Gemini CLI) 다중 벤더 수용 설계 문서 | 🟢 정본 | 2026-08-15 |
 | [`architecture/system-entities-mapping.md`](./architecture/system-entities-mapping.md) | Project, Host, Worker, Agent, Task 간의 물리 배치(WHERE), 행동 구성(WHAT), 스코프 결정(WHEN) 관계 맵 및 매핑 불변식 명세 | 🟢 정본 | 2026-08-15 |
 | [`architecture/system-entities-critique.md`](./architecture/system-entities-critique.md) | 위 관계 맵의 동시성 병목(FOR UPDATE), pg_notify 유실, 격리 우회, 토큰 인플레이션에 대한 비판적 분석 및 대안 제안서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/multi-agent-realignment-report.md`](./architecture/multi-agent-realignment-report.md) | 코어/인프라/운영 도메인 간의 재배정 드레인, Nginx WebSocket, 토큰 데드락, 유실 방지 동기화 논의 및 의사결정 선택지 | 🟢 정본 | 2026-08-15 |
 | [`architecture/log.md`](./architecture/log.md) | 아키텍처 도메인 설계 개정 이력 기록용 append-only 로그 파일 | ⚪ 부기 문서 | 2026-08-15 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
