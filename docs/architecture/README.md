@@ -22,6 +22,7 @@ last_verified: "2026-08-15"
 | [`agent-harness-composition-design.md`](./agent-harness-composition-design.md) | 에이전트 하네스 — prompt ➔ skill ➔ tool의 3계층 하네스 및 프로젝트 헌법 구성 |
 | [`agent-runtime-vendor-design.md`](./agent-runtime-vendor-design.md) | 벤더 추상화 — AgentRunner 트레잇 기반 NetworkBind 및 StdioBridge 다중 런타임 수용 설계 |
 | [`system-entities-mapping.md`](./system-entities-mapping.md) | 엔티티 매핑 — Project, Host, Worker, Agent, Task 간의 물리(WHERE)/행동(WHAT)/스코프(WHEN) 매핑 및 제약 규칙 |
+| [`system-entities-critique.md`](./system-entities-critique.md) | 설계 비판 — 관계 매핑 설계의 비판적 분석, 잠재적 레이스 컨디션 및 토큰 최적화 대안 제안서 |
 | [`log.md`](./log.md) | 아키텍처 로그 — 도메인 설계 개정 역사의 append-only 보존 기록 |
 
 두 문서는 상호 보완적이다: `overview.md`가 "왜 이렇게 설계했는가"를, `api-reference.md`가
