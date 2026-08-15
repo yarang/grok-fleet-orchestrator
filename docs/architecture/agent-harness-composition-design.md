@@ -250,10 +250,13 @@ Claude Code의 PreToolUse/PostToolUse류 후킹을 대입하면 두 레벨로 �
   spawn하는 `grok agent serve`와 같은 바이너리로 추정 —
   [`agent-runtime-vendor-design.md`](agent-runtime-vendor-design.md)
   `#52` §1) 자체가 이미 네이티브 **Hooks** 시스템을 갖고 있는 것으로
-  확인됐습니다(`grok inspect`로 노출). 즉 위 "세션 내부 레벨" Hooks가
-  fleet이 처음부터 새로 만들 필요 없이 **grok의 네이티브 기능을 그대로
-  노출/설정**하는 문제일 수 있습니다 — 이 가능성도 `#52`가 확장한 Phase 0
-  스파이크 범위에 포함됩니다.
+  **추정됩니다**(`grok inspect`로 노출 — ⚠️ 팀 검토로 캐비어트 추가:
+  이는 `#52` §1/§7이 명시하듯 공개 문서 조사에 기반한 강한 추정이지 이
+  저장소 안에서 실기기로 검증한 사실이 아닙니다. 이전 서술("확인됐습니다")은
+  이 미검증 캐비어트 없이 인용돼 있었습니다). 즉 위 "세션 내부 레벨"
+  Hooks가 fleet이 처음부터 새로 만들 필요 없이 **grok의 네이티브 기능을
+  그대로 노출/설정**하는 문제일 수 있습니다 — 이 가능성도 `#52`가 확장한
+  Phase 0 스파이크 범위에 포함됩니다.
 
 ### 7.4 서브에이전트 위임 — 새 엔티티 불필요
 
@@ -286,6 +289,15 @@ ACP 개입이 필요할 수 있습니다 — 두 항목이 같은 미검증 전�
 `AgentTemplateManage`에 통합할지 별도로 분리할지는 §10 열린 질문(기본은
 분리, `mcp_servers`/`agent_templates` 관리 권한이 이미 분리돼 있는 것과
 일관성을 맞추기 위함).
+
+`SkillManage`는 **스킬 카탈로그 자체의 CRUD**만 다룹니다. Agent별 스킬
+바인딩 변경(§4의 `agent_skills` — 특정 Agent에 필수/옵션 스킬을 개별
+추가/제거)은 **`AgentManage`**(`agent-provisioning-design.md` §10, `custom_prompt`/
+도구 바인딩 수정과 동일 권한)로 처리합니다(⚠️ 팀 검토 minor로 신설 —
+이전엔 `agent_skills`가 `agent_tools`와 완전히 동일한 구조로 설계됐다고
+서술하면서도 정작 그 뮤테이션 표면의 권한 정의가 다섯 문서 어디에도
+없었습니다. `AgentManage`가 이미 도구 바인딩 수정을 명시적으로 포괄하므로,
+Tool/Skill 대칭 원칙을 그대로 따라 스킬 바인딩도 같은 권한으로 게이트합니다).
 
 **REST**: `/api/skills/*`(`#49`의 `/api/mcp-servers/*`와 동일한 페어링
 관례). `DELETE /api/skills/:id`도 `mcp_servers`와 동일하게 참조 중이면

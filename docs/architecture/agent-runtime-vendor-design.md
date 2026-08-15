@@ -21,8 +21,11 @@ cli에도 적용할 수 있는가?" — 조사 결과 두 가지 중요한 사�
    바이너리의 headless 모드입니다 — 즉 지금 설계는 이미 grok build에
    적용돼 있는 것에 가깝습니다. **Grok Build는 이미 네이티브 Skills·
    Hooks·Plugins·MCP servers 시스템을 갖고 있습니다**(`grok inspect`로
-   확인 가능) — `#51`이 fleet 레벨에 새로 설계한 Skill/Hooks 개념과
-   겹칩니다.
+   확인 가능 — ⚠️ 팀 검토로 명시: 이는 공개 문서 조사에 기반한 강한
+   추정이며, 이 저장소 안에서 실기기로 검증한 사실은 아닙니다. 특히
+   `fleet-worker`가 실제로 쓰는 headless `agent serve` 모드에서도 이
+   확장 시스템에 접근 가능한지는 별도 확인이 필요합니다 — §7 참고) —
+   `#51`이 fleet 레벨에 새로 설계한 Skill/Hooks 개념과 겹칩니다.
 2. **Gemini CLI도 ACP를 지원하지만(`gemini --acp`) 전송 방식이 근본적으로
    다릅니다** — grok은 `--bind`로 네트워크(WebSocket)에 리슨하는데,
    Gemini는 **stdio(표준입출력) 기반 JSON-RPC**이고 인증 플래그도 없습니다.
@@ -66,7 +69,12 @@ CREATE TABLE agent_runtimes (
     stdio_invocation_args TEXT,          -- 예: '--acp'
     -- #51의 Host 가용성 가드와 동일한 패턴 — 이 런타임을 쓰려면 host가
     -- 가져야 하는 label 키 목록(예: 'gemini-cli-installed').
-    required_host_labels JSONB,
+    -- ⚠️ 팀 검토에서 발견(major): #51이 mcp_servers.required_host_labels를
+    -- NOT NULL DEFAULT '[]'로 통일한 것과 똑같은 컬럼명인데도 여기선
+    -- nullable/기본값 없음으로 재도입해 #51이 고친 비일관을 되살렸었습니다
+    -- (Rust 타입 Vec<String>도 non-Option이라 NULL을 표현 못 함) — 동일하게
+    -- NOT NULL DEFAULT로 통일합니다.
+    required_host_labels JSONB NOT NULL DEFAULT '[]',
     created_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -169,9 +177,14 @@ pub trait AgentRunner: Send + Sync {
   newline-delimited JSON-RPC를 씁니다) — 바이트를 그냥 파이프로 이어
   붙이면 TCP/파이프 버퍼링에 따라 한 JSON-RPC 메시지가 여러 조각으로
   쪼개지거나 여러 메시지가 한 덩어리로 뭉쳐 전달될 수 있어, 양쪽의
-  메시지 경계가 어긋납니다. 게다가 `#49` §2.2에서 이미 확인했듯 grok
-  자신의 ACP 구현조차 표준 필드 배치에서 벗어나는 등 wire-format이
-  완전히 균일하지 않다는 전례가 있어, "그냥 이어붙이면 되겠지"라는
+  메시지 경계가 어긋납니다. 게다가 grok 자신의 ACP 구현조차 표준 필드
+  배치에서 벗어나는 등 wire-format이 완전히 균일하지 않다는 전례가 있어
+  (⚠️ 팀 검토에서 인용 오류 발견·정정 — 이전엔 "`#49` §2.2에서 이미
+  확인했듯"이라고 인용했으나 `agent-provisioning-design.md`에는 §2.2라는
+  하위 절이 없습니다. 실제 근거는
+  `crates/fleet-transport/src/acp_transport.rs` 코드 주석의 실측
+  wire-format 특이사항 — session/update의 sessionUpdate 태그 키,
+  update._meta 안의 promptId 등입니다), "그냥 이어붙이면 되겠지"라는
   가정은 검증되지 않은 채로 두면 위험합니다. **수정**: 브릿지는 raw
   바이트 패스스루가 아니라 **JSON-RPC 메시지 경계를 실제로 파싱해
   재구성**해야 합니다 — stdio 쪽에서는 개행 단위로 완전한 JSON 메시지를
@@ -246,10 +259,19 @@ RESTRICT` — 이미 뜬 에이전트가 자기 런타임을 잃으면 안 되�
   Gemini ACP 모드는 문서상 CLI 레벨 인증 플래그가 없음(ACP 프로토콜
   자체의 `authenticate` 메서드를 쓰는 것으로 보임) — 이 문서의 credential
   전달 방식(`fleet-credentials`와의 연동 여부)은 Phase 0에서 함께 확인.
-- **`grok agent serve`가 실제로 Grok Build와 동일 바이너리의 서브커맨드인지
-  최종 확인**: §1의 결론은 공개 문서 조사에 기반한 강한 추정이지 이
-  저장소 안에서 실기기로 검증한 사실은 아닙니다 — Phase 0에서 `grok
-  --version`/`grok --help` 출력으로 확정.
+- **§1의 Grok Build 관련 주장 전체(바이너리 동일성 + 네이티브
+  Skills/Hooks/Plugins/MCP 시스템 존재) 최종 확인**(⚠️ 팀 검토로 범위
+  명시화 — 이전엔 제목이 "바이너리 동일성"으로만 좁게 한정돼, §1이 확정
+  서술한 "Grok Build는 이미 네이티브 Skills·Hooks·Plugins·MCP servers
+  시스템을 갖고 있습니다"라는 더 넓은 주장까지 이 미검증 캐비어트가
+  명확히 커버하는지 모호했습니다): §1의 결론은 **전부** 공개 문서 조사에
+  기반한 강한 추정이지 이 저장소 안에서 실기기로 검증한 사실은 아닙니다
+  — Phase 0에서 `grok --version`/`grok --help`로 바이너리 동일성을,
+  `grok inspect`(headless `agent serve` 모드에서도 접근 가능한지 포함)로
+  네이티브 확장 시스템 존재를 함께 확정합니다. 이 미검증 캐비어트는
+  `agent-harness-composition-design.md` §7.3에 이 발견을 인용할 때도
+  함께 명시해야 합니다(그쪽 문서에서 "확인됐습니다"로 캐비어트 없이
+  전파된 것을 이번 라운드에서 함께 정정).
 
 ## 관련 문서
 

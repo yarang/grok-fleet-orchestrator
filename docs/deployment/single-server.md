@@ -8,23 +8,17 @@
 
 서버 1대(물리 서버 또는 VM 1대) 내부에서 모든 컴포넌트가 로컬 네트워크(`localhost / 127.0.0.1`)를 통해 유기적으로 통신하며, 외부 노출이 필요한 영역만 안전하게 필터링합니다.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  Single Linux Server (Host OS)                                         │
-│                                                                        │
-│  [외부 클라이언트] ──► [포트 443 / HTTPS] ──► [ Nginx 웹 서버 (Native) ]      │
-│                                                   │                    │
-│      ┌────────────────────────────────────────────┼──────────────┐     │
-│      ▼ (Dashboard & MCP)                          ▼ (API Proxy)  │     │
-│  ┌───────────────────────────┐            ┌───────────────────────────┐│
-│  │ fleet serve (Native)      │            │ liteLLM (venv+systemd)    ││
-│  │ - Port 8081 (API)         │            │ - Port 4000 (Internal)    ││
-│  │ - Port 8082 (Dashboard)   │            └─────────────┬─────────────┘│
-│  └─────────────┬─────────────┘                          │              │
-│                │                                        ▼              │
-│                └──────────► [ PostgreSQL 16 (Docker) ] ─┘              │
-│                             - Port 5432 (Internal)                     │
-└────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    Client[외부 클라이언트] -->|Port 443 / HTTPS| Nginx[Nginx 웹 서버 Native]
+    
+    subgraph Host[Single Linux Server Host OS]
+        Nginx -->|Dashboard & MCP| Fleet[fleet serve Native<br>- Port 8081 API<br>- Port 8082 Dashboard]
+        Nginx -->|API Proxy| LiteLLM[liteLLM venv+systemd<br>- Port 4000 Internal]
+        
+        Fleet --> DB[(PostgreSQL 16 Docker<br>- Port 5432 Internal)]
+        LiteLLM --> DB
+    end
 ```
 
 ---

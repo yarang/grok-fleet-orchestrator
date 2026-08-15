@@ -16,11 +16,11 @@ docs/assets/diagrams/
 
 | 도메인 | 대응 문서 디렉토리 | 리소스 수 |
 |---|---|---|
-| `architecture/` | `docs/architecture/` | 12 (`.mermaid`) |
+| `architecture/` | `docs/architecture/` | 26 (`.mermaid`) |
 | `deployment/` | `docs/deployment/` | 4 (`.mermaid`) |
 | `llm-wiki/` | `docs/llm-wiki/` | 2 (`.mermaid`) |
 | `server-management/` | `docs/server-management/` | 4 (`.mermaid`) |
-| `ui-dashboard/` | `docs/ui-dashboard/` | 7 (`.mermaid`) |
+| `ui-dashboard/` | `docs/ui-dashboard/` | 8 (`.mermaid`) |
 | `worker-bootstrap/` | `docs/worker-bootstrap/` | 4 (`.svg`) + 4 (`.mermaid`) |
 
 ## 규칙 요약

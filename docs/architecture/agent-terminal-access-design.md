@@ -47,43 +47,62 @@
   `agent_commands`나 `agents` 테이블에 별도 저장하지 않습니다 —
   `agent_id`로부터 결정적으로(deterministic) 파생되는 이름이라 저장할
   필요가 없습니다.
-- **spawn 변경**: `GrokRunner`가 `Command::new("grok")`로 직접 spawn하던
-  것을, `Command::new("tmux").args(["new-session", "-d", "-s", &session_name,
-  "--", grok_bin, "agent", "serve", ...])`로 감쌉니다. tmux가 이미 스크롤백
-  버퍼·detach/reattach를 다 해주므로, 별도 로그 캡처 인프라를 새로 만들지
-  않습니다 — `#49` §13의 "다중 프로세스 로그 수집 부재" 문제가 이 변경만으로
-  사실상 해소됩니다.
+> ⚠️ **[major, 팀 검토] 용어 정합성**: 이 절 전체에서 "`GrokRunner`"라는
+> 명칭은 `#52`(`agent-runtime-vendor-design.md`) 이전에 쓰던 구체 타입
+> 이름입니다 — `#52`는 이를 `AgentRunner` 트레잇(`spawn`/`terminate`/
+> `capture_snapshot` 세 메서드만 정의) + 벤더별 구현체(`NetworkBindRunner`/
+> `StdioBridgeRunner`)로 대체했고, tmux 매핑은 두 구현체 모두에 적용됩니다
+> (`#52` §4). 아래 서술에서 "`GrokRunner`"는 모두 **"`AgentRunner` 구현체
+> (`NetworkBindRunner`/`StdioBridgeRunner`)"**로 읽으세요. 또한 아래 2번의
+> "주기적으로 tmux를 폴링하는 컴포넌트"는 `#52`가 정의한 `AgentRunner`
+> **트레잇의 새 공개 메서드가 아니라, 각 구현체의 `spawn()` 내부에서
+> 시작되는 백그라운드 폴링 태스크**입니다 — `#52`의 트레잇 표면(3개
+> 메서드)은 그대로 유지되고, 죽음을 감지했을 때 재시작 여부를 판단하는
+> 로직만 그 구현체 내부에 새로 생깁니다(트레잇 밖에서 별도로 호출하는
+> 컴포넌트가 아님).
+
+- **spawn 변경**: `AgentRunner` 구현체가 `Command::new("grok")`로 직접
+  spawn하던 것을, `Command::new("tmux").args(["new-session", "-d", "-s",
+  &session_name, "--", grok_bin, "agent", "serve", ...])`로 감쌉니다.
+  tmux가 이미 스크롤백 버퍼·detach/reattach를 다 해주므로, 별도 로그 캡처
+  인프라를 새로 만들지 않습니다 — `#49` §13의 "다중 프로세스 로그 수집
+  부재" 문제가 이 변경만으로 사실상 해소됩니다.
 - ⚠️ **생존 감지 방식 전면 재설계(팀 검토 critical 수정)**: 이전 설계는
-  기존 `GrokRunner`가 `tokio::process::Child`를 `child.wait()`해 종료
-  코드로 재시작 여부를 판단하던 방식을 그대로 유지한다고 암묵적으로
+  기존 `AgentRunner` 구현체가 `tokio::process::Child`를 `child.wait()`해
+  종료 코드로 재시작 여부를 판단하던 방식을 그대로 유지한다고 암묵적으로
   전제했지만, **`tmux new-session -d`는 세션을 만들자마자(수십~수백 ms
-  내) 종료 코드 0으로 리턴하는 명령입니다**(`-d`가 "detach"인 이유) —
-  `child.wait()`가 실제로 잡는 건 grok 프로세스가 아니라 이 순간적으로
-  끝나는 tmux 런처이므로, 기존 재시작 정책(종료 코드로 재시작 여부 판단)이
-  통째로 무력화됩니다. 그래서 생존 감지 자체를 다시 설계합니다:
+  내로 추정 — 아직 실측하지 않은 값입니다, §9 참고) 종료 코드 0으로
+  리턴하는 명령입니다**(`-d`가 "detach"인 이유) — `child.wait()`가 실제로
+  잡는 건 grok 프로세스가 아니라 이 순간적으로 끝나는 tmux 런처이므로,
+  기존 재시작 정책(종료 코드로 재시작 여부 판단)이 통째로 무력화됩니다.
+  그래서 생존 감지 자체를 다시 설계합니다:
   1. 세션 생성 직후 `tmux set-option -t <session> remain-on-exit on`을
      실행합니다 — grok이 죽어도 pane이 즉시 사라지지 않고 마지막 화면을
-     유지합니다(tmux 기본값은 `off`라 그대로 두면 죽자마자 pane이 닫혀
-     §4가 예로 든 "크래시 스택트레이스 캡처" 유스케이스 자체가 성립하지
-     않습니다 — 팀 검토 major, 같이 수정).
-  2. `AgentRunner`가 이 세션에 대해 주기적으로(예: 2~5초 간격)
+     유지합니다(tmux 기본값이 `off`라는 것과 아래 2번의 `pane_dead`/
+     `pane_dead_status` 포맷 변수가 의도대로 동작한다는 것은 **아직 공식
+     문서나 실기기로 확인하지 않았습니다** — §9 "실기기 검증 필요"로
+     이관, 팀 검토에서 발견. 이대로 두면 §4가 예로 든 "크래시 스택트레이스
+     캡처" 유스케이스 자체가 성립하지 않을 수 있습니다 — 팀 검토 major,
+     같이 수정).
+  2. `AgentRunner` 구현체가 이 세션에 대해 주기적으로(예: 2~5초 간격)
      `tmux list-panes -t <session> -F '#{pane_dead} #{pane_dead_status}'`로
-     생존 여부와 종료 코드를 폴링합니다 — `child.wait()`를 완전히
-     대체합니다.
+     생존 여부와 종료 코드를 폴링합니다(구현체 내부 백그라운드 태스크 —
+     위 안내 참고) — `child.wait()`를 완전히 대체합니다.
   3. `pane_dead == 1`을 감지하면: (a) 필요하면 `capture_terminal`과 같은
      방식으로 마지막 화면을 캡처해 실패 사유로 남기고, (b) `#{pane_dead_status}`
      값으로 기존과 동일한 재시작 판단(0 → 정상 종료로 간주, 재시작 안 함
      / 0 아님 → `restart_delay_secs` 후 재spawn)을 적용한 뒤, (c)
      `tmux kill-session -t <session>`으로 실제 정리하고 필요하면 새
      세션으로 재spawn합니다.
-- **종료 변경(의도된 종료)**: 기존 `terminate_child()`(SIGTERM 대기 →
-  SIGKILL)는 이제 프로세스가 아니라 **tmux 세션**을 대상으로 합니다 —
-  `tmux send-keys -t <session> C-c` 등으로 그레이스풀 종료를 시도한 뒤,
-  타임아웃 시 `tmux kill-session -t <session>`. 이때는 위 폴링 루프가
-  "의도된 종료였다"는 걸 알 수 있도록(재시작 로직이 오작동하지 않도록)
-  종료를 시작하기 전에 그 세션을 폴링 대상에서 먼저 제외합니다. `C-c`
-  (SIGINT)가 grok에 대해 실제로 기존 SIGTERM 정책과 동등한 그레이스풀
-  종료로 작동하는지는 아직 검증하지 않았습니다(§9).
+- **종료 변경(의도된 종료)**: 기존 `terminate()`(`#52` `AgentRunner`
+  트레잇의 공개 메서드, 이전 명칭 `terminate_child()`)는 이제 프로세스가
+  아니라 **tmux 세션**을 대상으로 합니다 — `tmux send-keys -t <session>
+  C-c` 등으로 그레이스풀 종료를 시도한 뒤, 타임아웃 시 `tmux kill-session
+  -t <session>`. 이때는 위 폴링 루프가 "의도된 종료였다"는 걸 알 수
+  있도록(재시작 로직이 오작동하지 않도록) 종료를 시작하기 전에 그 세션을
+  폴링 대상에서 먼저 제외합니다. `C-c`(SIGINT)가 grok에 대해 실제로 기존
+  SIGTERM 정책과 동등한 그레이스풀 종료로 작동하는지는 아직 검증하지
+  않았습니다(§9).
 - **호스트 요구사항**: `tmux`가 호스트에 설치돼 있어야 합니다 —
   `fleet-provisioner`의 프로비저닝 플레이북(`crates/fleet-provisioner`)에
   설치 스텝 추가 필요(§7).
@@ -170,8 +189,11 @@
      `channel.request_pty` + `channel.exec("tmux attach -t <session>")`)를
      `SshClient`에 추가합니다 — `russh 0.46.0`(`Cargo.lock` 고정 버전)
      API를 docs.rs로 확인한 결과 `request_pty`/`request_shell`/`exec`/
-     `window_change`/`data`가 전부 존재해 이 메서드는 그대로 구현
-     가능함을 검증했습니다.
+     `window_change`/`data`가 전부 **존재함을 확인했습니다**(⚠️ 팀 검토로
+     표현 정정 — "그대로 구현 가능함을 검증했다"는 API 시그니처 존재
+     확인과 실제 동작 검증을 동일시한 과대 주장이었습니다. `request_pty` +
+     `exec("tmux attach -t <session>")` 조합이 실제로 양방향 인터랙티브
+     스트림을 만들어내는지는 §9 4번의 미검증 항목입니다).
   3. 오케스트레이터가 이 SSH PTY 채널과 방금 연 WebSocket 사이에서 **raw
      바이트를 그대로 양방향 릴레이**합니다(JSON-RPC 프레이밍 없음 — 기존
      ACP WebSocket 전송과는 별개의, 훨씬 단순한 채널).
@@ -211,7 +233,7 @@ tmux는 한 세션에 여러 클라이언트가 동시에 `attach`하는 것을 
 `fleet-provisioner`의 부트스트랩 플레이북에 `tmux` 패키지 설치 스텝을
 추가해야 합니다(`docs/worker-bootstrap/` 문서 계열과 연동 — 이 문서가
 소유하지 않는 범위이므로 참조만). 기존 호스트(플레이북 재실행 전)는 tmux가
-없을 수 있으므로, `GrokRunner`가 spawn 전에 `tmux -V` 존재 확인 실패 시
+없을 수 있으므로, `AgentRunner` 구현체가 spawn 전에 `tmux -V` 존재 확인 실패 시
 `agent.status = Failed`(에러: "host missing tmux — re-run provisioning")로
 명확히 실패시키고, 프로세스를 tmux 없이 직접 spawn하는 폴백은 두지
 않습니다(폴백을 두면 "이 에이전트는 왜 모니터링이 안 되지"라는 혼란만
@@ -237,10 +259,12 @@ tmux는 한 세션에 여러 클라이언트가 동시에 `attach`하는 것을 
 
 ## 9. 열린 질문
 
-`russh` PTY 지원(§5)과 tmux 서버 생존성(§2, §3)은 실제로 검증해 각각
-긍정/부정으로 확정했습니다(경위는 [`log.md`](log.md)). 아래는 여전히
-남은 항목입니다 — 대부분 실기기(grok 바이너리·실제 호스트)가 있어야
-확인 가능해 `#49` Phase 0 검증 스파이크와 함께 확인할 예정입니다.
+`tmux` 서버 생존성(§2, §3)은 실제로 검증해 확정했습니다(경위는
+[`log.md`](log.md)). `russh` PTY 지원(§5)은 **API가 docs.rs에 존재한다는
+것만** 확인했습니다 — 아래 4번 참고(⚠️ 팀 검토 minor로 정정, 이전 서술은
+"구현 가능함을 검증했다"고 과대 주장했습니다). 아래는 여전히 남은
+항목입니다 — 대부분 실기기(grok 바이너리·실제 호스트)가 있어야 확인
+가능해 `#49` Phase 0 검증 스파이크와 함께 확인할 예정입니다.
 
 ### 실기기 검증 필요
 
@@ -251,6 +275,23 @@ tmux는 한 세션에 여러 클라이언트가 동시에 `attach`하는 것을 
    수준으로 줄어듭니다.
 3. **동시 세션 생성 레이스**(§3) — 같은 `start` 커맨드가 두 번 실행되면
    `tmux new-session`이 어떻게 반응하는지 실측 필요.
+3.5. **§3 생존 감지 메커니즘의 세부 동작 3가지**(⚠️ 팀 검토 major로 신설
+   — 이전엔 검증 표시 없이 확정 사실처럼 서술됐습니다): (a)
+   `tmux new-session -d`가 실제로 "수십~수백ms 내" 종료 코드 0으로
+   리턴하는지(정확한 시간 범위는 추정치), (b) tmux의 `remain-on-exit`
+   기본값이 실제로 `off`인지(버전별 차이 가능성), (c)
+   `tmux list-panes -F '#{pane_dead} #{pane_dead_status}'` 포맷 변수
+   조합이 실제로 죽음/종료코드를 정확히 보고하는지. §3의 생존 감지
+   전면 재설계 전체가 이 3가지 위에 서 있으므로, `russh` API처럼
+   공식 문서로 확인하거나(가능하면) 실기기로 검증해야 합니다.
+4. **`request_pty` 뒤에 `exec("tmux attach -t <session>")`를 호출하는
+   조합이 실제로 양방향 인터랙티브 PTY 스트림을 만들어내는지**(§5,
+   ⚠️ 팀 검토 minor로 신설) — docs.rs에서 확인한 건
+   `request_pty`/`request_shell`/`exec`/`window_change`/`data` 메서드
+   시그니처가 "존재한다"는 것뿐이고, 이 조합의 실제 동작 시맨틱(pty
+   요청과 exec 조합, tmux attach와의 상호작용)은 검증되지 않았습니다 —
+   "구현 가능함을 검증했다"가 아니라 "API는 존재를 확인했다"로 표현을
+   낮춥니다.
 
 ### 아직 설계하지 않은 것
 

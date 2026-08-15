@@ -9,8 +9,8 @@ flowchart TD
     ComposeWithMemory --> Dispatch
 
     ResolveAgent -- "No" --> HasProject{project_id 지정?}
-    HasProject -- Yes --> ExistingSoftSelect["#48의 소프트 선호 필터로<br/>워커 선택 (변경 없음)"]
-    ExistingSoftSelect --> HasThread1{thread_id의 project_id가 있음?}
+    HasProject -- Yes --> ExistingHardSelect["#48의 하드 배타적 필터로<br/>워커 선택(2026-08-14 2차 개정 —<br/>후보 없으면 폴백 없이<br/>SelectionError::NoWorkerForProject)"]
+    ExistingHardSelect --> HasThread1{thread_id의 project_id가 있음?}
     HasThread1 -- Yes --> ComposeProjectThread["프로젝트 스코프 스레드 — 향후 해당 스레드를<br/>맡은 agent가 있으면 그 메모리도 함께 주입<br/>(열린 질문 — §9 참고)"]
     HasThread1 -- No --> ComposeWithMemory
     ComposeProjectThread --> Dispatch

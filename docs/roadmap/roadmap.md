@@ -834,6 +834,20 @@
     `project_id`도 같은 트랜잭션에서 갱신). 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
+    ⚠️ **9차 개정 (나머지 14건 재검증, 2026-08-15)**: 세션 한도로 미뤄졌던
+    14건을 예산 회복 후 3표 검증 완주(42개 에이전트 전원 정상 완료)로
+    재검증, 12건 확정. 이 항목에서 가장 중요한 반영: **`ProjectAssign`을
+    `Operator` 기본 권한에 둘지에 대한 §9 열린 질문을 critical로 격상** —
+    `Operator`가 이미 보유한 `ProjectAssign`+`TaskCreate` 조합만으로
+    `AgentAutoProvisioner`를 트리거해 `AgentCreate`(Admin 전용)를 우회하는
+    구체적 경로를 확인, Phase 1 착수 전 확정해야 하는 차단 항목으로
+    표시. `/projects` 계열 REST 라우트의 권한 표기가 `ui-design.md`와
+    충돌하던 문제 수정, `PATCH /api/projects/:id` 엔드포인트 신설.
+    `agent-memory-injection-flow.mermaid`(폐기된 소프트 필터 레이블,
+    critical)와 `project-aware-dispatch-logic.mermaid`(단계 번호 불일치,
+    major)도 함께 확정. 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: 설계 문서 §8의 Phase 1(스키마 + Store + RBAC)부터 순차 구현.
 
 49. ⏳ **에이전트(Agent) 동적 프로비저닝 · 메모리 · 스레드 요약 · 도구 바인딩**
@@ -997,6 +1011,14 @@
     **major** 발견(`ui-design.md` §3.9에 반영). 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
+    ⚠️ **9차 개정 (나머지 14건 재검증, 2026-08-15)**: `#48` 9차와 동일한
+    재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영. §4.1의
+    "Automatic 전환 API/CLI" 엔드포인트 실체를 `project-feature-design.md`
+    §7의 신규 `PATCH /api/projects/:id`로 크로스 레퍼런스(**critical**).
+    §10에 `AgentAutoProvisioner`의 `AgentCreate` RBAC 우회 경로 경고 박스
+    신설(**critical**, 해소책은 `#48` §9로 정본 위임). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
 
@@ -1084,6 +1106,18 @@
     마이그레이션 계획이 어느 문서에도 없던 누락 — §9에 신규 마이그레이션
     번호 예약 필요를 명시. 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
+    ⚠️ **7차 개정 (나머지 14건 재검증, 2026-08-15)**: `#48` 9차와 동일한
+    재검증 라운드에서 이 항목에 해당하는 확정 발견 4건을 반영. §3에서
+    "`AgentRunner`"가 `#50`(폴링 컴포넌트)과 `#52`(3개 메서드짜리 트레잇)
+    사이에서 서로 다른 걸 가리키던 **major** 용어 충돌을 정리(`GrokRunner`
+    잔존 표기도 함께 정정), §3의 생존 감지 세부 사실 3가지가 검증 없이
+    확정 서술돼 있던 **major** 문제를 §9로 이관, §5의 russh "구현 가능함을
+    검증" 과대 주장을 "존재를 확인" 수준으로 낮춤(**minor**),
+    `agent-data-model.mermaid`의 `capture_terminal` 누락을 직접 재확인해
+    반영(검증 에이전트 다수표는 반박이었으나 직접 확인 결과를 우선). 자세한
+    내용은 [`docs/architecture/log.md`](../architecture/log.md)의 개정
+    이력 참고.
 
     **다음 단계**: `#49` Phase 4가 완료된 뒤, §9에 남은 미검증 항목(grok의
     SIGINT/TTY 동작, 동시 세션 생성 레이스 등)을 `#49` Phase 0 검증
@@ -1216,7 +1250,7 @@
 
 ---
 
-## 현재 진행 상황 (2026-08-11 기준)
+## 현재 진행 상황 (2026-08-15 기준)
 
 > **P0·P1은 전부 해소됐다.** 남은 항목은 모두 P2 이하다.
 

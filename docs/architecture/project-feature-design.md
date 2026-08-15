@@ -280,9 +280,10 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 
 | Method | Path | 권한 | 설명 |
 |---|---|---|---|
-| GET | `/projects` | 세션 | 프로젝트 목록 페이지 |
-| GET | `/projects/:id` | 세션 | 프로젝트 상세 페이지 |
-| GET | `/projects/new` | 세션 | 생성 폼 |
+| GET | `/projects` | `ProjectRead` | 프로젝트 목록 페이지 |
+| GET | `/projects/:id` | `ProjectRead` | 프로젝트 상세 페이지 |
+| GET | `/projects/new` | `ProjectCreate` | 생성 폼(⚠️ 팀 검토, major — 이전엔 "세션"만 요구해 `ui-design.md`가 명시한 "operator는 열람만"(생성 폼조차 admin만 접근) 의도와 정면 충돌했습니다. 기존 관례(`crates/fleet-dashboard/src/provisioning.rs`의 `provision_page`가 `serve_page_if_permitted(HostProvision, ...)`로 `/hosts/provision` 페이지 자체를 권한 게이트하는 패턴)와 동일하게, 생성 폼 페이지 라우트 자체를 `ProjectCreate`로 게이트합니다) |
+| PATCH | `/api/projects/:id` | `ProjectCreate` | 프로젝트 필드 수정(name/description/agent_provisioning_mode/workdir_template/default_agent_template_id/agent_idle_timeout_secs) — ⚠️ 팀 검토(minor)로 신설. `agent-provisioning-design.md` §4.1이 "Automatic 전환 API/CLI"의 존재를 전제하면서도 이 엔드포인트 자체가 어느 문서에도 없던 공백을 메웁니다. 생성과 동일한 등급(`ProjectCreate`, admin 기본)을 재사용 — 별도 `ProjectUpdate` 권한을 새로 만들 만큼 성격이 다르지 않다고 판단(수정 대상 필드가 모두 생성 시점에도 채우는 필드라 "생성을 나중에 마저 채우는 것"에 가까움) |
 | GET | `/api/projects` | `ProjectRead` | 목록 JSON |
 | POST | `/api/projects` | `ProjectCreate` | 생성 |
 | GET | `/api/projects/:id` | `ProjectRead` | 상세 JSON |
@@ -339,12 +340,21 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
   `#49`의 엔티티) — 상세 열린 질문은
   [`agent-provisioning-design.md`](agent-provisioning-design.md) §12 참고.
 - **`ProjectAssign`을 `Operator` 기본 권한에 둘지 재검토**(팀 검토에서
-  발견, minor): host/worker를 프로젝트 간에 재배정하는 건 물리 자원의
-  소속을 바꾸는 조작인데, 이 코드베이스의 기존 관례상 `WorkerRegister`/
-  `WorkerDelete`/`HostProvision` 같은 비슷한 급의 인프라 변경 권한은 전부
-  `Admin` 전용입니다. `ProjectAssign`만 `Operator`에게 기본 부여하는 게
-  일관된 선택인지는 실사용 피드백을 보고 재검토 — 이번 라운드에서는
-  정책을 바꾸지 않고 이 열린 질문으로만 기록합니다.
+  발견, **critical로 격상** — 처음엔 등급 비일관 정도의 minor 문제로만
+  기록했으나, 재검증 라운드에서 이 비일관이 실제로 악용 가능한 구체적
+  경로로 이어짐을 확인): `Operator`는 `ProjectAssign`(여유 host를
+  `agent_provisioning_mode=automatic` 프로젝트에 배정 가능)과 기존
+  `TaskCreate`(해당 프로젝트 스코프 태스크 제출 가능, `TaskRequest.project_id`에
+  별도 권한 게이트 없음)를 이미 보유하고 있어, 이 둘을 조합하면
+  `agent-provisioning-design.md` §4.1의 `AgentAutoProvisioner`가 RBAC
+  검사 없이 자동으로 Agent를 생성하도록 트리거할 수 있습니다 — 즉
+  `Operator`가 `AgentCreate`(`Admin` 전용으로 선언된 권한, §10)를 전혀
+  거치지 않고도 사실상 Agent를 생성시키는 셈입니다. 이 코드베이스의 기존
+  관례상 `WorkerRegister`/`WorkerDelete`/`HostProvision` 같은 비슷한 급의
+  인프라 변경 권한은 전부 `Admin` 전용이므로, `ProjectAssign`을
+  `Admin`으로 올리는 쪽이 유력한 해소책으로 보이지만 — 이는 정책 변경이라
+  이번 라운드에서 임의로 바꾸지 않고, **Phase 1(스키마+Store+RBAC) 구현
+  착수 전 반드시 확정해야 하는 차단 항목**으로 격상해 기록합니다.
 
 ## UI/UX 설계
 

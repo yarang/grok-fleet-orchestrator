@@ -75,7 +75,7 @@ erDiagram
         uuid id PK
         uuid host_id FK
         uuid agent_id FK "agent row is created first (Pending), then this command references it"
-        text command_type "start | stop"
+        text command_type "start | stop | capture_terminal(#50)"
         text status "pending | acked | done | failed"
         text error
         timestamptz created_at

@@ -99,6 +99,35 @@ unverified-assumptions-audit, platform-narrative-coherence)을, 그사이
 이 문서에 해당하는 것은 없음(모두 `#49`/`#50`/`#51`/`#52`/`ui-design.md`
 소관).
 
+### 2026-08-15, 7차 — 나머지 14건 재검증(3표 완주) + 확정 반영
+6차에서 세션 한도로 검증 못 받은 14건을 예산 회복 후 다시 3표 적대적
+검증(사용자 요청, 42개 에이전트 전원 정상 완료 — 이번엔 부분 실패 없음).
+14건 중 12건 확정, 2건은 실제로 반박(둘 다 직전 라운드에서 이미 고쳐져
+있었음 — `agent-data-model.mermaid`의 `capture_terminal` 누락은 검증
+에이전트 다수가 놓쳤지만 제가 직접 재확인한 결과 실제로는 여전히
+누락돼 있어 판정을 뒤집어 반영, `ui-design.md`의 IA 트리/라우트 매트릭스
+누락은 이미 6차에서 고쳐진 게 맞아 반박을 그대로 수용).
+
+이 문서에 해당하는 확정 발견 2건을 반영: (1) **critical, 원래 §9의
+"`ProjectAssign`을 `Operator` 기본 권한에 둘지" 열린 질문을 critical로
+격상**: `Operator`가 이미 보유한 `ProjectAssign` + `TaskCreate` 조합만으로
+`agent-provisioning-design.md`의 `AgentAutoProvisioner`를 트리거해
+`AgentCreate`(Admin 전용) 없이도 사실상 Agent를 생성시킬 수 있는 구체적
+우회 경로를 확인 — Phase 1 착수 전 확정해야 하는 차단 항목으로
+격상. (2) **major** §7 REST 표면의 `GET /projects`/`/projects/:id`/`/projects/new`가
+"세션"만 요구한다고 서술해 `ui-design.md`가 명시한 `ProjectRead`/`ProjectCreate`
+권한 게이트와 정면 충돌하던 문제 — 세 라우트 모두 실제 권한으로 정정,
+`PATCH /api/projects/:id`(`ProjectCreate`, 신규) 엔드포인트도 함께
+추가해 `agent-provisioning-design.md` §4.1이 전제하던 "Automatic 전환
+API"의 실체를 채움.
+
+`agent-memory-injection-flow.mermaid`(critical)와
+`project-aware-dispatch-logic.mermaid`(major)도 같은 라운드에서 확정 —
+전자는 "#48의 소프트 선호 필터(변경 없음)"라는 초과된 레이블을 하드
+배타적 필터로 정정, 후자는 회로차단기/용량 필터 단계 번호를 실제
+`selector.rs` 주석(3/3.5)과 일치하도록 재작성(§5 프로즈는 이미
+정확했으나 다이어그램만 구 번호를 유지하고 있었음).
+
 ---
 
 ## `agent-provisioning-design.md` (로드맵 [`#49`](../roadmap/roadmap.md))
@@ -288,6 +317,19 @@ Running` 전이에 `worker.project_id = agent.project_id` 단계 주석 추가.
 (파일 소재는 `ui-design.md`지만 근거 규칙은 이 문서 §4.1) — `ui-design.md`
 §3.9 인터랙션 표에 두 필드를 추가해 반영했습니다.
 
+### 2026-08-15, 9차 — 나머지 14건 재검증(3표 완주) + 확정 반영
+`project-feature-design.md` 7차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 2건을 반영: (1) **critical** — §4.1의
+"Automatic 전환 API/CLI 호출"이 어떤 엔드포인트인지 다섯 문서 어디에도
+정의돼 있지 않던 공백을 확인 — `project-feature-design.md` §7에 신설된
+`PATCH /api/projects/:id`(`ProjectCreate`)를 크로스 레퍼런스로 추가.
+(2) **critical** §10에 새 경고 박스 신설 — `AgentAutoProvisioner`가 RBAC
+검사 없이 Agent를 생성하는데, `Operator`가 이미 보유한 `#48`의
+`ProjectAssign`+`TaskCreate` 조합만으로 이를 트리거해 `AgentCreate`(Admin
+전용)를 우회할 수 있는 구체 경로를 발견 — 해소책은 정책 결정이라 이
+문서에서 임의로 바꾸지 않고 `project-feature-design.md` §9로 정본을
+넘김(그쪽 문서 7차 항목 참고).
+
 ---
 
 ## `agent-terminal-access-design.md` (로드맵 [`#50`](../roadmap/roadmap.md))
@@ -386,6 +428,30 @@ Upgrade`/`Connection $connection_upgrade` 추가가 `#50` 구현 시 선행돼�
 없던 누락 — §9에 `019_agent_commands_result.sql`(가칭) 신규 예약 필요를
 명시.
 
+### 2026-08-15, 5차 — 나머지 14건 재검증(3표 완주) + 확정 반영
+`project-feature-design.md` 7차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 4건을 반영: (1) **major**
+"`AgentRunner`"라는 이름이 `#50`과 `#52`에서 서로 다른 걸 가리키는
+용어 충돌 — `#52`는 `AgentRunner`를 `spawn`/`terminate`/`capture_snapshot`
+세 메서드만 있는 트레잇으로 정의하는데, `#50` §3은 같은 이름에 "2~5초
+간격 tmux 폴링"이라는 상태 유지 책임을 얹고 인접 문장에선 `#52` 이전
+구체 타입 `GrokRunner`도 계속 언급하며 종료 메서드도 `terminate_child()`로
+불러 혼란스러웠던 문제 — §3 전체를 "`GrokRunner`" → "`AgentRunner`
+구현체(`NetworkBindRunner`/`StdioBridgeRunner`)"로 정정하고, 폴링 루프는
+트레잇의 새 공개 메서드가 아니라 `spawn()` 내부 백그라운드 태스크라고
+명확화하는 안내 박스를 §3 앞에 신설. `terminate_child()`도 `#52`의
+`terminate()`로 통일. (2) **major** §3의 생존 감지 메커니즘 3가지 세부
+사실(`tmux new-session -d` 리턴 시점, `remain-on-exit` 기본값, `pane_dead`
+포맷 변수 정확도)이 검증 표시 없이 확정 사실로 서술돼 있던 문제 — §9
+"실기기 검증 필요"에 새 항목(3.5번)으로 이관. (3) **minor** §5의 russh
+"구현 가능함을 검증했습니다"가 API 시그니처 존재 확인과 실제 동작 검증을
+동일시한 과대 주장이던 문제 — "존재를 확인했습니다"로 표현을 낮추고
+§9에 4번 항목(실제 `request_pty`+`exec` 조합의 인터랙티브 스트림 생성
+여부는 미검증)으로 이관. (4) **note**(제 직접 재확인으로 판정 override
+— 검증 에이전트 3표 중 2표가 반박했으나 `agent-data-model.mermaid`를
+직접 grep한 결과 여전히 `capture_terminal`이 빠져 있어 반박을 기각하고
+반영) `AGENT_COMMANDS.command_type` ER 필드에 `capture_terminal` 값 추가.
+
 ---
 
 ## `agent-harness-composition-design.md` (로드맵 [`#51`](../roadmap/roadmap.md))
@@ -457,6 +523,18 @@ Skill 저장 결정도 Phase 0 스파이크에서 재검토 가능한 잠정 결
 반영. `ui-design.md`의 IA 트리·라우트 가드 매트릭스에 `/admin/skills`가
 누락돼 있던 별도 minor 발견도 같은 라운드에서 함께 반영.
 
+### 2026-08-15, 4차 — 나머지 14건 재검증(3표 완주) + 확정 반영
+`project-feature-design.md` 7차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 1건(**minor**, cross-rbac-consistency
+관점)을 반영: §4가 `agent_skills`(Agent별 필수/옵션 스킬 오버라이드)를
+`agent_tools`와 완전히 동일한 구조로 설계했다고 서술하면서도, 정작 이
+뮤테이션 표면(Agent별 스킬 add/remove)을 어느 권한으로 게이트하는지 §8
+어디에도 없던 공백 — `SkillManage`(카탈로그 CRUD 전용)와 별개로,
+`AgentManage`(`agent-provisioning-design.md` §10, 이미 도구 바인딩 수정을
+포괄)가 스킬 바인딩 수정도 함께 담당한다고 §8에 명시해 Tool/Skill 대칭
+원칙을 권한 정의에도 완성. (참고: 같은 발견이 지적한 "화면에 스킬 토글이
+없다"는 부분은 이 문서 3차에서 이미 `ui-design.md`에 반영돼 있었습니다.)
+
 ---
 
 ## `agent-runtime-vendor-design.md` (로드맵 [`#52`](../roadmap/roadmap.md))
@@ -524,3 +602,22 @@ runtime Badge 추가"라고 Canonical-Derived 갱신을 선언했지만, 실제
 
 `agent-runtime-data-model.mermaid`에 `AGENT_TEMPLATES.runtime_id`를
 `NOT NULL`로 주석 갱신, `DEFAULT` 서브쿼리 버그 수정 경위 메모 추가.
+
+### 2026-08-15, 4차 — 나머지 14건 재검증(3표 완주) + 확정 반영
+`project-feature-design.md` 7차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 3건을 반영: (1) **major**
+`agent_runtimes.required_host_labels`가 `#51`이 `mcp_servers.required_host_labels`에
+명시적으로 확립한 `NOT NULL DEFAULT '[]'` 관례(같은 필드명, 같은 패턴
+재사용을 자처하면서도)를 어기고 nullable/기본값 없음으로 재도입했던
+문제(Rust 타입 `Vec<String>`도 non-Option이라 `NULL`을 표현 못 함) —
+SQL/Rust doc/ER 다이어그램 세 곳 모두 `NOT NULL DEFAULT '[]'`로 통일.
+(2) **minor** §4의 grok wire-format 비표준성 주장이 존재하지 않는
+"`#49` §2.2"를 근거로 인용된 추적 불가능한 인용 — 실제 근거인
+`crates/fleet-transport/src/acp_transport.rs` 코드 주석으로 정정.
+(3) **minor** §1이 "Grok Build는 이미 네이티브 Skills·Hooks·Plugins·MCP
+servers 시스템을 갖고 있습니다"를 확정 사실처럼 서술하고, §7의 미검증
+캐비어트는 제목이 "바이너리 동일성"으로 좁게 한정돼 이 더 넓은 주장까지
+커버하는지 모호했던 문제 — §1에 인라인 캐비어트 추가, §7 항목 제목/범위를
+"§1의 Grok Build 관련 주장 전체"로 명시적으로 넓힘. 이 확정 서술이
+캐비어트 없이 `agent-harness-composition-design.md` §7.3에 "확인됐습니다"로
+전파돼 있던 것도 같은 라운드에서 함께 정정("추정됩니다" + 캐비어트 추가).

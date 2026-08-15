@@ -13,7 +13,7 @@ erDiagram
         text bin_path_template
         text invocation_args "network_bind 전용, 예: 'agent serve --bind {bind_addr} --secret {secret}'"
         text stdio_invocation_args "stdio_bridge 전용, 예: '--acp'"
-        jsonb required_host_labels "nullable"
+        jsonb required_host_labels "NOT NULL DEFAULT '[]'(#51 패턴과 통일, 팀 검토로 수정)"
         text created_by
         timestamptz created_at
         timestamptz updated_at

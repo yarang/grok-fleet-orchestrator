@@ -414,7 +414,10 @@ pub enum AgentProvisioningMode { Manual, Automatic }
   회수되지 않아 이 문서 스스로 "자동 생성은 반드시 자동 회수와 짝을
   이뤄야 한다"고 규정한 원칙이 깨집니다). `Project`를 `Automatic`으로
   전환하는 API/CLI 호출은 이 두 필드가 모두 채워져 있는지 확인하고, 아니면
-  `400 Bad Request`로 거부합니다. 이 전제가 갖춰지면 신규 백그라운드 루프
+  `400 Bad Request`로 거부합니다 — 이 엔드포인트 자체는
+  [`project-feature-design.md`](project-feature-design.md) §7의
+  `PATCH /api/projects/:id`(`ProjectCreate` 권한, 팀 검토로 신설)입니다.
+  이 전제가 갖춰지면 신규 백그라운드 루프
   **`AgentAutoProvisioner`**가 기존
   `Reconciler`(`fleet-scheduler/src/reconcile.rs`)와 동일한 "설정 + spawn +
   JoinHandle 기반 abort" 패턴으로 주기적으로(예: 30초, `Reconciler`의
@@ -627,6 +630,18 @@ Phase 3(메모리+프롬프트 조립, §11)에서 이 계산 로직도 함께 �
 
 `Admin`만 `AgentCreate`/`AgentDelete`/`AgentTemplateManage` 기본 보유,
 `Operator`는 `AgentRead`+`AgentManage`.
+
+> ⚠️ **[critical, 팀 검토] `AgentCreate` 우회 경로**: `AgentAutoProvisioner`(§4.1)는
+> RBAC 검사 없이 시스템이 직접 Agent를 생성합니다. `Operator`가 이미 보유한
+> `#48`의 `ProjectAssign`(여유 host를 `automatic` 프로젝트에 배정)과 기존
+> `TaskCreate`(그 프로젝트 스코프 태스크 제출)를 조합하면, `Operator`가
+> `AgentCreate` 없이도 사실상 Agent를 생성시킬 수 있습니다 — 이 문서만
+> 봐서는 `AgentCreate`가 유일한 생성 경로처럼 보이지만 실제로는 아닙니다.
+> 해소책(가장 유력한 안: `ProjectAssign`을 `Admin` 전용으로 격상)은 정책
+> 결정이라 이 문서에서 임의로 바꾸지 않고
+> [`project-feature-design.md`](project-feature-design.md) §9에 Phase 1
+> 착수 전 확정해야 하는 차단 항목으로 기록했습니다 — 그쪽을 정본으로
+> 참고하세요.
 
 **REST**: `/api/agents/*`, `/api/agent-templates/*`, `/api/mcp-servers/*` —
 `#48`과 동일한 `/<resource>` + `/api/<resource>` 페어링 관례.

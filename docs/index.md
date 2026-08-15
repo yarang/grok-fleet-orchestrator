@@ -27,6 +27,12 @@
 | [`architecture/overview.md`](./architecture/overview.md) | Store trait·CircuitBreaker·WorkerSelector·ACP 전송·워커 데몬·mTLS·부트스트랩 토큰 등 내부 설계 마스터 문서 | 🟢 정본 | 2026-08-10 |
 | [`architecture/api-reference.md`](./architecture/api-reference.md) | HTTP REST + MCP 12종 도구 API 레퍼런스 (2026-08-12 코드 대조로 도구명/개수 정정, 2026-08-13 호스트/브레이커/토큰 4종 추가) | 🟢 정본 | 2026-08-13 |
 | [`architecture/mcp-specification.md`](./architecture/mcp-specification.md) | Model Context Protocol(MCP) JSON-RPC over stdio 표준 사양 및 12종 도구 연동 스펙 | 🟢 정본 — §4 도구 목록 정정 완료(2026-08-12), 4종 추가 반영(2026-08-13) | 2026-08-13 |
+| [`architecture/project-feature-design.md`](./architecture/project-feature-design.md) | 워커와 호스트를 배타적(1:N)으로 격리·배정하는 프로젝트 격리 단위 및 하드 디스패치 설계 마스터 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/agent-provisioning-design.md`](./architecture/agent-provisioning-design.md) | 에이전트를 Worker와 분리하여 custom prompt, 메모리, MCP 도구를 동적으로 프로비저닝하는 수명주기 및 데이터 모델 설계 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/agent-terminal-access-design.md`](./architecture/agent-terminal-access-design.md) | grok 에이전트를 tmux 내 실행하고 스냅샷 폴링 및 russh PTY WebSocket 중계를 통한 대화형 attach 기능 설계 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/agent-harness-composition-design.md`](./architecture/agent-harness-composition-design.md) | prompt ➔ skill ➔ tool의 3계층 하네스 구조 및 프로젝트 헌법(constitution) 주입 규칙 설계 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/agent-runtime-vendor-design.md`](./architecture/agent-runtime-vendor-design.md) | AgentRunner 트레잇 기반 NetworkBind(grok) 및 StdioBridge(Gemini CLI) 다중 벤더 수용 설계 문서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/log.md`](./architecture/log.md) | 아키텍처 도메인 설계 개정 이력 기록용 append-only 로그 파일 | ⚪ 부기 문서 | 2026-08-15 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 
