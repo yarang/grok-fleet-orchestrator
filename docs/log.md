@@ -200,3 +200,9 @@ last_verified: "2026-08-15"
 - **`docs/skills.md` 신설** (5.7 KB): 스킬 시스템 전체 사용 가이드 — CLI 사용법, 스킬 파일 위치/형식, 체이닝 패턴, 커스텀 스킬 작성 방법.
   - `docs/index.md` 도메인 9 표에 🟢 정본으로 색인 등록.
   - 커밋: `804dc5b` (docs: 스킬 시스템 사용 가이드 추가)
+
+- **`docs/architecture/host-integrity-and-security-monitoring-design.md` 신설**:
+  - 워커 노드의 비인가 패키지 및 임의 생성 파일 감시를 위한 3계층 하이브리드 파이프라인(커널 inotify ➔ 5분 윈도우 배칭 ➔ L1/L2 필터링 ➔ L3 온디맨드 LLM 위험성 분석) 설계.
+  - cgroups v2/systemd 리소스 격리(`Nice=19`, `IOSchedulingClass=idle`, `CPUQuota=5%`, `MemoryMax=64M`)를 통한 무결성 데몬의 오버헤드 최소화 기법 수립.
+  - `TaskResult` 사이드이펙트 매니페스트 필드 추가 및 점진적 로드맵 제안.
+  - `docs/architecture/README.md` 및 `docs/index.md`에 🟢 정본으로 색인 등록.

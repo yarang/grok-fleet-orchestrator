@@ -25,6 +25,7 @@ last_verified: "2026-08-15"
 | [`system-entities-critique.md`](./system-entities-critique.md) | 설계 비판 — 관계 매핑 설계의 비판적 분석, 잠재적 레이스 컨디션 및 토큰 최적화 대안 제안서 |
 | [`multi-agent-realignment-report.md`](./multi-agent-realignment-report.md) | 교차 조정 — 코어/인프라/운영 도메인 간의 통합 가입, 드레인 소거, Nginx 업스트림 합의 요약 보고서 |
 | [`feature-feasibility-testing.md`](./feature-feasibility-testing.md) | 검증 방안 — 드레인, Git 이관, 동적 스킬, 멀티 에이전트 구현 기술 분석 및 로컬 검증 테스트 사양 |
+| [`host-integrity-and-security-monitoring-design.md`](./host-integrity-and-security-monitoring-design.md) | 무결성 감시 — 워커 비관리 파일/패키지 변경 실시간 커널 감시, 3계층 필터링 및 LLM 위험성 분석 아키텍처 보고서 |
 | [`log.md`](./log.md) | 아키텍처 로그 — 도메인 설계 개정 역사의 append-only 보존 기록 |
 
 두 문서는 상호 보완적이다: `overview.md`가 "왜 이렇게 설계했는가"를, `api-reference.md`가

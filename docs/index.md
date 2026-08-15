@@ -43,6 +43,7 @@ last_verified: "2026-08-15"
 | [`architecture/system-entities-critique.md`](./architecture/system-entities-critique.md) | 위 관계 맵의 동시성 병목(FOR UPDATE), pg_notify 유실, 격리 우회, 토큰 인플레이션에 대한 비판적 분석 및 대안 제안서 | 🟢 정본 | 2026-08-15 |
 | [`architecture/multi-agent-realignment-report.md`](./architecture/multi-agent-realignment-report.md) | 코어/인프라/운영 도메인 간의 재배정 드레인, Nginx WebSocket, 토큰 데드락, 유실 방지 동기화 논의 및 의사결정 선택지 | 🟢 정본 | 2026-08-15 |
 | [`architecture/feature-feasibility-testing.md`](./architecture/feature-feasibility-testing.md) | 드레인, Git 이관, 동적 스킬, 다중 에이전트 체이닝 구현에 필요한 기술 분석 및 로컬 테스트/검증 시나리오 명세서 | 🟢 정본 | 2026-08-15 |
+| [`architecture/host-integrity-and-security-monitoring-design.md`](./architecture/host-integrity-and-security-monitoring-design.md) | 워커 비관리 파일/패키지 변경 실시간 커널 감시, 3계층 필터링 및 온디맨드 LLM 위험성 분석 아키텍처 보고서 | 🟢 정본 | 2026-08-16 |
 | [`architecture/log.md`](./architecture/log.md) | 아키텍처 도메인 설계 개정 이력 기록용 append-only 로그 파일 | ⚪ 부기 문서 | 2026-08-15 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
