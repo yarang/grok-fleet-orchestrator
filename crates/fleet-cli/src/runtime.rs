@@ -579,6 +579,34 @@ pub async fn run_tasks(action: TasksAction) -> Result<()> {
         } => run_tasks_list(status, limit, json).await,
         TasksAction::Show { id } => run_tasks_show(&id).await,
         TasksAction::Cancel { id, reason } => run_tasks_cancel(&id, reason).await,
+        TasksAction::Submit {
+            prompt,
+            skills,
+            model,
+            server_hint,
+            priority,
+            max_turns,
+            timeout_secs,
+            required_labels,
+            cwd,
+            created_by,
+            json,
+        } => {
+            run_tasks_submit(
+                prompt,
+                skills,
+                model,
+                server_hint,
+                priority,
+                max_turns,
+                timeout_secs,
+                required_labels,
+                cwd,
+                created_by,
+                json,
+            )
+            .await
+        }
     }
 }
 
@@ -887,6 +915,86 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
         .await
         .context("failed to update task status")?;
     println!("task {id} cancelled (reason: {reason})");
+    Ok(())
+}
+
+/// `tasks submit <prompt>` 명령.
+///
+/// DB에 직접 Pending 태스크를 생성한다. 실행 중인 `fleet serve`의 Reconciler/
+/// Dispatcher가 `reconcile-interval`마다 Pending 작업을 스캔해 자동으로 워커에
+/// 디스패치한다 (`--reconcile-max-dispatch-retries > 0`인 기본 배포에서는 즉시
+/// 재시도가 활성화되어 있으므로 수 초 이내에 Dispatched 상태로 전환된다).
+///
+/// 스킬 이름이 지정된 경우 `FLEET_SKILLS_DIR` 또는 `~/.config/grok-fleet/skills/`에서
+/// `<name>.md` 파일을 읽어 프롬프트 앞에 XML 블록으로 주입한 뒤 저장한다.
+#[allow(clippy::too_many_arguments)]
+async fn run_tasks_submit(
+    prompt: String,
+    skills: Vec<String>,
+    model: Option<String>,
+    server_hint: Option<String>,
+    priority: String,
+    max_turns: Option<u32>,
+    timeout_secs: Option<u64>,
+    required_labels: Vec<String>,
+    cwd: Option<String>,
+    created_by: String,
+    json_output: bool,
+) -> Result<()> {
+    let store = connect_and_migrate(2).await?;
+
+    // 스킬 주입: skills 목록이 비어 있으면 prompt를 그대로 사용.
+    let final_prompt = if skills.is_empty() {
+        prompt.clone()
+    } else {
+        fleet_scheduler::skill_loader::inject_skills(&prompt, &skills)
+    };
+
+    let task_priority = match priority.to_lowercase().as_str() {
+        "low" => fleet_core::TaskPriority::Low,
+        "high" => fleet_core::TaskPriority::High,
+        _ => fleet_core::TaskPriority::Normal,
+    };
+
+    let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: final_prompt,
+        cwd: cwd.filter(|s| !s.is_empty()),
+        model: model.filter(|s| !s.is_empty()),
+        server_hint: server_hint.filter(|s| !s.is_empty()),
+        required_labels,
+        max_turns,
+        timeout_secs,
+        priority: task_priority,
+        created_by,
+        parent_task_id: None,
+        dependency_ids: vec![],
+        skills_required: skills.clone(),
+    });
+    let task_id = task.id;
+
+    store
+        .insert_task(&task)
+        .await
+        .context("failed to insert task")?;
+
+    // 스킬 주입 결과 요약 출력.
+    if json_output {
+        println!(
+            "{}",
+            serde_json::json!({
+                "task_id": task_id,
+                "status": "pending",
+                "skills_injected": skills,
+            })
+        );
+    } else {
+        println!("task {task_id} submitted (status: pending)");
+        if !skills.is_empty() {
+            println!("  skills injected: {}", skills.join(", "));
+        }
+        println!("  tip: use `fleet tasks show {task_id}` to track status");
+    }
+
     Ok(())
 }
 

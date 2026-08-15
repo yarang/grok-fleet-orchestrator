@@ -7,7 +7,8 @@
 //! - `fleet serve` — MCP stdio + HTTP API + (옵션) 대시보드 실행
 //! - `fleet migrate` — 데이터베이스 마이그레이션만 실행
 //! - `fleet workers list` / `workers show <name>` — 워커 조회
-//! - `fleet tasks list` / `tasks show <id>` / `tasks cancel <id>` — 작업 관리
+//! - `fleet tasks list` / `tasks show <id>` / `tasks cancel <id>` / `tasks submit <prompt>` — 작업 관리
+//!   - `tasks submit --skill <name>` — 스킬 인젝션과 함께 작업 제출 (반복 허용)
 //! - `fleet token new` — 부트스트랩 토큰 생성
 //! - `fleet doctor` — 인프라 진단 (DB 연결, 마이그레이션, 워커 상태)
 //! - `fleet provision` — SSH 자동 프로비저닝
@@ -499,6 +500,59 @@ enum TasksAction {
         /// 취소 사유 (기본값: "manual cancel").
         #[arg(long)]
         reason: Option<String>,
+    },
+
+    /// 새 작업을 제출하여 워커에 디스패치합니다.
+    ///
+    /// 예시:
+    ///   fleet tasks submit "refactor main.rs"
+    ///   fleet tasks submit "security audit" --skill security-audit --skill rust-expert
+    ///   fleet tasks submit "fix bug" --model claude-3-7-sonnet --priority high
+    Submit {
+        /// 에이전트에 보낼 프롬프트.
+        prompt: String,
+
+        /// 주입할 스킬 이름 (반복 허용). `FLEET_SKILLS_DIR` 또는
+        /// `~/.config/grok-fleet/skills/<name>.md` 에서 로드.
+        /// 예: `--skill rust-expert --skill security-audit`
+        #[arg(long = "skill", value_name = "SKILL_NAME")]
+        skills: Vec<String>,
+
+        /// 라우팅할 모델 이름 (워커 라벨 `model`과 일치해야 함).
+        #[arg(long)]
+        model: Option<String>,
+
+        /// 특정 워커 이름으로 고정 (없으면 스케줄러가 자동 선택).
+        #[arg(long)]
+        server_hint: Option<String>,
+
+        /// 작업 우선순위 (`low` | `normal` | `high`). 기본값: `normal`.
+        #[arg(long, default_value = "normal")]
+        priority: String,
+
+        /// 에이전트 최대 대화 턴 수.
+        #[arg(long)]
+        max_turns: Option<u32>,
+
+        /// 작업 타임아웃 (초).
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+
+        /// 워커 필수 라벨 (반복 허용). 예: `--label gpu --label region=us`.
+        #[arg(long = "label", value_name = "LABEL")]
+        required_labels: Vec<String>,
+
+        /// 작업 디렉토리 (워커에 전달).
+        #[arg(long)]
+        cwd: Option<String>,
+
+        /// 제출자 식별자 (감사 로그용). 기본값: `"cli"`.
+        #[arg(long, default_value = "cli")]
+        created_by: String,
+
+        /// JSON 형식으로 결과 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
