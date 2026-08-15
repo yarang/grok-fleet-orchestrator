@@ -112,6 +112,33 @@ impl GrokRunner {
     }
 }
 
+/// grok / agy(Antigravity) 등 에이전트 CLI 서브프로세스에 LLM 프록시 환경변수 주입.
+pub(crate) fn apply_llm_proxy_envs(cmd: &mut Command, proxy_opt: &Option<crate::config::LlmProxySection>) {
+    if let Some(proxy) = proxy_opt {
+        if let Some(url) = &proxy.gateway_url {
+            let url_trimmed = url.trim_end_matches('/');
+            // OpenAI 호환 게이트웨이 환경변수 (grok, liteLLM 기반 클라이언트)
+            cmd.env("OPENAI_BASE_URL", format!("{url_trimmed}/v1"));
+            cmd.env("OPENAI_API_BASE", format!("{url_trimmed}/v1"));
+            // Gemini / Antigravity CLI 호환 게이트웨이 환경변수 (agy, gemini-cli)
+            cmd.env("GEMINI_BASE_URL", url_trimmed);
+            cmd.env("GEMINI_API_BASE", url_trimmed);
+            cmd.env("ANTIGRAVITY_BASE_URL", url_trimmed);
+            // Anthropic 호환 환경변수
+            cmd.env("ANTHROPIC_BASE_URL", url_trimmed);
+            // Fleet 전용 통합 게이트웨이 환경변수
+            cmd.env("FLEET_LLM_GATEWAY_URL", url_trimmed);
+        }
+        if let Some(key) = &proxy.api_key {
+            cmd.env("OPENAI_API_KEY", key);
+            cmd.env("GEMINI_API_KEY", key);
+            cmd.env("ANTIGRAVITY_API_KEY", key);
+            cmd.env("ANTHROPIC_API_KEY", key);
+            cmd.env("FLEET_LLM_API_KEY", key);
+        }
+    }
+}
+
 /// grok agent serve 서브프로세스 시작.
 async fn spawn_grok(config: &WorkerConfig) -> Result<Child, std::io::Error> {
     let mut cmd = Command::new(&config.grok.bin);
@@ -127,8 +154,8 @@ async fn spawn_grok(config: &WorkerConfig) -> Result<Child, std::io::Error> {
         cmd.current_dir(cwd);
     }
 
-    // 환경변수 — GROK_API_KEY 등은 부모 프로세스에서 상속.
-    // (실제 grok CLI가 요구하는 인증은 배포 스크립트에서 설정)
+    // LLM 프록시 게이트웨이(liteLLM) 환경변수 주입 (grok, agy 지원)
+    apply_llm_proxy_envs(&mut cmd, &config.llm_proxy);
 
     cmd.spawn()
 }
@@ -263,5 +290,50 @@ mod tests {
         // runner는 이미 move됨. 대신 _rx가 아니라 shutdown의 Notify를 통해야 함.
         // 테스트 단순화: 그냥 루프가 도는지만 확인하고 종료.
         runner_handle.abort();
+    }
+
+    #[test]
+    fn apply_llm_proxy_envs_sets_grok_and_agy_envs() {
+        let mut cmd = Command::new("/bin/true");
+        let proxy = crate::config::LlmProxySection {
+            gateway_url: Some("https://fleet.agentthread.dev/api-gateway/".to_string()),
+            api_key: Some("sk-test-master-key".to_string()),
+        };
+
+        apply_llm_proxy_envs(&mut cmd, &Some(proxy));
+
+        let std_cmd = cmd.as_std();
+        let envs: std::collections::HashMap<_, _> = std_cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string())))
+            .collect();
+
+        // OpenAI/grok 엔드포인트 검증
+        assert_eq!(
+            envs.get("OPENAI_BASE_URL").cloned().flatten(),
+            Some("https://fleet.agentthread.dev/api-gateway/v1".to_string())
+        );
+        assert_eq!(
+            envs.get("OPENAI_API_KEY").cloned().flatten(),
+            Some("sk-test-master-key".to_string())
+        );
+
+        // Gemini/Antigravity(agy) 엔드포인트 검증
+        assert_eq!(
+            envs.get("GEMINI_BASE_URL").cloned().flatten(),
+            Some("https://fleet.agentthread.dev/api-gateway".to_string())
+        );
+        assert_eq!(
+            envs.get("ANTIGRAVITY_BASE_URL").cloned().flatten(),
+            Some("https://fleet.agentthread.dev/api-gateway".to_string())
+        );
+        assert_eq!(
+            envs.get("ANTIGRAVITY_API_KEY").cloned().flatten(),
+            Some("sk-test-master-key".to_string())
+        );
+        assert_eq!(
+            envs.get("FLEET_LLM_GATEWAY_URL").cloned().flatten(),
+            Some("https://fleet.agentthread.dev/api-gateway".to_string())
+        );
     }
 }

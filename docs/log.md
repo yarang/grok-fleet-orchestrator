@@ -206,3 +206,9 @@ last_verified: "2026-08-15"
   - cgroups v2/systemd 리소스 격리(`Nice=19`, `IOSchedulingClass=idle`, `CPUQuota=5%`, `MemoryMax=64M`)를 통한 무결성 데몬의 오버헤드 최소화 기법 수립.
   - `TaskResult` 사이드이펙트 매니페스트 필드 추가 및 점진적 로드맵 제안.
   - `docs/architecture/README.md` 및 `docs/index.md`에 🟢 정본으로 색인 등록.
+
+- **`fleet-worker` grok & agy(Antigravity CLI) 프록시 연동 지원**:
+  - `WorkerConfig`에 `[llm_proxy]` (`gateway_url`, `api_key`) 섹션 추가.
+  - 에이전트 CLI 프로세스 스폰 시 `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `ANTIGRAVITY_BASE_URL`, `ANTHROPIC_BASE_URL`, `FLEET_LLM_GATEWAY_URL` 환경변수 자동 주입.
+  - `grok_process.rs` 단위 테스트 `apply_llm_proxy_envs_sets_grok_and_agy_envs` 추가 및 52개 테스트 전체 통과 검증 완료.
+  - `docs/llm-wiki/litellm_integration_plan.md` 갱신.

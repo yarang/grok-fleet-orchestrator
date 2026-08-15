@@ -46,6 +46,23 @@ pub struct WorkerConfig {
     /// mTLS proxy 설정 (옵션). 누락 시 mTLS 비활성.
     #[serde(default)]
     pub mtls: Option<MtlsSection>,
+    /// AI/LLM 프록시 게이트웨이 설정 (옵션). grok / agy 등의 모든 AI API 호출을
+    /// orchestrator liteLLM 프록시로 라우팅.
+    #[serde(default)]
+    pub llm_proxy: Option<LlmProxySection>,
+}
+
+/// `[llm_proxy]` 섹션 (옵션).
+/// grok, agy(Antigravity) 등 에이전트 CLI 프로세스가 외부 LLM 공급자 대신
+/// 중앙 프록시 게이트웨이(liteLLM)를 경유하도록 환경변수를 주입한다.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmProxySection {
+    /// 프록시 게이트웨이 기본 URL (예: `https://fleet.agentthread.dev/api-gateway`).
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+    /// 프록시 인증 마스터 키 (예: `sk-litellm-master-key`).
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// `[worker]` 섹션.
@@ -333,6 +350,7 @@ pub struct WorkerConfigBuilder {
     max_concurrent: Option<u32>,
     labels: HashMap<String, String>,
     mtls: Option<MtlsSection>,
+    llm_proxy: Option<LlmProxySection>,
 }
 
 impl WorkerConfigBuilder {
@@ -370,6 +388,11 @@ impl WorkerConfigBuilder {
         self.mtls = Some(mtls);
         self
     }
+    /// LLM 프록시 섹션 오버라이드 (테스트용).
+    pub fn llm_proxy(mut self, proxy: LlmProxySection) -> Self {
+        self.llm_proxy = Some(proxy);
+        self
+    }
     pub fn build(self) -> WorkerConfig {
         WorkerConfig {
             worker: WorkerSection {
@@ -391,6 +414,7 @@ impl WorkerConfigBuilder {
                 cwd: None,
             },
             mtls: self.mtls,
+            llm_proxy: self.llm_proxy,
         }
     }
 }

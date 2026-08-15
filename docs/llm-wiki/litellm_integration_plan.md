@@ -27,8 +27,7 @@
 - **groq-compat 훅**: grok CLI가 assistant 메시지에 붙이는 비표준 필드(`model_id`,
   `model_fingerprint`)를 Groq가 400으로 거부하는 문제를 pre-call 훅으로 해결.
   구현 정본은 [`examples/groq-compat/`](../../examples/groq-compat/) (§4.4).
-- **워커 연동**: 현재 `ec1`만 게이트웨이를 경유하도록 전환됨 (canary). `arm1`/`ec2`는
-  아직 각 프로바이더에 직결 — 마이그레이션 미완료 (§8).
+- **워커 연동**: `WorkerConfig`에 `[llm_proxy]`(`gateway_url`, `api_key`) 섹션 도입. `grok` 및 `agy`(Antigravity CLI) 프로세스 스폰 시 `OPENAI_BASE_URL`, `GEMINI_BASE_URL`, `ANTIGRAVITY_BASE_URL`, `ANTHROPIC_BASE_URL`, `FLEET_LLM_GATEWAY_URL` 환경변수를 자동 주입하여 중앙 프록시로 라우팅. 현재 `ec1` canary 검증 완료.
 
 ---
 
