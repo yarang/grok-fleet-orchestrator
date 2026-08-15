@@ -985,6 +985,18 @@
     인용 오류 정정 다수. 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
+    ⚠️ **8차 개정 (미검증 발견 재검증, 2026-08-15)**: 5차에서 계정 한도로
+    검증받지 못한 6개 관점을 현재 문서 기준으로 다시 검토·검증(세션
+    한도로 이번에도 78개 중 32개 에이전트만 완료 — 나머지는 한도 리셋 후
+    재검증 대기). 이 항목에서 확정 반영된 것: 기존 프로덕션 mTLS 배포가
+    host당 고정 단일 upstream 구조인데 Phase 4의 host당 다중 에이전트
+    (동적 포트) 모델과 어떻게 공존하는지 서술이 전무했던 **critical**
+    구조적 공백(§13에 기록, Phase 4 착수 전 해소 필수), 프로비저닝 실패
+    알림이 `ui-design.md`에 반영 안 됐던 **minor** 격차 재확인,
+    `/projects/new` 폼에 Automatic 모드 필수 필드 입력 UI가 없던
+    **major** 발견(`ui-design.md` §3.9에 반영). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
 
@@ -1063,6 +1075,16 @@
     시작 전 폴링 대상에서 먼저 제거). 인용 오류 1건 정정. 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
+    ⚠️ **6차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
+    재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영(둘 다
+    **major**, operational-readiness 관점). §5의 WebSocket attach
+    엔드포인트가 기존 프로덕션 nginx 게이트웨이(Upgrade 헤더 미전달)를
+    통과하지 못하는 배포 전제조건 누락을 §5에 경고로 기록. `capture_terminal`
+    결과를 저장할 `agent_commands.result` 컬럼이 스키마에 없는데도 대응
+    마이그레이션 계획이 어느 문서에도 없던 누락 — §9에 신규 마이그레이션
+    번호 예약 필요를 명시. 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
     **다음 단계**: `#49` Phase 4가 완료된 뒤, §9에 남은 미검증 항목(grok의
     SIGINT/TTY 동작, 동시 세션 생성 레이스 등)을 `#49` Phase 0 검증
     스파이크와 함께 확인. 그 전까지는 착수 대상 아님.
@@ -1114,6 +1136,17 @@
     실제로는 독립 라우트). 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
+    ⚠️ **3차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
+    재검증 라운드에서 이 항목에 해당하는 확정 발견 1건(**major**,
+    ui-backend-consistency 관점)을 반영: Skill 바인딩을 Tool 바인딩과
+    완전히 동일한 구조로 설계했다고 문서는 명시하지만 `ui-design.md`의
+    에이전트 생성/관리 화면에는 Skill 선택·토글 UI가 전혀 없어 화면에서만
+    이 대칭이 깨져 있던 문제 — `ui-design.md` §3.12/§3.13에 Tool과 동일한
+    UI 패턴으로 Skill 바인딩을 추가해 반영. IA 트리·라우트 가드 매트릭스에
+    `/admin/skills`가 누락돼 있던 별도 minor 발견도 함께 반영. 자세한
+    내용은 [`docs/architecture/log.md`](../architecture/log.md)의 개정
+    이력 참고.
+
     **다음 단계**: `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은
     Phase에서 함께 구현 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI
     패턴이 완전히 동일해 분리 구현하면 낭비.
@@ -1164,6 +1197,17 @@
     규약 차이로 프레이밍이 깨질 위험이 있던 **major** 문제 — 양쪽에서
     완전한 JSON-RPC 메시지 단위로 파싱 후 재구성하도록 정정. §6 UI 서술
     ("네 번째 탭") 정정(**minor**, 실제로는 독립 라우트). 자세한 내용은
+    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+
+    ⚠️ **3차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
+    재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영. §6이
+    "Agent 상세 헤더에 runtime Badge 추가"라고 `ui-design.md` 갱신을
+    선언했지만 실제로는 반영되지 않았던 **major** Canonical-Derived
+    불일치 — `ui-design.md` §3.13 헤더에 실제로 runtime Badge를 추가해
+    반영. `platform-layer-stack.mermaid`가 이 문서(L7)의 `#51`(L5)
+    의존을 누락한 **major** 발견도 반영(`L5 --> L7` 엣지 추가). IA
+    트리·라우트 가드 매트릭스에 `/admin/agent-runtimes`가 누락돼 있던
+    별도 minor 발견도 함께 반영. 자세한 내용은
     [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
 
     **다음 단계**: `#49` Phase 0 검증 스파이크 범위에 grok build 네이티브

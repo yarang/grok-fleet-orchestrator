@@ -748,7 +748,28 @@ agent 행과 `agent_commands`가 조용히 사라지고 실제 grok 프로세스
 4. **프로비저닝 실패 알림 경로 없음**: `agent_commands.status = 'failed'`가
    쌓여도 관리자가 능동적으로 조회하지 않으면 알 방법이 없습니다 — 최소
    대시보드 배지/카운트(예: overview 페이지에 "실패한 에이전트 명령 N건")
-   정도는 필요하다고 열린 질문에 기록합니다.
+   정도는 필요하다고 열린 질문에 기록합니다. ⚠️ 팀 검토(minor)로 재확인:
+   `ui-design.md`가 §3.9~§3.14로 갱신될 때 이 배지가 실제로 반영되지 않았음을
+   확인했습니다 — 다른 상태(예: "waiting (no project worker)")는 StatusPill
+   변형까지 확정한 것과 대비되는 격차이므로, `#50` 구현 단계에서 이 항목도
+   함께 화면에 반영해야 합니다.
+5. **[critical, 팀 검토] mTLS 배포 토폴로지가 host당 다중 에이전트(동적
+   포트) 모델과 구조적으로 충돌**: 기존 프로덕션 mTLS 배포(`docs/deployment/server-topology.md`
+   §3.1.3/§4.1, `MtlsProxy::bind(listen_addr, upstream_addr, ...)` —
+   `crates/fleet-transport/src/mtls_proxy.rs`, `crates/fleet-worker/src/runner.rs:240`)는
+   host당 **고정 단일 로컬 upstream**(`127.0.0.1:2419`)을 `wss://worker-ip:2420`
+   하나로 mTLS 종단하는 1:1 구조입니다. 반면 Phase 4가 도입하는 "`agent_id`
+   키드 다중 프로세스 레지스트리(동적 포트)"는 host 하나에 N개의 grok
+   프로세스가 서로 다른 포트에서 동시에 뜨는 것을 전제로 합니다. 오케스트레이터가
+   mTLS 배포에서 특정 agent의 동적 포트로 어떻게 접속하는지(`MtlsProxy`가
+   agent별로 라우팅해야 하는지, 포트마다 별도 `MtlsProxy` 인스턴스가
+   필요한지 등)가 `#48`~`#52` 어디에도 서술돼 있지 않습니다 — 위 2번 항목
+   (동적 포트 할당 범위)이 plain 배포 관점에서만 열려 있고, mTLS 배포에서는
+   포트 범위를 정하는 것만으로는 해결되지 않는 라우팅 문제라는 점이
+   별개로 드러났습니다. **Phase 4 착수 전 반드시 해소해야 하는 설계
+   공백**으로 기록 — 후보안(각 agent 포트마다 별도 `MtlsProxy` 인스턴스
+   vs. `MtlsProxy` 자체를 agent-aware 라우터로 확장)은 Phase 0 스파이크
+   범위에 포함시킵니다.
 
 ## UI/UX 설계
 

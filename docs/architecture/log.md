@@ -85,6 +85,20 @@ Agent(옛 값 고정) 사이에 불일치가 생길 수 있는 문제** — `ass
 같은 트랜잭션에서 그 host 위의 모든 Agent의 `project_id`도 함께 갱신하도록
 Store 트레이트 doc comment에 명시.
 
+### 2026-08-15, 6차 — 미검증 발견 재검증 라운드(6개 관점 재검토)
+5차에서 계정 월간 사용량 한도로 검증받지 못한 6개 관점(cross-rbac-consistency,
+cross-terminology-consistency, operational-readiness, ui-backend-consistency,
+unverified-assumptions-audit, platform-narrative-coherence)을, 그사이
+문서가 여러 차례 수정됐으므로 옛 발견을 복원하지 않고 **현재 문서 상태
+기준으로 새로 검토**하도록 재설계해 다시 실행(사용자 요청). 이번엔 "세션
+사용량 한도"(5차의 월간 한도와 다름, 한국시간 12:40pm 리셋)에 걸려
+78개 에이전트 중 32개만 완료 — 원시 발견 24건 중 9건만 3표 검증 통과,
+1건은 실제로 반박됨(L0 계층이 MCP 클라이언트와 워커측 런타임 벤더를
+혼동한다는 발견 — 재검증 결과 반박), 나머지 14건은 검증 자체가 세션
+한도로 실패해 미검증 상태로 보류(한도 리셋 후 재검증 예정). 확정 9건 중
+이 문서에 해당하는 것은 없음(모두 `#49`/`#50`/`#51`/`#52`/`ui-design.md`
+소관).
+
 ---
 
 ## `agent-provisioning-design.md` (로드맵 [`#49`](../roadmap/roadmap.md))
@@ -254,6 +268,26 @@ CONSTRAINT`로 FK 후행 추가(§48 3차의 동일 패턴 재사용). (2) **cri
 Failed`(둘 다 `process_incarnation` 재시작 감지 경유), `Starting →
 Running` 전이에 `worker.project_id = agent.project_id` 단계 주석 추가.
 
+### 2026-08-15, 8차 — 미검증 발견 재검증 라운드(6개 관점 재검토)
+`project-feature-design.md` 6차와 동일한 재검증 라운드(세션 한도로 78개
+중 32개 에이전트만 완료, 확정 9건/반박 1건/미검증 14건 — 경위는
+`project-feature-design.md` 6차 항목 참고). 이 문서에 해당하는 확정
+발견 2건을 반영: (1) **critical** 기존 프로덕션 mTLS 배포
+(`docs/deployment/server-topology.md`, `MtlsProxy::bind`)가 host당
+고정 단일 upstream 1:1 구조인데, Phase 4의 host당 다중 에이전트(동적
+포트) 모델과 어떻게 공존하는지 `#48`~`#52` 어디에도 서술이 없던 구조적
+공백 — §13에 새 항목(5번)으로 기록, Phase 4 착수 전 반드시 해소해야
+하는 설계 공백으로 표시하고 후보안 검토를 Phase 0 스파이크 범위에 포함.
+(2) **minor** §13.4(프로비저닝 실패 알림 경로 없음)이 열린 질문으로만
+남고 이후 `ui-design.md` §3.9~§3.14 갱신에 전혀 반영되지 않았던 격차 —
+§13.4에 재확인 주석 추가.
+
+이 라운드는 `ui-design.md`의 `/projects/new` 폼에 `default_agent_template_id`/
+`agent_idle_timeout_secs` 입력 필드가 없어 §4.1의 "Automatic 전환 시 둘 다
+필수" 규칙을 실제로 만족시킬 UI 경로가 없다는 major 발견도 확정했습니다
+(파일 소재는 `ui-design.md`지만 근거 규칙은 이 문서 §4.1) — `ui-design.md`
+§3.9 인터랙션 표에 두 필드를 추가해 반영했습니다.
+
 ---
 
 ## `agent-terminal-access-design.md` (로드맵 [`#50`](../roadmap/roadmap.md))
@@ -334,6 +368,24 @@ fleet-worker 수명 동안의 모니터링/attach"로 좁히고, "재시작 시 
 7차와 동일한 클래스의 오류가 이 문서에도 독립적으로 존재 — 실제 §3.2.5로
 정정.
 
+### 2026-08-15, 4차 — 미검증 발견 재검증 라운드(6개 관점 재검토)
+`project-feature-design.md` 6차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 2건을 반영, 둘 다 **operational-readiness**
+관점: (1) **major** §5의 `POST /api/agents/:id/attach/ws` WebSocket
+업그레이드 엔드포인트가 대시보드 `/api/*` 네임스페이스를 타는데, 기존
+프로덕션 nginx 설정(`docs/deployment/nginx-gateway.md`,
+`docs/deployment/deployment.md`)이 모든 프록시 location에서 `Connection`
+헤더를 비우고 `Upgrade` 헤더를 전달하지 않아 WebSocket 핸드셰이크가
+백엔드에 도달하지 못하는 배포 전제조건 누락 — §5에 `proxy_set_header
+Upgrade`/`Connection $connection_upgrade` 추가가 `#50` 구현 시 선행돼야
+한다는 경고 주석 추가(배포 문서 자체는 이 문서 소유 범위가 아니므로
+구현 착수 시점에 함께 갱신하기로 기록만). (2) **major** §4의
+`capture_terminal` 결과 저장 계획(`agent_commands.result` 필드 추가)이
+실제로는 `agent_commands` 테이블 스키마(`#49`의 `016_agents.sql`)에
+`result` 컬럼이 아예 없는데도 대응 마이그레이션 계획이 어느 문서에도
+없던 누락 — §9에 `019_agent_commands_result.sql`(가칭) 신규 예약 필요를
+명시.
+
 ---
 
 ## `agent-harness-composition-design.md` (로드맵 [`#51`](../roadmap/roadmap.md))
@@ -393,6 +445,18 @@ Skill 저장 결정도 Phase 0 스파이크에서 재검토 가능한 잠정 결
 `ui-design.md` §3.14가 실제로는 별도 라우트(`/admin/skills`)로 설계한
 것과 모순 — 같은 관리자 메뉴 그룹 내 독립 라우트로 정정.
 
+### 2026-08-15, 3차 — 미검증 발견 재검증 라운드(6개 관점 재검토)
+`project-feature-design.md` 6차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 1건(**major**, ui-backend-consistency
+관점)을 반영: §4가 Skill 바인딩을 `agent_template_tools`/`agent_tools`와
+완전히 동일한 구조(required/optional)로 설계했다고 명시하지만, 정작
+`ui-design.md`의 에이전트 생성 폼(§3.12)·관리 모달(§3.13)에는 도구
+바인딩 UI만 있고 Skill 선택/토글 UI가 전혀 없어 화면에서만 이 대칭이
+깨져 있던 문제 — `ui-design.md` §3.12에 Skill 체크박스 목록(7번 항목,
+도구와 동일 UI 패턴)을, §3.13에 Skill 토글·필수/옵션 표시를 추가해
+반영. `ui-design.md`의 IA 트리·라우트 가드 매트릭스에 `/admin/skills`가
+누락돼 있던 별도 minor 발견도 같은 라운드에서 함께 반영.
+
 ---
 
 ## `agent-runtime-vendor-design.md` (로드맵 [`#52`](../roadmap/roadmap.md))
@@ -441,6 +505,22 @@ nullable로 남아 있던 별도 minor 불일치도 함께 해소). (2) **major*
 하도록 정정, 정확한 방식 확정은 Phase 0 스파이크로 위임. (3) **minor**
 §6 "네 번째 탭"이라는 표현 — `#51` 2차와 동일한 클래스의 오류, 독립 라우트로
 정정.
+
+### 2026-08-15, 3차 — 미검증 발견 재검증 라운드(6개 관점 재검토)
+`project-feature-design.md` 6차와 동일한 재검증 라운드(경위는 그쪽 항목
+참고). 이 문서에 해당하는 확정 발견 2건을 반영: (1) **major**
+(ui-backend-consistency) §6이 "Agent 상세(`ui-design.md` §3.13) 헤더에
+runtime Badge 추가"라고 Canonical-Derived 갱신을 선언했지만, 실제
+`ui-design.md` §3.13 헤더 와이어프레임에는 runtime 값이 전혀 없어 선언과
+실제가 어긋나 있던 문제(`agent.md` §5.3 정합성 동기화 규칙 위반 사례) —
+`ui-design.md` §3.13 헤더에 실제로 runtime Badge(`agent_runtimes.name`,
+예: "grok")를 추가해 반영. (2) **major** (platform-narrative-coherence)
+`platform-layer-stack.mermaid`가 L7(이 문서, `#52`)을 L4(`#49`)에만
+의존하는 것으로 그렸으나, 이 문서 스스로 `#51`(하네스 구성)에도 명시적으로
+의존한다고 두 번 이상 밝히고 있어 `L5 --> L7` 엣지가 빠져 있던 문제 —
+다이어그램에 해당 엣지 추가. `ui-design.md`의 IA 트리·라우트 가드
+매트릭스에 `/admin/agent-runtimes`가 누락돼 있던 별도 minor 발견도 같은
+라운드에서 함께 반영(`#51` 3차와 동일한 위치에 함께 추가).
 
 `agent-runtime-data-model.mermaid`에 `AGENT_TEMPLATES.runtime_id`를
 `NOT NULL`로 주석 갱신, `DEFAULT` 서브쿼리 버그 수정 경위 메모 추가.

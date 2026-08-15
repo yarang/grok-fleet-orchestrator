@@ -66,13 +66,19 @@ fleet.agentthread.dev/
 ├── /agents/:id                 # 에이전트 상세 (메모리 브라우저 포함) [P2] (⚠️ 미구현 — #49, §3.13)
 ├── /agents/new                 # 에이전트 생성                   [P2] (⚠️ 미구현 — #49, §3.12)
 ├── /admin/agent-templates      # 에이전트 템플릿 관리             [P2] (⚠️ 미구현 — #49, §3.14)
-└── /admin/mcp-servers          # MCP 도구 카탈로그 관리           [P2] (⚠️ 미구현 — #49, §3.14)
+├── /admin/mcp-servers          # MCP 도구 카탈로그 관리           [P2] (⚠️ 미구현 — #49, §3.14)
+├── /admin/skills                # Skill 카탈로그 관리              [P2] (⚠️ 미구현 — #51, §3.14)
+└── /admin/agent-runtimes        # 에이전트 런타임 카탈로그 관리     [P2] (⚠️ 미구현 — #52, §3.14)
 ```
 
-> `/projects*`·`/agents*`·`/admin/agent-templates`·`/admin/mcp-servers`는
-> 2026-08-14 재검토(`roadmap.md` `#48`/`#49` 4차 개정) 결과 이 문서에 추가된
-> **설계만 완료된 미구현 라우트**입니다 — 다른 라우트처럼 실측 확인된 것이
-> 아니라, `#48`/`#49` 구현 착수 시 이 IA 트리를 정본으로 따르라는 목적입니다.
+> `/projects*`·`/agents*`·`/admin/agent-templates`·`/admin/mcp-servers`·
+> `/admin/skills`·`/admin/agent-runtimes`는 2026-08-14/15 재검토(`roadmap.md`
+> `#48`~`#52` 개정) 결과 이 문서에 추가된 **설계만 완료된 미구현
+> 라우트**입니다 — 다른 라우트처럼 실측 확인된 것이 아니라, `#48`~`#52`
+> 구현 착수 시 이 IA 트리를 정본으로 따르라는 목적입니다. (⚠️ 팀 검토로
+> 뒤늦게 추가 — `/admin/skills`/`/admin/agent-runtimes`는 §3.14에는
+> 2026-08-15에 신설됐으나 이 IA 트리와 아래 라우트 가드 매트릭스에는
+> 반영되지 않았던 격차를 여기서 바로잡습니다.)
 
 ### 라우트 가드 매트릭스
 
@@ -108,6 +114,8 @@ auth.rs`)입니다.
 | `/agents/new`    | ✓    | admin        | `AgentCreate` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
 | `/admin/agent-templates` | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
 | `/admin/mcp-servers`     | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
+| `/admin/skills`          | ✓ | admin  | `SkillManage` 권한 필요(기본 admin 전용) (⚠️ 미구현, #51) |
+| `/admin/agent-runtimes`  | ✓ | admin  | `AgentRuntimeManage` 권한 필요(기본 admin 전용) (⚠️ 미구현, #52) |
 
 ---
 
@@ -751,7 +759,7 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 | 요소 | 동작 |
 | --- | --- |
 | 행 클릭 | `/projects/:id` 상세로 이동 |
-| `+ New Project` | `/projects/new` (name, description, agent_provisioning_mode, workdir_template 입력하는 단일 폼 — 마법사 아님, 기존 `/tasks/new` 같은 단순 폼 컨벤션 재사용) |
+| `+ New Project` | `/projects/new` (name, description, agent_provisioning_mode, workdir_template, **default_agent_template_id, agent_idle_timeout_secs**(2026-08-15 팀 검토로 추가 — `agent_provisioning_mode = automatic` 선택 시에만 두 필드가 나타나며 둘 다 필수, `agent-provisioning-design.md` §4.1의 "Automatic 전환 시 두 필드 모두 필수, 아니면 400" 규칙과 대응) 입력하는 단일 폼 — 마법사 아님, 기존 `/tasks/new` 같은 단순 폼 컨벤션 재사용. `/projects/:id`의 Edit 액션도 동일 폼을 재사용) |
 | Mode 컬럼 | Badge(`manual` = parchment, `automatic` = Action Blue) |
 | 데이터 갱신 주기 | 10s 폴링(기존 Overview/Workers와 동일 관례) |
 
@@ -924,7 +932,13 @@ pending_no_project_worker =
 6. **도구 바인딩** — `mcp_servers` 카탈로그 체크박스 목록. 필수 도구는 항상
    체크·비활성화, 옵션 도구만 토글 가능. 카탈로그에 없으면 "관리자에게
    `/admin/mcp-servers`에서 등록을 요청하세요" 안내.
-7. **생성**(pill CTA) → `POST /api/agents`.
+7. **Skill 바인딩**(2026-08-15 팀 검토로 추가, `#51`) — 6번 도구 체크박스
+   목록 바로 아래에 동일한 UI 패턴으로 `skills` 카탈로그 체크박스 목록을
+   둡니다. 필수 Skill은 항상 체크·비활성화, 옵션 Skill만 토글 가능(도구와
+   완전히 동일한 규칙 — `agent-harness-composition-design.md` §4가 Skill
+   바인딩을 Tool 바인딩과 동형 구조로 설계했으므로 화면도 대칭을 유지).
+   카탈로그에 없으면 "관리자에게 `/admin/skills`에서 등록을 요청하세요" 안내.
+8. **생성**(pill CTA) → `POST /api/agents`.
 
 ![Agent Creation Prefill Flow](../assets/diagrams/ui-dashboard/agent-creation-flow.mermaid)
 
@@ -933,8 +947,8 @@ pending_no_project_worker =
 | 요소 | 동작 |
 | --- | --- |
 | Host 변경 | Project 읽기 전용 필드 즉시 갱신, 이미 선택한 Template이 그 host의 프로젝트와 무관하므로 유지(템플릿은 host/project와 독립적인 프리셋) |
-| Template 변경 | Custom Prompt/도구 체크박스를 템플릿 값으로 재프리필 — 사용자가 이미 손으로 고친 값이 있으면 덮어쓰기 전에 확인 모달("템플릿 값으로 덮어쓸까요?") |
-| 필수 도구 체크박스 | 항상 체크된 채 비활성화(해제 불가) |
+| Template 변경 | Custom Prompt/도구/Skill 체크박스를 템플릿 값으로 재프리필 — 사용자가 이미 손으로 고친 값이 있으면 덮어쓰기 전에 확인 모달("템플릿 값으로 덮어쓸까요?") |
+| 필수 도구/Skill 체크박스 | 항상 체크된 채 비활성화(해제 불가) |
 | 생성 실패(host 여유 없음) | 인라인 에러 "이 host는 이미 가득 찼습니다 — 다른 host를 선택하세요" |
 
 ---
@@ -953,12 +967,13 @@ pending_no_project_worker =
 <svg viewBox="0 0 900 640" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
   <rect x="20" y="20" width="860" height="600" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
   <rect x="40" y="40" width="820" height="72" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Agents / code-reviewer-1 • running • automatic</text>
+  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">← Agents / code-reviewer-1 • running • automatic • grok</text>
   <text x="60" y="96" font-family="Inter, sans-serif" font-size="13" fill="#444">host worker-ec1 • project payments-migration • template code-reviewer</text>
   <rect x="40" y="128" width="820" height="120" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <text x="60" y="152" font-family="Inter, sans-serif" font-size="14" fill="#444">Custom Prompt / Tools  [Manage]</text>
+  <text x="60" y="152" font-family="Inter, sans-serif" font-size="14" fill="#444">Custom Prompt / Tools / Skills  [Manage]</text>
   <line x1="60" y1="184" x2="820" y2="184" stroke="#e0e0e0" />
-  <text x="60" y="208" font-family="Inter, sans-serif" font-size="13" fill="#111">required: linter-mcp, github-mcp  •  optional: slack-mcp</text>
+  <text x="60" y="208" font-family="Inter, sans-serif" font-size="13" fill="#111">tools required: linter-mcp, github-mcp  •  optional: slack-mcp</text>
+  <text x="60" y="228" font-family="Inter, sans-serif" font-size="13" fill="#111">skills required: pr-review-checklist  •  optional: —</text>
   <rect x="40" y="264" width="820" height="240" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <text x="60" y="288" font-family="Inter, sans-serif" font-size="14" fill="#444">Memory  [kind: all ▾]</text>
   <line x1="60" y1="324" x2="820" y2="324" stroke="#e0e0e0" />
@@ -975,7 +990,8 @@ pending_no_project_worker =
 
 | 요소 | 동작 |
 | --- | --- |
-| `Manage` | 모달 — custom_prompt 편집, 옵션 도구 토글(필수 도구는 여기서도 해제 불가) — `AgentManage` |
+| `Manage` | 모달 — custom_prompt 편집, 옵션 도구/Skill 토글(필수 도구·Skill은 여기서도 해제 불가, 2026-08-15 팀 검토로 Skill 토글 추가) — `AgentManage` |
+| 헤더 runtime Badge | `agent_runtimes.name`(예: `grok`, `gemini-cli`) 표시, 2026-08-15 팀 검토로 추가 — `agent-runtime-vendor-design.md` §6 참고 |
 | Memory kind 필터 | note / summary / fact 드롭다운 |
 | Memory 행 `🗑` | `DELETE /api/agents/:id/memory/:entry_id` 확인 후 즉시 목록에서 제거 — `AgentManage` |
 | Memory 행 텍스트 클릭 | 잘린 content 전체 펼침(inline expand) |

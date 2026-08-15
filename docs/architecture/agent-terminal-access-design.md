@@ -146,6 +146,20 @@
   `Operator`도 기본 미보유). 근거: 인터랙티브 attach는 사실상 호스트
   셸 접근과 동급의 권한이라, 기존 "custom_prompt/도구 바인딩 수정"
   (`AgentManage`)이나 "정지/삭제"(`AgentDelete`)보다 훨씬 민감합니다.
+> ⚠️ **[major, 팀 검토] 배포 전제조건**: `/api/agents/:id/attach/ws`는
+> 대시보드 API 네임스페이스(`/api/*`)라 프로덕션 nginx 게이트웨이의
+> `location /`(8082 프록시) 블록을 탑니다. 그런데 기존 nginx 설정
+> (`docs/deployment/nginx-gateway.md`, `docs/deployment/deployment.md`)은
+> 모든 프록시 location에서 `proxy_set_header Connection "";`로 Connection
+> 헤더를 비우고 `Upgrade` 헤더 자체를 전달하지 않습니다 — 이대로면
+> WebSocket 업그레이드 핸드셰이크가 백엔드에 도달하지 못해 attach 기능이
+> 전혀 동작하지 않습니다. **`#50` 구현 시 nginx 설정에
+> `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection
+> $connection_upgrade;`(맵 변수 포함) 추가가 선행돼야 합니다** — 배포
+> 문서 갱신은 이 문서의 소유 범위가 아니므로 여기서는 전제조건으로만
+> 기록하고, `#50` Phase 구현 착수 시 `docs/deployment/nginx-gateway.md`/
+> `deployment.md`를 함께 갱신합니다.
+
 - 흐름:
   1. `fleet-cli`가 `POST /api/agents/:id/attach/ws`로 WebSocket 업그레이드
      요청(세션 토큰 인증, `require_permission(AgentAttach)`).
@@ -242,6 +256,15 @@ tmux는 한 세션에 여러 클라이언트가 동시에 `attach`하는 것을 
 
 4. **`capture_terminal` 커맨드의 큐잉/멱등성 모델**(§4).
 5. **`agent_commands.result`(캡처 텍스트)의 크기 제한·보존 정책**(§4).
+   ⚠️ **[major, 팀 검토] 그보다 앞서 컬럼 자체가 마이그레이션 계획에
+   없음**을 확인했습니다 — `agent_commands` 테이블(`#49` §3
+   `016_agents.sql`)에는 `id, host_id, agent_id, command_type, status,
+   error, created_at, acked_at`만 있고 `result` 컬럼이 없습니다.
+   `#48`(015)→`#49`(016)→`#51`(017)→`#52`(018)가 각각 마이그레이션
+   번호를 예약한 것과 달리 `#50`은 스키마 변경이 필요함에도 자체
+   마이그레이션 계획이 없었습니다 — 구현 시 `019_agent_commands_result.sql`
+   (가칭, `ALTER TABLE agent_commands ADD COLUMN result TEXT;`)로 신규
+   예약해야 합니다.
 6. **tmux 소켓/권한/다중 사용자 격리**(§3) — `fleet-worker`가 어떤
    유저로 도는지, 커스텀 소켓(`tmux -S`)을 쓸지 등.
 7. **`fleet-cli` raw 터미널 모드의 크레이트 선택·크로스플랫폼 지원**(§5).
