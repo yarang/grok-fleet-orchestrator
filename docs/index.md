@@ -107,6 +107,7 @@ last_verified: "2026-08-15"
 |---|---|---|---|
 | [`../agent.md`](../agent.md) | Git 정책·로드맵·품질/CI 게이트·LLM-Wiki 규약·다이어그램 및 SVG 리소스 관리 규약(§6) — 에이전트 협업 가이드 전문 | 🟢 정본 | 2026-08-12 |
 | [`../CLAUDE.md`](../CLAUDE.md) | Claude Code 진입점. `@agent.md`를 임포트하고 문서 작성 지침(§6)만 요약 재기술 | 🔵 사본 — `agent.md`의 진입점/요약. 내용이 어긋나면 `agent.md`가 우선 | 2026-08-12 |
+| [`skills.md`](./skills.md) | 에이전트 스킬 시스템 사용 가이드 — `fleet tasks submit --skill <name>` CLI 사용법, `FLEET_SKILLS_DIR` 우선순위, 기본 제공 5종 스킬(rust-expert, security-audit, code-reviewer, doc-writer, data-analyst), 커스텀 스킬 작성 방법 | 🟢 정본 | 2026-08-16 |
 
 ## 하위 디렉토리 (자체 부기 체계 보유)
 
