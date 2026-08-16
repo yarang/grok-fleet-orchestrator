@@ -1,0 +1,306 @@
+# config/inventory-from-ssh.yaml
+#
+# ~/.ssh/config 에서 추출한 Fleet Orchestrator 전체 프로비저닝 인벤토리.
+#
+# 사용법:
+#   # 전체 호스트 드라이런 확인
+#   fleet provision --inventory config/inventory-from-ssh.yaml --dry-run
+#
+#   # 특정 그룹만 프로비저닝 (예: yarangdev 그룹)
+#   fleet provision --inventory config/inventory-from-ssh.yaml --tags yarangdev
+#
+#   # 특정 호스트만 프로비저닝 (예: arm1)
+#   fleet provision --inventory config/inventory-from-ssh.yaml --only oci-yarangdev-arm1
+
+defaults:
+  user: ubuntu
+  ssh_port: 22
+  host_key_policy: tofu
+
+options:
+  orchestrator_url: https://fleet.agentthread.dev
+  parallel: 4
+  retry_failed: true
+
+workers:
+  # ═══════════════════════════════════════════════════════════════════════
+  # 1. OCI - yarangdev 계정 (기본 주력 워커군)
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-yarangdev-arm1.fcoinfup.com
+    name: oci-yarangdev-arm1
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: arm64
+      tier: build
+      group: yarangdev
+      cloud: oci
+      region: ap-chuncheon-1
+
+  - host: oci-yarangdev-ec1.fcoinfup.com
+    name: oci-yarangdev-ec1
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: x86_64
+      tier: general
+      group: yarangdev
+      cloud: oci
+      region: ap-chuncheon-1
+
+  - host: oci-yarangdev-ec2.fcoinfup.com
+    name: oci-yarangdev-ec2
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: x86_64
+      tier: scaleout
+      group: yarangdev
+      cloud: oci
+      region: ap-chuncheon-1
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 2. OCI - yarang 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-yarang-arm1.fcoinfup.com
+    name: oci-yarang-arm1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: yarang
+      cloud: oci
+
+  - host: oci-yarang-arm2.fcoinfup.com
+    name: oci-yarang-arm2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: yarang
+      cloud: oci
+
+  - host: oci-yarang-ec1.fcoinfup.com
+    name: oci-yarang-ec1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: yarang
+      cloud: oci
+
+  - host: oci-yarang-ec2.fcoinfup.com
+    name: oci-yarang-ec2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: yarang
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 3. OCI - ajou 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-ajou-arm1.fcoinfup.com
+    name: oci-ajou-arm1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: ajou
+      cloud: oci
+
+  - host: oci-ajou-arm2.fcoinfup.com
+    name: oci-ajou-arm2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: ajou
+      cloud: oci
+
+  - host: oci-ajou-ec1.fcoinfup.com
+    name: oci-ajou-ec1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: ajou
+      cloud: oci
+
+  - host: oci-ajou-ec2.fcoinfup.com
+    name: oci-ajou-ec2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: ajou
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 4. OCI - fcoinfup 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-fcoinfup-arm1.fcoinfup.com
+    name: oci-fcoinfup-arm1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: fcoinfup
+      cloud: oci
+
+  - host: oci-fcoinfup-arm2.fcoinfup.com
+    name: oci-fcoinfup-arm2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: fcoinfup
+      cloud: oci
+
+  - host: oci-fcoinfup-ec1.fcoinfup.com
+    name: oci-fcoinfup-ec1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: fcoinfup
+      cloud: oci
+
+  - host: oci-fcoinfup-ec2.fcoinfup.com
+    name: oci-fcoinfup-ec2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: fcoinfup
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 5. OCI - cyrus 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-cyrus-arm1.fcoinfup.com
+    name: oci-cyrus-arm1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: cyrus
+      cloud: oci
+
+  - host: oci-cyrus-arm2.fcoinfup.com
+    name: oci-cyrus-arm2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: arm64
+      group: cyrus
+      cloud: oci
+
+  - host: oci-cyrus-ec1.fcoinfup.com
+    name: oci-cyrus-ec1
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: cyrus
+      cloud: oci
+
+  - host: oci-cyrus-ec2.fcoinfup.com
+    name: oci-cyrus-ec2
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: cyrus
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 6. OCI - booming 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-boom-arm1.fcoinfup.com
+    name: oci-boom-arm1
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: arm64
+      group: booming
+      cloud: oci
+
+  - host: oci-boom-arm2.fcoinfup.com
+    name: oci-boom-arm2
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: arm64
+      group: booming
+      cloud: oci
+
+  - host: oci-boom-ec1.fcoinfup.com
+    name: oci-boom-ec1
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: x86_64
+      group: booming
+      cloud: oci
+
+  - host: oci-boom-ec2.fcoinfup.com
+    name: oci-boom-ec2
+    ssh_key: ~/CERT/login_oci4
+    labels:
+      arch: x86_64
+      group: booming
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 7. OCI - bok 계정
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: oci-bok-arm1.fcoinfup.com
+    name: oci-bok-arm1
+    ssh_key: ~/CERT/login_bok
+    labels:
+      arch: arm64
+      group: bok
+      cloud: oci
+
+  - host: oci-bok-arm2.fcoinfup.com
+    name: oci-bok-arm2
+    ssh_key: ~/CERT/login_bok
+    labels:
+      arch: arm64
+      group: bok
+      cloud: oci
+
+  - host: oci-bok-ec1.fcoinfup.com
+    name: oci-bok-ec1
+    ssh_key: ~/CERT/login_bok
+    labels:
+      arch: x86_64
+      group: bok
+      cloud: oci
+
+  - host: oci-bok-ec2.fcoinfup.com
+    name: oci-bok-ec2
+    ssh_key: ~/CERT/login_bok
+    labels:
+      arch: x86_64
+      group: bok
+      cloud: oci
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 8. Google Cloud Platform (GCP)
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: gcp-ajou-ec1.fcoinfup.com
+    name: gcp-ajou-ec1
+    ssh_key: ~/CERT/gcloud
+    labels:
+      arch: x86_64
+      group: ajou
+      cloud: gcp
+
+  - host: gcp-fcoinfup-ec1.fcoinfup.com
+    name: gcp-fcoinfup-ec1
+    ssh_key: ~/CERT/gcloud
+    labels:
+      arch: x86_64
+      group: fcoinfup
+      cloud: gcp
+
+  - host: gcp-tune-ec1.fcoinfup.com
+    name: gcp-tune-ec1
+    ssh_key: ~/CERT/gcloud
+    labels:
+      arch: x86_64
+      group: tune
+      cloud: gcp
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 9. 온프레미스 / 로컬 서버
+  # ═══════════════════════════════════════════════════════════════════════
+  - host: 172.16.1.101
+    name: mini01
+    user: yarang
+    ssh_key: ~/CERT/login_oci3
+    labels:
+      arch: x86_64
+      group: local
+      tier: on-premise

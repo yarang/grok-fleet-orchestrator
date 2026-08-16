@@ -366,39 +366,70 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 > `host_alias`/`identity_file`/`labels` 확장 제안(아직 미구현)을 참조하세요 —
 > 이 문서의 `labels`/`region` 제안과 목적은 비슷하지만 별도 트랙입니다.
 
-#### 레이아웃 (SVG wireframe)
+#### 레이아웃 및 클러스터 그룹핑 (SVG wireframe)
 
-<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
-  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
-  <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Hosts / Inventory + agent health</text>
-  <rect x="40" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="240" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="440" y="112" width="180" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="640" y="112" width="220" height="60" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="40" y="198" width="820" height="240" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <line x1="60" y1="230" x2="820" y2="230" stroke="#e0e0e0" />
-  <line x1="60" y1="270" x2="820" y2="270" stroke="#e0e0e0" />
-  <line x1="60" y1="310" x2="820" y2="310" stroke="#e0e0e0" />
-  <line x1="60" y1="350" x2="820" y2="350" stroke="#e0e0e0" />
-  <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Total 4</text>
-  <text x="260" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Online 3</text>
-  <text x="460" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Provisioned 1</text>
-  <text x="660" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Failed 0</text>
-  <text x="60" y="216" font-family="Inter, sans-serif" font-size="14" fill="#444">Host table</text>
-  <text x="60" y="256" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.10 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [12 ev]</text>
-  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.1.11 • 0.2.112 • v0.1.0 • online • ap-ne-2 • [8 ev]</text>
-  <text x="60" y="336" font-family="Inter, sans-serif" font-size="13" fill="#111">10.0.2.20 • — • — • provisioned • us-west • [3 ev]</text>
-</svg>
+![Host Cluster Grouped View](../assets/diagrams/ui-dashboard/host-cluster-grouped-view.svg)
+
+```mermaid
+flowchart TD
+    Dashboard["Dashboard /hosts"] --> TopKPI["1. 상단 인프라 요약 바 (Top KPI Bar)"]
+    Dashboard --> Toolbar["2. 검색 & 필터 툴바 (Search & Filter Bar)"]
+    Dashboard --> GroupContainer["3. 클러스터 계정/리전 그룹 컨테이너 (Grouped Accordion)"]
+
+    TopKPI --> K1["Total Hosts (32)"]
+    TopKPI --> K2["Online & Ready (28)"]
+    TopKPI --> K3["Busy Running (3)"]
+    TopKPI --> K4["Offline / Error (1)"]
+    TopKPI --> K5["Capacity (42/128 Slots)"]
+
+    Toolbar --> F1["Arch Filter (All / ARM64 / x86_64)"]
+    Toolbar --> F2["Status Filter (Online / Idle / Busy / Offline)"]
+    Toolbar --> F3["Runtime Filter (grok / agy / gemini)"]
+    Toolbar --> F4["View Mode (Card Grid / Table View)"]
+
+    GroupContainer --> G1["Group 1: OCI yarangdev (3 Hosts - Chuncheon)"]
+    GroupContainer --> G2["Group 2: OCI ajou (4 Hosts - All Idle)"]
+    GroupContainer --> G3["Group 3: OCI cyrus (4 Hosts)"]
+    GroupContainer --> G4["Group 4: GCP Google Cloud (3 Hosts)"]
+    GroupContainer --> G5["Group 5: Local On-Premise (mini01)"]
+```
+
+#### 대규모 분산 호스트 UI 디자인 상세
+
+1. **상단 인프라 요약 바 (Top KPI Bar)**:
+   - **Total Hosts (32)**: 전체 등록 인프라 총계
+   - **Online & Ready (28)**: 초록색 뱃지, 즉시 디스패치 가능한 유휴 호스트
+   - **Active Running Tasks (3)**: 파란색 뱃지, 현재 ACP 세션 실행 중
+   - **Offline / Error (1)**: 빨간색 뱃지, 하트비트 타임아웃 또는 회선 장애
+   - **Cluster Capacity Meter**: `42 / 128 Tasks In-Use` 전체 슬롯 점유율 게이지
+
+2. **클러스터 계정/리전별 접이식 그룹 (Grouped Accordion View)**:
+   - 30여 대 이상의 서버를 클라우드 계정(OCI `yarangdev`, `ajou`, `cyrus`, `booming`, `bok`, `GCP`, `Local`)별로 그룹화.
+   - 각 아코디언 헤더에 그룹별 가용 상태 요약(예: `OCI yarangdev • 3/3 Online • Chuncheon Region`) 표시.
+
+3. **실시간 호스트 카드 컴포넌트 (Host Card Spec)**:
+   - **식별 정보**: Host Alias/Name (`oci-yarangdev-arm1`), 목적지 IP, 아키텍처 뱃지 (`[ARM64]`, `[x86_64]`), 지원 런타임 (`[grok]`, `[agy]`, `[gemini]`).
+   - **실시간 리소스 게이지**:
+     - CPU Load Average (1m, 5m, 15m) 프로그레스 바 (0~100%)
+     - Available Memory (GB / Total GB) 프로그레스 바
+   - **작업 수용 능력 & 장애 격리**:
+     - `Active Tasks: N / Max_Concurrent` (예: `1 / 4 Busy`, `0 / 2 Idle`)
+     - 서킷 브레이커 상태: 🟢 `Closed` / 🟡 `HalfOpen` / 🔴 `Open`
+   - **컨텍스트 액션 버튼**:
+     - `[▶ Dispatch]`: 해당 호스트로 `server_hint`를 고정한 태스크 제출 모달 즉시 호출
+     - `[SSH]`: 원격 터미널 세션 또는 SSH 접속 정보 복사
+     - `[Drain]`: 유지보수를 위한 신규 태스크 유입 차단 모드 토글
 
 #### 인터랙션
 
 | 요소              | 동작                                                |
 | ----------------- | --------------------------------------------------- |
-| Host 행 클릭      | `/hosts/:hostname` 상세 페이지 이동                 |
+| Host 행 / 카드 클릭 | `/hosts/:hostname` 상세 페이지 이동                 |
+| `[▶ Dispatch]` 버튼 | `server_hint`가 사전 입력된 태스크 제출 팝업 열기     |
+| `[Drain]` 토글      | 호스트 드레인 모드 전환 (`POST /api/hosts/:id/drain`) |
 | History [N ev] 클릭 | `/hosts/:hostname#events` 이벤트 섹션으로 스크롤    |
 | ↻ Refresh 버튼    | 즉시 폴링 트리거                                     |
-| Status pill       | online(green) / provisioned(amber) / offline(gray) / failed(red) ⚠️ 정정(2026-08-13): 실제 `hosts.status` 값은 `provisioned\|online\|offline\|failed` 4가지이며, "ready"/"unknown"은 존재하지 않음 |
+| Status pill       | online(green) / provisioned(amber) / offline(gray) / failed(red) |
 | 데이터 갱신 주기  | 10s 폴링                                             |
 
 #### SSH Config 자동 임포트 UI 흐름 (New in v0.2)

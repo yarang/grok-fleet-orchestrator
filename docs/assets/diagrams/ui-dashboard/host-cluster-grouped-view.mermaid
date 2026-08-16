@@ -1,0 +1,24 @@
+flowchart TD
+    Dashboard["Dashboard /hosts"] --> TopKPI["1. 상단 인프라 요약 바 (Top KPI Bar)"]
+    Dashboard --> Toolbar["2. 검색 & 필터 툴바 (Search & Filter Bar)"]
+    Dashboard --> GroupContainer["3. 클러스터 계정/리전 그룹 컨테이너 (Grouped Accordion)"]
+
+    TopKPI --> K1["Total Hosts (32)"]
+    TopKPI --> K2["Online & Ready (28)"]
+    TopKPI --> K3["Busy Running (3)"]
+    TopKPI --> K4["Offline / Error (1)"]
+    TopKPI --> K5["Capacity (42/128 Slots)"]
+
+    Toolbar --> F1["Arch Filter (All / ARM64 / x86_64)"]
+    Toolbar --> F2["Status Filter (Online / Idle / Busy / Offline)"]
+    Toolbar --> F3["Runtime Filter (grok / agy / gemini)"]
+    Toolbar --> F4["View Mode (Card Grid / Table View)"]
+
+    GroupContainer --> G1["Group 1: OCI yarangdev (3 Hosts - Chuncheon)"]
+    GroupContainer --> G2["Group 2: OCI ajou (4 Hosts - All Idle)"]
+    GroupContainer --> G3["Group 3: OCI cyrus (4 Hosts)"]
+    GroupContainer --> G4["Group 4: GCP Google Cloud (3 Hosts)"]
+    GroupContainer --> G5["Group 5: Local On-Premise (mini01)"]
+
+    G1 --> Card1["Host Card: oci-yarangdev-arm1\n• Status: Online\n• Arch: ARM64\n• CPU: 24% | Mem: 8.4/24GB\n• Active Tasks: 1/4 (Busy)\n• Circuit: Closed\n• Actions: [Dispatch] [SSH] [Drain]"]
+    G1 --> Card2["Host Card: oci-yarangdev-ec1\n• Status: Online\n• Arch: x86_64\n• CPU: 12% | Mem: 2.1/8GB\n• Active Tasks: 0/2 (Idle)"]

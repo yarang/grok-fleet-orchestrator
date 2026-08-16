@@ -20,7 +20,7 @@ docs/assets/diagrams/
 | `deployment/` | `docs/deployment/` | 4 (`.mermaid`) |
 | `llm-wiki/` | `docs/llm-wiki/` | 2 (`.mermaid`) |
 | `server-management/` | `docs/server-management/` | 4 (`.mermaid`) |
-| `ui-dashboard/` | `docs/ui-dashboard/` | 8 (`.mermaid`) |
+| `ui-dashboard/` | `docs/ui-dashboard/` | 1 (`.svg`) + 9 (`.mermaid`) |
 | `worker-bootstrap/` | `docs/worker-bootstrap/` | 4 (`.svg`) + 4 (`.mermaid`) |
 
 ## 규칙 요약
