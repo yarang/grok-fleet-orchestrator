@@ -80,7 +80,8 @@ The following skills ship in `~/.config/grok-fleet/skills/`:
 | `rust-expert` | `rust-expert.md` | Rust refactoring, performance, Clippy, error handling |
 | `security-audit` | `security-audit.md` | OWASP Top 10, SQL injection, XSS, auth/authz review |
 | `code-reviewer` | `code-reviewer.md` | Readability, maintainability, test coverage, PR feedback |
-| `doc-writer` | `doc-writer.md` | API docs, README, architecture docs, English + Korean |
+| `doc-writer` | `doc-writer.md` | API docs, README, architecture docs, English + Korean, Mermaid/SVG guidelines |
+| `markdown-visual-expert` | `markdown-visual-expert.md` | Markdown technical specs, Mermaid diagrams, vector SVGs, `docs/assets/diagrams/` asset management |
 | `data-analyst` | `data-analyst.md` | SQL optimisation, data pipelines, statistical analysis |
 
 ---
@@ -111,6 +112,10 @@ fleet tasks submit --skill code-reviewer \
 # Write documentation
 fleet tasks submit --skill doc-writer \
   "Write a README for the grok-fleet-orchestrator project with setup, usage, and contribution sections in English and Korean"
+
+# Write architecture specification with Mermaid/SVG visual diagrams
+fleet tasks submit --skill markdown-visual-expert \
+  "Write an architecture spec for the task scheduler lifecycle. Include a Mermaid sequence diagram and save any complex assets in docs/assets/diagrams/architecture/"
 
 # SQL optimisation
 fleet tasks submit --skill data-analyst \

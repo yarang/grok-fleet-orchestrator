@@ -216,3 +216,8 @@ last_verified: "2026-08-15"
 - **`docs/architecture/intelligent-task-routing-and-budget-control-design.md` 신설**:
   - FreeRouter 분류/정책의 Rust 흡수 2단계 라우팅(`TaskRouter`), 3단계 소프트 예산 제어(80% 경보/Compact, 100% Grace Turn, 120% Hard Abort & Partial Diff), 3계층 Compact 엔진(L1 Truncate, L2 Summary, L3 State), 무비용 결정론적 텔레메트리 DB 및 MAB(UCB1) 공평성 탐색 알고리즘, 멀티 CLI(grok, agy) 하이브리드 매핑 통합 설계서.
   - `docs/architecture/README.md` 및 `docs/index.md`에 🟢 정본으로 색인 등록.
+
+- **`markdown-visual-expert.md` 스킬 신설 및 `doc-writer.md` 보강**:
+  - 마크다운 기술 문서 작성 시 Mermaid 다이어그램 및 벡터 SVG 적극 활용 지침 수립.
+  - 대형/재사용 시각 에셋을 `docs/assets/diagrams/<domain>/` 디렉토리에 체계적으로 저장 및 상대경로로 참조하는 규약 반영.
+  - `~/.config/grok-fleet/skills/markdown-visual-expert.md` 생성 및 `docs/skills.md` 카탈로그 갱신.
