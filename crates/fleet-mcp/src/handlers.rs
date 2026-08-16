@@ -110,6 +110,15 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
     req.timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+    req.skills_required = args
+        .get("skills_required")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     req.created_by = "mcp".to_string();
 
     let task = Task::from_request(req);
@@ -926,25 +935,15 @@ mod tests {
             finished_at: chrono::Utc::now(),
         };
         let id = TaskId::new();
-        let task = Task {
-            id,
+        let mut task = Task::from_request(TaskRequest {
             prompt: "cargo build".into(),
-            cwd: None,
-            model: None,
-            server_hint: None,
-            required_labels: vec![],
-            max_turns: None,
-            timeout_secs: None,
-            created_at: chrono::Utc::now(),
             created_by: "test".into(),
-            priority: fleet_core::TaskPriority::Normal,
-            status: TaskStatus::Completed(result),
-            dispatched_at: None,
-            thread_id: id,
-            parent_task_id: None,
-            project_id: None,
-            retry_count: 0,
-        };
+            ..Default::default()
+        });
+        task.id = id;
+        task.thread_id = id;
+        task.status = TaskStatus::Completed(result);
+
         let summary = task_summary_with_options(&task, true);
         assert_eq!(summary["phase"], "completed");
         assert_eq!(summary["output"], "build finished");
@@ -969,25 +968,15 @@ mod tests {
             finished_at: chrono::Utc::now(),
         };
         let id = TaskId::new();
-        let task = Task {
-            id,
+        let mut task = Task::from_request(TaskRequest {
             prompt: "test".into(),
-            cwd: None,
-            model: None,
-            server_hint: None,
-            required_labels: vec![],
-            max_turns: None,
-            timeout_secs: None,
-            created_at: chrono::Utc::now(),
             created_by: "test".into(),
-            priority: fleet_core::TaskPriority::Normal,
-            status: TaskStatus::Completed(result),
-            dispatched_at: None,
-            thread_id: id,
-            parent_task_id: None,
-            project_id: None,
-            retry_count: 0,
-        };
+            ..Default::default()
+        });
+        task.id = id;
+        task.thread_id = id;
+        task.status = TaskStatus::Completed(result);
+
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["token_usage"]["input_tokens"], 100);
         assert_eq!(summary["token_usage"]["output_tokens"], 200);
@@ -1007,25 +996,15 @@ mod tests {
             finished_at: chrono::Utc::now(),
         };
         let id = TaskId::new();
-        let task = Task {
-            id,
+        let mut task = Task::from_request(TaskRequest {
             prompt: "cargo build".into(),
-            cwd: None,
-            model: None,
-            server_hint: None,
-            required_labels: vec![],
-            max_turns: None,
-            timeout_secs: None,
-            created_at: chrono::Utc::now(),
             created_by: "test".into(),
-            priority: fleet_core::TaskPriority::Normal,
-            status: TaskStatus::Completed(result),
-            dispatched_at: None,
-            thread_id: id,
-            parent_task_id: None,
-            project_id: None,
-            retry_count: 0,
-        };
+            ..Default::default()
+        });
+        task.id = id;
+        task.thread_id = id;
+        task.status = TaskStatus::Completed(result);
+
         let summary = task_summary_with_options(&task, false);
         assert_eq!(summary["phase"], "completed");
         assert!(summary.get("output").is_none());

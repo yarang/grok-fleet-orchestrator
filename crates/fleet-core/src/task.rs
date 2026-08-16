@@ -50,6 +50,21 @@ pub struct TaskRequest {
     /// `None`이면 새 스레드의 루트 태스크.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<TaskId>,
+    /// DAG 체이닝용 선행 태스크 ID 목록.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_ids: Vec<TaskId>,
+    /// 요구 에이전트 스킬 목록.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_required: Vec<String>,
+    /// 요구 논리적 프로파일 (`economy` | `balanced` | `complex` | `reasoning` | `auto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_profile: Option<String>,
+    /// 라우터가 최종 선정한 물리 모델명 (사전 지정 또는 라우팅 결과).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    /// 할당된 최대 토큰 예산 (Soft-Landing 기준).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
 }
 
 /// 작업 엔티티 (Store에 영속화되는 형태).
@@ -93,6 +108,27 @@ pub struct Task {
     /// 더 이상 재시도하지 않고 `Failed`(dead-letter)로 전이된다.
     #[serde(default)]
     pub retry_count: u32,
+    /// DAG 체이닝용 선행 태스크 ID 목록.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_ids: Vec<TaskId>,
+    /// 작업 마이그레이션 이관용 Git 임시 브랜치명.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_branch: Option<String>,
+    /// 요구 에이전트 스킬 목록.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_required: Vec<String>,
+    /// 요구 논리적 프로파일 (`economy` | `balanced` | `complex` | `reasoning` | `auto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_profile: Option<String>,
+    /// 라우터가 최종 선정한 물리 모델명.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    /// 할당된 최대 토큰 예산.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// 예산 초과(Hard Abort) 시 보존된 중간 git diff 또는 요약.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_output: Option<String>,
 }
 
 impl Task {
@@ -123,6 +159,13 @@ impl Task {
             parent_task_id: req.parent_task_id,
             project_id: None,
             retry_count: 0,
+            dependency_ids: req.dependency_ids,
+            checkpoint_branch: None,
+            skills_required: req.skills_required,
+            routing_profile: req.routing_profile,
+            resolved_model: req.resolved_model,
+            token_budget: req.token_budget,
+            partial_output: None,
         }
     }
 
@@ -324,15 +367,8 @@ mod tests {
     fn task_starts_pending() {
         let req = TaskRequest {
             prompt: "cargo build".into(),
-            cwd: None,
-            model: None,
-            server_hint: None,
-            required_labels: vec![],
-            max_turns: None,
-            timeout_secs: None,
-            priority: TaskPriority::Normal,
             created_by: "admin@org".into(),
-            parent_task_id: None,
+            ..Default::default()
         };
         let task = Task::from_request(req);
         assert!(matches!(task.status, TaskStatus::Pending));
@@ -365,26 +401,12 @@ mod tests {
             worker_id: WorkerId::new(),
             finished_at: Utc::now(),
         };
-        let id = TaskId::new();
-        let t = Task {
-            id,
+        let mut t = Task::from_request(TaskRequest {
             prompt: "x".into(),
-            cwd: None,
-            model: None,
-            server_hint: None,
-            required_labels: vec![],
-            max_turns: None,
-            timeout_secs: None,
-            created_at: Utc::now(),
             created_by: "x".into(),
-            priority: TaskPriority::Normal,
-            status: TaskStatus::Completed(result),
-            dispatched_at: None,
-            thread_id: id,
-            parent_task_id: None,
-            project_id: None,
-            retry_count: 0,
-        };
+            ..Default::default()
+        });
+        t.status = TaskStatus::Completed(result);
         assert!(t.is_terminal());
         assert!(!t.is_running());
     }

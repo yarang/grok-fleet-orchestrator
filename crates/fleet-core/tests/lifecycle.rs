@@ -24,7 +24,7 @@ fn task_lifecycle_pending_to_completed() {
         timeout_secs: Some(600),
         priority: TaskPriority::High,
         created_by: "admin@org".into(),
-        parent_task_id: None,
+        ..Default::default()
     };
     let task = Task::from_request(req);
     assert!(matches!(task.status, TaskStatus::Pending));

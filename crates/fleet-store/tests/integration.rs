@@ -77,13 +77,11 @@ fn sample_task(prompt: &str, created_by: &str) -> Task {
         prompt: prompt.into(),
         cwd: Some("/tmp/work".into()),
         model: Some("grok-4".into()),
-        server_hint: None,
         required_labels: vec!["linux".into()],
         max_turns: Some(10),
         timeout_secs: Some(600),
-        priority: TaskPriority::Normal,
         created_by: created_by.into(),
-        parent_task_id: None,
+        ..Default::default()
     };
     Task::from_request(req)
 }
@@ -481,6 +479,8 @@ async fn worker_heartbeat_updates_last_seen() {
         load_avg: vec![0.5, 0.7, 0.8],
         mem_available_mb: 8192,
         disk_free_mb: 50000,
+        cpu_usage: Some(10.0),
+        ram_usage: Some(30.0),
         agent_healthy: true,
         grok_version: None,
         fleet_worker_version: None,

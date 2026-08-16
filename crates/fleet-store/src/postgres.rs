@@ -163,14 +163,16 @@ impl Store for PgStore {
         let status_json = serde_json::to_value(&task.status)?;
         let labels_json = serde_json::to_value(&task.required_labels)?;
 
+        let dep_uuids: Vec<Uuid> = task.dependency_ids.iter().map(|id| id.as_uuid()).collect();
         sqlx::query(
             r#"
             INSERT INTO tasks
                 (id, prompt, cwd, model, server_hint, required_labels,
                  max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                 thread_id, parent_task_id, project_id)
+                 thread_id, parent_task_id, project_id, dependency_ids, checkpoint_branch, skills_required,
+                 requested_profile, resolved_model, token_budget, partial_output)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
             "#,
         )
         .bind(task.id.as_uuid())
@@ -189,6 +191,13 @@ impl Store for PgStore {
         .bind(task.thread_id.as_uuid())
         .bind(task.parent_task_id.map(|id| id.as_uuid()))
         .bind(task.project_id.map(|id| id.as_uuid()))
+        .bind(dep_uuids)
+        .bind(task.checkpoint_branch.as_ref())
+        .bind(&task.skills_required)
+        .bind(task.routing_profile.as_deref())
+        .bind(task.resolved_model.as_deref())
+        .bind(task.token_budget.map(|v| v as i64))
+        .bind(task.partial_output.as_deref())
         .execute(&self.pool)
         .await?;
 
@@ -199,7 +208,8 @@ impl Store for PgStore {
         let row = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                      thread_id, parent_task_id, project_id, retry_count
+                      thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
+                      requested_profile, resolved_model, token_budget, partial_output
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -213,7 +223,8 @@ impl Store for PgStore {
         let rows = sqlx::query(
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                      thread_id, parent_task_id, project_id, retry_count
+                      thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
+                      requested_profile, resolved_model, token_budget, partial_output
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -260,6 +271,19 @@ impl Store for PgStore {
         Ok(retry_count as u32)
     }
 
+    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError> {
+        let result = sqlx::query("UPDATE tasks SET checkpoint_branch = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(checkpoint_branch)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         // 단순 필터는 SQL로, 복잡한 것(status 위상)은 Rust로 후처리.
         let limit = filter.limit.min(1000) as i64;
@@ -273,7 +297,8 @@ impl Store for PgStore {
         //   {"Failed": {"worker_id": "..."}}
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                          thread_id, parent_task_id, project_id, retry_count
+                          thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
+                          requested_profile, resolved_model, token_budget, partial_output
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -1559,9 +1584,10 @@ impl Store for PgStore {
                 ssh_host, ssh_port, ssh_user,
                 grok_version, fleet_worker_version, os_info,
                 load_avg, mem_available_mb, disk_free_mb,
-                last_heartbeat_at, provisioned_at, created_at, updated_at
+                last_heartbeat_at, provisioned_at, created_at, updated_at,
+                cpu_usage, ram_usage
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), $17, $18)
             ON CONFLICT (hostname) DO UPDATE SET
                 worker_id = EXCLUDED.worker_id,
                 status = EXCLUDED.status,
@@ -1575,7 +1601,9 @@ impl Store for PgStore {
                 mem_available_mb = COALESCE(EXCLUDED.mem_available_mb, hosts.mem_available_mb),
                 disk_free_mb = COALESCE(EXCLUDED.disk_free_mb, hosts.disk_free_mb),
                 last_heartbeat_at = COALESCE(EXCLUDED.last_heartbeat_at, hosts.last_heartbeat_at),
-                provisioned_at = COALESCE(EXCLUDED.provisioned_at, hosts.provisioned_at)
+                provisioned_at = COALESCE(EXCLUDED.provisioned_at, hosts.provisioned_at),
+                cpu_usage = EXCLUDED.cpu_usage,
+                ram_usage = EXCLUDED.ram_usage
             "#,
         )
         .bind(host.id)
@@ -1594,6 +1622,8 @@ impl Store for PgStore {
         .bind(host.last_heartbeat_at)
         .bind(host.provisioned_at)
         .bind(host.created_at)
+        .bind(host.metrics.cpu_usage)
+        .bind(host.metrics.ram_usage)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1771,10 +1801,19 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let parent_task_id: Option<Uuid> = row.try_get("parent_task_id")?;
     let project_id: Option<Uuid> = row.try_get("project_id")?;
     let retry_count: i32 = row.try_get("retry_count")?;
+    let dependency_uuids: Vec<Uuid> = row.try_get("dependency_ids")?;
+    let checkpoint_branch: Option<String> = row.try_get("checkpoint_branch")?;
+    let skills_required: Vec<String> = row.try_get("skills_required")?;
+    let routing_profile: Option<String> = row.try_get("requested_profile")?;
+    let resolved_model: Option<String> = row.try_get("resolved_model")?;
+    let token_budget_raw: Option<i64> = row.try_get("token_budget")?;
+    let partial_output: Option<String> = row.try_get("partial_output")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
     let priority = str_to_priority(&priority_str)?;
+
+    let dependency_ids = dependency_uuids.into_iter().map(TaskId::from).collect();
 
     Ok(Task {
         id: TaskId::from(id),
@@ -1794,6 +1833,13 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         parent_task_id: parent_task_id.map(TaskId::from),
         project_id: project_id.map(fleet_core::ProjectId::from),
         retry_count: retry_count as u32,
+        dependency_ids,
+        checkpoint_branch,
+        skills_required,
+        routing_profile,
+        resolved_model,
+        token_budget: token_budget_raw.map(|v| v as u64),
+        partial_output,
     })
 }
 
@@ -1904,6 +1950,7 @@ fn worker_status_to_str(s: WorkerStatus) -> &'static str {
     match s {
         WorkerStatus::Online => "online",
         WorkerStatus::Degraded => "degraded",
+        WorkerStatus::Draining => "draining",
         WorkerStatus::Offline => "offline",
         WorkerStatus::CircuitOpen => "circuit_open",
     }
@@ -1913,6 +1960,7 @@ fn str_to_worker_status(s: &str) -> Result<WorkerStatus, StoreError> {
     match s {
         "online" => Ok(WorkerStatus::Online),
         "degraded" => Ok(WorkerStatus::Degraded),
+        "draining" => Ok(WorkerStatus::Draining),
         "offline" => Ok(WorkerStatus::Offline),
         "circuit_open" => Ok(WorkerStatus::CircuitOpen),
         other => Err(StoreError::Decode(format!(
@@ -2008,6 +2056,8 @@ fn row_to_host(row: &sqlx::postgres::PgRow) -> Result<fleet_core::Host, StoreErr
 
     let mem_available_mb: Option<i64> = row.try_get("mem_available_mb").unwrap_or(None);
     let disk_free_mb: Option<i64> = row.try_get("disk_free_mb").unwrap_or(None);
+    let cpu_usage: Option<f32> = row.try_get("cpu_usage").unwrap_or(None);
+    let ram_usage: Option<f32> = row.try_get("ram_usage").unwrap_or(None);
 
     let last_heartbeat_at: Option<chrono::DateTime<Utc>> = row.try_get("last_heartbeat_at")?;
     let provisioned_at: Option<chrono::DateTime<Utc>> = row.try_get("provisioned_at")?;
@@ -2029,6 +2079,8 @@ fn row_to_host(row: &sqlx::postgres::PgRow) -> Result<fleet_core::Host, StoreErr
             load_avg,
             mem_available_mb: mem_available_mb.map(|v| v as u64),
             disk_free_mb: disk_free_mb.map(|v| v as u64),
+            cpu_usage,
+            ram_usage,
         },
         last_heartbeat_at,
         provisioned_at,

@@ -49,6 +49,7 @@ pub async fn overview(
         match w.status {
             fleet_core::WorkerStatus::Online => counts.online += 1,
             fleet_core::WorkerStatus::Degraded => counts.degraded += 1,
+            fleet_core::WorkerStatus::Draining => counts.draining += 1,
             fleet_core::WorkerStatus::Offline => counts.offline += 1,
             fleet_core::WorkerStatus::CircuitOpen => counts.circuit_open += 1,
         }
@@ -515,6 +516,7 @@ pub async fn submit_task_api(
         priority,
         created_by: principal.user.username.clone(),
         parent_task_id: None, // inherit_from_parent가 아래서 채운다.
+        ..Default::default()
     });
     if let Some(parent) = &parent_task {
         task.inherit_from_parent(parent);

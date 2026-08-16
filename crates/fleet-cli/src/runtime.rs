@@ -966,9 +966,8 @@ async fn run_tasks_submit(
         timeout_secs,
         priority: task_priority,
         created_by,
-        parent_task_id: None,
-        dependency_ids: vec![],
         skills_required: skills.clone(),
+        ..Default::default()
     });
     let task_id = task.id;
 
