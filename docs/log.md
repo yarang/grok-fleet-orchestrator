@@ -220,4 +220,5 @@ last_verified: "2026-08-15"
 - **`markdown-visual-expert.md` 스킬 신설 및 `doc-writer.md` 보강**:
   - 마크다운 기술 문서 작성 시 Mermaid 다이어그램 및 벡터 SVG 적극 활용 지침 수립.
   - 대형/재사용 시각 에셋을 `docs/assets/diagrams/<domain>/` 디렉토리에 체계적으로 저장 및 상대경로로 참조하는 규약 반영.
-  - `~/.config/grok-fleet/skills/markdown-visual-expert.md` 생성 및 `docs/skills.md` 카탈로그 갱신.
+  - `~/.config/grok-fleet/skills/markdown-visual-expert.md` 및 `.agents/skills/markdown-visual-expert/SKILL.md` 생성.
+  - Gemini/Antigravity 에이전트 지침 진입점 [`GEMINI.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/GEMINI.md) 신설 및 `docs/index.md` 색인 등록.
