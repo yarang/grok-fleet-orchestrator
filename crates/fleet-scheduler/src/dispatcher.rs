@@ -17,6 +17,8 @@ use fleet_transport::{DispatchRequest, TransportError, WorkerEvent};
 use tracing::{info, warn};
 
 use crate::breaker::{BreakerState, Outcome};
+use crate::router::TaskRouter;
+use crate::skill_loader::inject_skills;
 use crate::state::FleetState;
 
 /// 활성 작업 게이지 (pending + active). 모니터링용.
@@ -136,6 +138,7 @@ impl Dispatcher {
 
                 dec_running();
                 info!(%task_id, %worker_id, "task completed");
+                self.dispatch_ready_tasks().await;
             }
             WorkerEvent::Failed { task_id, error } => {
                 // 현재 상태에서 worker_id 추출
@@ -221,8 +224,21 @@ impl Dispatcher {
 
     /// 작업을 제출. 워커 선택 → dispatch → 백그라운드 실행.
     #[tracing::instrument(skip(self, task), fields(task_id = %task.id))]
-    pub async fn submit(&self, task: Task) -> Result<TaskId, DispatchError> {
+    pub async fn submit(&self, mut task: Task) -> Result<TaskId, DispatchError> {
         let task_id = task.id;
+
+        // 0. 지능형 라우터를 통해 프로파일/모델/예산 결정
+        let router = crate::router::HeuristicTaskRouter::new();
+        let decision = router.resolve_routing(&task);
+        if task.routing_profile.is_none() {
+            task.routing_profile = Some(decision.profile.as_str().to_string());
+        }
+        if task.resolved_model.is_none() {
+            task.resolved_model = Some(decision.resolved_model);
+        }
+        if task.token_budget.is_none() {
+            task.token_budget = Some(decision.token_budget);
+        }
 
         // 1. Store에 작업 저장
         self.state
@@ -257,6 +273,25 @@ impl Dispatcher {
         // 전이시킨다. transport dispatch 자체의 실패(연결 오류 등)는 이
         // 플래그와 무관하게 `dispatch_existing` 내부에서 항상 즉시 `Failed`로
         // 마킹되므로 아래에서 별도 처리가 필요 없다.
+        // DAG 체이닝: 미완료 선행 작업이 하나라도 있다면 dispatch를 수행하지 않고 Pending으로 대기
+        let mut has_unresolved_dependencies = false;
+        for dep_id in &task.dependency_ids {
+            if let Ok(Some(dep_task)) = self.state.store.get_task(*dep_id).await {
+                if !matches!(dep_task.status, TaskStatus::Completed(_)) {
+                    has_unresolved_dependencies = true;
+                    break;
+                }
+            } else {
+                has_unresolved_dependencies = true;
+                break;
+            }
+        }
+
+        if has_unresolved_dependencies {
+            info!(%task_id, "Task has unresolved dependencies, leaving Pending");
+            return Ok(task_id);
+        }
+
         let retries_enabled = self.max_dispatch_retries > 0;
         match self.dispatch_existing(task, !retries_enabled).await {
             Ok(()) => {}
@@ -381,11 +416,13 @@ impl Dispatcher {
             .await;
 
         // 6. Transport로 dispatch
-        let prompt = if task.parent_task_id.is_some() {
+        let base_prompt = if task.parent_task_id.is_some() {
             self.build_threaded_prompt(&task).await
         } else {
             task.prompt.clone()
         };
+        // 스킬 로더: skills_required에 지정된 스킬 파일을 로드해 프롬프트 앞에 인젝션.
+        let prompt = inject_skills(&base_prompt, &task.skills_required);
         let req = DispatchRequest {
             task_id,
             worker_id,
@@ -394,6 +431,8 @@ impl Dispatcher {
             model: task.model.clone(),
             max_turns: task.max_turns,
             timeout_secs: task.timeout_secs,
+            checkpoint_branch: task.checkpoint_branch.clone(),
+            skills_required: task.skills_required.clone(),
         };
 
         inc_running();
@@ -613,6 +652,39 @@ impl Dispatcher {
             .flatten()
             .map(|w| w.circuit_state)
             .unwrap_or(CircuitState::Closed)
+    }
+
+    async fn dispatch_ready_tasks(&self) {
+        use fleet_core::TaskFilter;
+        use fleet_core::TaskStatusFilter;
+        
+        let filter = TaskFilter {
+            status: Some(TaskStatusFilter::Pending),
+            limit: 1000,
+            ..Default::default()
+        };
+        
+        if let Ok(pending_tasks) = self.state.store.list_tasks(&filter).await {
+            for task in pending_tasks {
+                let mut ready = true;
+                for dep_id in &task.dependency_ids {
+                    if let Ok(Some(dep_task)) = self.state.store.get_task(*dep_id).await {
+                        if !matches!(dep_task.status, TaskStatus::Completed(_)) {
+                            ready = false;
+                            break;
+                        }
+                    } else {
+                        ready = false;
+                        break;
+                    }
+                }
+                if ready {
+                    let task_id = task.id;
+                    info!(%task_id, "Dependency resolved, dispatching task from DAG chain");
+                    let _ = self.dispatch_existing(task, false).await;
+                }
+            }
+        }
     }
 }
 

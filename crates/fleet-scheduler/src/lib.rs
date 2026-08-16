@@ -25,7 +25,9 @@ pub mod cleanup;
 pub mod dispatcher;
 pub mod health;
 pub mod reconcile;
+pub mod router;
 pub mod selector;
+pub mod skill_loader;
 pub mod state;
 pub mod sync;
 
@@ -34,6 +36,7 @@ pub use cleanup::{CleanupConfig, CleanupSummary, SessionCleanup, SessionCleanupH
 pub use dispatcher::{CancelError, DispatchError, Dispatcher, WaitError};
 pub use health::{HealthChecker, HealthCheckerHandle, HealthConfig};
 pub use reconcile::{ReconcileConfig, ReconcileSummary, Reconciler, ReconcilerHandle};
+pub use router::{HeuristicTaskRouter, RoutingDecision, RoutingProfile, TaskRouter};
 pub use selector::{SelectionError, WorkerSelector};
 pub use state::FleetState;
 pub use sync::MultiAdminSync;

@@ -1,0 +1,36 @@
+flowchart TD
+    Start(["태스크 제출 (Dispatcher::submit)"]) --> CheckProfile{"명시적 routing_profile 지정 여부"}
+
+    %% 1. 명시적 프로파일
+    CheckProfile -- "Yes" --> ResolveExplicit["요청 프로파일 & 기본 모델/예산 확정"]
+    
+    %% 2. 명시적 모델 지정
+    CheckProfile -- "No" --> CheckModel{"명시적 model 지정 여부"}
+    CheckModel -- "Yes" --> InferFromModel["모델명 기반 프로파일 역추론 (e.g. fast->Economy, r1->Reasoning)"]
+    
+    %% 3. 14차원 결정론적 휴리스틱 판정
+    CheckModel -- "No" --> HeuristicAnalysis["14차원 결정론적 휴리스틱 분석 (0ms, $0)"]
+    
+    subgraph Heuristics ["Heuristic Task Classifier"]
+        H1["1. 키워드 분석 (린트/구현/리팩토링/증명)"]
+        H2["2. 프롬프트 길이/구조 분석"]
+        H3["3. 스킬 메타데이터 (rust-expert, doc-writer 등)"]
+    end
+    
+    HeuristicAnalysis --> Heuristics
+    Heuristics --> ScoreRanking{"점수 비교 판정"}
+    
+    ScoreRanking -- "Reasoning >= 4" --> ProfileReasoning["Reasoning Profile\n(deepseek-r1 / 500k 토큰)"]
+    ScoreRanking -- "Complex >= 4" --> ProfileComplex["Complex Profile\n(grok-4 / 250k 토큰)"]
+    ScoreRanking -- "Economy >= 3" --> ProfileEconomy["Economy Profile\n(grok-code-fast / 40k 토큰)"]
+    ScoreRanking -- "Default" --> ProfileBalanced["Balanced Profile\n(gemini-2.5-flash / 100k 토큰)"]
+
+    ResolveExplicit --> FinalDecision["RoutingDecision 생성"]
+    InferFromModel --> FinalDecision
+    ProfileReasoning --> FinalDecision
+    ProfileComplex --> FinalDecision
+    ProfileEconomy --> FinalDecision
+    ProfileBalanced --> FinalDecision
+
+    FinalDecision --> DBUpdate["Task 레코드 갱신 (profile, resolved_model, budget)"]
+    DBUpdate --> SelectWorker["WorkerSelector 워커 탐색 및 ACP 디스패치"]

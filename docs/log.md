@@ -222,3 +222,10 @@ last_verified: "2026-08-15"
   - 대형/재사용 시각 에셋을 `docs/assets/diagrams/<domain>/` 디렉토리에 체계적으로 저장 및 상대경로로 참조하는 규약 반영.
   - `~/.config/grok-fleet/skills/markdown-visual-expert.md` 및 `.agents/skills/markdown-visual-expert/SKILL.md` 생성.
   - Gemini/Antigravity 에이전트 지침 진입점 [`GEMINI.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/GEMINI.md) 신설 및 `docs/index.md` 색인 등록.
+
+- **`fleet-scheduler` 지능형 TaskRouter 및 HeuristicTaskClassifier 구현 (Step 3)**:
+  - `crates/fleet-scheduler/src/router.rs` 신설: `TaskRouter` 트레잇 및 14차원 결정론적 휴리스틱 분류기(`HeuristicTaskRouter`) 구현 (비용 $0, 레이턴시 0ms).
+  - 4단계 논리 프로파일(`Economy`, `Balanced`, `Complex`, `Reasoning`) 및 기본 모델/소프트 예산 매핑.
+  - `Dispatcher::submit` 파이프라인에서 지능형 라우팅 결정 자동 주입.
+  - `docs/assets/diagrams/architecture/task-router-flow.{svg,mermaid}` 다이어그램 작성 및 아키텍처 사양서 연동.
+  - `cargo test --workspace` 100% 통과 검증 완료.

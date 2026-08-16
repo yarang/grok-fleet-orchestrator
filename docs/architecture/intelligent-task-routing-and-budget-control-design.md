@@ -29,6 +29,8 @@ Grok Fleet Orchestrator의 기존 라우팅 방식은 `task.model`과 워커의 
 
 전체 라우팅을 **1단계 논리적 요구 능력 분류**와 **2단계 물리 모델 및 워커 매핑**으로 분리합니다.
 
+![Task Router Flow](../assets/diagrams/architecture/task-router-flow.svg)
+
 ```mermaid
 flowchart LR
     A["Task 제출\n(User Prompt + Skills)"] --> B["Task Classifier\n(Heuristic + Pre-flight)"]
@@ -42,10 +44,10 @@ flowchart LR
 ```
 
 ### 2.1 논리적 프로파일 (Logical Profiles)
-* `economy`: 단순 파일 조회, 포맷팅, 작은 오탈자 수정 (초저비용/무료 모델 우선)
-* `balanced`: 일반적인 버그 수정, 단위 테스트 추가, 단일 컴포넌트 구현
-* `complex`: 다중 파일 리팩토링, 아키텍처 분석, 복잡한 디버깅
-* `reasoning`: 보안 감사, 동시성/데드락 해결, DB 마이그레이션
+* `economy`: 단순 파일 조회, 포맷팅, 작은 오탈자 수정 (초저비용/무료 모델 우선, 기본 예산 40k)
+* `balanced`: 일반적인 버그 수정, 단위 테스트 추가, 단일 컴포넌트 구현 (기본 예산 100k)
+* `complex`: 다중 파일 리팩토링, 아키텍처 분석, 복잡한 디버깅 (기본 예산 250k)
+* `reasoning`: 보안 감사, 동시성/데드락 해결, 수학적/형식적 증명 (기본 예산 500k)
 
 ### 2.2 사용자 Override 지원
 * CLI/API/MCP에서 명시적 지정 가능: `--profile reasoning` 또는 프롬프트 접두사 `/max`, `/simple`.
@@ -56,24 +58,28 @@ flowchart LR
 
 오케스트레이터의 Rust 카운터가 매 턴 응답의 `usage` 메타데이터를 **$O(1)$ 무비용 정수 누적**하여 실시간 감시합니다.
 
-```
-[태스크 실행: 예산 50,000 토큰]
-      │
-      ▼
- ┌───▶ [Turn N LLM 응답 수신] ──▶ { usage: { input, output } }
- │           │
- │           ▼
- │     [고정 알고리즘 즉시 누적 (비용 $0, 0ms)]
- │       누적 토큰 = 41,800 tokens (83.6%)
- │           │
- │           ▼
- │     [3단계 임계치 분기 판정]
- │       ├─ < 80%   : [정상 진행] ➔ 워커가 도구(Tool) 실행
- │       ├─ 80%~100%: [Phase 1: 경보 & Compact] ➔ 프롬프트에 마무리 유도 주입 + 히스토리 압축
- │       ├─ 100%~120%: [Phase 2: Grace Wrap-up] ➔ 추가 도구 차단 + 현재 결과/diff 요약 강제
- │       └─ > 120%  : [Phase 3: Hard Stop] ➔ ACP 세션 즉시 취소 & 워크스페이스 중간 diff 보존
- │           │
- └───────────┘
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as Dispatcher
+    participant T as Transport (ACP)
+    participant W as Worker (grok / agy)
+    
+    D->>T: Dispatch Task (token_budget = B)
+    loop Each Turn
+        T->>W: Prompt Request
+        W-->>T: Prompt Response (usage: {input, output})
+        Note over T: Fixed Integer Accumulator (Cost: $0, 0ms)
+        alt Tokens < 80% B
+            Note over T: Normal Execution
+        else 80% <= Tokens < 100% B
+            Note over T: Phase 1: Inject Budget Warning + Trigger Compact
+        else 100% <= Tokens < 120% B
+            Note over T: Phase 2: Grace Turn (Deny New Tools, Enforce Wrap-up)
+        else Tokens >= 120% B
+            Note over T: Phase 3: Hard Abort (Preserve partial_output diff)
+        end
+    end
 ```
 
 1. **Phase 1 (80% Warning & Compact)**:
