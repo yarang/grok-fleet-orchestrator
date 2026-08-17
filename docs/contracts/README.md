@@ -5,20 +5,35 @@ implementation: not-applicable
 verification: design-reviewed
 source: "docs/contracts/README.md"
 last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["api-contracts"]
 ---
 
-# External Contracts
+# Consumer-facing Contracts
 
-외부 소비자가 호출·구현해야 하는 wire contract를 분리한다. 이 디렉터리의 문서는
-**목표 설계의 정본**이다. 구현이 설계와 다르면 설계가 이후 변경의 방향을 정하고,
-문서는 `implementation` 상태와 현재 차이를 명시한다. 현재 동작의 사실 확인에는
-연결된 코드·OpenAPI·테스트를 사용하며, 구현이 설계대로 동작한다고 추정하지 않는다.
+외부 Worker·자동화·MCP client와 first-party Dashboard가 의존하는 service contract를 분리한다.
+CLI 사용법과 설정 파일 형식은 이 디렉터리의 범위가 아니다. 구현이 설계와 다르면 문서는
+`implementation` 상태와 현재 차이를 명시하며, 구현이 목표대로 동작한다고 추정하지 않는다.
 
-| 계약 | 독자와 정본 |
-|---|---|
-| HTTP API | Worker·자동화 — [`http-api.md`](./http-api.md) |
-| MCP | MCP client — [`mcp-tools.md`](./mcp-tools.md) |
-| Worker enrollment | Worker 운영자·daemon — [`worker-enrollment.md`](./worker-enrollment.md) |
-| Dashboard API | first-party Dashboard — [`dashboard-api.md`](./dashboard-api.md) |
-| Agent management | Agent 운영자·자동화 — [`agent-management.md`](./agent-management.md) |
-| Project management | Dashboard·MCP client — [`project-management.md`](./project-management.md) |
+현재 동작은 router·handler·테스트가 실행 사실이고, OpenAPI와 `tools/list`가 기계 판독 wire schema다.
+이 디렉터리의 prose는 현재 표면의 탐색·보안 경계와 목표 계약을 소유한다. 충돌이 발견되면 현재
+사실을 숨기지 않고 차이를 기록한 뒤 코드 또는 목표 계약 중 승인된 쪽을 함께 수정한다.
+
+## 현재 또는 부분 구현 계약
+
+| 계약 | 소비자 | 기계 판독 근거 | 구현 상태 |
+|---|---|---|---|
+| [HTTP API](./http-api.md) | Worker·자동화 | OpenAPI | `partial` |
+| [MCP](./mcp-tools.md) | MCP client | `tools/list` | `partial` |
+| [Worker enrollment](./worker-enrollment.md) | Worker 운영자·daemon | HTTP schema·코드 | `partial` |
+| [Dashboard API](./dashboard-api.md) | first-party Dashboard | route·schema 코드 | `partial` |
+
+## Roadmap에 등록된 제안 계약
+
+아래 문서는 현재 호출 가능한 기능이 아니다. 연결된 Roadmap 항목과 활성화 게이트가 충족되기
+전에는 wire contract가 승인된 것으로 보거나 클라이언트 호환성 약속·운영 절차로 사용하지 않는다.
+
+| 계약 | 소비자 | Roadmap | 구현 상태 |
+|---|---|---|---|
+| [Agent management](./agent-management.md) | Agent 운영자·자동화 | [#49](../roadmap/roadmap.md#기능-확장-48-52) | `proposed` |
+| [Project management](./project-management.md) | Dashboard·MCP client | [#48](../roadmap/roadmap.md#기능-확장-48-52) | `proposed` |

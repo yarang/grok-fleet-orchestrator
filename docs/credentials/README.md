@@ -10,9 +10,8 @@ last_verified: "2026-08-15"
 > Fleet이 운영하는 모든 호스트(orchestrator, worker)와 부속 서비스(wiki-mcp 등)의
 > API 키·토큰·비밀번호를 **어디에 두고, 어떻게 기록하고, 언제 회전할지** 정하는 문서.
 >
-> 이 디렉토리는 [`docs/llm-wiki/`](../llm-wiki/README.md)와 동일한 정본(canonical) /
-> append-only 로그 관례를 따른다: 이 `README.md`가 정책(무엇을 해야 하는가), `registry.md`가
-> append-only 기록(무엇이 실제로 존재하는가)이다.
+> 이 디렉토리는 [문서 관리 정책](../governance/documentation-policy.md)을 따른다. 이 `README.md`가
+> secret 메타데이터 정책, `registry.md`가 현재 스냅샷과 append-only 변경 기록을 소유한다.
 
 ## 원칙
 

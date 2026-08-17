@@ -105,6 +105,8 @@ last_verified: "2026-08-15"
     *   [`reverse-proxy.md`](../deployment/reverse-proxy.md)에 `/ws` 리버스 프록시 규격 주입.
     *   [`configuration.md`](../deployment/configuration.md)에 격리 디렉토리 구조 및 `wipe` 전용 sudoers 사양 기록.
 3.  **Phase 3. 부트스트랩 및 가입 흐름 교정**:
-    *   [`join-authentication.md`](../worker-bootstrap/join-authentication.md)의 일회성 토큰 persistence 오기 교정.
+    *   당시 `join-authentication.md`의 일회성 토큰 persistence 오기 교정을 계획했다.
+        해당 문서는 가입 계약과 보안 정본에 병합한 뒤 삭제했으며 원문은 Git 이력으로 확인한다.
 4.  **Phase 4. 자가 치유 및 게이트웨이 설정 동기화**:
-    *   [`hardware-healing.md`](../operations/proposals/hardware-healing.md)에 `pg_notify` 유실 대비 Cursor 스펙 명시.
+    *   당시 `hardware-healing.md`에 `pg_notify` 유실 대비 Cursor 스펙을 명시하는 안을 검토했다.
+        해당 미승인 제안은 이후 폐기했으며 원문은 Git 이력으로 확인한다.

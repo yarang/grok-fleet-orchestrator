@@ -57,8 +57,8 @@ flowchart LR
 1. 현재 설계 결정을 확인할 때는 [Architecture](README.md)의 정본 선택표와 해당 정본을 읽는다.
 2. 실제 코드 구조·제약·과거 정정은 [implementation-reference.md](implementation-reference.md)를 읽는다.
 3. 호출 가능한 외부 표면은 `architecture/`가 아니라 [contracts/](../contracts/README.md)를 읽는다.
-4. 아직 구현되지 않은 운영 자동화는 [operations/proposals/](../operations/proposals/README.md)에서만
-   확인한다.
+4. 아직 구현되지 않은 운영 자동화 요구는 [Roadmap](../roadmap/README.md)에 ID를 부여하고,
+   승인된 Architecture 또는 Security 설계에서 확인한다.
 
 ## 범위 밖
 

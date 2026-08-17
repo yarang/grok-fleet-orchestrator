@@ -12,6 +12,9 @@ owners: ["documentation-governance"]
 
 # 설계문서 품질·정본성 합동 검토 보고서
 
+> 후속 결정(2026-08-17): 미구현 Self-Healing 및 Server Management 제안은 승인된
+> Roadmap 작업이 아니므로 현재 문서 트리에서 제거했다. 원문과 당시 판단은 Git 이력으로 보존한다.
+
 ## 1. 결론
 
 현재 문서군의 핵심 문제는 단순한 분량 부족이 아니다. 다음 세 문제가 함께 존재한다.
@@ -94,7 +97,7 @@ owners: ["documentation-governance"]
 | `architecture/overview.md` | Derived 탐색 지도, 100~150줄 | 시스템 경계, 소형 Mermaid 컴포넌트 지도, 현재 구현 상태 요약, 정본 탐색표, 안정 링크 | 세부 코드 대조, 절차, 과거 정정, 제안 |
 | `architecture/implementation-reference.md` | Derived 구현 참조, 분량 제한 없음 | 코드 구조, 실제 제약, 검증 근거, 구현 단계 | ACP, Worker daemon, WebSocket 재연결, 세션 동시성, CircuitBreaker, WorkerSelector, task monitoring, mTLS, SSH host-key 검증의 코드 대조 |
 | `worker-bootstrap/` 하위 정본/사본 | 도메인별 지위 선언 | join·bootstrap의 현재 계약과 절차 | Worker join·bootstrap 관련 설명 |
-| `operations/proposals/` 또는 Historical 문서 | Proposed 또는 Historical | 미구현 Self-Healing의 제안과 제거·보류 이유 | Self-Healing 설계와 과거 구현 제거 기록 |
+| Git 이력 | Historical | 폐기된 Self-Healing 제안의 복원 원천 | Self-Healing 설계와 과거 구현 제거 기록 |
 
 `implementation-reference.md`는 설계 결정·운영 규칙·API 계약을 새로 만들지 않는다.
 그 내용의 정본은 각각 architecture, security, contracts, deployment 문서에 둔다.
@@ -143,7 +146,7 @@ owners: ["documentation-governance"]
 - [ ] frontmatter, 정본 중복, 상대 링크, 색인 누락을 검사하는 문서 lint를 CI에 추가한다. (P1)
 - [ ] API 계약의 HTTP/MCP/Dashboard 책임을 분리한다. (P1)
 - [ ] `overview.md`를 100~150줄의 Derived 탐색 지도로 재작성하고, 코드 대조 고유 내용은 `implementation-reference.md`로 이동한다. (P1)
-- [ ] `overview.md`에서 Worker join·bootstrap은 `worker-bootstrap/`으로, 미구현 Self-Healing은 `operations/proposals/` 또는 Historical 문서로 이동한다. (P1)
+- [x] `overview.md`에서 Worker join·bootstrap은 `worker-bootstrap/`으로 이동하고, 미승인 Self-Healing 제안은 삭제해 Git 이력으로 보존한다. (P1)
 - [ ] agent provisioning, deployment, UI 문서를 안정 링크를 보존하며 단계적으로 분리한다. (P2)
 - [ ] roadmap은 원문을 유지하고 active backlog/index를 생성한다. (P2)
 

@@ -26,21 +26,38 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 추가로 확인한다. 각 응답 필드는 `crates/fleet-dashboard/src/schema.rs`, 상세 오류와 권한은 handler
 테스트가 현재 구현 근거다.
 
-| 표면 | Method | 목적 |
-|---|---|---|
-| `/api/overview`, `/api/me` | GET | 요약과 현재 session 사용자 |
-| `/api/workers`, `/api/workers/{id}` | GET | Worker 목록·상세 |
-| `/api/tasks` | GET, POST | Task 목록·제출 |
-| `/api/tasks/{id}`, `/api/tasks/{id}/thread` | GET | Task 상세·thread 조회 |
-| `/api/events`, `/api/events/stream` | GET | 이벤트 목록·SSE stream |
-| `/api/hosts`, `/api/hosts/{hostname}` | GET | Host 목록·상세 |
-| `/api/audit` | GET | 인증·권한 감사 로그 |
-| `/api/tools` | GET | MCP 도구 카탈로그 |
-| `/api/users` | GET, POST | 사용자 목록·생성 |
-| `/api/users/{id}/toggle`, `/api/users/{id}/delete` | POST | 사용자 상태 변경·삭제 |
-| `/api/ssh-keys`, `/api/ssh-keys/{name}` | GET, POST, DELETE | SSH key 메타데이터·관리 |
-| `/api/hosts/provision` | POST | 원격 host provisioning 요청 |
-| `/api/users/resend-verification` | POST | 인증 전 이메일 재전송 |
+| 표면 | Method | 현재 capability | 목적 |
+|---|---|---|---|
+| `/api/overview` | GET | `DashboardView` | 운영 요약 |
+| `/api/me` | GET | session | 현재 session 사용자 |
+| `/api/workers`, `/api/workers/{id}` | GET | `WorkerList` | Worker 목록·상세 |
+| `/api/tasks` | GET, POST | `TaskList`, `TaskCreate` | Task 목록·제출 |
+| `/api/tasks/{id}`, `/api/tasks/{id}/thread` | GET | `TaskRead`; output은 `TaskOutput` | Task 상세·thread 조회 |
+| `/api/events`, `/api/events/stream` | GET | `EventsList` | 이벤트 목록·SSE stream |
+| `/api/hosts`, `/api/hosts/{hostname}` | GET | `DashboardView` | Host 목록·상세 |
+| `/api/audit` | GET | `AuditRead` | 인증·권한 감사 로그 |
+| `/api/tools` | GET | `DashboardView` | MCP 도구 카탈로그 |
+| `/api/users` | GET, POST | `UserRead`, `UserCreate` | 사용자 목록·생성 |
+| `/api/users/{id}/toggle`, `/api/users/{id}/delete` | POST | `UserCreate`, `UserDelete` | 사용자 상태 변경·삭제 |
+| `/api/ssh-keys`, `/api/ssh-keys/{name}` | GET, POST, DELETE | `HostProvision` | 프로비저닝용 SSH 비밀키 관리 |
+| `/api/hosts/provision` | POST | `HostProvision` | 원격 host provisioning 요청 |
+| `/api/users/resend-verification` | POST | public; 현재 rate limit 없음 | 인증 전 이메일 재전송 |
+
+## 오류와 mutation 경계
+
+`ApiError`를 사용하는 Dashboard JSON handler의 현재 envelope는 다음과 같다.
+
+```json
+{ "error": { "code": "not_found", "message": "worker not found" } }
+```
+
+해당 타입의 코드는 `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`,
+`store_error`, `internal_error`, `unavailable`이다. 모든 route가 아직 이 envelope로 통합된 것은 아니다.
+세부 요청·응답 schema와 mutation별 CSRF 적용은 기계 판독 계약으로 통합되지 않았으므로 handler와
+테스트가 실행 사실이다. 특히 public resend JSON API는 현재 rate limit이 없고, 존재하지 않는 계정과
+이미 검증된 계정에 서로 다른 오류를 반환해 계정 상태를 구분할 수 있다. session cookie가 있다는
+이유만으로 모든 mutation의 CSRF 검증이나 멱등성을 가정하면 안 된다. 외부 공개 전에는 versioning,
+schema 생성, pagination, CSRF와 idempotency를 별도 호환성 결정으로 확정한다.
 
 인증·세션·RBAC의 목표 정책은 [control-plane security model](../security/control-plane-security-model.md)이
 정본이다. API 표면을 바꿀 때는 이 표, route, schema, handler 테스트를 함께 갱신한다.

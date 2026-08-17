@@ -361,10 +361,8 @@ CREATE INDEX idx_host_events_host ON host_events(host_id, created_at DESC);
 > os_info(JSONB — 위 제안의 TEXT가 아님), load_avg, mem_available_mb,
 > disk_free_mb, last_heartbeat_at, provisioned_at, created_at, updated_at`.
 > `host_events`는 실제로 `id UUID`(제안의 `BIGSERIAL seq`가 아님) +
-> `severity` 컬럼이 추가돼 있습니다. 라벨/리전으로 인벤토리를 필터링하려면
-> [`bootstrap-release-v0.2.md §3.2.1`](../worker-bootstrap/bootstrap-release-v0.2.md)의
-> `host_alias`/`identity_file`/`labels` 확장 제안(아직 미구현)을 참조하세요 —
-> 이 문서의 `labels`/`region` 제안과 목적은 비슷하지만 별도 트랙입니다.
+> `severity` 컬럼이 추가돼 있습니다. `host_alias`/`identity_file`/`labels` 확장은 승인된
+> backend 계약이나 Roadmap 항목이 없으므로 현재 지원 스키마로 해석하지 않습니다.
 
 #### 레이아웃 및 클러스터 그룹핑 (SVG wireframe)
 
@@ -436,13 +434,10 @@ flowchart TD
 
 호스트 인벤토리 우측 상단의 `[Import SSH Config]` 버튼을 통해 로컬 설정을 임포트하고 데이터베이스화하는 화면 설계 스펙입니다.
 
-> ⚠️ **정정 (2026-08-12)**: `.ssh/config` 자동 임포트 자체는 아직 미구현 상태이며, 아래
-> 화면 설계는 [`bootstrap-release-v0.2.md §3.2`](../worker-bootstrap/bootstrap-release-v0.2.md)의
-> 최신 결정과 맞춰 다음 두 가지를 정정합니다: (1) 신규 `inventory_hosts` 테이블이 아니라
-> 기존 `hosts` 테이블에 `host_alias`/`identity_file`/`labels` 컬럼을 확장하는 설계로
-> 확정되었고, (2) IdentityFile 자동 수집은 새 암호화 저장소를 만드는 게 아니라 이미
-> 구현되어 있는 SSH 키 금고(`ssh_keys` 테이블, `crates/fleet-dashboard/src/provisioning.rs`)를
-> 재사용하는 것으로 확정되었습니다.
+> ⚠️ **미구현·미승인:** `.ssh/config` 자동 임포트, `host_alias`/`identity_file`/`labels`
+> 컬럼과 관련 API는 구현되지 않았고 현재 Roadmap에도 등록되지 않았습니다. 아래 내용은 화면
+> 아이디어이며 backend 계약이 승인되기 전에는 구현 대상으로 사용하지 않습니다. SSH 키 금고의
+> 현재 사실은 [Credential registry](../credentials/registry.md)가 우선합니다.
 
 1. **임포트 진입 버튼**:
    - 위치: `/hosts` sub-nav 우측 끝의 primary pill CTA 버튼 옆.
@@ -463,7 +458,7 @@ flowchart TD
      닫히며 호스트 목록 테이블이 실시간 리로드됨.
 4. **키 파일(IdentityFile) 가져오기 정책 설정**:
    - 모달 하단에 `Private Key Access Option` 라디오 버튼 그룹을 제공하여 보안 취향에 맞춘 수집 레벨을 결정할 수 있도록 설계합니다.
-     - **Option 1: 자동 가져오기 (Auto Import, 기본값)**: `.ssh/config` 내에 검출된 `IdentityFile` 로컬 경로를 오케스트레이터 백엔드가 자동으로 읽어들여, ⚠️ 정정: 별도의 새 암호화 저장소가 아니라 **기존 SSH 키 금고**(`ssh_keys` 테이블, `MasterKey` AES-256-GCM 암호화 — `bootstrap-release-v0.2.md §3.2.2` 참조)에 등록합니다. `hosts.identity_file` 컬럼에는 로컬 경로가 아니라 이 금고의 키 이름이 저장됩니다. (추가 수동 액션 없이 원클릭 프로비저닝 가능)
+     - **Option 1: 자동 가져오기 (Auto Import, 제안)**: `.ssh/config`의 `IdentityFile`을 사용자가 명시적으로 승인한 경우 기존 SSH 키 금고에 등록하고, 향후 승인될 참조 필드에는 로컬 경로가 아니라 금고 식별자를 저장합니다.
      - **Option 2: 수동 선택적 허용 (Manual Upload On Provision)**: 가져오기 시점에는 키 경로 텍스트만 기록하고, 이후 `/hosts` 페이지에서 실제 프로비저닝 버튼을 누르는 순간 브라우저 모달로 해당 SSH 개인키 파일을 사용자가 수동 지목/업로드하여 연동을 완료하도록 제어합니다(이 경로도 최종적으로는 같은 SSH 키 금고에 등록됩니다).
 
 #### 빈 상태

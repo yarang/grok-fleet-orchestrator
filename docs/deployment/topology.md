@@ -1,9 +1,9 @@
 ---
 type: architecture-reference
-authority: canonical
+authority: derived
 implementation: partial
 verification: design-reviewed
-source: "docs/deployment/topology.md"
+source: "docs/architecture/control-plane-authority-and-failover.md"
 last_verified: "2026-08-17"
 last_verified_commit: "working-tree"
 owners: ["deployment"]

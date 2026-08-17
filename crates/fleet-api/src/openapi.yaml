@@ -11,7 +11,7 @@ info:
     `fleet-api` crate. The separate dashboard HTTP API (`fleet-dashboard`,
     `--dashboard-bind`, cookie-session + RBAC authenticated, ~30 more routes
     under `/api/*`) is out of scope — see
-    `docs/architecture/api-reference.md` for a partial reference.
+    `docs/contracts/dashboard-api.md` for its contract entry point.
 
 
     Hand-maintained from `crates/fleet-api/src/{schema.rs,handlers.rs,app.rs}`.
@@ -21,8 +21,8 @@ info:
   license:
     name: (see repository LICENSE)
 externalDocs:
-  description: Full architecture reference (includes the MCP tool surface too)
-  url: https://git.agentthread.dev/yarang/grok-fleet-orchestrator/src/branch/main/docs/architecture/api-reference.md
+  description: Human-readable HTTP API contract and security boundaries
+  url: https://git.agentthread.dev/yarang/grok-fleet-orchestrator/src/branch/main/docs/contracts/http-api.md
 
 servers:
   - url: /v1
@@ -450,8 +450,8 @@ paths:
       summary: Prometheus metrics
       description: >-
         Served *outside* the `/v1` prefix and outside the bearer-auth
-        middleware (standard Prometheus scrape convention) — but still
-        behind Cloudflare Access if `--cf-audience` is configured.
+        and Cloudflare middleware (standard Prometheus scrape convention).
+        A reverse proxy or network ACL must protect it separately.
       security: []
       servers:
         - url: /
@@ -477,9 +477,10 @@ components:
         `Authorization: Bearer <token>` against the `--api-tokens`/
         `FLEET_API_TOKENS` allow-list (constant-time compare). If
         `--cf-audience` is set, `CF-Access-Jwt-Assertion` is checked first
-        and satisfies auth on its own — this spec doesn't model that
-        alternate scheme. If neither is configured, the server runs in
-        no-auth mode (dev only) and this requirement is not enforced.
+        on `/v1`; when both controls are configured, both must pass. This
+        spec does not model the Cloudflare assertion as a security scheme.
+        If neither is configured, the server runs in no-auth mode (dev only)
+        and this requirement is not enforced.
 
   parameters:
     WorkerId:

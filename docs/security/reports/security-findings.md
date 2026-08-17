@@ -28,14 +28,14 @@ owners: ["security"]
 | S7 | P1 | HTTP 공용 bearer의 과도한 권한과 endpoint별 authorization 부재 | 설계 확정·구현 대기 |
 | S8 | P1 | MCP ToolContext의 principal/RBAC 부재 | 설계 확정·구현 대기 |
 | S9 | P1 | Bootstrap token 원문 저장·목록·URL 전달 | 부분 해결 — API/MCP/URL 원문 노출 제거, DB digest 저장은 대기 |
+| S10 | P1 | Join 이후 Worker별 operational identity 전환 부재 | 설계 확정·구현 대기 |
+| S11 | P1 | URL query 및 CLI argument의 secret 전달 | 설계 확정·구현 대기 |
+| S12 | P2 | master key와 provider credential rotation/runbook 부재 | 설계 필요 |
 
 S9의 첫 구현은 `token_id = SHA-256(raw token)` 공개 식별자로 목록과 회수를
 전환했다. 원문은 발급 응답에서만 1회 반환하며, API/MCP 목록과 URL은 원문을
 받거나 반환하지 않는다. 기존 DB schema는 아직 원문을 보관하므로 HMAC/Argon2id
 digest 저장과 immutable DB token id 마이그레이션이 남아 있다.
-| S10 | P1 | Join 이후 Worker별 operational identity 전환 부재 | 설계 확정·구현 대기 |
-| S11 | P1 | URL query 및 CLI argument의 secret 전달 | 설계 확정·구현 대기 |
-| S12 | P2 | master key와 provider credential rotation/runbook 부재 | 설계 필요 |
 
 ---
 

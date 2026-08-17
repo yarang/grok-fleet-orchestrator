@@ -1,0 +1,8 @@
+flowchart LR
+    Worker["fleet-worker<br/>llm_proxy settings"] --> Agent["grok / agy subprocess"]
+    Agent -->|"provider-compatible base URL + gateway key"| Gateway["liteLLM gateway<br/>model mapping · request adaptation"]
+    Gateway --> ProviderA["Gemini"]
+    Gateway --> ProviderB["Groq"]
+    Gateway --> ProviderC["Other configured providers"]
+    Control["fleet serve<br/>optional gateway URL validation"] -. "does not proxy requests" .-> Gateway
+    Planned["Per-agent budget · usage accounting · fallback<br/>not implemented"] -.-> Gateway

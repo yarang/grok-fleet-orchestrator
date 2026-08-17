@@ -1,8 +1,0 @@
-graph TD
-    UI[Orchestrator Control UI] -->|Command / JSON| Agent[fleet-worker Agent Host OS<br/>• OS Detection Debian/RedHat<br/>• PackageKit D-Bus / Sudoer Exec]
-    
-    subgraph Wrappers [배포판별 패키지 래퍼]
-        Agent -->|Debian-based| APT[APT Wrapper<br/>apt-get, dpkg]
-        Agent -->|RedHat-based| DNF[DNF/YUM Wrapper<br/>dnf, rpm]
-        Agent -->|Common| Hold[Version Hold<br/>Apt hold, etc]
-    end

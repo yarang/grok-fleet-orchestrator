@@ -41,7 +41,7 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_list_tasks` | 선택 status, limit, offset | Task 목록 |
 | `fleet_cancel_task` | `task_id`, 선택 reason | 취소 결과 |
 | `fleet_wait_for_task` | `task_id`, 선택 timeout | terminal Task 또는 timeout 오류 |
-| `fleet_stream_task_output` | `task_id`, offset, polling 설정 | 출력 chunk와 현재 상태 |
+| `fleet_stream_task_output` | `task_id`, `from_offset`, polling 설정 | 출력 chunk와 현재 상태 |
 | `fleet_collect_results` | `task_ids` | 여러 Task 결과 |
 | `fleet_list_workers` | 선택 status, labels, limit | Worker 목록 |
 | `fleet_list_hosts` | 선택 status | Host 목록 |
@@ -54,6 +54,11 @@ Project와 Agent 관리 도구는 제안 계약일 뿐 현재 `tools/list`에 �
 
 ## 보안 상태
 
-현재 MCP capability 모델은 목표 보안 계약을 완전히 구현하지 않는다. capability, project scope,
-fail-closed 정책은 [control-plane security model](../security/control-plane-security-model.md)을 따르며,
-구현 전에는 도구가 그 정책을 보장한다고 서술하지 않는다.
+현재 stdio MCP `ToolContext`에는 호출 principal, capability, Project scope, 요청 감사 주체가 없다.
+따라서 task 취소, breaker reset, bootstrap token 회수 같은 변경 도구도 도구별 권한 검사를 하지
+않는다. destructive 도구의 `request_id`, 멱등성, precondition도 계약되어 있지 않다.
+
+목표 capability, Project scope, fail-closed 정책은
+[control-plane security model](../security/control-plane-security-model.md)을 따르며, 구현 전에는
+도구가 그 정책을 보장한다고 서술하지 않는다. `fleet_list_tasks`의 offset 기반 조회는 snapshot
+consistency, `has_more` 또는 next cursor를 보장하지 않는다.

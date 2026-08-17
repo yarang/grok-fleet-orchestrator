@@ -1,0 +1,7 @@
+flowchart LR
+    Worker["Worker agent subprocess"] -->|"HTTPS + gateway credential"| Edge["Optional reverse proxy"]
+    Edge --> Gateway["liteLLM :4000"]
+    Gateway --> Providers["Configured LLM providers"]
+    Config["examples/litellm-config.yaml"] --> Gateway
+    Hook["examples/groq-compat/"] --> Gateway
+    Secrets["Provider keys + master key"] --> Gateway

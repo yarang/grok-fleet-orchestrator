@@ -9,21 +9,25 @@ last_verified_commit: "working-tree"
 owners: ["worker-bootstrap"]
 ---
 
-# 워커 부트스트랩 & 가입 인증 (Worker Bootstrap & Join Auth)
+# Worker 가입
 
 > 전체 문서 카탈로그는 [`../index.md`](../index.md).
 
-Worker enrollment의 현재·목표 외부 계약은 [`../contracts/worker-enrollment.md`](../contracts/worker-enrollment.md)가
-정본이다. 이 디렉터리는 그 계약을 구현·운영하기 위한 절차, 제안, 보존된 구현 스냅샷을 둔다.
-현재 join 경로는 원문 bootstrap token의 재사용과 API-token 보호 모드의 인증 경계가 해결되지 않은
-`partial` 상태이므로, 여기의 문서를 프로덕션 운영 절차로 읽기 전에 계약의 “현재 구현” 절을 확인한다.
+이 디렉터리는 운영자가 Worker를 처음 가입시키는 현재 절차와 정본 탐색만 담당한다. 가입·등록·
+heartbeat의 현재·목표 외부 계약은 [Worker enrollment](../contracts/worker-enrollment.md), token과
+Worker identity의 보안 불변식은 [Control Plane 보안 모델](../security/control-plane-security-model.md),
+SSH 설치 자동화는 [Worker 프로비저닝](../deployment/worker-provisioning.md)이 소유한다.
 
-![Worker Join Flow Overview Diagram](../assets/diagrams/worker-bootstrap/join-flow-overview.mermaid)
+현재 self-service join은 원문 bootstrap token을 Worker의 지속 bearer로 다시 기록하고,
+API-token 또는 Cloudflare 보호 모드에 필요한 인증 header를 보내지 않는다. 따라서 일반
+프로덕션 가입 절차가 아니며, 실행 전에 계약의 차단 조건을 확인해야 한다.
 
-| 문서 | 정본 범위 |
+## 읽기 순서와 책임
+
+| 문서 | 책임 | 상태 |
 |---|---|
-| [`join-authentication.md`](./join-authentication.md) | 🔵 목표 가입 보안 모델 — 현재 계약은 `contracts/worker-enrollment.md`를 우선 |
-| [`token-delivery.md`](./token-delivery.md) | 🟡 전달 방식 제안 — 현재 구현과 미구현 채널을 구분해 읽음 |
-| [`ssh-provisioning.md`](./ssh-provisioning.md) | 🟡 SSH 프로비저닝 보존 참조 — 구형 token-file 절차는 사용 금지 |
-| [`bootstrap-release-v0.2.md`](./bootstrap-release-v0.2.md) | 🔵 코드 대조 기반 release 스냅샷 |
-| [`serve-and-bootstrap-design.md`](./serve-and-bootstrap-design.md) | ⚫ 여러 도메인이 섞인 보존 참조 — Architecture/Contracts/Bootstrap으로 분리 중 |
+| [수동 가입 절차](join.md) | 현재 `fleet token issue`와 `fleet-worker join` 실행·검증·중단 조건 | derived · partial |
+
+미구현 token-file, SFTP token 파쇄, cloud-init 전달과 Worker-scoped credential 발급 절차는 이
+디렉터리의 지원 Runbook이 아니다. 목표 계약이 승인·구현되면 정본을 먼저 변경하고 이 절차를
+동기화한다.

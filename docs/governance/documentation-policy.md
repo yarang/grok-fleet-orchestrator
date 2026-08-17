@@ -4,157 +4,93 @@ authority: canonical
 implementation: not-applicable
 verification: design-reviewed
 source: "docs/governance/documentation-policy.md"
-last_verified: "2026-08-16"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["documentation-governance"]
 ---
 
-# 문서화 시스템 분석 및 지속 관리를 위한 지침서 (Documentation Policy)
+# 문서 관리 정책
 
-> 작성일: 2026-08-13
->
-> 이 문서는 Grok Fleet Orchestrator 프로젝트의 모든 문서가 실제 코드베이스와 완벽히 동기화된 상태(No-Drift)를 유지하고, 에이전트와 인간 개발자 간의 지식 협업을 지속하기 위한 **문서 관리 정책, 구조 분석 및 실무 가이드라인**을 정의합니다.
+이 문서는 Grok Fleet Orchestrator 문서의 책임, 정본 관계, 메타데이터와 부기 원칙을 정의한다.
+재작성 순서와 완료 검사는 [문서 재작성 가이드](documentation-rewrite-guide.md)가 담당하고,
+특정 시점의 감사·비교 결과는 [`reviews/`](../reviews/README.md), 변경 이력은
+[`docs/log.md`](../log.md)가 담당한다.
 
----
+## 1. 문서 구조와 책임
 
-## 1. 문서화 시스템 아키텍처 및 상태 분석
+문서는 독자와 변경 주기가 같은 기능 도메인에 둔다. 시스템 설계는 `architecture/`, 외부 계약은
+`contracts/`, 현재 배포 절차는 `deployment/`, 보안 정책은 `security/`, 비교·감사 기록은
+`reviews/`, 협업 규칙은 `governance/`가 소유한다.
 
-Grok Fleet Orchestrator의 문서 시스템은 단순히 텍스트를 모아둔 저장소가 아니라, **도메인 단위의 격리된 구조**, **정본-사본 간의 명확한 의존성**, 그리고 **실제 작동하는 코드와의 실측 정합성**을 보장하는 체계적인 지식 맵으로 구성되어 있습니다.
+문서가 있는 각 도메인은 `README.md` 또는 `index.md` 하나를 진입점으로 둔다. 도메인 진입점은
+범위, 읽기 순서, 파일별 책임과 정본 관계를 관리한다. 루트 [`docs/index.md`](../index.md)는 도메인
+탐색을 위한 카탈로그이며, 세부 문서 목록의 정본은 각 도메인 진입점이다. 독립 부기 체계를 가진
+하위 위키는 자체 인덱스와 로그 또는 레지스트리를 사용할 수 있다.
 
-### 1.1 디렉토리 구조 및 역할 분담
-모든 문서는 flat한 구조를 탈피하고, 책임이 다른 도메인 디렉토리와 특수 목적의 하위 위키/레지스트리로 분리해 관리합니다. 실제 경로와 정본 지위는 항상 [`docs/index.md`](../index.md)를 우선합니다.
+`docs/assets/`는 문서 도메인이 아니라 공유 자산 컨테이너다. 다이어그램 목록과 규칙은
+[`assets/diagrams/README.md`](../assets/diagrams/README.md)가 관리한다.
 
-```
-docs/
-├── index.md                 # 전체 문서의 콘텐츠 지향 카탈로그 (정본/사본 상태 기록)
-├── log.md                   # 문서 변경 이력을 기록하는 Append-only 로그 파일
-├── assets/
-│   └── diagrams/            # 모든 다이어그램(.mermaid, .svg) 리소스 통합 관리 디렉토리
-│       ├── <domain>/        # 각 도메인 이름과 1:1 매핑
-│       └── shared/          # 여러 도메인이 공유하는 다이어그램
-├── architecture/            # 시스템 설계 정본과 구현 참조
-├── contracts/               # HTTP/MCP/등록 계약의 탐색 진입점(원문 경로는 호환성 위해 유지)
-├── deployment/              # 배포 가이드, 토폴로지, Nginx 게이트웨이 결정
-├── worker-bootstrap/        # 워커 등록·조인 인증·SSH 프로비저닝 흐름
-├── operations/              # 운영 진입점과 아직 미구현인 자동화 제안
-│   └── proposals/
-├── security/                # 보안 모델, 결함 분석, 해결 기록
-├── credentials/             # 시크릿·크리덴셜 메타데이터(값 자체는 미기록)
-├── roadmap/                 # 개발 단계, 백로그, 시점별 분석 기록
-├── ui-dashboard/            # 제품 UI·대시보드 설계
-├── governance/              # 문서 정책과 Skill 운영 정책
-├── engineering-patterns/    # 코드베이스에서 추출한 재사용 구현 패턴
-├── llm-wiki/                # LLM 게이트웨이(liteLLM) 관련 독립 서브 위키
-└── (legacy server-management 경로 제거됨)
-```
+## 2. 정본과 파생 문서
 
-### 1.2 중앙 부기 체계 (Central Bookkeeping)
-*   **[`docs/index.md`](../index.md) (카탈로그)**: 모든 문서의 파일 경로, 한 줄 요약, 상태 지위(🟢, 🔵, 🟡, ⚪, ⚫), 최종 개정일을 관리합니다.
-*   **[`docs/log.md`](../log.md) (변경 로그)**: 시간순으로 작성된 **수정 불가능한(Append-only)** 이력입니다. 변경 유형을 `ingest`(신규 반영), `query`(새 지식 파일링), `lint`(정합성 수정)로 명확히 분류합니다.
-*   **서브 위키 독립성**: `llm-wiki/`와 `credentials/`는 다루는 지식의 특수성(LLM 기술 변화, 자격증명 메타데이터)을 고려하여 자체적인 `README.md`, `index.md`, `log.md`/`registry.md`를 가집니다.
+문서 하나는 독자 질문 하나와 기능상 책임 하나를 담당한다. 같은 사실을 여러 문서가 설명해야
+한다면 하나만 `canonical`로 두고 나머지는 `derived`로 표시한다.
 
-### 1.3 최근 정합성 감사(Audit) 결과 및 성과
-2026-08-11과 2026-08-13에 걸쳐 대대적인 문서 정합성 점검 및 코드 실측 조사가 이루어졌으며, 다음과 같은 중대한 문서 드리프트(Drift)가 해소되었습니다.
+- `canonical`: 해당 계약·정책·절차의 우선 출처다.
+- `derived`: 정본을 요약하거나 코드 구조·검증 근거를 설명하며 새 정책을 만들지 않는다.
+- `historical`: 특정 시점의 기록이며 현재 지침으로 사용하지 않는다.
+- `deprecated`: 삭제 전 전환 상태다. 대체 경로와 inbound link를 정리한 뒤 제거한다.
 
-*   **실제 API 및 도구 정합**: 문서가 지칭하던 MCP 도구명(허구의 명칭)을 실제 코드(`crates/fleet-mcp/src/schema.rs`)에 정의된 `fleet_dispatch_task` 등의 7종 도구와 일치시켰습니다.
-*   **동적 동작 팩트 체크**: 스케줄러 디스패처가 "1초 주기 폴링" 방식으로 작동한다는 노후된 서술을 "이벤트 루프 및 채널 기반 즉각 디스패치"라는 실제 Rust 구현체와 동기화했습니다.
-*   **미구현 제안과 폐기 문서의 분리**: 아직 검토할 가치가 있는 미구현 선택지는 `proposed`로 명확히 분리합니다. 폐기된 문서는 대체 정본과 inbound link를 정리한 뒤 삭제하며, 비교·논의 근거만 `docs/reviews/`에 남깁니다.
-*   **Nginx 게이트웨이 표준화**: 과거 Caddy를 리버스 프록시로 사용하던 구버전 배포 가이드와 Docker Compose 설제를 Nginx 리버스 프록시 표준 구성(`nginx-gateway.md`)으로 전면 동기화했습니다.
-*   **시크릿 레지스트리 최신화**: 코드에 구현되어 있었으나 시크릿 대장에 누락되어 있던 `FLEET_API_TOKENS`, `FLEET_CF_AUDIENCE`, `FLEET_GMAIL_USER/PASS`, `ssh_keys` 데이터베이스 테이블의 존재를 추가 등재했습니다.
+정본과 파생 문서가 충돌하면 정본이 우선한다. 변경은 정본에 먼저 반영한 뒤 파생 문서를
+동기화한다. `canonical`은 구현 완료나 운영 검증을 의미하지 않으므로 구현·검증 상태를 별도
+필드로 표시한다.
 
----
+## 3. 현재 사실과 목표 계약
 
-## 2. 지속적인 지식 보존을 위한 4대 문서화 지침
+API, 환경변수, 심볼, 포트, 기본값과 권한은 실제 코드·테스트·설정 자산으로 확인한다. 예시 값이
+필요하면 실제 값으로 오인되지 않게 명시하며 secret, token, password는 기록하지 않는다.
 
-에이전트와 개발자가 변경을 수행할 때, 다음 지침을 의무적으로 준수하여 문서가 코드베이스로부터 멀어지는 현상을 원천 차단해야 합니다.
+현재 동작과 목표 설계가 다르면 같은 주장으로 섞지 않는다. 현재 사실에는 코드 또는 테스트
+근거를 연결하고, 목표는 `proposed` 또는 `partial` 상태와 완료 조건을 함께 기록한다. 보안·인증·
+credential 전달처럼 조합에 따라 동작이 달라지는 내용은 표나 상태 흐름으로 표현한다.
 
-### 2.1 정본-사본 원칙 (Canonical-Derived Principle)
-문서 간에 정보가 중복 서술되는 것을 지양하되, 중복 기술이 필요한 경우 단 하나의 **정본(Canonical)**과 이를 인용하는 **사본(Derived)**으로 지위를 선언합니다.
-*   **지위 명시**: 각 문서의 서두 및 [`docs/index.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/index.md)에 정본 여부와 참조 소스를 밝힙니다.
-*   **선(先)정본 수정 후(後)동기화**: 정보를 업데이트해야 할 경우, 반드시 **정본을 먼저 수정**한 뒤 사본들을 순차적으로 고쳐야 합니다. 이 순서를 생략하면 사본이 구세대 정보를 담고 있는 모순이 유발됩니다.
+## 4. 메타데이터
 
-### 2.2 코드 실측 검증 원칙 (Fact-Checking Against Code)
-문서에 기술되는 모든 클래스, 구조체, 함수명, 포트 번호, 환경변수명은 플레이스홀더나 임의의 예시를 사용하지 않고 **실제 코드 파일과 정합해야 합니다**.
-*   **실제 심볼 링크 제공**: 문서 내에서 코드 심볼을 언급할 때는 반드시 Markdown 파일 링크 기법(`[심볼](file:///경로#라인)`)을 활용하여 사용자가 클릭하여 실제 코드로 이동할 수 있도록 지원합니다.
-*   **행동 증명(Fail-to-Prove)**: 구현 여부를 검증할 때는 단순히 텍스트 검색에 의존하지 않고, 해당 코드가 누락되거나 실패했을 때 **테스트 하네스나 빌드가 실제로 깨지는지(Fail-closed)** 확인하여 사실성을 증명합니다.
+새 문서와 크게 개정한 문서는 다음 프론트매터를 사용한다.
 
-### 2.3 다이어그램 및 SVG 리소스 관리 규약
-텍스트 서술만으로 구조적 관계를 명확히 표현할 수 없으므로, 아키텍처나 흐름을 다루는 장표에는 반드시 다이어그램을 병행 표기합니다.
-*   **Mermaid 우선 사용**: 노드와 엣지(흐름, 상태, 시퀀스) 형태는 버전 관리와 Diff 비교가 용이한 Mermaid 소스 파일(`.mermaid`)로 생성합니다.
-*   **자유 레이아웃은 SVG**: 박스 배치, 모듈 맵 등 픽셀 단위 정렬이 필요한 디자인은 SVG(`.svg`)로 작성하며, 텍스트 형태의 ASCII-art 박스 그리기(`┌──┐`)는 사용을 전면 금지합니다.
-*   **외부 파일 분리 및 임베딩**: 문서가 인라인 코드로 거대해지는 것을 막기 위해 100줄 이상의 Mermaid나 모든 SVG는 반드시 `docs/assets/diagrams/<domain>/` 경로 아래 별도 파일로 분리하고 마크다운 이미지 태그로 호출합니다.
-*   **편집 소스 공동 보존**: 완성된 SVG를 수정할 수 있도록, SVG를 렌더링하기 전 원본 소스(`.mermaid` 또는 기타 벡터 파일)를 동일한 경로에 나란히 보존해야 합니다.
-
-### 2.4 로드맵 무결성 보존 (Roadmap Integrity)
-*   [`docs/roadmap/roadmap.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/roadmap/roadmap.md)의 마일스톤 번호는 영구적인 참조 키입니다. 완료된 항목이라도 삭제하거나 번호를 재활용해서는 안 되며, 체크 표시(✅)와 함께 해결 당시의 커밋 해시를 본문에 명기합니다.
-*   로드맵 상태의 갱신 오너는 에이전트(Planner)이며, 작업 완료 직후 코드의 동작을 실측 대조한 뒤 마일스톤 문서를 즉각 동기화해야 합니다.
-
----
-
-## 3. 문서 운영 워크플로우 (Ingest - Query - Lint)
-
-문서의 영속적인 가치를 보장하기 위해 일상적인 변경 단계마다 다음 워크플로우를 강제합니다.
-
-```mermaid
-flowchart TD
-    Start([변경 사항 발생]) --> Ingest[Ingest: 문서 수정/생성]
-    Ingest --> CheckCanonical{정본 수정인가?}
-    CheckCanonical -- Yes --> SyncDerived[Derived 사본 동기화]
-    CheckCanonical -- No --> UpdateIndex[index.md 및 log.md 갱신]
-    SyncDerived --> UpdateIndex
-    UpdateIndex --> Commit[Git Stage 및 Conventional Commit]
-    
-    Periodic([정기 검사 시점]) --> Lint[Lint: 교차 참조 & 모순 점검]
-    Lint --> DriftDetect{드리프트 발견?}
-    DriftDetect -- Yes --> FixDrift[문서 교정 및 log.md에 기록]
-    DriftDetect -- No --> End([완료])
-    FixDrift --> End
-```
-
-### 3.1 Ingest (반입 및 갱신)
-1.  **YAML 프론트매터 기재**: 신규 생성하거나 크게 개정하는 파일의 최상단에 메타데이터 블록을 작성합니다.
-2.  **색인 갱신**: 신규 문서는 즉시 [`docs/index.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/index.md)에 등록하고, 변경이 발생하면 해당 행의 `최종 개정` 날짜와 `상태`를 현행화합니다.
-3.  **변경 이력 추가**: [`docs/log.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/log.md) 맨 아래에 날짜, 유형(`ingest`), 세부 작업 내역 및 관련 커밋 해시를 작성하여 append합니다.
-
-### 3.2 Query (지식 조회 및 추론)
-1.  AI 에이전트는 기여를 시작할 때 최우선적으로 [`docs/index.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/index.md)와 [`agent.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/agent.md)를 탐독하여 최신의 컨텍스트를 파악합니다.
-2.  특정 하위 기술 영역(예: LLM Gateway, Credentials)을 작업할 경우 해당 서브 디렉토리 내의 README 및 인덱스를 정독하여 과거 결정 맥락을 누락하지 않도록 주의합니다.
-
-### 3.3 Lint (검사 및 교정)
-1.  주기적으로 전체 문서 디렉토리를 대상으로 다음 사항을 모니터링합니다:
-    *   어떤 문서에서도 참조되지 않는 **고아 문서(Orphaned Pages)**
-    *   실제 소스 코드가 리팩토링되었음에도 예전 네임스페이스나 구조체를 가리키는 **깨진 링크 및 서술**
-    *   도메인 디렉토리(`docs/assets/diagrams/`) 규칙을 위반하고 생성된 임시 이미지 폴더
-2.  린트 과정에서 수정한 내역은 원인 분석과 함께 [`docs/log.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/log.md)에 `lint` 유형으로 영구 기록합니다.
-
----
-
-## 4. 문서 메타데이터 & 작성 표준 규격
-
-### 4.1 YAML 프론트매터 표준 양식
-모든 마크다운 위키 파일 최상단에 기입하는 공통 규격입니다:
 ```yaml
 ---
-type: wiki | architecture-decision | security-architecture | runbook
+type: "<문서의 기능 유형>"
 authority: canonical | derived | historical | deprecated
-implementation: proposed | partial | implemented | retired
+implementation: not-applicable | proposed | partial | implemented | retired
 verification: assumed | design-reviewed | code-checked | integration-tested | production-proven
-source: "docs/<path-to-source-file>.md"
+source: "docs/<정본 또는 자기 경로>.md"
 last_verified: "YYYY-MM-DD"
-last_verified_commit: "<git commit or working-tree>"
+last_verified_commit: "<commit 또는 working-tree>"
 owners: ["<domain owner>"]
 ---
 ```
 
-`authority`는 어느 문서가 우선하는지를, `implementation`은 코드 반영 수준을,
-`verification`은 근거의 강도를 나타낸다. `canonical`은 구현 완료나 운영 검증을
-의미하지 않는다. 미결정 체크리스트와 상충 대안은 canonical decision과 분리한다.
+`type`은 폐쇄 enum이 아니다. `domain-index`, `architecture-decision`, `api-contract`, `runbook`,
+`governance-policy`처럼 기능을 드러내는 안정적인 kebab-case 값을 사용한다. 다른 필드는 위 허용값을
+사용한다. `source`는 canonical 문서에서는 자기 경로, derived 문서에서는 우선하는 정본 경로다.
 
-### 4.2 카탈로그 상태 범례 지침
-[`docs/index.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/docs/index.md)와 서브 위키 인덱스에서 문서 상태를 표현할 때 아래 정의를 따릅니다.
+## 5. 링크와 시각 자료
 
-| 범례 | 지위 (Status) | 행동 지침 |
-|:---:|---|---|
-| 🟢 | **정본 (Canonical)** | 해당 도메인의 단일 진실 원천(Single Source of Truth)으로 관리합니다. |
-| 🔵 | **사본 (Derived)** | 정본을 인용하거나 변환한 문서입니다. 내용 충돌 시 정본이 무조건 우선하며, 정본 개정 시 함께 업데이트되어야 합니다. |
-| 🟡 | **부분 수정됨 (Drifted/Partial)** | 소스 코드와의 불일치나 모순이 감지되어 일부만 정정된 상태입니다. 전체 검토 및 리팩토링이 요구됩니다. |
-| ⚪ | **Review 부기 (Review)** | 비교·감사·대안·논의 기록입니다. `docs/reviews/`에만 두며 정본을 재정의하지 않습니다. |
-| ⚫ | **폐기/고아 (Deprecated)** | 사용하지 않거나 참조가 유실된 문서입니다. inbound link와 색인을 정리한 뒤 파일을 삭제하고, 삭제 이유는 `docs/log.md`에 기록합니다. |
+- Markdown 링크는 저장소 상대 경로를 사용한다. 개인 환경의 `file:///` 절대 링크는 금지한다.
+- 삭제·이동 전 파일명, 표시명, 상대 링크와 자산 참조를 검색한다.
+- 구조·상태·흐름은 필요한 경우 Mermaid 또는 SVG로 표현하고 ASCII-art 박스는 사용하지 않는다.
+- 50줄 미만의 단일 문서용 Mermaid는 인라인으로 둘 수 있다.
+- 100줄 이상, 재사용되는 Mermaid와 모든 SVG는 `docs/assets/diagrams/<domain>/`에 둔다.
+- 다이어그램을 변경하면 참조 문서와 [`assets/diagrams/README.md`](../assets/diagrams/README.md)를
+  함께 확인한다.
+
+## 6. 중앙 부기
+
+- 도메인 파일과 읽기 순서는 해당 도메인 진입점에서 관리한다.
+- 도메인 추가·이동·폐기 또는 탐색 구조 변경은 [`docs/index.md`](../index.md)에 반영한다.
+- 문서의 생성·대규모 재작성·삭제·정합성 수정은 [`docs/log.md`](../log.md)에 `ingest` 또는
+  `lint`로 기록한다.
+- 비교, 감사, 대안과 논의 과정은 [`docs/reviews/`](../reviews/README.md)에 두고 정본에는 확정된
+  결과만 반영한다.
+
+이 정책의 적용 절차와 검증 게이트는 [문서 재작성 가이드](documentation-rewrite-guide.md)를 따른다.

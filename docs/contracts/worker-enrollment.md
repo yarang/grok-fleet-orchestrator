@@ -25,7 +25,11 @@ owners: ["fleet-api", "fleet-worker"]
 `worker.toml` `[grok].secret`에 평문으로 다시 기록한다. bootstrap token과 이 secret은 현재
 DB·응답·로컬 파일 노출 경계를 만족하지 않는다.
 
-이 흐름에는 두 제한이 있다.
+유효하지 않거나 소진된 bootstrap token을 판별하는 현재 저장소 오류에는 원문 token이 포함되며,
+handler가 그 오류 문자열을 HTTP 응답에 포함할 수 있다. 따라서 현재 노출 경계에는 DB·응답·설정
+파일뿐 아니라 HTTP 오류 응답도 포함한다.
+
+이 흐름에는 다음 제한이 있다.
 
 - token 사용량은 join 시 소비될 수 있으나 이후 Bearer 인증은 별도 정적 API token 목록을 사용한다.
 - join CLI는 Authorization header를 보내지 않으므로 API token 보호 모드에서는 middleware가 join을

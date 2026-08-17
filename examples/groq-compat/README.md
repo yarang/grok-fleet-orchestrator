@@ -51,7 +51,7 @@ Groq 은 그 밖의 필드를 **어차피 전부 거부**하므로, 화이트리
 
 ## 경로 1 — liteLLM 게이트웨이 (정본, Fleet 프로덕션)
 
-[`multi_provider_llm_proxy_analysis.md`](../../docs/llm-wiki/multi_provider_llm_proxy_analysis.md)
+[`LLM Gateway 아키텍처`](../../docs/architecture/llm-gateway.md)
 가 정한 대로 **모든 추론 주체는 liteLLM 을 바라본다.** 이 훅은 그 게이트웨이
 안에서 동작하므로 워커·오케스트레이터 코드는 전혀 바뀌지 않는다.
 
@@ -134,6 +134,5 @@ API 키는 저장하지 않고 클라이언트의 `Authorization` 헤더를 그�
 - 프롬프트를 최소화(약 3,200토큰)해도 8K TPM 모델은 분당 약 2회 호출이 한계다.
 - 즉 **동작은 하지만 느리다** — 툴을 여러 번 쓰는 작업은 분 단위로 끊긴다.
 
-프롬프트 최소화 방법(커스텀 최소 에이전트 정의, 스킬 로딩 차단 등)과 측정치는
-[`free_tier_providers_analysis.md`](../../docs/llm-wiki/free_tier_providers_analysis.md)
-를 참고한다.
+과거 프롬프트 최소화 실측과 무료 티어 한도 조사는 Git 이력에서 복원한다. 외부
+공급자의 현재 한도는 배포 전 공식 문서로 다시 확인한다.

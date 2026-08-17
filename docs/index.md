@@ -2,20 +2,19 @@
 type: wiki
 status: canonical
 source: "docs/index.md"
-last_verified: "2026-08-15"
+last_verified: "2026-08-17"
 ---
 
 # Docs — 인덱스 (Index)
 
 > `docs/`의 모든 설계·운영 문서를 도메인별 하위 디렉토리로 재배치한 뒤의 콘텐츠 지향
 > 목록이다. 새 문서를 추가하거나 기존 문서의 상태(정본/사본/폐기)가 바뀌면 이 표를 함께
-> 갱신하고 [`log.md`](./log.md)에 항목을 남긴다. `docs/llm-wiki/`와 `docs/credentials/`는
-> 각자의 `README.md`/`index.md`(또는 `registry.md`)를 이미 갖추고 있으므로 이 인덱스에서는
-> 디렉토리 단위로만 참조한다.
+> 갱신하고 [`log.md`](./log.md)에 항목을 남긴다. `docs/credentials/`는 자체 `README.md`와
+> `registry.md`로 secret 메타데이터를 관리한다.
 >
-> **운영 규칙**은 [`docs/llm-wiki/README.md`](./llm-wiki/README.md)의 스키마(정본/사본 구분,
-> ingest/query/lint 워크플로우, 필수 부기 파일)를 그대로 따른다. 각 도메인 디렉토리에는
-> 그 도메인 문서 간 관계를 설명하는 `README.md`가 있다.
+> **운영 규칙**은 [문서 관리 정책](./governance/documentation-policy.md)과
+> [문서 재작성 가이드](./governance/documentation-rewrite-guide.md)를 따른다. 각 기능 도메인의
+> 세부 문서 관계는 해당 `README.md` 또는 `index.md`가 소유한다.
 
 ## 상태 범례
 
@@ -38,33 +37,33 @@ last_verified: "2026-08-15"
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
 | [`deployment/README.md`](./deployment/README.md) | 설치·구성·운영·복구·네트워크 경계의 도메인 진입점 | 🟢 정본 | 2026-08-17 |
-| [`deployment/historical/2026-07-20-arm2-arm1-deploy-log.md`](./deployment/historical/2026-07-20-arm2-arm1-deploy-log.md) | 실제 arm1/arm2 배포 시점 기록(Caddy 시절, ACP 인증 디버깅) | ⚪ 역사적 기록 | 2026-07-20 |
+| [`deployment/install.md`](./deployment/install.md) | release artifact 검증·바이너리 설치·서비스 등록 준비 Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/configuration.md`](./deployment/configuration.md) | env/TOML 구성 경계·secret 권한·production preflight | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/worker-provisioning.md`](./deployment/worker-provisioning.md) | SSH로 Worker binary·설정·service를 배포하고 실패를 검증하는 Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/operations.md`](./deployment/operations.md) | 시작·상태 확인·안전 중단·수동 Primary 승격 Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/backup-recovery.md`](./deployment/backup-recovery.md) | PostgreSQL 백업·새 DB 복원·in-place 복구 게이트 | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/troubleshooting.md`](./deployment/troubleshooting.md) | 배포 증상별 증거 수집과 복구 경로 Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/reverse-proxy.md`](./deployment/reverse-proxy.md) | Nginx TLS·trusted proxy·공개 endpoint 경계 | 🟡 정본·부분 구현 | 2026-08-17 |
+| [`deployment/topology.md`](./deployment/topology.md) | Single Active Primary·Cold Standby 정본의 배포 관점 요약 | 🔵 사본·부분 구현 | 2026-08-17 |
+| [`deployment/litellm-gateway.md`](./deployment/litellm-gateway.md) | liteLLM gateway 준비·기동·검증·rollback Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
 
 ## 도메인 3. 🔑 Worker Bootstrap & Join Auth — [`worker-bootstrap/README.md`](./worker-bootstrap/README.md)
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`contracts/worker-enrollment.md`](./contracts/worker-enrollment.md) | join/register/heartbeat의 현재 구현·목표 보안 계약과 검증 게이트 | 🟢 정본 | 2026-08-17 |
-| [`worker-bootstrap/join-authentication.md`](./worker-bootstrap/join-authentication.md) | Worker-scoped credential·edge 방어의 목표 가입 보안 모델 | 🔵 사본 — enrollment 계약 참조 | 2026-08-17 |
-| [`worker-bootstrap/token-delivery.md`](./worker-bootstrap/token-delivery.md) | SSH·수동·cloud-init 전달 채널의 미구현 제안 비교 | 🟡 제안 | 2026-08-17 |
-| [`worker-bootstrap/ssh-provisioning.md`](./worker-bootstrap/ssh-provisioning.md) | SSH host-key·provisioner 배경을 보존한 부분 구현 참조 | 🟡 부분 구현 | 2026-08-17 |
-| [`worker-bootstrap/serve-and-bootstrap-design.md`](./worker-bootstrap/serve-and-bootstrap-design.md) | server/Dashboard/bootstrap 책임이 섞인 보존 참조 | ⚫ 폐기 | 2026-08-17 |
-| [`worker-bootstrap/bootstrap-release-v0.2.md`](./worker-bootstrap/bootstrap-release-v0.2.md) | v0.2 시점 코드 대조 기반 구현 스냅샷 | 🔵 사본 | 2026-08-17 |
+| [`worker-bootstrap/README.md`](./worker-bootstrap/README.md) | 현재 수동 가입 절차와 계약·보안·SSH 프로비저닝 정본 탐색 진입점 | 🟢 정본 | 2026-08-17 |
 
-## 도메인 4. 🛠️ Operations Proposals (미구현) — [`operations/README.md`](./operations/README.md)
+## 도메인 4. 🛠️ Operations — [`operations/README.md`](./operations/README.md)
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`operations/proposals/advanced-management-proposals.md`](./operations/proposals/advanced-management-proposals.md) | SSH 키 회수, UFW/Fail2ban, 설정 드리프트 감지, 네트워크 지연 진단, SMART/하드웨어 헬스체크 제안 | 🔵 미구현 제안 | 2026-08-16 |
-| [`operations/proposals/linux-package-management.md`](./operations/proposals/linux-package-management.md) | APT/DNF 래퍼와 제한 sudo 권한 위임 제안 | 🔵 미구현 제안 | 2026-08-16 |
-| [`operations/proposals/hardware-healing.md`](./operations/proposals/hardware-healing.md) | GPU 스로틀/스톨 감지와 클라우드/베어메탈 자가치유 제안 | 🔵 미구현 제안 | 2026-08-16 |
+| [`operations/README.md`](./operations/README.md) | 배포·가입·장애 전환 정본과 운영 문서 승격 규칙의 진입점 | 🟢 정본 | 2026-08-17 |
 
-## 도메인 5. 📋 Roadmap & Planning
+## 도메인 5. 📋 Roadmap & Planning — [`roadmap/README.md`](./roadmap/README.md)
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`roadmap/roadmap.md`](./roadmap/roadmap.md) | P0~P3 백로그/상태 마스터 트래커 — 가장 권위 있는 "지금 실제로 무엇이 참인가" 문서 | 🟢 정본 | 2026-08-09 |
-| [`roadmap/conflict-analysis.md`](./roadmap/conflict-analysis.md) | 2026-08-06 시점의 Caddy→Nginx 및 다중 운영 전제를 기록한 우선순위 분석 | ⚪ 역사적 분석 — 현재 roadmap/availability 정본 참조 | 2026-08-16 |
+| [`roadmap/README.md`](./roadmap/README.md) | 구현 순서·상태·완료 게이트를 관리하는 Roadmap 도메인 진입점 | 🟢 정본 | 2026-08-17 |
 
 ## 도메인 6. 🔒 Security
 
@@ -90,8 +89,8 @@ last_verified: "2026-08-15"
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`governance/documentation-policy.md`](./governance/documentation-policy.md) | 정본/보존 문서 지위, 코드 실측, Mermaid/SVG, Ingest/Query/Lint 규약 | 🟢 정본 | 2026-08-16 |
-| [`governance/documentation-rewrite-guide.md`](./governance/documentation-rewrite-guide.md) | 도메인 진입점, 기능상 책임, 폐기 삭제, review 부기, Git 기록 규약 | 🟢 정본 | 2026-08-17 |
+| [`governance/documentation-policy.md`](./governance/documentation-policy.md) | 문서 도메인·정본 관계·메타데이터·링크·부기 원칙 | 🟢 정본 | 2026-08-17 |
+| [`governance/documentation-rewrite-guide.md`](./governance/documentation-rewrite-guide.md) | 대규모 문서 재작성·이동·폐기 절차와 완료 게이트 | 🟢 정본 | 2026-08-17 |
 | [`governance/skills.md`](./governance/skills.md) | Fleet Skill 시스템 사용 및 작성 가이드 | 🟢 정본 | 2026-08-16 |
 | [`reviews/README.md`](./reviews/README.md) | 비교·감사·대안·논의 부기 문서의 별도 진입점 | 🔵 사본 — 정본 근거 보관 | 2026-08-17 |
 
@@ -99,24 +98,21 @@ last_verified: "2026-08-15"
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`../agent.md`](../agent.md) | Git 정책·로드맵·품질/CI 게이트·LLM-Wiki 규약·다이어그램 및 SVG 리소스 관리 규약(§6) — 에이전트 협업 가이드 전문 | 🟢 정본 | 2026-08-12 |
-| [`../CLAUDE.md`](../CLAUDE.md) | Claude Code 진입점. `@agent.md`를 임포트하고 문서 작성 지침(§6)만 요약 재기술 | 🔵 사본 — `agent.md`의 진입점/요약. 내용이 어긋나면 `agent.md`가 우선 | 2026-08-12 |
-| [`../GEMINI.md`](../GEMINI.md) | Gemini / Google Antigravity (agy) 진입점. `@agent.md`를 임포트하고 Mermaid/SVG 문서 작성 및 에셋 지침 요약 | 🔵 사본 — `agent.md`의 진입점/요약. 내용이 어긋나면 `agent.md`가 우선 | 2026-08-16 |
+| [`../AGENTS.md`](../AGENTS.md) | Codex가 공통 에이전트·문서 정책을 적용하도록 하는 최소 실행 진입점 | 🔵 사본 — `agent.md`와 Governance 정본 참조 | 2026-08-17 |
+| [`../agent.md`](../agent.md) | Git·로드맵·보안·품질/CI의 공통 에이전트 규칙과 문서 정책 진입점 | 🟢 정본 | 2026-08-17 |
+| [`../CLAUDE.md`](../CLAUDE.md) | Claude Code에서 공통 에이전트·Governance 정본으로 연결하는 최소 진입점 | 🔵 사본 | 2026-08-17 |
+| [`../GEMINI.md`](../GEMINI.md) | Gemini에서 공통 에이전트·Governance 정본으로 연결하는 최소 진입점 | 🔵 사본 | 2026-08-17 |
 
 ## 하위 디렉토리 (자체 부기 체계 보유)
 
 | 디렉토리 | 한 줄 요약 |
 |---|---|
-| [`llm-wiki/`](./llm-wiki/README.md) | LLM 게이트웨이(liteLLM) 채택 결정 및 인프라 스펙 위키 — 자체 `index.md`/`log.md` 보유 |
 | [`credentials/`](./credentials/README.md) | 시크릿·크리덴셜 관리 지침 및 레지스트리 — 자체 `registry.md`(스냅샷+변경이력) 보유 |
-| [`operations/`](./operations/README.md) | 배포·Worker enrollment의 운영 경계와 미구현 운영 자동화 제안의 탐색 지도 |
-| [`contracts/`](./contracts/README.md) | HTTP, MCP, Dashboard, Worker enrollment 외부 계약의 정본 탐색 지도 |
+| [`operations/`](./operations/README.md) | 배포·Worker enrollment·장애 전환 정본과 운영 문서 승격 규칙의 탐색 지도 |
+| [`contracts/`](./contracts/README.md) | HTTP·MCP·Dashboard·Worker enrollment 현재 계약과 Project·Agent 제안 계약의 탐색 지도 |
 | [`governance/`](./governance/README.md) | 문서 정책 및 Skill/기여자 협업 지침 |
 
 ## 고아 페이지 / 미해결 교차참조
-
-- [`deployment/historical/2026-07-20-arm2-arm1-deploy-log.md`](./deployment/historical/2026-07-20-arm2-arm1-deploy-log.md) — 역사적 기록으로 유효, 현재
-  지침 문서와는 명확히 분리되어 있어 조치 불필요.
 
 _(2026-08-12: `engineering-patterns/reuse-patterns.md`의 고아 판정을 철회함 — 코드
 주석에서 실제 채택 근거를 확인, 위 도메인 8 표 참조.)_

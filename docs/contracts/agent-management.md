@@ -1,10 +1,12 @@
 ---
-type: contract
+type: proposed-contract
 authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/contracts/agent-management.md"
 last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["agent-platform", "api-contracts"]
 ---
 
 # Agent 관리 계약
@@ -14,7 +16,8 @@ last_verified: "2026-08-17"
 이 계약은 Agent 생성·명령·상태 조회의 외부 표면을 정의한다. 상세 상태 전이는
 [Agent 프로비저닝](../architecture/agents/provisioning.md), 권한은
 [보안 모델](../security/control-plane-security-model.md)이 정본이다. 현재 이 API, CLI, MCP,
-Dashboard route는 구현되지 않았다.
+Dashboard route는 구현되지 않았다. 이 문서는 Roadmap #49에 등록된 인터페이스 요구사항이며,
+transport와 concrete schema 및 아래 게이트가 승인되기 전에는 wire 호환성 약속이 아니다.
 
 ## 최소 표면
 
@@ -29,3 +32,11 @@ Dashboard route는 구현되지 않았다.
 
 capture와 attach는 이 계약의 부속 기능이 아니며 [터미널 접근](../architecture/agents/terminal-access.md)의
 보안 게이트가 충족될 때 별도 capability로 추가한다.
+
+## 활성화 게이트
+
+- HTTP, CLI 또는 MCP 중 노출 transport와 method·path·tool 이름 확정
+- principal 종류, capability, Project membership 검사 시점 확정
+- `request_id` 보존기간, canonical payload hash와 동시 중복 요청 결과 확정
+- `401`, `429`, 재시도 가능한 `5xx`와 결과 불명 상태 계약
+- 목록 표면이 추가되면 pagination과 version negotiation 계약
