@@ -6,7 +6,7 @@
 > 이 문서의 갱신 오너는 planner이며, 단계 완료 시점마다 코드 실측 대조 후 일괄 갱신한다.
 > 다른 담당자는 커밋 메시지에 항목 번호(`#7`, `#20`)만 남기면 된다.
 >
-> 🔐 **보안 백로그는 [`docs/security-findings.md`](../security/findings.md)에 별도 관리**한다.
+> 🔐 **보안 발견 기록은 [`docs/security/reports/security-findings.md`](../security/reports/security-findings.md)에 별도 관리**한다.
 > 미해결 발견 6건(S1~S6, HIGH 3건 포함)이 등록되어 있으며, 각 항목은 재확인 명령·
 > 악용 시나리오·수정 방향·회귀 테스트 방침을 포함한다. 아래 #33 참조.
 
@@ -389,7 +389,7 @@ flowchart LR
 
 33. ✅ **미해결 보안 발견 6건 (S1~S6) 해결 완료** (P1, 보안) — → 담당: security
     
-    상세: [`docs/security-findings.md`](../security/findings.md). 2026-08-06에 6대 보안 결함 전체를 해결 완료했습니다.
+    상세: [`docs/security/reports/security-findings.md`](../security/reports/security-findings.md). 2026-08-06에 6대 보안 결함 전체를 해결 완료했습니다.
 
     * **S1 (락아웃 증폭)**: 차단 분기 내의 `record_login_failure` 호출을 제거해 계정 영구 잠금 취약점을 해소했습니다.
     * **S2 (JWT 서명 미검증)**: `jsonwebtoken`을 도입해 JWKS(certs) 기반 RS256 서명, `iss`, `aud`, `exp`를 정상 검증하도록 고도화하고 로컬 테스트 모킹용 헬퍼를 추가했습니다.
@@ -737,7 +737,7 @@ flowchart LR
     단일화(30여 개 파일 통합, 확장자 통일)하고, `agent.md`/`CLAUDE.md`의 정본/사본
     관계를 명확히 했으며, `engineering-patterns/reuse-patterns.md`의 고아 판정을
     코드 근거로 철회했습니다. `docs/operations/proposals/*`(명시적 미구현 제안),
-    `docs/security/findings.md`(기존 내용과 이번 세션 재확인 결과 일치)는 별도
+    `docs/security/reports/security-findings.md`(기존 내용과 이번 세션 재확인 결과 일치)는 별도
     수정 불필요로 판단했습니다.
 
     **후속 (2026-08-13, 동일 세션 연속 진행)**: `docs/ui-dashboard/ui-design.md`,

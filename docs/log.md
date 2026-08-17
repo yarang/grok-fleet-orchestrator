@@ -414,3 +414,9 @@ last_verified: "2026-08-15"
 - 유형: `ingest` + `lint`
 - Contracts는 목표 설계를 우선 정본으로 유지하되, 구현과 다른 경우 현재 상태를 명시하도록 진입점 규칙을 정리했다.
 - HTTP host 범위·인증 조합, MCP 전송·도구 표면, Dashboard route 표면, Worker enrollment의 secret·token 소비 제한과 활성화 게이트를 보강했다.
+
+## 2026-08-17 — Security 도메인 진입점과 기록 분리
+
+- 유형: `ingest` + `lint`
+- `security/README.md`를 신원·권한·Worker credential·secret 경계의 단일 도메인 진입점으로 추가했다.
+- historical 보안 발견·해결 기록은 `security/reports/`로 이관하고, Security 정본과 root index는 진입점만 가리키도록 정리했다.

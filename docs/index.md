@@ -70,8 +70,7 @@ last_verified: "2026-08-15"
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`security/findings.md`](./security/findings.md) | S1~S6 보안 결함(로그인 락아웃 증폭, JWT/JWKS 검증, Real IP 추출 등) 해결 보고서 | 🟢 정본 | 2026-08-06 |
-| [`security/control-plane-security-model.md`](./security/control-plane-security-model.md) | HTTP/MCP 공통 principal·capability, Worker 신원, bootstrap token 및 secret 경계 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
+| [Security](./security/README.md) | 신원·권한·Worker credential·secret 경계의 도메인 진입점 | 🟢 정본 | 2026-08-17 |
 
 ## 도메인 7. 🎨 UI / Dashboard
 

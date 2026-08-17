@@ -4,13 +4,14 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/security/control-plane-security-model.md"
-last_verified: "2026-08-16"
+last_verified: "2026-08-17"
+owners: ["security"]
 ---
 
 # Control Plane 신원·권한·시크릿 모델
 
 > **정본 범위:** 이 문서는 목표 보안 계약을 정의한다. 현재 구현은 이 계약을 완전히
-> 만족하지 않으며, 아래 상태 표와 [security findings](findings.md)를 함께 확인해야 한다.
+> 만족하지 않으며, 아래 상태 표와 [security findings](reports/security-findings.md)를 함께 확인해야 한다.
 
 ## 현재 구현과 목표의 차이
 

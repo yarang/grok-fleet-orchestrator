@@ -3,7 +3,7 @@ type: security-report
 authority: historical
 implementation: partial
 verification: code-checked
-source: "docs/security/findings.md"
+source: "docs/security/reports/security-findings.md"
 last_verified: "2026-08-17"
 last_verified_commit: "working-tree"
 owners: ["security"]
@@ -12,14 +12,14 @@ owners: ["security"]
 # 보안 발견 및 해결 이력
 
 > **Historical:** 현재 신원·권한·secret 계약은
-> [control-plane-security-model.md](control-plane-security-model.md)가 정본이다. 이 문서는
+> [control-plane-security-model.md](../control-plane-security-model.md)가 정본이다. 이 문서는
 > 발견·해결·미해결 항목의 이력을 보존하며, 현재 정책을 재정의하지 않는다.
 
-> 최종 업데이트: 2026-08-06. 담당: Antigravity.
+> 기록 기준일: 2026-08-17. 초기 해결 기록: 2026-08-06.
 >
 > 기존 S1~S6은 해결됐다. 2026-08-16 전체 설계 감사에서 control-plane identity와
 > secret lifecycle의 신규 공백을 발견했으며 정본 설계는
-> [`control-plane-security-model.md`](control-plane-security-model.md)다.
+> [`control-plane-security-model.md`](../control-plane-security-model.md)다.
 
 ## 신규 미해결 항목
 
