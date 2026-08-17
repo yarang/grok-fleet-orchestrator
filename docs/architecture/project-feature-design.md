@@ -11,9 +11,8 @@ last_verified: "2026-08-16"
 
 > 작성일: 2026-08-14. 로드맵 [`#48`](../roadmap/roadmap.md)에 대응하는 설계
 > 문서입니다. **설계 확정** 단계이며 아직 구현되지 않았습니다 — 구현 진행
-> 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요. 개정 이력(왜 이렇게
-> 결정했는지)은 [`log.md`](log.md)의 "project-feature-design.md" 절을
-> 참고하세요 — 이 문서 본문은 현재 확정된 설계만 담습니다.
+> 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요. 상세 개정 이력은 Git과
+> [Reviews](../reviews/README.md)를 참고하세요 — 이 문서 본문은 현재 확정된 설계만 담습니다.
 
 ## 책임 경계
 
@@ -420,7 +419,7 @@ Project 개발 종료는 Task 하나의 완료와 다르다. Project는 `Drainin
 ## 관련 문서
 
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #48 — 구현 진행 상황 정본.
-- [`docs/architecture/log.md`](log.md) — 이 설계에 도달한 경위(개정 이력).
+- Git history와 [`docs/reviews/`](../reviews/README.md) — 이 설계에 도달한 경위.
 - [`docs/architecture/agents/provisioning.md`](agents/provisioning.md) — `#49`,
   이 하드 격리 모델 위에 host 내 동적 에이전트 생성을 쌓는 후속 설계.
 - [`docs/architecture/agents/harness-composition.md`](agents/harness-composition.md) — `#51`,

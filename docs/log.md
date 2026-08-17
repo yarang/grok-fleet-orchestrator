@@ -389,3 +389,9 @@ last_verified: "2026-08-15"
 
 - 유형: `ingest` + `lint`
 - 단일 제어 권한, lease, epoch, fencing 계약은 Architecture에 남기고, 수동 Primary 승격·Standby 준비 점검은 Deployment Runbook으로 분리했다.
+
+## 2026-08-17 — Routing·예산 계약과 Architecture 로그 정리
+
+- 유형: `ingest` + `lint`
+- `task-routing-policy.md`와 `task-budget-control.md`로 Worker 선택 정책과 usage 예산 제어를 분리했다.
+- `architecture/log.md`는 중앙 `docs/log.md`, `docs/reviews/`, Git history와 역할이 겹치므로 inbound link를 정리한 뒤 삭제했다.

@@ -49,13 +49,14 @@ flowchart TD
 | Task 관리 | [Task management](task-management-design.md) | Task 제출·의존성·취소·결과·감사는 어떻게 관리하는가? |
 | 교차 lifecycle | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) | Project·Task·Attempt·Agent 전이는 어떻게 맞물리는가? |
 | Agent 실행 | [Agent domain](agents/README.md) | 격리, provisioning, runtime, harness, tool, memory, terminal은 어떻게 분리되는가? |
-| Routing | [Intelligent task routing](intelligent-task-routing-and-budget-control-design.md) | 현재 routing 구현과 목표 budget 정책은 무엇인가? |
+| Task routing | [Task routing 정책](task-routing-policy.md) | 논리 profile과 Worker 선택 정책은 무엇인가? |
+| Task 예산 | [Task 예산 제어](task-budget-control.md) | usage budget과 telemetry 제한은 어떻게 적용하는가? |
 
 ## Derived와 기록
 
 [system-entities-mapping.md](system-entities-mapping.md)는 엔티티 관계를 빠르게 보는 Derived
-지도다. 비교·대안·feasibility 검토는 [Reviews](../reviews/README.md)에, 시간순 변경은
-[architecture log](log.md)에 둔다. 이 문서들은 정본을 바꾸지 않는다.
+지도다. 비교·대안·feasibility 검토는 [Reviews](../reviews/README.md)에, 의미 있는 문서 변경은
+[Docs log](../log.md)에 둔다. 세부 변경 이력은 Git을 따른다. 이 문서들은 정본을 바꾸지 않는다.
 
 정본과 코드가 다르면 정본의 `implementation`과 `verification`을 낮추고 현재 차이를 명시한다.
 Derived와 review는 정본을 재정의하지 않는다.

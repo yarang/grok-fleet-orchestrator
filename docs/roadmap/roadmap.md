@@ -864,7 +864,7 @@ flowchart LR
     Agent의 `project_id`가 host 재배정 시 재동기화되지 않던 미검증(critical)
     발견 1건도 함께 반영(`assign_host_to_project`가 소속 Agent 전체의
     `project_id`도 같은 트랜잭션에서 갱신). 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **9차 개정 (나머지 14건 재검증, 2026-08-15)**: 세션 한도로 미뤄졌던
     14건을 예산 회복 후 3표 검증 완주(42개 에이전트 전원 정상 완료)로
@@ -878,7 +878,7 @@ flowchart LR
     `agent-memory-injection-flow.mermaid`(폐기된 소프트 필터 레이블,
     critical)와 `project-aware-dispatch-logic.mermaid`(단계 번호 불일치,
     major)도 함께 확정. 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     **다음 단계**: 설계 문서 §8의 Phase 1(스키마 + Store + RBAC)부터 순차 구현.
 
@@ -1030,7 +1030,7 @@ flowchart LR
     필드 도입), `POST /api/agents`에 남아있던 모순된 `project_id` 파라미터
     제거, `Automatic` 모드 전환 전제조건에 `agent_idle_timeout_secs` 필수화,
     인용 오류 정정 다수. 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **8차 개정 (미검증 발견 재검증, 2026-08-15)**: 5차에서 계정 한도로
     검증받지 못한 6개 관점을 현재 문서 기준으로 다시 검토·검증(세션
@@ -1042,7 +1042,7 @@ flowchart LR
     알림이 `ui-design.md`에 반영 안 됐던 **minor** 격차 재확인,
     `/projects/new` 폼에 Automatic 모드 필수 필드 입력 UI가 없던
     **major** 발견(`ui-design.md` §3.9에 반영). 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **9차 개정 (나머지 14건 재검증, 2026-08-15)**: `#48` 9차와 동일한
     재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영. §4.1의
@@ -1050,7 +1050,7 @@ flowchart LR
     §7의 신규 `PATCH /api/projects/:id`로 크로스 레퍼런스(**critical**).
     §10에 `AgentAutoProvisioner`의 `AgentCreate` RBAC 우회 경로 경고 박스
     신설(**critical**, 해소책은 `#48` §9로 정본 위임). 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     **다음 단계**: 설계 문서 §11의 **Phase 0(검증 스파이크)부터** 순차 구현
     — `#48` Phase 1과 독립적으로 병행 가능.
@@ -1128,7 +1128,7 @@ flowchart LR
     재작성(크래시 출력이 즉시 사라지던 별도 major 발견도 함께 해소). 의도된
     stop이 생존 폴링 루프와 경합할 수 있던 **major** 문제도 수정(stop
     시작 전 폴링 대상에서 먼저 제거). 인용 오류 1건 정정. 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **6차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
     재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영(둘 다
@@ -1138,7 +1138,7 @@ flowchart LR
     결과를 저장할 `agent_commands.result` 컬럼이 스키마에 없는데도 대응
     마이그레이션 계획이 어느 문서에도 없던 누락 — §9에 신규 마이그레이션
     번호 예약 필요를 명시. 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **7차 개정 (나머지 14건 재검증, 2026-08-15)**: `#48` 9차와 동일한
     재검증 라운드에서 이 항목에 해당하는 확정 발견 4건을 반영. §3에서
@@ -1149,8 +1149,7 @@ flowchart LR
     검증" 과대 주장을 "존재를 확인" 수준으로 낮춤(**minor**),
     `agent-data-model.mermaid`의 `capture_terminal` 누락을 직접 재확인해
     반영(검증 에이전트 다수표는 반박이었으나 직접 확인 결과를 우선). 자세한
-    내용은 [`docs/architecture/log.md`](../architecture/log.md)의 개정
-    이력 참고.
+    내용은 Git history와 `docs/reviews/`의 검토 기록 참고.
 
     **다음 단계**: `#49` Phase 4가 완료된 뒤, §9에 남은 미검증 항목(grok의
     SIGINT/TTY 동작, 동시 세션 생성 레이스 등)을 `#49` Phase 0 검증
@@ -1201,7 +1200,7 @@ flowchart LR
     발견 이전에 내려져 재검토가 누락됐던 것을 Phase 0 재검토 대상으로 명시
     플래그 추가(**major**), §8 UI 서술("세 번째 탭") 정정(**major**,
     실제로는 독립 라우트). 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **3차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
     재검증 라운드에서 이 항목에 해당하는 확정 발견 1건(**major**,
@@ -1211,8 +1210,7 @@ flowchart LR
     이 대칭이 깨져 있던 문제 — `ui-design.md` §3.12/§3.13에 Tool과 동일한
     UI 패턴으로 Skill 바인딩을 추가해 반영. IA 트리·라우트 가드 매트릭스에
     `/admin/skills`가 누락돼 있던 별도 minor 발견도 함께 반영. 자세한
-    내용은 [`docs/architecture/log.md`](../architecture/log.md)의 개정
-    이력 참고.
+    내용은 Git history와 `docs/reviews/`의 검토 기록 참고.
 
     **다음 단계**: `#49` Phase 2(템플릿/카탈로그/도구 바인딩)와 같은
     Phase에서 함께 구현 권장 — Skill 바인딩이 도구 바인딩과 스키마·API·UI
@@ -1264,7 +1262,7 @@ flowchart LR
     규약 차이로 프레이밍이 깨질 위험이 있던 **major** 문제 — 양쪽에서
     완전한 JSON-RPC 메시지 단위로 파싱 후 재구성하도록 정정. §6 UI 서술
     ("네 번째 탭") 정정(**minor**, 실제로는 독립 라우트). 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    Git history와 `docs/reviews/`의 검토 기록 참고.
 
     ⚠️ **3차 개정 (미검증 발견 재검증, 2026-08-15)**: `#48` 8차와 동일한
     재검증 라운드에서 이 항목에 해당하는 확정 발견 2건을 반영. §6이
@@ -1274,8 +1272,7 @@ flowchart LR
     반영. `platform-layer-stack.mermaid`가 이 문서(L7)의 `#51`(L5)
     의존을 누락한 **major** 발견도 반영(`L5 --> L7` 엣지 추가). IA
     트리·라우트 가드 매트릭스에 `/admin/agent-runtimes`가 누락돼 있던
-    별도 minor 발견도 함께 반영. 자세한 내용은
-    [`docs/architecture/log.md`](../architecture/log.md)의 개정 이력 참고.
+    별도 minor 발견도 함께 반영. 자세한 내용은 Git history와 `docs/reviews/`의 검토 기록 참고.
 
     **다음 단계**: `#49` Phase 0 검증 스파이크 범위에 grok build 네이티브
     설정 파일 조사와 `grok --help`로 서브커맨드 관계 확정을 포함해 함께
@@ -1306,8 +1303,7 @@ flowchart LR
 > [`Agent harness`](../architecture/agents/harness-composition.md),
 > [`Agent runtime`](../architecture/agents/runtime-adapters.md)),
 > 구현은 아직 시작 전이라 미배정 상태. 문서들 모두 "현재 확정된 설계"만
-> 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는
-> [`docs/architecture/log.md`](../architecture/log.md)에 별도로 정리돼 있다.
+> 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는 Git history와 `docs/reviews/`에 보존한다.
 
 > ⚠️ **정정 (2026-08-13)**: 이 표가 #32를 여전히 "security 담당·미해결"로 열거하고
 > 있었으나, 해당 항목 본문은 이미 "✅ 해결됨(`db614ec`)"으로 끝나 있었다 — 헤더
