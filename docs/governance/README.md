@@ -4,7 +4,7 @@ authority: canonical
 implementation: not-applicable
 verification: design-reviewed
 source: "docs/governance/README.md"
-last_verified: "2026-08-16"
+last_verified: "2026-08-17"
 ---
 
 # Governance
@@ -15,5 +15,5 @@ last_verified: "2026-08-16"
 | 문서 | 역할 |
 |---|---|
 | [`documentation-policy.md`](./documentation-policy.md) | 정본·보존 문서, 메타데이터, lint 규약 |
-| [`documentation-rewrite-guide.md`](./documentation-rewrite-guide.md) | 도메인 진입점, 기능상 책임, 폐기 삭제, review 부기, Git 기록 규약 |
+| [`documentation-rewrite-guide.md`](./documentation-rewrite-guide.md) | 도메인 진입점, 현재/목표 분리, 폐기 삭제, review 부기, 링크·Git 검증 규약 |
 | [`skills.md`](./skills.md) | Fleet Skill 시스템 사용·작성 규약 |
