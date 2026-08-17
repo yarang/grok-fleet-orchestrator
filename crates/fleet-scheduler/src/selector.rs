@@ -185,6 +185,9 @@ mod tests {
         async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
             unimplemented!()
         }
+        async fn update_task_checkpoint(&self, _: TaskId, _: Option<&str>) -> Result<(), StoreError> {
+            unimplemented!()
+        }
         async fn upsert_worker(&self, _: &Worker) -> Result<(), StoreError> {
             unimplemented!()
         }

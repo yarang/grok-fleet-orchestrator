@@ -86,6 +86,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
         match w.status {
             WorkerStatus::Online => w_counts.online += 1,
             WorkerStatus::Degraded => w_counts.degraded += 1,
+            WorkerStatus::Draining => w_counts.draining += 1,
             WorkerStatus::Offline => w_counts.offline += 1,
             WorkerStatus::CircuitOpen => w_counts.circuit_open += 1,
         }
@@ -156,6 +157,12 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
         "fleet_workers_total",
         &[("status", "circuit_open")],
         w_counts.circuit_open,
+    );
+    push_gauge(
+        &mut out,
+        "fleet_workers_total",
+        &[("status", "draining")],
+        w_counts.draining,
     );
     push_gauge(
         &mut out,
@@ -455,6 +462,7 @@ struct WorkerCounts {
     total: u64,
     online: u64,
     degraded: u64,
+    draining: u64,
     offline: u64,
     circuit_open: u64,
 }

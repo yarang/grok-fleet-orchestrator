@@ -5,7 +5,7 @@
 //! - GET /v1/bootstrap-tokens 로 목록 조회
 //! - POST /v1/workers/join 로 토큰 소비 + worker 생성
 //! - 토큰 재사용 시 거부 (단일 사용)
-//! - DELETE /v1/bootstrap-tokens/:token 으로 회수
+//! - DELETE /v1/bootstrap-tokens/:token_id 으로 공개 식별자 회수
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -73,6 +73,7 @@ async fn create_token_returns_token_string() {
     let token = json["token"].as_str().expect("token in response");
     assert!(token.starts_with("test_"));
     assert!(token.len() > "test_".len() + 10);
+    assert!(json["token_id"].as_str().unwrap().starts_with("bt_"));
 }
 
 #[tokio::test]
@@ -124,6 +125,8 @@ async fn list_tokens_returns_all() {
     assert_eq!(status, axum::http::StatusCode::OK);
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 2);
+    assert!(arr.iter().all(|entry| entry.get("token").is_none()));
+    assert!(arr.iter().all(|entry| entry["token_id"].as_str().unwrap().starts_with("bt_")));
 }
 
 #[tokio::test]
@@ -134,7 +137,7 @@ async fn revoke_token_removes_it() {
     let (status, _) = api_call(
         store.clone(),
         axum::http::Method::DELETE,
-        "/v1/bootstrap-tokens/doomed",
+        &format!("/v1/bootstrap-tokens/{}", BootstrapToken::public_id_for("doomed")),
         None,
     )
     .await;
@@ -150,7 +153,7 @@ async fn revoke_unknown_token_returns_404() {
     let (status, json) = api_call(
         store,
         axum::http::Method::DELETE,
-        "/v1/bootstrap-tokens/nonexistent",
+        "/v1/bootstrap-tokens/bt_nonexistent",
         None,
     )
     .await;
@@ -418,6 +421,9 @@ impl Store for BsStore {
         unimplemented!()
     }
     async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
+        unimplemented!()
+    }
+    async fn update_task_checkpoint(&self, _: TaskId, _: Option<&str>) -> Result<(), StoreError> {
         unimplemented!()
     }
     async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {

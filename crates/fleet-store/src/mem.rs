@@ -164,6 +164,15 @@ impl Store for MemStore {
         Ok(task.retry_count)
     }
 
+    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.get_mut(&id) else {
+            return Err(StoreError::NotFound);
+        };
+        task.checkpoint_branch = checkpoint_branch.map(|s| s.to_string());
+        Ok(())
+    }
+
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         if self.is_failing("list_tasks") {
             return Err(StoreError::Unsupported("list_tasks"));

@@ -313,6 +313,8 @@ mod tests {
             model: None,
             max_turns: None,
             timeout_secs: None,
+            checkpoint_branch: None,
+            skills_required: vec![],
         };
         transport.dispatch(req).await.unwrap();
 
@@ -342,6 +344,8 @@ mod tests {
             model: None,
             max_turns: None,
             timeout_secs: None,
+            checkpoint_branch: None,
+            skills_required: vec![],
         };
         let result = transport.dispatch(req).await;
         assert!(result.is_err());

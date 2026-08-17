@@ -1,4 +1,19 @@
-# 오케스트레이터 및 워커 설치/연동 가이드 — 구현 현황 요약 (Release v0.2)
+---
+type: release-reference
+authority: derived
+implementation: partial
+verification: code-checked
+source: "docs/worker-bootstrap/bootstrap-release-v0.2.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["worker-bootstrap"]
+---
+
+# 오케스트레이터·Worker 구현 스냅샷 (Release v0.2)
+
+> **Derived:** 이 문서는 v0.2 시점의 코드 대조 스냅샷이다. 현재 join 계약은
+> [`contracts/worker-enrollment.md`](../contracts/worker-enrollment.md), 현재 설치·운영 절차는
+> [`deployment/`](../deployment/README.md)를 우선한다.
 
 > **문서 성격**: 이 문서는 `fleet`/`fleet-worker` 설치·조인·프로비저닝의 **실제 코드 구현 현황을 코드 대비 검증한 요약/색인 문서**입니다. 각 주제의 상세 설계는 아래 §0 표에 링크된 정본 문서를 참조하세요. 이 문서 단독으로 전체 스펙을 재서술하지 않습니다 — v0.1(2026-08-06)까지는 세부 설계가 문서마다 중복 서술되어 있었고, 실제 코드가 갱신되며 문서 간 불일치가 발생했습니다. v0.2는 그 중복을 없애고 "지금 코드가 실제로 무엇을 하는지"를 한곳에서 확인할 수 있게 하는 데 목적이 있습니다.
 >

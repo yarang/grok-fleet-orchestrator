@@ -185,6 +185,8 @@ pub async fn heartbeat(
         load_avg: req.load_avg.clone(),
         mem_available_mb: req.mem_available_mb,
         disk_free_mb: req.disk_free_mb,
+        cpu_usage: req.cpu_usage,
+        ram_usage: req.ram_usage,
         agent_healthy: req.agent_healthy,
         grok_version: req.grok_version.clone(),
         fleet_worker_version: req.fleet_worker_version.clone(),
@@ -206,7 +208,7 @@ pub async fn heartbeat(
         Some(WorkerStatus::Degraded)
     };
     if let Some(new) = new_status {
-        if worker.status != new {
+        if worker.status != WorkerStatus::Draining && worker.status != new {
             let mut updated = worker.clone();
             updated.status = new;
             state.store.upsert_worker(&updated).await?;
@@ -248,6 +250,8 @@ pub async fn heartbeat(
             load_avg: req.load_avg.clone(),
             mem_available_mb: Some(req.mem_available_mb),
             disk_free_mb: Some(req.disk_free_mb),
+            cpu_usage: req.cpu_usage,
+            ram_usage: req.ram_usage,
         },
         last_heartbeat_at: Some(Utc::now()),
         provisioned_at: None,
@@ -258,9 +262,34 @@ pub async fn heartbeat(
 
     debug!(%worker_id, active = req.active_tasks, healthy = req.agent_healthy, "heartbeat");
 
+    // 자가 드레인 평가: CPU나 RAM 사용량이 90%를 초과한 경우 또는 이미 Draining인 경우
+    let mut is_overloaded = false;
+    if let Some(cpu) = req.cpu_usage {
+        if cpu > 90.0 {
+            is_overloaded = true;
+        }
+    }
+    if let Some(ram) = req.ram_usage {
+        if ram > 90.0 {
+            is_overloaded = true;
+        }
+    }
+
+    let desired_state = if is_overloaded || worker.status == WorkerStatus::Draining {
+        if worker.status != WorkerStatus::Draining {
+            let mut updated = worker.clone();
+            updated.status = WorkerStatus::Draining;
+            state.store.upsert_worker(&updated).await?;
+            tracing::info!(worker_id = %worker_id, "Worker CPU/RAM overloaded; transitioning to Draining");
+        }
+        "drain"
+    } else {
+        "running"
+    };
+
     Ok(Json(HeartbeatResponse {
         ok: true,
-        desired_state: "running",
+        desired_state,
         server_time: Utc::now(),
     }))
 }
@@ -581,6 +610,7 @@ pub async fn create_bootstrap_token(
     info!(token_prefix = %req.prefix, max_uses = req.max_uses, "bootstrap token issued");
     Ok(Json(CreateBootstrapTokenResponse {
         token,
+        token_id: bt.public_id(),
         created_at: now,
         expires_at,
         max_uses: req.max_uses,
@@ -600,21 +630,27 @@ pub async fn list_bootstrap_tokens(
     ))
 }
 
-/// `DELETE /v1/bootstrap-tokens/:token` — 토큰 회수.
+/// `DELETE /v1/bootstrap-tokens/:token_id` — 공개 식별자로 토큰 회수.
 pub async fn revoke_bootstrap_token(
     State(state): State<Arc<AppState>>,
-    Path(token): Path<String>,
+    Path(token_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = state
+        .store
+        .list_bootstrap_tokens()
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.public_id() == token_id)
+        .map(|candidate| candidate.token)
+        .ok_or_else(|| ApiError::NotFound("bootstrap token not found".into()))?;
     let revoked = state.store.revoke_bootstrap_token(&token).await?;
     if !revoked {
-        return Err(ApiError::NotFound(format!(
-            "bootstrap token not found: {token}"
-        )));
+        return Err(ApiError::NotFound("bootstrap token not found".into()));
     }
     info!("bootstrap token revoked");
     Ok(Json(serde_json::json!({
         "status": "revoked",
-        "token": token,
+        "token_id": token_id,
     })))
 }
 

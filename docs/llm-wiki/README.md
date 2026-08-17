@@ -19,7 +19,7 @@ last_verified: "2026-08-15"
 ## 운영 규칙 (스키마)
 
 ### 1. 정본(canonical) / 사본(derived) 구분
-각 위키 페이지는 자신이 어떤 주제의 **정본**인지 명시한다 — 게이트웨이 선택은 [`multi_provider_llm_proxy_analysis.md`](./multi_provider_llm_proxy_analysis.md), 인프라 스펙(포트·이미지·환경변수)은 [`litellm_integration_plan.md`](./litellm_integration_plan.md)가 정본이다. 이 위키 밖의 다른 문서(예: `docs/deployment/single-server.md`)가 같은 내용을 인용할 때는 **사본임을 명시하고 정본 링크를 남긴다**. 값이 어긋나면 정본이 우선한다. 값을 바꿀 때는 정본을 먼저 고친 뒤 사본을 동기화한다 — 이 순서를 지키지 않아 과거 One API/liteLLM 불일치가 발생했다 ([`log.md`](./log.md) 2026-08-06 항목 참고).
+각 위키 페이지는 자신이 어떤 주제의 **정본**인지 명시한다 — 게이트웨이 선택은 [`multi_provider_llm_proxy_analysis.md`](./multi_provider_llm_proxy_analysis.md), 인프라 스펙(포트·이미지·환경변수)은 [`litellm_integration_plan.md`](./litellm_integration_plan.md)가 정본이다. 다른 도메인 문서가 같은 내용을 인용할 때는 정본 링크만 둔다. 값이 어긋나면 정본이 우선한다.
 
 ### 2. 작업 흐름
 * **Ingest**: 새로운 결정·요구사항이 생기면 관련 위키 페이지에 통합한다. 한 소스가 여러 페이지에 영향을 줄 수 있으므로 교차참조를 빠짐없이 갱신한다. 신규/변경 페이지는 `index.md`에 반영하고, `log.md`에 항목을 추가한다.

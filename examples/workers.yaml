@@ -11,7 +11,7 @@
 #   1. 각 호스트에 SSH 접속.
 #   2. (필요 시) cloudflared 설치 및 tunnel 연결.
 #   3. grok CLI + fleet-worker 바이너리 배포.
-#   4. /etc/fleet-worker/worker.toml 생성 (각 호스트의 name/labels 자동 치환).
+#   4. /etc/fleet/worker.toml 생성 (각 호스트의 name/labels 자동 치환).
 #   5. systemd 유닛 활성화 (examples/fleet-worker.service 참조).
 #   6. orchestrator 에 워커로 등록.
 

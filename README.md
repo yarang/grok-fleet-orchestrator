@@ -40,7 +40,7 @@ cargo build --release --features "acp mtls"
 
 운영용 샘플 설정은 `examples/` 디렉토리 참조 (`worker.toml`, `workers.yaml`,
 `fleet.service`, `fleet-worker.service`, `fleet.env`, `mcp-clients.json`).
-자세한 설치 절차는 [`docs/deployment.md`](docs/deployment/deployment.md#0-설치) 의 §0.
+자세한 설치 절차는 [`docs/deployment/install.md`](docs/deployment/install.md)를 참고한다.
 
 ## 주요 특징
 
@@ -145,8 +145,8 @@ AI 클라이언트에 노출되는 7개 MCP 도구:
 
 - [`docs/index.md`](docs/index.md) — 전체 설계·운영 문서 카탈로그 (정본/사본 상태, 최종 개정일)
 - [`docs/architecture/overview.md`](docs/architecture/overview.md) — 시스템 아키텍처, 데이터 흐름, 핵심 추상화
-- [`docs/architecture/api-reference.md`](docs/architecture/api-reference.md) — HTTP API + MCP 도구 레퍼런스
-- [`docs/deployment/deployment.md`](docs/deployment/deployment.md) — 단일 서버 및 분산 배포 가이드 (Cloudflare Tunnel 포함)
+- [`docs/contracts/README.md`](docs/contracts/README.md) — HTTP, MCP, Dashboard, Worker enrollment 계약
+- [`docs/deployment/README.md`](docs/deployment/README.md) — 설치·구성·운영·복구 진입점
 - [`docs/ui-dashboard/ui-design.md`](docs/ui-dashboard/ui-design.md) — 웹 대시보드 화면 설계서 (8개 페이지, 사용자 흐름, 디자인 시스템, 구현 우선순위)
 - [`DESIGN-apple.md`](DESIGN-apple.md) — Apple Design System 스펙 (색상, 타이포그래피, 컴포넌트)
 - [`examples/`](examples/) — 운영용 샘플 설정 (`worker.toml`, `workers.yaml`, systemd units, MCP 클라이언트 예시)

@@ -120,8 +120,20 @@ impl HealthChecker {
             .await
             .map_err(|e| ScanError::Store(e.to_string()))?;
 
+        // Draining 워커도 검사
+        let draining = self
+            .state
+            .store
+            .list_workers(&WorkerFilter {
+                status: Some(WorkerStatus::Draining),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| ScanError::Store(e.to_string()))?;
+
         let mut all = candidates;
         all.extend(degraded);
+        all.extend(draining);
 
         let now = Utc::now();
         let grace = chrono::Duration::from_std(self.config.grace_duration())

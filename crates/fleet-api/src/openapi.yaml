@@ -352,9 +352,9 @@ paths:
       responses:
         "201":
           description: >-
-            Token created. The full token string is returned here and is
-            also returned unmasked by every subsequent `GET` — there is no
-            masking anywhere in the implementation.
+            The full token string is returned exactly once here. Store it in a
+            secret manager; subsequent list and revoke calls use token_id and
+            never reveal or accept the raw token.
           content:
             application/json:
               schema:
@@ -382,19 +382,20 @@ paths:
                 items:
                   $ref: "#/components/schemas/BootstrapTokenSummary"
 
-  /bootstrap-tokens/{token}:
+  /bootstrap-tokens/{token_id}:
     delete:
       operationId: revokeBootstrapToken
       tags: [bootstrap-tokens]
       summary: Revoke (permanently delete) a bootstrap token
       description: >-
-        Deletes the row outright — this is not a use_count bump or a soft
-        disable. Already-joined workers are unaffected.
+        Deletes the row outright using the public token_id returned by the list
+        endpoint; raw token values are never accepted in the URL. This is not a
+        use_count bump or a soft disable. Already-joined workers are unaffected.
       parameters:
-        - name: token
+        - name: token_id
           in: path
           required: true
-          description: The full token string (percent-encode if it contains reserved characters)
+          description: Public SHA-256-based identifier returned by the list endpoint
           schema:
             type: string
       responses:
@@ -404,15 +405,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, token]
+                required: [status, token_id]
                 properties:
                   status:
                     type: string
                     enum: [revoked]
-                  token:
+                  token_id:
                     type: string
         "404":
-          description: No token with that value exists
+          description: No token with that public identifier exists
           content:
             application/json:
               schema:
@@ -864,11 +865,15 @@ components:
 
     CreateBootstrapTokenResponse:
       type: object
-      required: [token, created_at, max_uses]
+      required: [token, token_id, created_at, max_uses]
       properties:
         token:
           type: string
-          example: "fleet_9f3a7c2bdeadbeef..._H8x"
+          description: Raw bootstrap token, returned only at issuance time
+        token_id:
+          type: string
+          description: Public identifier for later list/revoke operations
+          example: "bt_9f3a7c2bdeadbeef"
         created_at:
           type: string
           format: date-time
@@ -881,11 +886,11 @@ components:
 
     BootstrapTokenSummary:
       type: object
-      required: [token, created_at, max_uses, use_count, remaining_uses]
+      required: [token_id, created_at, max_uses, use_count, remaining_uses]
       properties:
-        token:
+        token_id:
           type: string
-          description: Returned unmasked — no masking logic exists anywhere in the server
+          description: SHA-256-based public identifier; the raw token is not returned
         created_at:
           type: string
           format: date-time

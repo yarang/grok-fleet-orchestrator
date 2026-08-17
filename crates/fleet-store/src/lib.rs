@@ -69,6 +69,9 @@ pub trait Store: Send + Sync {
     /// `CircuitOpen`으로 실패할 때마다 호출된다.
     async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError>;
 
+    /// 작업 마이그레이션 이관용 Git 임시 브랜치명을 업데이트합니다.
+    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError>;
+
     /// 스레드(연속 대화) 전체를 시간순(오름차순)으로 조회 — 대화를 읽는 순서.
     ///
     /// 기본 구현은 `list_tasks`를 넉넉한 limit으로 호출한 뒤 클라이언트 측에서

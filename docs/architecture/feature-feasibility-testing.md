@@ -1,11 +1,16 @@
 ---
-type: wiki
-status: canonical
+type: verification-plan
+authority: derived
+implementation: not-applicable
+verification: design-reviewed
 source: "docs/architecture/feature-feasibility-testing.md"
 last_verified: "2026-08-15"
 ---
 
-# 핵심 기능 명세 및 로컬 검증/테스트 방안 (Feature Feasibility & Testing Spec)
+# 핵심 기능 검증 방안 보존 (Derived)
+
+> **지위: Derived verification plan.** 현재 설계 규칙은
+> [아키텍처 정본 지도](canonical-map.md)가 가리키는 정본을 따른다.
 
 > 작성일: 2026-08-15  
 > **보고 주체**: 기술 타당성 평가 에이전트 (`tech_evaluator`)  

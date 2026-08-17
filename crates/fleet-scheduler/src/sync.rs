@@ -171,6 +171,9 @@ mod tests {
         async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, fleet_store::StoreError> {
             unimplemented!()
         }
+        async fn update_task_checkpoint(&self, _: TaskId, _: Option<&str>) -> Result<(), fleet_store::StoreError> {
+            unimplemented!()
+        }
         async fn upsert_worker(
             &self,
             _: &fleet_core::Worker,

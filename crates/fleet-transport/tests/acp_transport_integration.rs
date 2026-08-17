@@ -182,6 +182,8 @@ fn dispatch_req(
         model: None,
         max_turns: None,
         timeout_secs: Some(30),
+        checkpoint_branch: None,
+        skills_required: vec![],
     }
 }
 

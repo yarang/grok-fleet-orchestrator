@@ -65,6 +65,10 @@ pub struct DispatchRequest {
     pub model: Option<String>,
     pub max_turns: Option<u32>,
     pub timeout_secs: Option<u64>,
+    pub checkpoint_branch: Option<String>,
+    /// 에이전트 스킬 로더: 태스크 명세의 `skills_required` 목록.
+    /// 비어있으면 스킬 인젝션 없음.
+    pub skills_required: Vec<String>,
 }
 
 /// 워커에서 발생하는 이벤트 (스트리밍).

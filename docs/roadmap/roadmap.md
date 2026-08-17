@@ -10,6 +10,38 @@
 > 미해결 발견 6건(S1~S6, HIGH 3건 포함)이 등록되어 있으며, 각 항목은 재확인 명령·
 > 악용 시나리오·수정 방향·회귀 테스트 방침을 포함한다. 아래 #33 참조.
 
+## 2026-08-16 이후 구현 로드맵 — 보안 경계와 실행 신뢰성
+
+보안 사고 대응(Cloudflare credential 폐기·재발급 및 노출 조치)은 완료됐다. 이후 개발은
+아래 순서를 따른다. 각 항목은 코드·API 계약·운영 문서·회귀 테스트를 같은 변경 단위로
+완료해야 하며, 설계 문서의 `proposed` 표기를 구현 검증 전에는 올리지 않는다.
+
+```mermaid
+flowchart LR
+    S1["1. Bootstrap token 원문 제거"] --> S2["2. HTTP/MCP principal·capability"]
+    S2 --> S3["3. Worker별 운영 신원"]
+    S3 --> S4["4. TaskAttempt·멱등성"]
+    S4 --> S5["5. Primary/Cold Standby fencing"]
+    S5 --> S6["6. Agent isolation·wipe"]
+    S6 --> S7["7. Skill revision loading"]
+```
+
+| 순서 | 결과물 | 완료 기준 | 상태 |
+|---:|---|---|---|
+| 1 | Bootstrap token 공개 식별자 | 발급 시 1회 외에는 원문을 API/MCP/URL/log에 노출하지 않고, 목록·회수는 공개 식별자로 동작 | ✅ 구현·회귀 테스트 완료 |
+| 2 | Principal/capability authorization | HTTP와 MCP 모두 actor·scope·capability를 검사하고 production no-auth를 fail-closed로 거부 | 대기 |
+| 3 | Worker operational identity | join 뒤 worker별 mTLS 또는 scoped credential로 전환, bootstrap 재사용 불가 | 대기 |
+| 3a | 선택적 Worker liveness | periodic heartbeat 또는 on-demand probe를 Worker별로 선택하고 idle Worker의 heartbeat timeout 오판을 제거 | 설계 확정·구현 대기 |
+| 4 | TaskAttempt execution contract | idempotency key, generation/CAS, retry·OutcomeUnknown·side-effect fencing | 대기 |
+| 5 | Cold Standby control authority | DB lease/epoch/fencing, 수동 승격 runbook과 split-brain 회귀 테스트 | 대기 |
+| 6 | Agent execution isolation | `fleet` 최소 권한, 제한 sudo wipe, rootless container, terminal/cancel cleanup 격리 | 대기 |
+| 7 | Reproducible Skill loading | required revision inline, optional read-only fetch, attempt manifest/hash | 대기 |
+
+각 단계의 정본 설계는 [`control-plane-security-model.md`](../security/control-plane-security-model.md),
+[`task-execution-consistency.md`](../architecture/task-execution-consistency.md),
+[`control-plane-availability.md`](../architecture/control-plane-availability.md),
+[`agents/execution-isolation.md`](../architecture/agents/execution-isolation.md)를 따른다.
+
 ## P0 — Production Blockers
 
 1. ✅ **Dockerfile** — 해결됨 (`acca872`). 멀티스테이지 빌드 + `.dockerignore`.
@@ -370,7 +402,7 @@
     
     상세: [`docs/llm-wiki/README.md`](../llm-wiki/README.md). 오케스트레이터의 멀티 LLM 공급자 연동과 Spend Control(비용 추적/한도)을 제어하기 위해 liteLLM 프록시 서비스를 Docker Compose에 수용하고, 시작 시 환경변수(`FLEET_LLM_GATEWAY_URL`) Fail-Fast 설정을 추가합니다.
 
-    **문서 정합성 수정 (2026-08-06~07)**: [`docs/single_server_deployment_plan.md`](../deployment/single-server.md)가 이 결정 이전에 작성되어 "One API(경량 대안)를 liteLLM 대신 채택"이라고 반대로 기술하고 있던 충돌을 발견했다. liteLLM 기준(포트 4000, `ghcr.io/berriai/litellm`, `litellm` 전용 논리 DB, `FLEET_LLM_GATEWAY_URL`)으로 갱신해 모순을 해소하는 한편, 재발 방지를 위해 `docs/llm-wiki/`를 게이트웨이 결정·스펙의 **정본(canonical source)**으로 격상했다 — `multi_provider_llm_proxy_analysis.md`에 liteLLM vs One API 비교표를 추가해 선택 근거를 명문화하고, `single_server_deployment_plan.md`의 Docker Compose 예시는 이제 그 정본을 인용한 사본임을 명시했다. 이어서 [Karpathy의 "LLM Wiki" 패턴](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)에 맞춰 `docs/llm-wiki/index.md`(페이지 카탈로그)와 `docs/llm-wiki/log.md`(ingest/query/lint append-only 이력)를 신설하고, `README.md`를 운영 규칙(스키마) 문서로 재편했다 — 상세 이력은 `log.md` 참고.
+    **문서 정합성 수정 (2026-08-06~07)**: 당시 단일 서버 배포 초안이 "One API(경량 대안)를 liteLLM 대신 채택"이라고 반대로 기술하던 충돌을 발견했다. 해당 폐기 문서는 삭제했으며, liteLLM 기준(포트 4000, `ghcr.io/berriai/litellm`, `litellm` 전용 논리 DB, `FLEET_LLM_GATEWAY_URL`)의 정본은 `docs/llm-wiki/`로 분리했다. `multi_provider_llm_proxy_analysis.md`에 liteLLM vs One API 비교표를 추가해 선택 근거를 명문화했다.
     
     **구현 완료 (2026-08-07)**: `crates/fleet-core/src/config.rs`에 `FLEET_LLM_GATEWAY_URL`의 유효한 HTTP/HTTPS URL 스킴 검증 필터를 추가하고 단위 테스트 2개를 작성하여 무결성을 확보했습니다. 또한 `docker-compose.yml`에 포트 4000번 기반의 `litellm` 컨테이너 서비스를 추가하고, 오케스트레이터 서비스가 기동 시 이를 자동 바인딩하도록 연동시켰으며, `examples/litellm-config.yaml` 템플릿 설정을 구축했습니다.
 
@@ -704,7 +736,7 @@
     서술 중이었음 등. 다이어그램 리소스를 `docs/assets/diagrams/<domain>/*.mermaid`로
     단일화(30여 개 파일 통합, 확장자 통일)하고, `agent.md`/`CLAUDE.md`의 정본/사본
     관계를 명확히 했으며, `engineering-patterns/reuse-patterns.md`의 고아 판정을
-    코드 근거로 철회했습니다. `docs/server-management/*`(명시적 미구현 제안),
+    코드 근거로 철회했습니다. `docs/operations/proposals/*`(명시적 미구현 제안),
     `docs/security/findings.md`(기존 내용과 이번 세션 재확인 결과 일치)는 별도
     수정 불필요로 판단했습니다.
 
@@ -910,7 +942,7 @@
     시퀀스 다이어그램, custom_prompt/메모리 주입 플로우 다이어그램,
     `016_agents.sql` 전체 스키마, RBAC 5종, 6단계 구현 계획(Phase 0 검증
     스파이크 신설), 6개 열린 질문)는
-    [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)에
+    [`docs/architecture/agents/provisioning.md`](../architecture/agents/provisioning.md)에
     정리했습니다.
 
     ⚠️ **알려진 리스크**: (1) Phase 4(동적 프로비저닝 — `fleet-worker`를 단일
@@ -938,7 +970,7 @@
     편의성 이슈 4건(다중 프로세스 로그 수집, 동적 포트 범위, 업그레이드 경로,
     프로비저닝 실패 알림)을 신설 §13에 정리하고, §UI/UX(열린 질문 목록) 절도
     신설했습니다. 자세한 내용은
-    [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
+    [`docs/architecture/agents/provisioning.md`](../architecture/agents/provisioning.md)의
     개정 이력 참고.
 
     ⚠️ **5차 개정 (프로토콜/절차 재검토, 2026-08-14)**: 구현 착수 전, 실제 코드
@@ -968,7 +1000,7 @@
     조용히 사라지고 프로세스가 고아로 남는 문제를 발견 — **정책 결정: 터미널
     상태가 아닌 agent가 있으면 호스트 삭제를 애플리케이션 레벨 409로
     차단**(RESTRICT, `mcp_servers` 정책과 동일 기조). 자세한 내용은
-    [`docs/architecture/agent-provisioning-design.md`](../architecture/agent-provisioning-design.md)의
+    [`docs/architecture/agents/provisioning.md`](../architecture/agents/provisioning.md)의
     개정 이력과 `agent-dynamic-provisioning-sequence.mermaid` 참고.
 
     ⚠️ **6차 개정 (전체 생명주기 다이어그램 + 협업 분석, 2026-08-14)**:
@@ -982,8 +1014,9 @@
     (2) `Stopping`은 호스트가 정상인데 `fleet-worker`가 종료 처리 도중
     재시작해 완료 ack이 유실되는 경로가 있는데도 별도 정리 규칙이 없던
     문제 — `Stopping` 정체 전용 타임아웃(5분) 규칙 신설, `#50`의
-    `tmux kill-server` 기동 정책이 실제 정리를 보장하므로 `Stopped`로
-    낙관적 확정.
+    전용 Fleet tmux socket에서 해당 Agent session만 정리하는 정책을 기준으로
+    `Stopped`를 낙관적으로 확정. container 격리 Agent는 container id cleanup
+    완료를 같은 전제 조건으로 사용.
 
     ⚠️ **7차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: `#48`과 동일한
     팀 검토 라운드에서 이 항목에 해당하는 확정 발견 12건을 반영. 핵심만
@@ -1047,7 +1080,7 @@
     전체 설계(아키텍처 다이어그램, 읽기 전용/인터랙티브 두 시퀀스
     다이어그램, RBAC, API/CLI 표면, 호스트 프로비저닝 변경, 동시 attach
     정책, 열린 질문)는
-    [`docs/architecture/agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)에
+    [`docs/architecture/agents/terminal-access.md`](../architecture/agents/terminal-access.md)에
     정리했습니다.
 
     ⚠️ **2차 개정 (자체 재감사, 2026-08-14)**: 사용자가 "tmux 이슈가
@@ -1157,7 +1190,7 @@
     전체 설계(3축 분석, 프롬프트 조립 순서 전체 확정, 데이터 모델,
     Host↔Tool 가용성 가드, 하네스 엔지니어링 요소 검토표, RBAC/API/CLI/UI
     표면, 단계별 구현 계획)는
-    [`docs/architecture/agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md)에
+    [`docs/architecture/agents/harness-composition.md`](../architecture/agents/harness-composition.md)에
     정리했습니다.
 
     ⚠️ **2차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 동일 팀 검토
@@ -1219,7 +1252,7 @@
 
     전체 설계(데이터 모델, `AgentRunner` 트레잇, RBAC/API/CLI 표면, 열린
     질문)는
-    [`docs/architecture/agent-runtime-vendor-design.md`](../architecture/agent-runtime-vendor-design.md)에
+    [`docs/architecture/agents/runtime-adapters.md`](../architecture/agents/runtime-adapters.md)에
     정리했습니다.
 
     ⚠️ **2차 개정 (다중 에이전트 팀 검토, 2026-08-15)**: 동일 팀 검토
@@ -1268,10 +1301,10 @@
 > `#52`(멀티 벤더 에이전트 런타임: grok build·Gemini CLI, 2026-08-15)
 > 순서로 신규 등록됐다 — 다섯 다 설계는 완료
 > ([`project-feature-design.md`](../architecture/project-feature-design.md),
-> [`agent-provisioning-design.md`](../architecture/agent-provisioning-design.md),
-> [`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md),
-> [`agent-harness-composition-design.md`](../architecture/agent-harness-composition-design.md),
-> [`agent-runtime-vendor-design.md`](../architecture/agent-runtime-vendor-design.md)),
+> [`Agent provisioning`](../architecture/agents/provisioning.md),
+> [`Agent terminal`](../architecture/agents/terminal-access.md),
+> [`Agent harness`](../architecture/agents/harness-composition.md),
+> [`Agent runtime`](../architecture/agents/runtime-adapters.md)),
 > 구현은 아직 시작 전이라 미배정 상태. 문서들 모두 "현재 확정된 설계"만
 > 담고 있으며, 개정 경위(왜 이렇게 결정했는지)는
 > [`docs/architecture/log.md`](../architecture/log.md)에 별도로 정리돼 있다.

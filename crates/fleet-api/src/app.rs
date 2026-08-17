@@ -598,7 +598,7 @@ mod tests {
             "/workers/{id}",
             "/workers/{name}/credentials",
             "/bootstrap-tokens",
-            "/bootstrap-tokens/{token}",
+            "/bootstrap-tokens/{token_id}",
             "/hosts/register",
             "/metrics",
         ] {

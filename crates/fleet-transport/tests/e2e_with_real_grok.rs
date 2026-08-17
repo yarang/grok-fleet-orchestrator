@@ -100,6 +100,8 @@ async fn e2e_dispatch_to_real_grok() {
         model: None,
         max_turns: Some(1),
         timeout_secs: Some(60),
+        checkpoint_branch: None,
+        skills_required: vec![],
     };
     transport.dispatch(req).await.expect("dispatch");
 

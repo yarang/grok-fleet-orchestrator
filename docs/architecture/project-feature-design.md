@@ -1,17 +1,48 @@
 ---
-type: wiki
-status: canonical
+type: architecture
+authority: canonical
+implementation: proposed
+verification: design-reviewed
 source: "docs/architecture/project-feature-design.md"
-last_verified: "2026-08-15"
+last_verified: "2026-08-16"
 ---
 
-# 프로젝트(Project) 기능 설계
+# Project Model & Governance 설계
 
 > 작성일: 2026-08-14. 로드맵 [`#48`](../roadmap/roadmap.md)에 대응하는 설계
 > 문서입니다. **설계 확정** 단계이며 아직 구현되지 않았습니다 — 구현 진행
 > 상황은 `roadmap.md` #48 항목을 정본으로 확인하세요. 개정 이력(왜 이렇게
 > 결정했는지)은 [`log.md`](log.md)의 "project-feature-design.md" 절을
 > 참고하세요 — 이 문서 본문은 현재 확정된 설계만 담습니다.
+
+## 책임 경계
+
+Project는 개발 목표·권한·정책·격리·공유 자원 소유의 경계다. 이 문서는 Project
+데이터, Project 상태의 허용 조건, host/worker 배정 제약, Project 관리 API를 소유한다.
+Task의 queue·의존성·취소·결과와 Agent의 process lifecycle은 각각 별도 정본에 둔다.
+
+| 이 문서가 소유 | 참조만 하는 정본 |
+|---|---|
+| Project model, policy revision, member/resource ownership | [Task Management](task-management-design.md) — Task 제출·결과·감사 |
+| Project RBAC, archive/reopen 요청의 권한 | [Lifecycle contract](project-task-agent-lifecycle.md) — 교차 상태 전이 |
+| host/worker의 project 격리 불변식 | [Agent Provisioning](agents/provisioning.md) — Agent 생성·중지 |
+| Project가 스케줄러에 주는 hard eligibility 제약 | [Task execution consistency](task-execution-consistency.md) — Attempt 실행 의미론 |
+
+Project가 Task에 정책을 제공한다고 해서 Task를 소유하거나, Agent template을 저장한다고
+해서 Agent process 상태를 소유하지 않는다. 정책 변경은 revision을 올리고 새 Task/Attempt에
+적용하며, 기존 실행에는 제출 시점 snapshot을 유지한다.
+
+```mermaid
+flowchart LR
+    Project["Project model\npolicy · RBAC · isolation"] --> Task["Task Management\nsubmit · queue · result"]
+    Project --> Agent["Agent Provisioning\nplacement constraint"]
+    Task --> Attempt["Execution consistency\nAttempt / retry"]
+    Agent --> Attempt
+    Lifecycle["Lifecycle contract"] -. "cross-entity invariants" .-> Project
+    Lifecycle -.-> Task
+    Lifecycle -.-> Agent
+    Lifecycle -.-> Attempt
+```
 
 ## 1. 배경 및 동기
 
@@ -35,6 +66,7 @@ last_verified: "2026-08-15"
 |---|---|---|
 | 프로젝트 ↔ host/worker 소속 관계 | **배타적(exclusive) 1:N** — host/worker는 최대 1개 프로젝트에만 소속, 미소속이면 일반 풀 | `workers.project_id`/`hosts.project_id` 직접 FK. host의 물리 자원과 그 위에서 도는 워커 프로세스의 세션 슬롯을 여러 프로젝트가 나눠 쓰면 항상 경쟁 상태가 생긴다 — 스키마 레벨에서 원천 차단하는 게 더 단순하고 확실함 |
 | project_id 지정 태스크의 디스패치 범위 | **하드(strict)** — 그 프로젝트 소유 워커만 후보. 후보가 없으면 전체 풀로 폴백하지 않음 | §5 참고 — 새 에러/재시도 메커니즘을 만들지 않고 **`#38`의 기존 `WorkerUnavailable` 재시도/Dead-Letter 경로를 그대로 재사용** |
+| 개발 수명과 작업 수명 | **Project/Agent 지속, Task는 terminal** | Task 완료는 개발 종료나 Agent 종료가 아니다. Project가 Active인 동안 Agent는 다음 Task의 workspace·memory·thread 문맥을 유지할 수 있다. 정본은 [Project·Agent·Task lifecycle](project-task-agent-lifecycle.md) |
 
 전체 생성→배정→디스패치→해제 흐름은 아래 시퀀스 다이어그램 참고(팀
 검토에서 이 다이어그램이 어느 절에서도 참조되지 않는 고아 파일이었음을
@@ -130,7 +162,7 @@ host에 연결돼 있다면 `project_id`는 그 host의 `project_id`로 **매번
 `crates/fleet-store/migrations/007_hosts.sql`). `#49`의 동적 프로비저닝
 워커는 이 host-단일-연결 재동기화 경로를 타지 않고 별도 경로로
 `project_id`를 직접 설정합니다 —
-[`agent-provisioning-design.md`](agent-provisioning-design.md) §4 6~7단계
+[`agents/provisioning.md`](agents/provisioning.md)의 명령·ACK 단계
 참고.
 
 ### `fleet-core` 신규 타입
@@ -217,7 +249,7 @@ async fn unassign_host_from_project(&self, host_id: Uuid) -> Result<(), StoreErr
 async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, StoreError>;
 ```
 
-## 5. 디스패치 프로토콜 확장 (`WorkerSelector`)
+## 5. Project가 제공하는 디스패치 제약 (`WorkerSelector`)
 
 ![Project-Aware Dispatch Logic](../assets/diagrams/architecture/project-aware-dispatch-logic.mermaid)
 
@@ -269,6 +301,10 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 부터 새 프로젝트 소속으로 취급). 이 정책은 AskUserQuestion으로 확인된
 결정이었으나 이 문서 본문에는 반영이 안 되고 `roadmap.md`에만 기록돼
 있던 걸 팀 검토(major)로 발견해 이번에 정식으로 옮겨 적습니다.
+
+### Project 종료와 Draining
+
+Project 개발 종료는 Task 하나의 완료와 다르다. Project는 `Draining`에서 새 Task·새 Agent·새 자원 배정을 막는 **정책 경계**만 제공한다. Attempt 관찰·cancel deadline·Agent stop 완료와 `Archived` 전이 순서는 [Project·Task·Attempt·Agent lifecycle](project-task-agent-lifecycle.md)을 따른다. Active Project의 즉시 삭제는 허용하지 않는다.
 
 ## 6. RBAC 권한 추가
 
@@ -345,7 +381,7 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 - **project_id 없는 태스크의 취급**: 계속 완전히 허용(일반 풀 워커 후보).
 - **장수명 에이전트의 메모리 보존 정책**: 이 문서의 범위 밖(`agent_memory`는
   `#49`의 엔티티) — 상세 열린 질문은
-  [`agent-provisioning-design.md`](agent-provisioning-design.md) §12 참고.
+  [`agents/provisioning.md`](agents/provisioning.md)의 재조정 규칙을 참고.
 - **`ProjectAssign`을 `Operator` 기본 권한에 둘지 재검토**(팀 검토에서
   발견, **critical로 격상** — 처음엔 등급 비일관 정도의 minor 문제로만
   기록했으나, 재검증 라운드에서 이 비일관이 실제로 악용 가능한 구체적
@@ -385,9 +421,9 @@ async fn list_project_hosts(&self, project_id: ProjectId) -> Result<Vec<Host>, S
 
 - [`docs/roadmap/roadmap.md`](../roadmap/roadmap.md) #48 — 구현 진행 상황 정본.
 - [`docs/architecture/log.md`](log.md) — 이 설계에 도달한 경위(개정 이력).
-- [`docs/architecture/agent-provisioning-design.md`](agent-provisioning-design.md) — `#49`,
+- [`docs/architecture/agents/provisioning.md`](agents/provisioning.md) — `#49`,
   이 하드 격리 모델 위에 host 내 동적 에이전트 생성을 쌓는 후속 설계.
-- [`docs/architecture/agent-harness-composition-design.md`](agent-harness-composition-design.md) — `#51`,
+- [`docs/architecture/agents/harness-composition.md`](agents/harness-composition.md) — `#51`,
   `constitution_prompt` 컬럼을 이 `projects` 테이블에 추가하는 후속 확장.
 - [`docs/ui-dashboard/ui-design.md`](../ui-dashboard/ui-design.md) §3.9~§3.10 —
   화면 설계 정본.

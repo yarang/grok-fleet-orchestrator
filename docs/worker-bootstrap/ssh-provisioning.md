@@ -1,4 +1,20 @@
-# SSH 자동화 주입(Secure SSH Provisioning) 구현 상세 명세서
+---
+type: runbook
+authority: derived
+implementation: partial
+verification: code-checked
+source: "docs/worker-bootstrap/ssh-provisioning.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["fleet-provisioner"]
+---
+
+# SSH 프로비저닝 보존 참조
+
+> **주의:** 이 문서의 SFTP token-file, `--token-file`, 파쇄 절차는 현재 구현이 아니다.
+> 실제 provisioner는 token을 포함한 `worker.toml`을 `/etc/fleet/worker.toml`에 기록한다.
+> 현재·목표 join 보안 계약은 [`contracts/worker-enrollment.md`](../contracts/worker-enrollment.md)를
+> 우선하며, 이 문서는 SSH host-key·프로비저닝 배경을 보존한다.
 
 > ⚠️ **정정 (2026-08-12)**: 아래 §1·§3의 "SFTP로 `/run/fleet-bootstrap.token` 파일을 써넣고 `shred -u -n 3`로 파쇄" 흐름은 **실제 코드와 다릅니다.** 실제로는 `crates/fleet-provisioner/src/steps/install_fleet_worker.rs`가 `bootstrap_token`이 이미 내장된 `worker.toml`을 단일 파일 쓰기로 `/etc/fleet/worker.toml`에 직접 씁니다 — 별도 토큰 파일도 파쇄 단계도 없습니다. 실제 CLI 인자와 흐름은 [`bootstrap-release-v0.2.md §3.1`](./bootstrap-release-v0.2.md)을 참조하세요. 이 문서는 최초 설계 의도를 남기기 위해 원문을 보존하며, 전면 재작성은 별도 작업으로 트래킹합니다.
 

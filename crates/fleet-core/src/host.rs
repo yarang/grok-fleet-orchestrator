@@ -60,6 +60,10 @@ pub struct HostMetrics {
     pub mem_available_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_free_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_usage: Option<f32>,
 }
 
 /// 호스트 가용성 상태.

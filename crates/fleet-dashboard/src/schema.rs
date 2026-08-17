@@ -29,6 +29,7 @@ pub struct TokenStats {
 pub struct WorkerCounts {
     pub online: u32,
     pub degraded: u32,
+    pub draining: u32,
     pub offline: u32,
     pub circuit_open: u32,
     pub total: u32,
@@ -64,6 +65,7 @@ impl WorkerSummary {
         match s {
             WorkerStatus::Online => "online",
             WorkerStatus::Degraded => "degraded",
+            WorkerStatus::Draining => "draining",
             WorkerStatus::Offline => "offline",
             WorkerStatus::CircuitOpen => "circuit_open",
         }

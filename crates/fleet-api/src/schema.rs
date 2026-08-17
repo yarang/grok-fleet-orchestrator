@@ -58,6 +58,10 @@ pub struct HeartbeatRequest {
     pub mem_available_mb: u64,
     #[serde(default)]
     pub disk_free_mb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_usage: Option<f32>,
     #[serde(default = "default_true")]
     pub agent_healthy: bool,
     /// grok CLI 버전.
@@ -144,6 +148,7 @@ impl WorkerSummary {
         match s {
             WorkerStatus::Online => "online",
             WorkerStatus::Degraded => "degraded",
+            WorkerStatus::Draining => "draining",
             WorkerStatus::Offline => "offline",
             WorkerStatus::CircuitOpen => "circuit_open",
         }
@@ -234,7 +239,10 @@ fn default_max_uses() -> u32 {
 /// `POST /v1/bootstrap-tokens` 응답.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateBootstrapTokenResponse {
+    /// 발급 시에만 반환되는 원문. 이후 목록·회수 API에는 포함되지 않는다.
     pub token: String,
+    /// 목록·회수에 사용할 공개 식별자.
+    pub token_id: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub max_uses: u32,
@@ -243,7 +251,8 @@ pub struct CreateBootstrapTokenResponse {
 /// `GET /v1/bootstrap-tokens` 응답의 개별 항목.
 #[derive(Debug, Clone, Serialize)]
 pub struct BootstrapTokenSummary {
-    pub token: String,
+    /// 원문 대신 노출하는 SHA-256 기반 공개 식별자.
+    pub token_id: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub max_uses: u32,
@@ -258,7 +267,7 @@ impl From<BootstrapToken> for BootstrapTokenSummary {
     fn from(t: BootstrapToken) -> Self {
         let remaining = t.remaining_uses();
         BootstrapTokenSummary {
-            token: t.token,
+            token_id: t.public_id(),
             created_at: t.created_at,
             expires_at: t.expires_at,
             max_uses: t.max_uses,

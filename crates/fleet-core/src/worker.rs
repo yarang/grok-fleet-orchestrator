@@ -90,6 +90,8 @@ pub enum WorkerStatus {
     Online,
     /// 응답 지연 또는 부하 과다 (완전 오프라인은 아님).
     Degraded,
+    /// 노드 드레인 중 (이관 준비 및 신규 작업 수령 차단).
+    Draining,
     /// 하트비트 누락으로 오프라인 처리됨.
     #[default]
     Offline,
@@ -153,6 +155,10 @@ pub struct WorkerHeartbeat {
     pub mem_available_mb: u64,
     #[serde(default)]
     pub disk_free_mb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_usage: Option<f32>,
     #[serde(default = "default_true")]
     pub agent_healthy: bool,
     /// grok CLI 버전 (예: "0.2.112").

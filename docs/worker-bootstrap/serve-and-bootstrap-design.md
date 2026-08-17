@@ -1,4 +1,19 @@
-# fleet serve & 대시보드 상세 설계 및 워커 부트스트랩/운영 절차서
+---
+type: historical-reference
+authority: deprecated
+implementation: partial
+verification: assumed
+source: "docs/worker-bootstrap/serve-and-bootstrap-design.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["architecture"]
+---
+
+# fleet serve·Dashboard·Bootstrap 보존 참조
+
+> **Deprecated:** 이 문서는 server engine, Dashboard, bootstrap 절차를 함께 다룬 과거 참조다.
+> 현재 구현 근거는 `architecture/implementation-reference.md`, 외부 표면은 `contracts/`, 가입 계약은
+> `contracts/worker-enrollment.md`를 읽는다. 이 문서의 절차를 운영 지침으로 사용하지 않는다.
 
 이 설계서는 **Grok Fleet Orchestrator**의 핵심 서버 엔진인 `fleet serve`와 **웹 대시보드(Web Dashboard)**의 모듈 및 통신 설계를 다루며, 워커 노드의 **최초 등록(Bootstrap) 및 일상 운영 절차(Operational Lifecycle)**를 Mermaid 시퀀스 다이어그램으로 정의합니다.
 

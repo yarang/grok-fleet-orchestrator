@@ -1,6 +1,19 @@
-# 초기 부트스트랩 토큰 제공 및 주입(Delivery) 방법론 설계서
+---
+type: proposal
+authority: derived
+implementation: proposed
+verification: design-reviewed
+source: "docs/worker-bootstrap/token-delivery.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["worker-bootstrap"]
+---
 
-> ⚠️ **정정 (2026-08-12)**: §2.1의 "SFTP로 `/run/fleet-bootstrap.token`에 쓴 뒤 `fleet-worker join --token-file ...` 실행, 이후 파쇄" 흐름은 **실제 코드와 다릅니다.** 실제 `fleet provision --host/--inventory`는 토큰이 내장된 `worker.toml`을 단일 파일 쓰기로 전달합니다(별도 토큰 파일 없음). CLI 예시의 `--host`/`--ssh-key` 플래그 자체는 실제와 일치합니다. 상세는 [`bootstrap-release-v0.2.md §3.1`](./bootstrap-release-v0.2.md)을 참조하세요.
+# Bootstrap token 전달 방식 제안
+
+> **Proposed:** 이 문서는 전달 채널의 비교·목표를 보존한다. 현재 구현은 token을 포함한
+> `worker.toml`을 직접 기록하며, SFTP token-file·`--token-file`·shred 절차는 구현되지 않았다.
+> 현재·목표 가입 계약은 [`contracts/worker-enrollment.md`](../contracts/worker-enrollment.md)를 우선한다.
 
 이 설계서는 워커 노드가 오케스트레이터에 가입할 때 사용하는 **최초 부트스트랩 토큰(Bootstrap Token)을 워커 서버에 유출 없이 안전하고 편리하게 주입(Provisioning / Delivery)하기 위한 채널 및 시나리오**를 정의합니다.
 

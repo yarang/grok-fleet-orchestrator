@@ -1,3 +1,12 @@
+---
+type: architecture-log
+authority: historical
+implementation: not-applicable
+verification: not-applicable
+source: "docs/architecture/log.md"
+last_verified: "2026-08-16"
+---
+
 # 아키텍처 설계 문서 변경 로그
 
 `docs/architecture/` 하위 설계 문서의 개정 이력을 문서별·날짜별로 기록합니다.

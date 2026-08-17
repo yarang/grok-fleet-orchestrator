@@ -1,9 +1,41 @@
-# 보안 발견 해결 보고서 (Security Findings Resolution Report)
+---
+type: security-report
+authority: historical
+implementation: partial
+verification: code-checked
+source: "docs/security/findings.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["security"]
+---
+
+# 보안 발견 및 해결 이력
+
+> **Historical:** 현재 신원·권한·secret 계약은
+> [control-plane-security-model.md](control-plane-security-model.md)가 정본이다. 이 문서는
+> 발견·해결·미해결 항목의 이력을 보존하며, 현재 정책을 재정의하지 않는다.
 
 > 최종 업데이트: 2026-08-06. 담당: Antigravity.
 >
-> 2026-08-01 기점으로 리포트되었던 6대 보안 결함(S1~S6)이 모두 성공적으로 해결되었습니다.
-> 관련 소스 코드 수정 완료 및 단위/통합 테스트가 100% 통과(그린)되었습니다.
+> 기존 S1~S6은 해결됐다. 2026-08-16 전체 설계 감사에서 control-plane identity와
+> secret lifecycle의 신규 공백을 발견했으며 정본 설계는
+> [`control-plane-security-model.md`](control-plane-security-model.md)다.
+
+## 신규 미해결 항목
+
+| ID | 우선순위 | 항목 | 상태 |
+|---|---|---|---|
+| S7 | P1 | HTTP 공용 bearer의 과도한 권한과 endpoint별 authorization 부재 | 설계 확정·구현 대기 |
+| S8 | P1 | MCP ToolContext의 principal/RBAC 부재 | 설계 확정·구현 대기 |
+| S9 | P1 | Bootstrap token 원문 저장·목록·URL 전달 | 부분 해결 — API/MCP/URL 원문 노출 제거, DB digest 저장은 대기 |
+
+S9의 첫 구현은 `token_id = SHA-256(raw token)` 공개 식별자로 목록과 회수를
+전환했다. 원문은 발급 응답에서만 1회 반환하며, API/MCP 목록과 URL은 원문을
+받거나 반환하지 않는다. 기존 DB schema는 아직 원문을 보관하므로 HMAC/Argon2id
+digest 저장과 immutable DB token id 마이그레이션이 남아 있다.
+| S10 | P1 | Join 이후 Worker별 operational identity 전환 부재 | 설계 확정·구현 대기 |
+| S11 | P1 | URL query 및 CLI argument의 secret 전달 | 설계 확정·구현 대기 |
+| S12 | P2 | master key와 provider credential rotation/runbook 부재 | 설계 필요 |
 
 ---
 

@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// 부트스트랩 토큰 엔티티.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +36,19 @@ pub struct BootstrapToken {
 }
 
 impl BootstrapToken {
+    /// 원문 token을 대체하는 공개 식별자.
+    ///
+    /// 목록·감사·회수 API에는 이 값만 노출한다. token은 충분한 엔트로피로
+    /// 생성되므로 SHA-256 digest를 공개해도 원문 복구가 실질적으로 불가능하다.
+    pub fn public_id(&self) -> String {
+        Self::public_id_for(&self.token)
+    }
+
+    /// 원문 token의 공개 식별자를 계산한다.
+    pub fn public_id_for(token: &str) -> String {
+        format!("bt_{}", hex::encode(Sha256::digest(token.as_bytes())))
+    }
+
     /// 현재 사용 가능한지 (만료 안 됨 + use_count < max_uses).
     pub fn is_usable(&self) -> bool {
         if self.use_count >= self.max_uses {

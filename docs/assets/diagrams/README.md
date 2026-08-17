@@ -19,7 +19,7 @@ docs/assets/diagrams/
 | `architecture/` | `docs/architecture/` | 1 (`.svg`) + 27 (`.mermaid`) |
 | `deployment/` | `docs/deployment/` | 4 (`.mermaid`) |
 | `llm-wiki/` | `docs/llm-wiki/` | 2 (`.mermaid`) |
-| `server-management/` | `docs/server-management/` | 4 (`.mermaid`) |
+| `server-management/` | `docs/operations/proposals/` | 4 (`.mermaid`, 이전 에셋 경로 유지) |
 | `ui-dashboard/` | `docs/ui-dashboard/` | 1 (`.svg`) + 9 (`.mermaid`) |
 | `worker-bootstrap/` | `docs/worker-bootstrap/` | 4 (`.svg`) + 4 (`.mermaid`) |
 

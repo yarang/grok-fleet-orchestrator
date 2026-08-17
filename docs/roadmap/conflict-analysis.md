@@ -1,4 +1,19 @@
-# 신규 서버 관리 기능과 기존 개발 로드맵 간 충돌 분석 보고서 (업데이트)
+---
+type: roadmap-analysis
+authority: historical
+implementation: not-applicable
+verification: design-reviewed
+source: "docs/roadmap/conflict-analysis.md"
+last_verified: "2026-08-16"
+---
+
+# 신규 서버 관리 기능과 기존 개발 로드맵 간 충돌 분석 보고서 (역사적 기록)
+
+> **역사적 분석:** 이 문서는 2026-08-06의 전제와 우선순위에 따른 스냅샷이다.
+> 현재 운영 가용성은 [`../architecture/control-plane-availability.md`](../architecture/control-plane-availability.md),
+> 현행 개발 순서는 [`roadmap.md`](roadmap.md), 운영 자동화 제안은
+> [`../operations/proposals/README.md`](../operations/proposals/README.md)를 따른다.
+> 특히 본문에 언급된 다중 Active 운영 전제는 현재 채택되지 않았다.
 
 > 작성일: 2026-08-06. 담당: Antigravity.
 > 

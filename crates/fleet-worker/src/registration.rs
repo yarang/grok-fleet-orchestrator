@@ -110,6 +110,10 @@ struct HeartbeatRequest {
     load_avg: Option<Vec<f32>>,
     mem_available_mb: Option<u64>,
     disk_free_mb: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_usage: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ram_usage: Option<f32>,
     agent_healthy: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     grok_version: Option<String>,
@@ -127,6 +131,12 @@ struct WorkerOsInfo {
     kernel: String,
     arch: String,
     hostname: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatResponse {
+    pub ok: bool,
+    pub desired_state: String,
 }
 
 /// `DELETE /v1/workers/:id` 요청.
@@ -217,7 +227,7 @@ impl RegistrationClient {
 
     /// 하트비트 1회 전송.
     #[tracing::instrument(skip(self))]
-    pub async fn heartbeat_once(&self, agent_healthy: bool) -> Result<(), WorkerError> {
+    pub async fn heartbeat_once(&self, agent_healthy: bool) -> Result<HeartbeatResponse, WorkerError> {
         let worker_id = self
             .worker_id
             .lock()
@@ -225,8 +235,8 @@ impl RegistrationClient {
             .clone()
             .ok_or_else(|| WorkerError::OrchestratorApi("not registered yet".into()))?;
 
-        // 빠른 시스템 메트릭 수집 (load_avg, mem — 마이크로초 단위).
-        let (load_avg, mem_available_mb, active_tasks) = collect_fast_metrics();
+        // 빠른 시스템 메트릭 수집 (load_avg, mem, cpu, ram).
+        let (load_avg, mem_available_mb, active_tasks, cpu_usage, ram_usage) = collect_fast_metrics();
 
         // 디스크 여유 공간: 캐시된 값을 사용하고, 필요하면 백그라운드 새로고침 트리거.
         // blocking syscall을 heartbeat 루프에서 분리하여 런타임 블로킹 방지.
@@ -250,6 +260,8 @@ impl RegistrationClient {
             load_avg,
             mem_available_mb,
             disk_free_mb,
+            cpu_usage,
+            ram_usage,
             agent_healthy,
             grok_version,
             fleet_worker_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -278,7 +290,8 @@ impl RegistrationClient {
                 "heartbeat returned {status}: {text}"
             )));
         }
-        Ok(())
+        let body: HeartbeatResponse = resp.json().await.map_err(WorkerError::Http)?;
+        Ok(body)
     }
 
     /// 하트비트 루프. shutdown_rx가 true가 될 때까지.
@@ -304,8 +317,15 @@ impl RegistrationClient {
                 .is_ok();
 
             // heartbeat 전송.
-            if let Err(e) = self.heartbeat_once(agent_healthy).await {
-                warn!(error = %e, "heartbeat failed — will retry next interval");
+            match self.heartbeat_once(agent_healthy).await {
+                Ok(resp) => {
+                    if resp.desired_state == "drain" {
+                        info!("Worker is in Draining state by Orchestrator direction");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "heartbeat failed — will retry next interval");
+                }
             }
 
             // 다음 주기까지 대기. shutdown 시 즉시 반환.
@@ -380,12 +400,18 @@ impl RegistrationClient {
 /// `DiskCache`를 통해 백그라운드에서 비동기 수집 및 캐싱.
 ///
 /// active_tasks는 fleet-worker가 관리하는 실행 중인 세션 카운터를 반환.
-fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
+fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32, Option<f32>, Option<f32>) {
     use sysinfo::System;
 
     let mut sys = System::new();
     sys.refresh_cpu_usage();
     sys.refresh_memory();
+
+    // cpu usage calculations require two measurements with a delay or call interval.
+    // Since this is run inside collect_fast_metrics, we can sleep briefly.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    sys.refresh_cpu_usage();
+    let cpu_usage = sys.global_cpu_usage();
 
     // sysinfo 0.32에서 load_average는 associated function.
     let load_avg = System::load_average();
@@ -397,11 +423,18 @@ fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32) {
     ];
 
     let mem_available_mb = sys.available_memory() / 1024; // KiB → MiB
+    let total_mem = sys.total_memory();
+    let ram_usage = if total_mem > 0 {
+        let used_mem = total_mem.saturating_sub(sys.available_memory());
+        Some((used_mem as f32 / total_mem as f32) * 100.0)
+    } else {
+        None
+    };
 
     // active_tasks: 전역 세션 카운터에서 가져옴.
     let active_tasks = crate::ACTIVE_SESSIONS.load(std::sync::atomic::Ordering::Relaxed);
 
-    (Some(load_vec), Some(mem_available_mb), active_tasks)
+    (Some(load_vec), Some(mem_available_mb), active_tasks, Some(cpu_usage), ram_usage)
 }
 
 /// grok CLI 버전 감지. `grok --version` 출력에서 추출.
@@ -639,7 +672,7 @@ mod tests {
                         s.heartbeats.lock().await.push(body);
                         (
                             axum::http::StatusCode::OK,
-                            Json(serde_json::json!({"ok": true})),
+                            Json(serde_json::json!({"ok": true, "desired_state": "running"})),
                         )
                     }
                 }),

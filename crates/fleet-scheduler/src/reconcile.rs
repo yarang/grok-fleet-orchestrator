@@ -253,6 +253,23 @@ impl Reconciler {
                 continue;
             }
 
+            // DAG 체이닝: 미완료 선행 작업이 하나라도 있다면 Reconciler도 재배포하지 않고 건너뜀
+            let mut has_unresolved_dependencies = false;
+            for dep_id in &task.dependency_ids {
+                if let Ok(Some(dep_task)) = self.state.store.get_task(*dep_id).await {
+                    if !matches!(dep_task.status, fleet_core::TaskStatus::Completed(_)) {
+                        has_unresolved_dependencies = true;
+                        break;
+                    }
+                } else {
+                    has_unresolved_dependencies = true;
+                    break;
+                }
+            }
+            if has_unresolved_dependencies {
+                continue;
+            }
+
             summary.stale_found += 1;
             let task_id = task.id;
 

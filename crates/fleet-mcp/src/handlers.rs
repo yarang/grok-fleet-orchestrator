@@ -811,7 +811,7 @@ async fn handle_list_bootstrap_tokens(
         .iter()
         .map(|t| {
             json!({
-                "token": t.token,
+                "token_id": t.public_id(),
                 "created_at": t.created_at.to_rfc3339(),
                 "expires_at": t.expires_at.map(|e| e.to_rfc3339()),
                 "max_uses": t.max_uses,
@@ -840,26 +840,40 @@ async fn handle_revoke_bootstrap_token(
         .as_object()
         .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
 
-    let token = args
-        .get("token")
+    let token_id = args
+        .get("token_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: token"))?;
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: token_id"))?;
+
+    let token = ctx
+        .state
+        .store
+        .list_bootstrap_tokens()
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        .into_iter()
+        .find(|candidate| candidate.public_id() == token_id)
+        .map(|candidate| candidate.token);
+
+    let Some(token) = token else {
+        return Ok(schema::tool_error("bootstrap token not found"));
+    };
 
     let revoked = ctx
         .state
         .store
-        .revoke_bootstrap_token(token)
+        .revoke_bootstrap_token(&token)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
     if revoked {
         Ok(schema::tool_json(&json!({
-            "token": token,
+            "token_id": token_id,
             "revoked": true,
         })))
     } else {
         Ok(schema::tool_error(format!(
-            "token not found (already revoked or never existed): {token}"
+            "bootstrap token not found"
         )))
     }
 }
@@ -1198,12 +1212,14 @@ mod tests {
             .unwrap();
         let body: Value = parse_tool_json(&listed);
         assert_eq!(body["count"], 1);
-        assert_eq!(body["tokens"][0]["token"], "fbt_test123");
+        let token_id = body["tokens"][0]["token_id"].as_str().unwrap();
+        assert_eq!(token_id, fleet_core::BootstrapToken::public_id_for("fbt_test123"));
+        assert!(body["tokens"][0].get("token").is_none());
 
         let revoked = dispatch_tool(
             &ctx,
             TOOL_REVOKE_BOOTSTRAP_TOKEN,
-            &json!({"token": "fbt_test123"}),
+            &json!({"token_id": token_id}),
         )
         .await
         .unwrap();
@@ -1223,7 +1239,7 @@ mod tests {
         let result = dispatch_tool(
             &ctx,
             TOOL_REVOKE_BOOTSTRAP_TOKEN,
-            &json!({"token": "does-not-exist"}),
+            &json!({"token_id": "bt_does-not-exist"}),
         )
         .await
         .unwrap();

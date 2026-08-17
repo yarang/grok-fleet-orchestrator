@@ -67,7 +67,7 @@ fleet provision \
 # workers.yaml 의 각 호스트에 대해:
 #   1. SSH 접속
 #   2. grok + fleet-worker 바이너리 배포
-#   3. /etc/fleet-worker/worker.toml 생성 (values 자동 치환)
+#   3. /etc/fleet/worker.toml 생성 (values 자동 치환)
 #   4. systemd 유닛 활성화 (fleet-worker.service)
 #   5. orchestrator 등록
 ```

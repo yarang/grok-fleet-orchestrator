@@ -1,11 +1,17 @@
 ---
-type: wiki
-status: canonical
+type: architecture-reference
+authority: derived
+implementation: proposed
+verification: design-reviewed
 source: "docs/architecture/system-entities-mapping.md"
 last_verified: "2026-08-15"
 ---
 
-# 시스템 엔티티 관계 및 매핑 규칙 (System Entities Mapping & Rules)
+# 시스템 엔티티 관계 참조 (Derived)
+
+> **지위: Derived relationship reference.** lifecycle·격리·하네스의 현재 규칙은
+> [아키텍처 정본 지도](canonical-map.md)의 해당 정본이 우선한다. 이 문서는 관계를
+> 빠르게 조망하기 위한 요약이며, 규칙을 새로 정의하지 않는다.
 
 > 작성일: 2026-08-15
 >
@@ -17,18 +23,19 @@ last_verified: "2026-08-15"
 
 시스템의 모든 구성 요소는 서로 독립된 세 개의 핵심 축(Axis)을 기준으로 분류되고 상호 작용합니다.
 
-```
-                  [ axis 2: WHAT - 행동 구성 ]
-                  Persona (custom_prompt)
-                           │
-                           ▼
-                         Skill (절차 지침)
-                           │
-                           ▼
-                        Tool/MCP (실행 도구)
-                           │
-  [ axis 1: WHERE - 물리 배치 ] ─────────────────── [ axis 3: WHEN - 스코프 체인 ]
-  Project ➔ Host ➔ Agent ➔ Worker               Project ➔ Template ➔ Agent ➔ Task
+```mermaid
+flowchart TB
+    subgraph What["축 2: WHAT — 행동 구성"]
+        Persona["Persona (custom_prompt)"] --> Skill["Skill (절차 지침)"] --> Tool["Tool / MCP (실행 도구)"]
+    end
+    subgraph Where["축 1: WHERE — 물리 배치"]
+        PH["Project"] --> Host --> Agent --> Worker
+    end
+    subgraph When["축 3: WHEN — 스코프 체인"]
+        PS["Project"] --> Template --> AI["Agent"] --> Task
+    end
+    What --- Where
+    What --- When
 ```
 
 ### 1.1 축 1 — WHERE (물리적 배치 및 격리)
@@ -67,29 +74,25 @@ last_verified: "2026-08-15"
 
 태스크가 스케줄러에 의해 디스패치(`Dispatcher`)되어 실행 장치로 전송될 때, 프롬프트 문자열은 권위와 스코프의 높낮이에 따라 아래의 strict한 순서로 자동 결합됩니다.
 
-```
-┌────────────────────────────────────────────────────────┐
-│ 1. Project.constitution_prompt (프로젝트 헌법)            │
-├────────────────────────────────────────────────────────┤
-│ 2. Agent.custom_prompt (에이전트 페르소나)                │
-├────────────────────────────────────────────────────────┤
-│ 3. Active Skills (필수 스킬 + 태스크 요청 선택 스킬)     │
-├────────────────────────────────────────────────────────┤
-│ 4. Agent Memory (구조화된 에이전트 메모리 컨텍스트)        │
-├────────────────────────────────────────────────────────┤
-│ 5. Thread Context (동일 스레드 내 이전 Q&A 이력)         │
-├────────────────────────────────────────────────────────┤
-│ 6. Task Prompt (사용자가 제출한 원시 프롬프트)             │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    Constitution["1. Project.constitution_prompt"] --> Persona["2. Agent.custom_prompt"]
+    Persona --> Required["3. Required Skill revision 본문\n(static prefix)"]
+    Required --> Catalog["4. Optional Skill catalog\n(본문은 read-only fetch)"]
+    Catalog --> Memory["5. Agent Memory"]
+    Memory --> Thread["6. Thread Context"]
+    Thread --> Prompt["7. Task Prompt"]
 ```
 
 1.  **프로젝트 헌법 (`constitution_prompt`)**: 프로젝트 내 모든 에이전트가 지켜야 할 철칙(CLAUDE.md 등)으로, 항상 맨 앞에 주입됩니다.
 2.  **에이전트 페르소나 (`custom_prompt`)**: 에이전트 고유의 역할과 정체성을 확립합니다.
-3.  **활성 스킬 (`Active Skills`)**: 템플릿에 지정된 필수(Required) 스킬 전체와 태스크가 실행 시점에 요청한 옵션(Optional) 스킬들이 마크다운 텍스트 지침서 형태로 주입됩니다:
-    $$\text{Active Skills} = \text{Skills}_{\text{required}} \cup \{ s \in \text{Skills}_{\text{optional}} \mid s.\text{name} \in \text{task.requested\_optional\_skills} \}$$
-4.  **에이전트 메모리 (`Agent Memory`)**: 해당 `agent_id` 하위에 누적된 최신 $N$개의 컨텍스트 메모리 스냅샷이 결합됩니다.
-5.  **스레드 컨텍스트 (`Thread Context`)**: 동일 `thread_id` 내 상위 부모 태스크들로부터 수집된 질문-응답(Q&A) 요약본이 계층 구조로 포맷팅되어 결합됩니다.
-6.  **태스크 프롬프트 (`Task Prompt`)**: 사용자가 실행 요청 시 작성한 최종 프롬프트(`task.prompt`)가 꼬리에 붙어 실행기로 전달됩니다.
+3.  **필수 Skill (`Required Skills`)**: 템플릿에 지정된 필수 Skill의 본문과 revision/hash를 static prefix로 주입합니다.
+4.  **선택 Skill 카탈로그 (`Optional Skill Catalog`)**: 이름·설명·revision·capability만 주입합니다. 본문은 Agent가 읽기 전용 `fetch_skill_content`로 명시 요청할 때 전달되며, 실제 조회 revision/hash는 Attempt manifest에 기록합니다.
+5.  **에이전트 메모리 (`Agent Memory`)**: 해당 `agent_id` 하위에 누적된 최신 $N$개의 컨텍스트 메모리 스냅샷이 결합됩니다.
+6.  **스레드 컨텍스트 (`Thread Context`)**: 동일 `thread_id` 내 상위 부모 태스크들로부터 수집된 질문-응답(Q&A) 요약본이 계층 구조로 포맷팅되어 결합됩니다.
+7.  **태스크 프롬프트 (`Task Prompt`)**: 사용자가 실행 요청 시 작성한 최종 프롬프트(`task.prompt`)가 꼬리에 붙어 실행기로 전달됩니다.
+
+Skill 전달 계약의 정본은 [Agent 하네스 구성](agents/harness-composition.md)이며, 이 문서는 엔티티 관계만 요약한다.
 
 ---
 

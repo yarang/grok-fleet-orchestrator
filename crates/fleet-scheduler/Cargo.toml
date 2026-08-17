@@ -27,3 +27,4 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 fleet-store = { workspace = true, features = ["test-support"] }
+tempfile = "3"

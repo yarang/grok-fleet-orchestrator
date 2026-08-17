@@ -33,12 +33,14 @@ pub mod grok_process;
 pub mod join;
 pub mod registration;
 pub mod runner;
+pub mod skill_loader;
 
 pub use config::WorkerConfig;
 pub use error::WorkerError;
 pub use join::JoinArgs;
 pub use registration::RegistrationClient;
 pub use runner::WorkerRunner;
+pub use skill_loader::{inject_skills, inject_skills_from_dir};
 
 /// 현재 실행 중인 grok 세션 수. heartbeat의 active_tasks에 사용.
 /// GrokRunner가 세션을 시작/종료할 때 이 값을 증감한다.

@@ -1,6 +1,6 @@
 # 에이전트 협업 가이드 (Agent Collaboration Guide)
 
-> 작성일: 2026-08-06. 최종 개정: 2026-08-12 — §6 다이어그램/리소스 규약 갱신(`docs/assets/diagrams/<domain>/` 구조로 확정), 이전 세션에서 유실된 §1~§5 복원.
+> 작성일: 2026-08-06. 최종 개정: 2026-08-17 — §5를 중앙 문서 체계와 재작성 게이트에 맞춰 갱신.
 >
 > 이 문서는 Grok Fleet Orchestrator 프로젝트에 기여하는 모든 AI 개발 에이전트(Agent)가 개발 과정에서 반드시 지켜야 할 **Git 정책, 개발 시퀀스, 보안baseline 및 테스트 검증 규칙**을 명시합니다. 에이전트는 기여를 시작하기 전에 본 가이드를 완전히 숙지해야 합니다.
 
@@ -101,17 +101,51 @@ GitHub Actions CI 환경에서 조건부 컴파일 및 코드 검사가 깨지�
 
 ---
 
-## 5. LLM-Wiki 지식 관리 규약
+## 5. 문서 정본성 및 재작성 규약
 
-AI 에이전트(LLM)와 인간 개발자 간의 문서 정합성을 통제하고 효율적인 컨텍스트 전달을 위해, **모든 기술 문서, 설계 아키팩트, 분석 보고서는 안드레이 카파시의 LLM-Wiki 원칙**에 맞춰 기입해야 합니다.
+문서는 코드와 동등한 프로젝트 자산이다. 일반 문서의 정본 위치·상태는
+[`docs/index.md`](./docs/index.md), 세부 정책은
+[`docs/governance/documentation-policy.md`](./docs/governance/documentation-policy.md),
+전체 재작성 절차는
+[`docs/governance/documentation-rewrite-guide.md`](./docs/governance/documentation-rewrite-guide.md)를
+따른다. 논의·감사·비교 부기는 [`docs/reviews/README.md`](./docs/reviews/README.md)에만 둔다.
+`llm-wiki/`와 `credentials/`만 자체 부기 체계를 유지한다.
 
-1.  **YAML 프론트매터 메타데이터 기재**:
-    *   모든 Wiki 마크다운 문서 최상단에 `type: wiki`, `status: canonical | derived`, `source: "<원본경로>"`, `last_verified` 항목을 필수로 설정해야 합니다.
-2.  **카탈로그 등록 및 히스토리 기록**:
-    *   신규 마크다운 문서를 생성하는 즉시 `docs/llm-wiki/index.md` 에 해당 파일 경로와 신뢰도 상태를 등록해야 합니다.
-    *   수정 및 생성이 완료되면 `docs/llm-wiki/log.md` 에 append-only 방식으로 변경 사항(날짜, 주체, 상세 내역)을 무조건 덧붙여야 합니다.
-3.  **Canonical-Derived 정합성 동기화**:
-    *   상위 의사 결정 문서(Canonical)를 변경할 경우, 이를 원천 소스(`source`)로 선언하여 참조하고 있는 하부 명세서나 설정 문서(Derived) 목록을 추적하여 모조리 연동 수정해야 합니다.
+### 5.1 작업 전 분류
+
+문서를 새로 만들거나 크게 고치기 전에 다음을 먼저 확인한다.
+
+1. 도메인 진입점(`README.md` 또는 `index.md`)에서 독자가 이 문서에 도달할 **읽기 순서**와, 문서가 소유할 **질문 하나·기능상 계약 하나**를 적는다.
+2. 문서를 `canonical`, `derived`, `runbook`, `proposed` 중 하나로 분류한다. 정본은 현재 결정·불변식·상태 전이·완료 조건만 소유한다.
+3. 구현 상태를 `proposed`, `partial`, `implemented`, `retired` 중 하나로, 검증 강도를 근거에 맞게 표기한다. 목표 설계를 현재 동작처럼 쓰지 않는다.
+4. 기존 정본과 책임이 겹치면 새 문서를 만들지 않는다. 기존 정본을 보강하거나, 책임 경계를 먼저 정본 지도에 기록한다.
+
+### 5.2 재작성·폐기·논의 분리 규칙
+
+* 도메인 진입점은 그 도메인의 파일 책임·정본 지위·읽기 순서만 관리한다. 세부 계약이나 절차를 다시 쓰지 않는다.
+* 재작성은 현재 계약을 명확히 하는 작업이다. 긴 코드 인용은 Derived에 두고, 논의·감사·대안 비교·과거 정정은 `docs/reviews/`에만 둔다.
+* 논의로 확정한 결과만 정본의 “결정” 절에 기록한다. 찬반, 회의 대화, 결정을 바꾸기 전의 대안은 정본에 남기지 않는다.
+* `overview.md`는 시스템 경계·현재 구현 상태·정본 탐색을 제공하는 얇은 Derived 입문 지도다. 세부 코드 대조는 `implementation-reference.md`에, Worker join·bootstrap은 `worker-bootstrap/`에, 미구현 Self-Healing은 `operations/proposals/`에 둔다.
+* 폐기 문서는 Deprecated 포인터로 남기지 않는다. 대체 정본·모든 inbound link·도메인 진입점·`docs/index.md`를 먼저 갱신한 뒤 파일을 삭제하고, 이유는 `docs/log.md`와 필요할 때 `docs/reviews/`에 남긴다.
+
+### 5.3 작성 형식과 문체
+
+* 설계 문서는 `목적과 범위 → 현재 상태 → 결정 → 계약 → 실패와 복구 → 검증 → 미결정 사항 → 관련 정본` 순서를 기본으로 사용한다.
+* 현재 상태, 목표 설계, 미결정 사항을 같은 문단이나 표에서 섞지 않는다. 미결정 사항에는 심각도, 담당자, 결정 기한, 차단 단계, 정본 소유자를 붙인다.
+* 단정은 코드·테스트·운영 근거가 있을 때만 사용한다. 근거가 없으면 `제안`, `가정`, `미구현`을 명시한다.
+* 한 문단은 하나의 주장만 담고, 능동형·현재형의 짧은 문장을 사용한다. "향후 검토한다"처럼 주체·조건·완료 기준이 없는 문장을 쓰지 않는다.
+* 구조, 상태, 흐름을 설명할 때는 Mermaid 또는 SVG를 사용한다. ASCII-art 박스 다이어그램과 로컬 절대 `file:///` 링크는 새로 작성하지 않는다.
+
+### 5.4 완료 게이트
+
+문서 재작성 완료 전에는 다음을 확인한다.
+
+1. frontmatter에 authority, implementation, verification, 문서 경로, 검증 시점·근거·소유자를 기록한다.
+2. 코드 심볼·API·환경변수·포트·상태 전이를 실제 코드와 대조하고, 문서의 구현 상태와 일치시킨다.
+3. 중복된 현재 규칙을 정본 링크로 교체하고, 폐기 문서는 링크 정리 뒤 삭제한다.
+4. 상대 링크와 다이어그램 참조를 점검하고 `docs/index.md` 및 `docs/log.md`를 갱신한다.
+5. 논의·비교 부기는 `docs/reviews/`에, 임시 분석·초안은 `.tmp/`에 둔다. `.tmp/`는 최종 문서와 섞거나 커밋하지 않는다.
+6. 링크·형식 검증 후 변경 범위를 다시 확인하고, 코드 변경과 분리된 `docs:` Conventional Commit을 남긴다.
 
 ---
 

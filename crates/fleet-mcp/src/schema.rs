@@ -460,12 +460,12 @@ pub fn all_tools() -> Vec<ToolInfo> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "token": {
+                    "token_id": {
                         "type": "string",
-                        "description": "The bootstrap token string to revoke (as returned by fleet_list_bootstrap_tokens or `fleet token create`)."
+                        "description": "The public token_id returned by fleet_list_bootstrap_tokens. Raw bootstrap token strings are never accepted by this tool."
                     }
                 },
-                "required": ["token"]
+                "required": ["token_id"]
             }),
         },
     ]

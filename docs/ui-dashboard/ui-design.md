@@ -1038,7 +1038,7 @@ Memory 패널 아래에 읽기 전용 "Terminal" 패널을 추가합니다 —
 추가로 노출 — 클릭 시 대시보드에서는 지원하지 않고(브라우저 PTY는 범위
 밖), `fleet agent attach <id>` CLI 명령을 복사해 안내하는 팝오버만
 표시합니다. 상세 프로토콜은
-[`agent-terminal-access-design.md`](../architecture/agent-terminal-access-design.md)
+[`Agent 터미널 접근`](../architecture/agents/terminal-access.md)
 §4/§5가 정본.
 
 #### 빈 상태
@@ -1502,8 +1502,8 @@ crates/fleet-dashboard/
 
 - [DESIGN-apple.md](../../DESIGN-apple.md) — Apple Design System 정본
 - [architecture.md](../architecture/overview.md) — 시스템 아키텍처
-- [api-reference.md](../architecture/api-reference.md) — HTTP API 명세
-- [deployment.md](../deployment/deployment.md) — 배포 가이드 (Nginx 설정 포함, 2026-08-11 갱신 — 원문의 "Caddy" 기술은 폐기됨)
+- [contracts/README.md](../contracts/README.md) — HTTP, MCP, Dashboard, Worker enrollment 계약
+- [deployment/README.md](../deployment/README.md) — 설치·구성·운영·복구 진입점
 - RBAC 구현 계획 — plan 문서 (Phase 9.1.1 ~ 9.1.6)
 
 ---

@@ -288,6 +288,8 @@ async fn acp_transport_with_client_tls_dispatches_task_end_to_end() {
             model: None,
             max_turns: None,
             timeout_secs: Some(10),
+            checkpoint_branch: None,
+            skills_required: vec![],
         })
         .await
         .expect("dispatch over mTLS");

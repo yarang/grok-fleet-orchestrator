@@ -1,13 +1,16 @@
 ---
 type: architecture-report
-status: canonical
+authority: canonical
+implementation: partial
+verification: code-checked
 source: "docs/architecture/intelligent-task-routing-and-budget-control-design.md"
 last_verified: "2026-08-16"
 ---
 
 # 지능형 태스크 라우팅, 실시간 예산 통제 및 텔레메트리 아키텍처 설계서
 **작성일**: 2026-08-16  
-**상태**: 🟢 정본 (Canonical)  
+**상태**: 🟡 정본·부분 구현 — 휴리스틱 분류와 일부 스키마는 구현됐으나 UCB1 선택,
+예산 소프트 랜딩, Compact, telemetry feedback loop는 구현 검증 전
 **대상**: Fleet Orchestrator 아키텍처팀, 스케줄러팀 및 협업 에이전트
 
 ---
@@ -21,7 +24,9 @@ Grok Fleet Orchestrator의 기존 라우팅 방식은 `task.model`과 워커의 
 2. **토큰 예산 통제 부재**: 에이전트가 무한 루프나 탐색적 과도 툴 호출에 빠질 경우 토큰 폭증을 방지하지 못함. 반면 단순 Hard Cut-off는 90% 완료된 작업을 파기하여 지연과 재시도 비용을 2배로 증가시키는 딜레마 유발.
 3. **컨텍스트 인플레이션**: 장기 세션 진행 시 이전 턴의 대용량 툴 출력이 매 턴마다 반복 전송되어 토큰 소비가 지수적으로 증가.
 
-본 설계서는 **FreeRouter의 분류·정책 개념을 Rust 네이티브로 흡수**하고, **3단계 소프트 랜딩 예산 제어**, **컨텍스트 Compact 엔진**, **무비용 결정론적 텔레메트리**, **MAB UCB1 탐색 공평성**, **멀티 CLI(grok, agy) 하이브리드 매핑**을 결합한 통합 아키텍처를 정의합니다.
+본 설계서는 **FreeRouter의 분류·정책 개념을 Rust 네이티브로 흡수**하는 목표
+아키텍처를 정의한다. 현재 코드에는 휴리스틱 분류와 라우팅 필드 저장이 반영돼 있다.
+나머지 기능은 단계별 구현 게이트를 통과하기 전까지 현재 동작으로 간주하지 않는다.
 
 ---
 
@@ -96,13 +101,12 @@ sequenceDiagram
 
 장기 실행 세션의 토큰 낭비를 차단하기 위해 3계층 압축 파이프라인을 운영합니다.
 
-```
-[턴 1] ─── [턴 2] ─── [턴 3] ─── [턴 4] ─── ... ─── [턴 15]
-  │          │          │          │                    │
-  ▼          ▼          ▼          ▼                    ▼
-[L1: Tool Truncation]  [L2: Middle-Turn Summarization]  [L3: State Snapshot]
-(도구 출력 > 2KB 시    (직전 2턴을 제외한 과거 대화를      (모든 히스토리를 버리고
- Head/Tail 20줄만 보존)  구조화된 요약 1개로 압축 치환)     git diff와 할일만 보존)
+```mermaid
+flowchart LR
+    Turns["장기 세션과 Tool 출력"] --> L1["L1 Tool Truncation\n원문 artifact 참조 보존"]
+    L1 --> L2["L2 Middle-turn Summary\n최근 턴 제외 요약"]
+    L2 --> L3["L3 State Snapshot\nGit diff와 할 일"]
+    L3 --> Verify["복원 가능성 및 정보 손실 검증"]
 ```
 
 * **경량 모델 보조 배치**: L2 대화 요약 압축에는 초저비용/무료 모델(Groq Llama-3.1-8B, Gemini Flash)을 1회성 보조 작업자로 투입하여 비용을 최소화(본체 작업 모델 대비 1/50 비용).
@@ -131,16 +135,10 @@ $$\text{Selection Score} = \text{베이지안 성공률} + c \times \sqrt{\frac{
 
 ## 6. 5대 엔티티 하이브리드 매핑 & 멀티 CLI 병행
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. 정적 계층 (Static Layer) — [Host ↔ CLI Runtime]          │
-│    - Host(arm1, arm2)에 fleet-worker(grok, agy) 상시 대기   │
-│    - 준비 시간 0초 (Zero Cold-Start)                        │
-├─────────────────────────────────────────────────────────────┤
-│ 2. 동적 계층 (Dynamic Layer) — [Model + Custom Prompt]       │
-│    - TaskRouter가 태스크 복잡도에 따라 Model을 동적 배정   │
-│    - 태스크 요구사항에 따라 Skill/헌법(Prompt)을 동적 주입    │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    Static["정적 계층\nHost와 CLI Runtime"] --> Dynamic["동적 계층\nModel, Prompt, Skill, Constitution"]
+    Dynamic --> Attempt["TaskAttempt\n정책 revision과 실행 snapshot"]
 ```
 
 * **멀티 CLI 유연성 (`AgentRunner`)**:
@@ -150,7 +148,7 @@ $$\text{Selection Score} = \text{베이지안 성공률} + c \times \sqrt{\frac{
 
 ---
 
-## 7. 데이터 모델 및 DB 마이그레이션 (`018_task_routing_telemetry.sql`)
+## 7. 데이터 모델 및 DB 마이그레이션 (`016_task_routing_telemetry.sql`)
 
 ```sql
 -- 1. tasks 테이블 확장
@@ -194,10 +192,15 @@ CREATE INDEX idx_task_telemetry_profile_model ON task_telemetry(routing_profile,
 
 ## 8. 단계별 구현 및 검증 로드맵
 
+현재 `RoutingProfile::default_model()`은 물리 모델명을 Rust 코드에 하드코딩한다.
+이는 모델 변화 대응 목표와 충돌하므로 운영 활성화 전에 versioned model catalog와
+외부 policy mapping으로 이전해야 한다. 결정에는 `policy_version`,
+`classifier_version`, 후보 집합과 reason code를 기록한다.
+
 | 단계 | 주요 작업 내용 | 담당 크레이트 / 파일 |
 |---|---|---|
-| **Phase 1** | 데이터 모델 확장 및 DB 마이그레이션 | `fleet-core/task.rs`, `fleet-store/migrations/018_...` |
-| **Phase 2** | `TaskRouter` 트레잇 및 FreeRouter 휴리스틱 분류기 구현 | `fleet-scheduler/src/router.rs` |
+| **Phase 1** | 데이터 모델 확장 및 DB 마이그레이션 구현 완료 | `fleet-core/task.rs`, `fleet-store/migrations/016_task_routing_telemetry.sql` |
+| **Phase 2** | `TaskRouter`와 휴리스틱 분류기 구현 완료; 하드코딩 모델 매핑 외부화 필요 | `fleet-scheduler/src/router.rs` |
 | **Phase 3** | 3단계 소프트 예산 감시 카운터 및 Grace Wrap-up 로직 통합 | `fleet-transport/src/acp_transport.rs` |
 | **Phase 4** | L1/L2 컨텍스트 Compact 엔진 구현 | `fleet-worker/src/compact.rs` or `fleet-transport` |
 | **Phase 5** | CLI 플래그 연동 (`--profile`, `--budget`) 및 E2E 검증 | `fleet-cli`, `fleet-dashboard` |
@@ -206,5 +209,6 @@ CREATE INDEX idx_task_telemetry_profile_model ON task_telemetry(routing_profile,
 
 ## 9. 결론
 
-본 아키텍처는 FreeRouter의 실용적인 비용 절감과 분류 아이디어를 Fleet의 Rust 단일 바이너리와 ACP 장기 세션 구조에 최적화하여 흡수합니다.  
-고정 알고리즘 기반의 소프트 예산 집행과 무비용 결정론적 텔레메트리를 통해, **오케스트레이터의 리소스 오버헤드와 평가 토큰 비용을 0으로 유지하면서도 모델 변화에 유연하게 자율 진화하는 엔터프라이즈급 AI 오케스트레이션**을 보장합니다.
+이 설계는 FreeRouter의 분류 아이디어를 Fleet의 태스크 경계에 적용한다. 비용 절감률,
+지연 오버헤드와 품질 향상은 workload benchmark로 검증해야 하며 현재 문서만으로
+보장하지 않는다. UCB1은 성공 지표와 rollback 조건이 마련된 뒤 feature flag로 활성화한다.

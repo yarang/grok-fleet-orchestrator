@@ -1,4 +1,20 @@
-# 워커 최초 가입(Join) 시 API 인증 방안 설계서
+---
+type: security-architecture
+authority: derived
+implementation: proposed
+verification: design-reviewed
+source: "docs/worker-bootstrap/join-authentication.md"
+last_verified: "2026-08-17"
+last_verified_commit: "working-tree"
+owners: ["fleet-api", "fleet-worker"]
+---
+
+# Worker 가입 인증 목표 모델
+
+> **현재 계약은 [`contracts/worker-enrollment.md`](../contracts/worker-enrollment.md)가 정본이다.**
+> 이 문서는 scoped Worker credential, 일회성 token, edge 방어의 목표 보안 모델을 보존한다.
+> 현재 구현은 join 뒤에 같은 원문 bootstrap token을 `worker.toml`에 기록하며 Worker-scoped credential을
+> 발급하지 않는다. 아래의 “발급” 서술을 현재 동작으로 해석하지 않는다.
 
 이 설계서는 신뢰할 수 없는 환경이나 외부 네트워크에 존재하는 워커 노드가 최초로 오케스트레이터 API 서버에 접근하여 등록(`/v1/workers/join`)을 시도할 때, **보안성과 편의성을 동시에 충족하기 위한 다중 인증 방안(Multi-Layered Authentication)**을 제시합니다.
 

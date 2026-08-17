@@ -17,7 +17,6 @@
 
 | 문서 | 인용 대상 | 위치 |
 |---|---|---|
-| [`docs/deployment/single-server.md`](../deployment/single-server.md) | `litellm_integration_plan.md`의 venv+systemd 배포 스펙 인용 (§2.1) + 폐기된 Docker Compose 설계 명시(§2.2, §3 Step 1) | §2.1, §2.2, §3 Step 1 |
 | [`docs/roadmap.md`](../roadmap/roadmap.md) #34 | `multi_provider_llm_proxy_analysis.md`의 채택 결론 | 항목 34 |
 | [`examples/groq-compat/README.md`](../../examples/groq-compat/README.md) | `litellm_integration_plan.md` §3.3의 훅 배경·실측·검증 절차 (구현 정본) | 전체 |
 | [`docs/architecture/overview.md`](../architecture/overview.md) | `README.md`가 자율 동작 제어 엔진 절을 인용 (엔진은 2026-08-13 삭제되어 양쪽 모두 "미구현 설계 구상"으로 정정됨) | ## Autonomic Self-Healing Engine (Autonomy) — 🔴 미구현·비연결 상태 |

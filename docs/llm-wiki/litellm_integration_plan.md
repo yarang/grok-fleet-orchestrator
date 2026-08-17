@@ -7,7 +7,7 @@
 아키텍처와 배포 스펙을 정의합니다.
 
 > ⚠️ **정본(canonical source) 표시**: 아래 §3~§5의 `config.yaml` / systemd unit /
-> nginx 라우팅 사양이 liteLLM 인프라 정의의 정본이다. [`docs/deployment/single-server.md`](../deployment/single-server.md)
+> liteLLM의 nginx 경계는 [`docs/deployment/reverse-proxy.md`](../deployment/reverse-proxy.md)를 따른다.
 > 등 다른 문서에 등장하는 동일 스펙은 **이 문서를 인용한 사본**이며, 값이 어긋나면
 > 이 문서가 우선한다.
 
@@ -132,7 +132,7 @@ location /api-gateway/ {
 `proxy_read_timeout 300s`는 grok-build의 긴 에이전틱 턴(툴 호출 다수)이 liteLLM
 기본 타임아웃보다 오래 걸릴 수 있어 넉넉히 잡았다.
 
-> ⚠️ **불일치 발견 (2026-08-13, 미확인)**: [`docs/deployment/nginx-gateway.md`](../deployment/nginx-gateway.md)의
+> ⚠️ **과거 불일치 기록 (2026-08-13)**: 이전 deployment gateway 문서의
 > `/api-gateway/` 블록은 `proxy_read_timeout 600s`와 `proxy_buffering off`를 추가로
 > 명시하고 있어 위 값(`300s`, buffering 지시자 없음)과 다릅니다. 이 문서가 §9 표시상
 > nginx 스펙의 정본이지만, 실제 arm2 서버에 배포된 `/etc/nginx/sites-available/fleet`의

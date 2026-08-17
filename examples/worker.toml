@@ -1,8 +1,8 @@
 # examples/worker.toml
 #
 # fleet-worker 데몬이 읽는 설정 파일의 실運용 예시.
-# 사용: `/etc/fleet-worker/worker.toml` 로 복사 후 값 채우고
-#       `fleet-worker --config /etc/fleet-worker/worker.toml` 실행.
+# 사용: `/etc/fleet/worker.toml` 로 복사 후 값 채우고
+#       `fleet-worker --config /etc/fleet/worker.toml` 실행.
 #
 # 이 파일의 필드는 `crates/fleet-worker/src/config.rs::WorkerConfig` 와 1:1 매핑.
 

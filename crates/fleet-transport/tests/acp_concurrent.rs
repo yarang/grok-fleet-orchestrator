@@ -180,6 +180,8 @@ fn dispatch_req(task_id: TaskId, worker_id: WorkerId, prompt: &str) -> DispatchR
         model: None,
         max_turns: None,
         timeout_secs: Some(30),
+        checkpoint_branch: None,
+        skills_required: vec![],
     }
 }
 

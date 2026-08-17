@@ -1,11 +1,16 @@
 ---
-type: architecture-report
-status: canonical
+type: architecture-proposal
+authority: derived
+implementation: proposed
+verification: design-reviewed
 source: "docs/architecture/host-integrity-and-security-monitoring-design.md"
 last_verified: "2026-08-16"
 ---
 
-# 호스트 무결성 감시 및 비인가 변경사항 위험성 분석 아키텍처 보고서
+# 호스트 무결성 감시 제안·위험 분석 보존 (Derived)
+
+> **지위: Derived proposal.** 구현 전 제안과 위험 분석을 보존한다. 현재 운영 보안
+> 규칙은 [Control Plane 보안 모델](../security/control-plane-security-model.md)이 우선한다.
 **작성일**: 2026-08-16  
 **대상**: Fleet Orchestrator 아키텍처팀 및 에이전트 협업 그룹
 

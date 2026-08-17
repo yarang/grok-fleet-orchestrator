@@ -6,7 +6,7 @@
 #
 # 사용:
 #   sudo cp examples/fleet-worker.service /etc/systemd/system/fleet-worker.service
-#   sudo cp examples/worker.toml /etc/fleet-worker/worker.toml  # 값 채운 버전
+#   sudo install -m 600 examples/worker.toml /etc/fleet/worker.toml
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now fleet-worker
 #
@@ -19,21 +19,21 @@ Documentation=https://github.com/yarang/grok-fleet-orchestrator
 After=network-online.target
 Wants=network-online.target
 # grok 서브프로세스를 띄우므로 PATH 가 /usr/local/bin 등을 포함해야 한다.
-AssertPathExists=/etc/fleet-worker/worker.toml
+AssertPathExists=/etc/fleet/worker.toml
 AssertPathExists=/usr/local/bin/grok
 
 [Service]
 Type=simple
-User=fleet-worker
-Group=fleet-worker
-WorkingDirectory=/var/lib/fleet-worker
+User=fleet
+Group=fleet
+WorkingDirectory=/var/lib/fleet
 
 # PATH 에 /usr/local/bin 을 포함시켜야 fleet-worker 가 grok 을 찾을 수 있다.
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 # RUST_LOG=fleet_worker=info,grok_process=debug
-EnvironmentFile=-/etc/fleet-worker/fleet-worker.env
+EnvironmentFile=-/etc/fleet/worker.env
 
-ExecStart=/usr/local/bin/fleet-worker --config /etc/fleet-worker/worker.toml
+ExecStart=/usr/local/bin/fleet-worker --config /etc/fleet/worker.toml
 
 # grok 서브프로세스도 함께 종료.
 KillMode=mixed
