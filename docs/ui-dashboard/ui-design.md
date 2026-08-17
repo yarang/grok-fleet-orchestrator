@@ -752,7 +752,8 @@ flowchart TD
 > 🆕 **설계 제안 (2026-08-14)**: `#48`(프로젝트 기능) 재검토에서 범위만
 > 정리했던 UI/UX 열린 질문을 이번에 구체화했습니다. 아직 구현되지
 > 않았습니다 — [`project-feature-design.md`](../architecture/project-feature-design.md)를
-> 데이터/API 정본으로, 이 절을 화면 정본으로 삼습니다.
+> 모델 정본으로, [`project-management.md`](../contracts/project-management.md)를
+> 외부 계약 정본으로, 이 절을 화면 정본으로 삼습니다.
 
 **라우트**: `/projects`  **권한**: `ProjectRead`(viewer+)  **스타일**: Apple tile system
 
@@ -763,7 +764,7 @@ flowchart TD
 
 | 데이터 | 소스 | 비고 |
 | --- | --- | --- |
-| 프로젝트 목록 | `GET /api/projects` | `project-feature-design.md` §7 |
+| 프로젝트 목록 | `GET /api/projects` | `contracts/project-management.md` |
 | Host/Worker 배정 수 | `list_project_hosts`/`list_project_worker_ids` 카운트 | 목록 응답에 집계 포함하도록 API 확장 필요(현재 설계엔 없음 — 구현 시 반영) |
 | 실행 중 Agent 수 | `#49` `agents` 테이블, `status IN ('Starting','Running')` 카운트 | 위와 동일하게 집계 확장 필요 |
 

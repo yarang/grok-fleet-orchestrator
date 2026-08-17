@@ -19,3 +19,4 @@ last_verified: "2026-08-17"
 | Worker enrollment | Worker 운영자·daemon — [`worker-enrollment.md`](./worker-enrollment.md) |
 | Dashboard API | first-party Dashboard — [`dashboard-api.md`](./dashboard-api.md) |
 | Agent management | Agent 운영자·자동화 — [`agent-management.md`](./agent-management.md) |
+| Project management | Dashboard·MCP client — [`project-management.md`](./project-management.md) |

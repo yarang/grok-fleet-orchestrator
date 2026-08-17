@@ -128,7 +128,8 @@ sequenceDiagram
 ## 정본 간 책임 분배
 
 - 이 문서: Project·Agent·Task의 수명 범위와 cross-entity 전이
-- [Project 기능 설계](project-feature-design.md): Project 데이터·배정·권한·API
+- [Project 모델과 거버넌스](project-feature-design.md): Project 데이터·배정·권한 차단 조건
+- [Project 관리 계약](../contracts/project-management.md): 제안된 Dashboard HTTP·MCP 표면
 - [Task Management](task-management-design.md): Task 제출·의존성·우선순위·결과·감사
 - [Agent 프로비저닝](agents/provisioning.md): Agent process/control 상태 전이
 - [Task 실행 일관성](task-execution-consistency.md): TaskAttempt CAS·retry·멱등성
