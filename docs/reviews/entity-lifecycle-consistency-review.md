@@ -1,16 +1,16 @@
 ---
-type: architecture-review
+type: review
 authority: historical
 implementation: not-applicable
 verification: design-reviewed
-source: "docs/architecture/entity-lifecycle-consistency-review.md"
+source: "docs/reviews/entity-lifecycle-consistency-review.md"
 last_verified: "2026-08-16"
 ---
 
 # Project · Task · Agent Lifecycle 정합성 검토 (Historical)
 
 > **지위: Historical review.** 이 검토에서 도출한 현재 lifecycle은
-> [Project·Agent·Task 연속 개발 Lifecycle](project-task-agent-lifecycle.md)에 정리됐다.
+> [Project·Agent·Task 연속 개발 Lifecycle](../architecture/project-task-agent-lifecycle.md)에 정리됐다.
 > 본문은 발견 근거와 당시의 미결정 사항을 보존한다.
 
 ## 결론

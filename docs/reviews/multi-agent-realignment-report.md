@@ -10,7 +10,7 @@ last_verified: "2026-08-15"
 # 다중 에이전트 설계 재정렬 기록 (Historical)
 
 > **지위: Historical decision record.** 확정된 lifecycle·격리·Skill 정책은
-> [아키텍처 정본 지도](canonical-map.md)의 해당 정본에 반영됐다. 이 문서는 대안과
+> [아키텍처 정본 지도](../architecture/canonical-map.md)의 해당 정본에 반영됐다. 이 문서는 대안과
 > 결정 과정을 보존한다.
 
 > 작성일: 2026-08-15  
@@ -99,8 +99,8 @@ last_verified: "2026-08-15"
 의사결정이 합의되는 대로 아래의 순서로 `docs` 내의 설계 문서들을 업데이트합니다.
 
 1.  **Phase 1. 코어 리모델링**:
-    *   [`system-entities-mapping.md`](./system-entities-mapping.md)를 2D 위상-실행 매트릭스로 재편.
-    *   [`project-feature-design.md`](./project-feature-design.md)에 Draining 시퀀스 다이어그램 추가.
+    *   [`system-entities-mapping.md`](../architecture/system-entities-mapping.md)를 2D 위상-실행 매트릭스로 재편.
+    *   [`project-feature-design.md`](../architecture/project-feature-design.md)에 Draining 시퀀스 다이어그램 추가.
 2.  **Phase 2. 인프라 배포 사양 정비**:
     *   [`reverse-proxy.md`](../deployment/reverse-proxy.md)에 `/ws` 리버스 프록시 규격 주입.
     *   [`configuration.md`](../deployment/configuration.md)에 격리 디렉토리 구조 및 `wipe` 전용 sudoers 사양 기록.

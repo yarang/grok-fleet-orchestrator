@@ -1,16 +1,16 @@
 ---
-type: verification-plan
+type: review
 authority: derived
 implementation: not-applicable
 verification: design-reviewed
-source: "docs/architecture/feature-feasibility-testing.md"
+source: "docs/reviews/feature-feasibility-testing.md"
 last_verified: "2026-08-15"
 ---
 
 # 핵심 기능 검증 방안 보존 (Derived)
 
 > **지위: Derived verification plan.** 현재 설계 규칙은
-> [아키텍처 정본 지도](canonical-map.md)가 가리키는 정본을 따른다.
+> [아키텍처 정본 지도](../architecture/canonical-map.md)가 가리키는 정본을 따른다.
 
 > 작성일: 2026-08-15  
 > **보고 주체**: 기술 타당성 평가 에이전트 (`tech_evaluator`)  
@@ -83,4 +83,4 @@ last_verified: "2026-08-15"
     2.  로컬 통합 테스트에서 가벼운 스트레스 스크립트(CPU/Memory 강제 점유)를 구동하여, 워커의 감시 백그라운드 스레드가 이를 감지하고 에이전트를 `Draining` 상태로 트리거하는지 실측 검증합니다.
 
 ### 3.4 다중 에이전트 체이닝 E2E 테스트: Mock Worker Actors
-*   **테스트 기법**: [`crates/fleet-scheduler/tests/dispatch_e2e.rs`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/crates/fleet-scheduler/tests/dispatch_e2e.rs) 내에 가짜 워커 행위자(Mock Worker)들을 배치하여, 1단계 에이전트가 완료한 작업 커밋 해시가 2단계 에이전트의 입력 프롬프트와 Git Checkout 브랜치 인풋으로 정상 이관되는지 DAG 흐름을 검증합니다.
+*   **테스트 기법**: [`crates/fleet-scheduler/tests/dispatch_e2e.rs`](../../crates/fleet-scheduler/tests/dispatch_e2e.rs) 내에 가짜 워커 행위자(Mock Worker)들을 배치하여, 1단계 에이전트가 완료한 작업 커밋 해시가 2단계 에이전트의 입력 프롬프트와 Git Checkout 브랜치 인풋으로 정상 이관되는지 DAG 흐름을 검증합니다.

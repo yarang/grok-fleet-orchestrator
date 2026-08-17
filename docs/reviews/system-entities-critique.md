@@ -1,26 +1,26 @@
 ---
-type: architecture-review
+type: review
 authority: derived
 implementation: not-applicable
 verification: design-reviewed
-source: "docs/architecture/system-entities-critique.md"
+source: "docs/reviews/system-entities-critique.md"
 last_verified: "2026-08-15"
 ---
 
 # 시스템 엔티티 설계 비판·대안 보존 (Derived)
 
 > **지위: Derived review.** 이 문서는 위험과 대안을 보존한다. 현재 결정은
-> [아키텍처 정본 지도](canonical-map.md)의 해당 정본만 변경할 수 있다.
+> [아키텍처 정본 지도](../architecture/canonical-map.md)의 해당 정본만 변경할 수 있다.
 
 > 작성일: 2026-08-15  
 > **보고 주체**: 비판적 시스템 설계자 에이전트 (`critical_auditor`)  
-> **분석 대상**: [`system-entities-mapping.md`](./system-entities-mapping.md) 및 관련 아키텍처 명세서
+> **분석 대상**: [`system-entities-mapping.md`](../architecture/system-entities-mapping.md) 및 관련 아키텍처 명세서
 
 ---
 
 ## 1. 개요
 
-본 보고서는 [`system-entities-mapping.md`](./system-entities-mapping.md)에 정립된 3축 아키텍처와 엔티티 간의 매핑 불변식이 직면한 구조적 한계, 잠재적 성능 병목(병렬 락 경쟁 및 TOCTOU), 다중 테넌트(Multi-tenant) 보안 공백, 그리고 프롬프트 비대화(Token Inflation) 문제를 비판적으로 해부하고 이에 대한 최적의 대안을 제안합니다.
+본 보고서는 [`system-entities-mapping.md`](../architecture/system-entities-mapping.md)에 정립된 3축 아키텍처와 엔티티 간의 매핑 불변식이 직면한 구조적 한계, 잠재적 성능 병목(병렬 락 경쟁 및 TOCTOU), 다중 테넌트(Multi-tenant) 보안 공백, 그리고 프롬프트 비대화(Token Inflation) 문제를 비판적으로 해부하고 이에 대한 최적의 대안을 제안합니다.
 
 ---
 

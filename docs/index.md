@@ -27,27 +27,11 @@ last_verified: "2026-08-15"
 | ⚪ | 역사적 기록 — 특정 시점의 스냅샷. 현재 지침으로 사용하지 않음 |
 | ⚫ | 고아/폐기 — 다른 문서에서 참조되지 않거나 폐기 판정. 병합/삭제 검토 대상 |
 
-## 도메인 1. 🏛️ Core Reference — [`architecture/README.md`](./architecture/README.md)
+## 도메인 1. 🏛️ Core Reference
 
-| 문서 | 한 줄 요약 | 상태 | 최종 개정 |
+| 진입점 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
-| [`architecture/canonical-map.md`](./architecture/canonical-map.md) | 아키텍처 주제별 단일 정본과 Derived 구현 근거의 경계를 정하는 진입점 | 🟢 정본 | 2026-08-17 |
-| [`architecture/overview.md`](./architecture/overview.md) | 시스템 경계·현재 구현 상태·정본 읽기 순서를 제공하는 얇은 Derived 입문 지도 | 🔵 사본 — 정본 지도 참조 | 2026-08-17 |
-| [`architecture/implementation-reference.md`](./architecture/implementation-reference.md) | ACP·Worker·WebSocket·selector·mTLS·SSH의 코드 대조와 보존된 구현 이력 | 🔵 사본 — 코드 근거 참조 | 2026-08-17 |
-| [`architecture/control-plane-availability.md`](./architecture/control-plane-availability.md) | 단일 Primary Orchestrator와 Cold Standby, lease/epoch/fencing, 수동 장애 전환 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/task-execution-consistency.md`](./architecture/task-execution-consistency.md) | TaskAttempt·generation·CAS·재시도·멱등성·부작용 분류 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/worker-liveness-policy.md`](./architecture/worker-liveness-policy.md) | 선택적 periodic heartbeat와 on-demand ACP probe, idle Fleet 부하 제어 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/project-feature-design.md`](./architecture/project-feature-design.md) | Project model & governance — 정책·권한·격리와 host/worker 배정 제약 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/task-management-design.md`](./architecture/task-management-design.md) | Task management — Project 귀속, 제출·의존성·취소·결과·감사와 목표 TaskAttempt 경계 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/project-task-agent-lifecycle.md`](./architecture/project-task-agent-lifecycle.md) | Lifecycle contract — Project/Task/Attempt/Agent 교차 전이, drain/archive 및 snapshot 보존 정본 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-16 |
-| [`architecture/agents/README.md`](./architecture/agents/README.md) | Agent 실행 플랫폼 — 격리·프로비저닝·runtime·harness·tool·memory·terminal의 기능별 정본 진입점 | 🟢 정본 — 설계 확정·구현 대기 | 2026-08-17 |
-| [`architecture/system-entities-mapping.md`](./architecture/system-entities-mapping.md) | Project, Host, Worker, Agent, Task의 물리 배치·행동 구성·스코프 관계 지도 | 🔵 사본 — 주제별 정본 참조 | 2026-08-16 |
-| [`architecture/system-entities-critique.md`](./architecture/system-entities-critique.md) | 위 관계의 동시성·격리·토큰 위험과 대안 검토 근거 | 🔵 검토 문서 | 2026-08-16 |
-| [`architecture/entity-lifecycle-consistency-review.md`](./architecture/entity-lifecycle-consistency-review.md) | lifecycle 정본 도출 전 발견한 drain/delete·snapshot 보존·on-demand control 검토 기록 | ⚪ 역사적 검토 | 2026-08-16 |
-| [`architecture/feature-feasibility-testing.md`](./architecture/feature-feasibility-testing.md) | 드레인, Git 이관, 동적 Skill, 다중 Agent 기능의 feasibility와 검증 시나리오 | 🔵 검증 계획 | 2026-08-16 |
-| [`architecture/host-integrity-and-security-monitoring-design.md`](./architecture/host-integrity-and-security-monitoring-design.md) | 워커 비관리 파일·패키지 변경 감시의 미구현 제안과 위험 분석 | 🔵 제안 문서 | 2026-08-16 |
-| [`architecture/intelligent-task-routing-and-budget-control-design.md`](./architecture/intelligent-task-routing-and-budget-control-design.md) | FreeRouter 흡수 라우팅, 소프트 예산, Compact와 텔레메트리 목표 설계 | 🟡 정본 — 휴리스틱·스키마 일부 구현 | 2026-08-16 |
-| [`architecture/log.md`](./architecture/log.md) | 아키텍처 도메인 설계 개정 이력 기록용 append-only 로그 파일 | ⚪ 부기 문서 | 2026-08-15 |
+| [`architecture/README.md`](./architecture/README.md) | Architecture 정본·Derived·review의 읽기 순서와 책임 경계 | 🟢 정본 | 2026-08-17 |
 
 ## 도메인 2. 🚀 Deployment & Infra — [`deployment/README.md`](./deployment/README.md)
 
