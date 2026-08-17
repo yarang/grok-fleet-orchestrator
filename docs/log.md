@@ -408,3 +408,9 @@ last_verified: "2026-08-15"
 - 유형: `ingest` + `lint`
 - Task 관리, 실행 일관성, routing 정책, 예산 제어 정본을 `architecture/tasks/`로 묶고 `README.md`를 단일 진입점으로 추가했다.
 - Project·Agent와의 교차 lifecycle 및 전 시스템 엔티티 관계 지도는 Architecture 최상위에 유지했다.
+
+## 2026-08-17 — 외부 계약의 설계 우선성과 현재 사실 보강
+
+- 유형: `ingest` + `lint`
+- Contracts는 목표 설계를 우선 정본으로 유지하되, 구현과 다른 경우 현재 상태를 명시하도록 진입점 규칙을 정리했다.
+- HTTP host 범위·인증 조합, MCP 전송·도구 표면, Dashboard route 표면, Worker enrollment의 secret·token 소비 제한과 활성화 게이트를 보강했다.

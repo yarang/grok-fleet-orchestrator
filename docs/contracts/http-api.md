@@ -21,14 +21,23 @@ owners: ["fleet-api"]
 |---|---|---|
 | `GET /v1/health`, `GET /metrics`, `GET /openapi.yaml` | 상태·관측·명세 조회 | OpenAPI와 `fleet-api` router |
 | `/v1/workers/*` | register, heartbeat, 목록, 자격증명 | OpenAPI |
-| `/v1/hosts/*` | host 등록·조회·관리 | OpenAPI |
+| `POST /v1/hosts/register` | provisioned host 등록 | OpenAPI |
 | `/v1/bootstrap-tokens/*` | 발급·목록·회수 | OpenAPI 및 worker enrollment 계약 |
 
 ## 인증 경계
 
-API token 또는 Cloudflare audience가 설정되지 않은 현재 구현은 no-auth로 시작한다. 이는
-프로덕션 정책이 아니라 현재 구현의 제약이다. 목표 fail-closed와 principal/capability 계약은
-[control-plane security model](../security/control-plane-security-model.md)이 정본이다.
+현재 인증 조합은 다음과 같다. 이는 프로덕션 정책이 아니라 구현의 제약이며, 목표
+fail-closed와 principal/capability 계약은 [control-plane security model](../security/control-plane-security-model.md)이 정본이다.
+
+| 설정 | `/v1/health` | 나머지 `/v1/*` | `/metrics`, `/openapi.yaml` |
+|---|---|---|---|
+| API token·Cloudflare 미설정 | 허용 | 허용 | bearer 미들웨어 밖 |
+| API token만 설정 | 허용 | Bearer 필요 | bearer 미들웨어 밖 |
+| Cloudflare만 설정 | Cloudflare assertion 필요 | Cloudflare assertion 필요 | 배포 edge 정책으로 별도 보호 필요 |
+| 둘 다 설정 | Cloudflare assertion 필요 | Cloudflare assertion과 Bearer 모두 필요 | bearer 미들웨어 밖 |
+
+`/metrics`와 `/openapi.yaml`은 `/v1` bearer 미들웨어 바깥에 있으므로, 공개 bind 또는
+reverse proxy 배포에서는 별도의 네트워크·gateway ACL을 검증해야 한다.
 
 `/v1/workers/join`의 현재·목표 인증 차이와 Worker credential 전환은
 [worker enrollment](worker-enrollment.md)에 둔다.
