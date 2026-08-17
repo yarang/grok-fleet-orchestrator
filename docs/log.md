@@ -384,3 +384,8 @@ last_verified: "2026-08-15"
 
 - 유형: `lint`
 - Architecture README에 질문별 단일 정본 선택표를 통합하고, 중복된 `architecture/canonical-map.md`를 inbound link 정리 뒤 삭제했다.
+
+## 2026-08-17 — Control Plane 권한과 장애 전환 절차 분리
+
+- 유형: `ingest` + `lint`
+- 단일 제어 권한, lease, epoch, fencing 계약은 Architecture에 남기고, 수동 Primary 승격·Standby 준비 점검은 Deployment Runbook으로 분리했다.

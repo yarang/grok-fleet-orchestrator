@@ -39,7 +39,7 @@ flowchart LR
 
 각 단계의 정본 설계는 [`control-plane-security-model.md`](../security/control-plane-security-model.md),
 [`task-execution-consistency.md`](../architecture/task-execution-consistency.md),
-[`control-plane-availability.md`](../architecture/control-plane-availability.md),
+[`control-plane-authority-and-failover.md`](../architecture/control-plane-authority-and-failover.md),
 [`agents/execution-isolation.md`](../architecture/agents/execution-isolation.md)를 따른다.
 
 ## P0 — Production Blockers

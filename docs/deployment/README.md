@@ -32,6 +32,6 @@ owners: ["deployment"]
 
 ## 인접 정본
 
-- [Control-plane availability](../architecture/control-plane-availability.md)
+- [Control Plane 권한과 장애 전환](../architecture/control-plane-authority-and-failover.md)
 - [Worker enrollment](../contracts/worker-enrollment.md)
 - [Control-plane security model](../security/control-plane-security-model.md)

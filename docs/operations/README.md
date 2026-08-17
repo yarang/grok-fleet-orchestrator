@@ -16,7 +16,7 @@ last_verified: "2026-08-16"
 |---|---|---|
 | 배포·설정·게이트웨이 | [`../deployment/`](../deployment/README.md) | 현재 운영 기준 |
 | Worker enrollment | [`../worker-bootstrap/`](../worker-bootstrap/README.md) | 현재 가입 흐름 기준 |
-| Cold Standby | [`../architecture/control-plane-availability.md`](../architecture/control-plane-availability.md) | 운영 기관 결정 |
+| Cold Standby | [`../architecture/control-plane-authority-and-failover.md`](../architecture/control-plane-authority-and-failover.md) | 운영 기관 결정 |
 | 운영 자동화 제안 | [`proposals/`](./proposals/README.md) | 미구현 제안, 운영 기준 아님 |
 
 기존 `deployment/`와 `worker-bootstrap/` 경로는 안정적인 외부 참조를 위해 유지한다.

@@ -42,7 +42,7 @@ flowchart LR
 
 | 질문 | 정본 |
 |---|---|
-| 누가 control plane을 소유하고 장애 전환하는가? | [Control-plane availability](control-plane-availability.md) |
+| 누가 control plane을 소유하고 장애 전환하는가? | [Control Plane 권한과 장애 전환](control-plane-authority-and-failover.md) |
 | 신원·권한·token·secret 경계는 무엇인가? | [Control-plane security model](../security/control-plane-security-model.md) |
 | TaskAttempt·재시도·취소·부작용은 어떻게 일관성을 지키는가? | [Task execution consistency](task-execution-consistency.md) |
 | Project·Task·Agent의 수명주기는 무엇인가? | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) |

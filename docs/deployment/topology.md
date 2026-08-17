@@ -12,7 +12,7 @@ owners: ["deployment"]
 # 운영 토폴로지
 
 현재 운영 모델은 Single Active Primary와 Cold Standby다. availability·lease·fencing의 상세 계약은
-[Control-plane availability](../architecture/control-plane-availability.md)가 정본이다.
+[Control Plane 권한과 장애 전환](../architecture/control-plane-authority-and-failover.md)가 정본이다.
 
 ```mermaid
 flowchart LR

@@ -36,8 +36,31 @@ health checker, stale-task reconciliation, CircuitBreaker 동기화는 기본 �
   [security model](../security/control-plane-security-model.md)의 대응을 따른다.
 - DB 연결 실패, health 실패, Worker heartbeat 실패는 [troubleshooting.md](troubleshooting.md)에서
   증거를 수집한 뒤 복구한다.
-- Primary 전환과 fencing은 [Control-plane availability](../architecture/control-plane-availability.md)가
+- Primary 전환의 권한·lease·fencing 계약은 [Control Plane 권한과 장애 전환](../architecture/control-plane-authority-and-failover.md)이
   정본이다. 이 Runbook은 Active-Active 전환 절차를 제공하지 않는다.
+
+## 수동 Primary 승격
+
+자동 failover는 지원하지 않는다. 다음 절차는 기존 Primary가 종료되었거나 네트워크 fencing되어
+새 제어 명령을 낼 수 없다는 증거가 있을 때만 수행한다.
+
+1. 기존 Primary의 접근 가능성, 프로세스 종료 또는 네트워크 fencing을 기록한다.
+2. DB에서 기존 lease 만료와 현재 epoch를 확인한다.
+3. Standby의 binary version, schema compatibility, DB 접근, 인증 설정을 확인한다.
+4. Standby를 기동해 새 epoch의 lease를 얻었는지 확인한다.
+5. readiness와 인증된 API를 확인한 뒤 gateway 트래픽을 전환한다.
+6. Worker 재연결, pending/stale dispatched reconciliation, 무해 Task dispatch를 확인한다.
+
+실패하면 gateway를 되돌리고, lease 소유자와 fencing 증거를 다시 확인한다. 승격 중에는 두
+인스턴스가 동시에 제어 명령을 내지 않게 한다.
+
+## Standby 준비 점검
+
+Standby에는 같은 Fleet binary와 schema compatibility 정보, DB 접근 경로, 해당 인스턴스가
+소비하는 인증·mTLS·Nginx·LiteLLM·OTEL·SMTP 설정, skill/routing policy revision, SSH
+`known_hosts`가 준비되어야 한다. secret은 원문을 운영 기록에 남기지 않고
+[configuration.md](configuration.md)의 권한·전달 규칙으로 검증한다. ACP 연결과 프로세스
+메모리는 복제 대상이 아니며, 승격 뒤 Worker 재연결과 reconciliation으로 복구한다.
 
 ## 운영 기록
 

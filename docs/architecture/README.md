@@ -40,7 +40,7 @@ flowchart TD
 
 | 주제 | 단일 정본 | 답하는 질문 |
 |---|---|---|
-| 운영 기관 | [Control-plane availability](control-plane-availability.md) | dispatch 권한과 Cold Standby 승격은 어떻게 제한하는가? |
+| 운영 기관 | [Control Plane 권한과 장애 전환](control-plane-authority-and-failover.md) | dispatch 권한과 Cold Standby 승격은 어떻게 제한하는가? |
 | 신원·권한·시크릿 | [Security model](../security/control-plane-security-model.md) | principal, capability, Worker identity, secret 경계는 무엇인가? |
 | 외부 계약 | [Contracts](../contracts/README.md) | HTTP, MCP, Dashboard, Worker enrollment의 호출 표면은 무엇인가? |
 | 실행 의미론 | [Task execution consistency](task-execution-consistency.md) | TaskAttempt, retry, cancel, idempotency, side effect의 규칙은 무엇인가? |
