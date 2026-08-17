@@ -64,7 +64,7 @@ owners: ["documentation-governance"]
 | 발견 | 영향 | 조치 |
 |---|---|---|
 | `api-reference.md`가 HTTP, MCP, 일부 Dashboard API를 함께 소유 | 정본 중복과 내부 범위 모순 | HTTP `/v1` 정본만 남기고 MCP는 `mcp-specification.md`로 연결; Dashboard 계약 별도화 |
-| 정본 지도에 Terminal Access와 Runtime Vendor 정본이 누락 | 탐색 경로와 책임 소유 불명확 | `canonical-map.md`에 두 정본 추가 |
+| Architecture 탐색표에 Terminal Access와 Runtime Vendor 정본이 누락 | 탐색 경로와 책임 소유 불명확 | `architecture/README.md`의 Agent 도메인 진입점에 두 책임을 포함 |
 | 중앙 색인에 diagrams·proposals README 누락 | 진입점이 고아 또는 비가시 상태 | `docs/index.md`에 등록 |
 | 보안 정본이 endpoint/tool × capability × project scope를 정의하지 않음 | 구현자별 권한 해석 분기 | 권한 매트릭스와 감사 fail-open/closed 계약 추가 |
 | terminal capture/attach에 scope·redaction·size·TTL·single-writer lease가 없음 | 정보 노출·저장소 DoS·세션 탈취 위험 | 별도 보안 계약으로 확정 |

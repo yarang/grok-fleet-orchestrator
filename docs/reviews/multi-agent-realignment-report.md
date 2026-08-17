@@ -10,7 +10,7 @@ last_verified: "2026-08-15"
 # 다중 에이전트 설계 재정렬 기록 (Historical)
 
 > **지위: Historical decision record.** 확정된 lifecycle·격리·Skill 정책은
-> [아키텍처 정본 지도](../architecture/canonical-map.md)의 해당 정본에 반영됐다. 이 문서는 대안과
+> [Architecture](../architecture/README.md)의 해당 정본에 반영됐다. 이 문서는 대안과
 > 결정 과정을 보존한다.
 
 > 작성일: 2026-08-15  

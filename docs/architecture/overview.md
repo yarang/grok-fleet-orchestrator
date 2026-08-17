@@ -48,13 +48,13 @@ flowchart LR
 | Project·Task·Agent의 수명주기는 무엇인가? | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) |
 | Project 정책·격리·배정 제약은 무엇인가? | [Project model](project-feature-design.md) |
 | Agent의 생성·회수·명령은 어떻게 동작하는가? | [Agent 실행 플랫폼](agents/README.md) |
-| Agent runtime·terminal·isolation의 경계는 무엇인가? | [Architecture canonical map](canonical-map.md) |
+| Agent runtime·terminal·isolation의 경계는 무엇인가? | [Architecture](README.md) |
 | HTTP·MCP·Worker enrollment의 외부 계약은 무엇인가? | [Contracts](../contracts/README.md) |
 | 설치·구성·복구 절차는 무엇인가? | [Deployment](../deployment/README.md) |
 
 ## 읽기 순서
 
-1. 현재 설계 결정을 확인할 때는 [canonical-map.md](canonical-map.md)와 해당 정본을 읽는다.
+1. 현재 설계 결정을 확인할 때는 [Architecture](README.md)의 정본 선택표와 해당 정본을 읽는다.
 2. 실제 코드 구조·제약·과거 정정은 [implementation-reference.md](implementation-reference.md)를 읽는다.
 3. 호출 가능한 외부 표면은 `architecture/`가 아니라 [contracts/](../contracts/README.md)를 읽는다.
 4. 아직 구현되지 않은 운영 자동화는 [operations/proposals/](../operations/proposals/README.md)에서만

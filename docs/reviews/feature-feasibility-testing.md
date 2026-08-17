@@ -10,7 +10,7 @@ last_verified: "2026-08-15"
 # 핵심 기능 검증 방안 보존 (Derived)
 
 > **지위: Derived verification plan.** 현재 설계 규칙은
-> [아키텍처 정본 지도](../architecture/canonical-map.md)가 가리키는 정본을 따른다.
+> [Architecture](../architecture/README.md)의 정본 선택표가 가리키는 정본을 따른다.
 
 > 작성일: 2026-08-15  
 > **보고 주체**: 기술 타당성 평가 에이전트 (`tech_evaluator`)  

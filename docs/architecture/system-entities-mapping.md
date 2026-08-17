@@ -11,7 +11,7 @@ owners: ["architecture"]
 # 시스템 엔티티 관계 참조
 
 이 문서는 현재 엔티티와 목표 엔티티의 관계를 빠르게 찾는 Derived 지도다. 관계의 규칙은
-[정본 지도](canonical-map.md)가 가리키는 문서가 소유한다.
+[Architecture](README.md)의 정본 선택표가 가리키는 문서가 소유한다.
 
 ```mermaid
 flowchart LR

@@ -619,6 +619,11 @@ runtime Badge 추가"라고 Canonical-Derived 갱신을 선언했지만, 실제
 - 엔티티 비판, lifecycle 정합성, feasibility 검토는 `docs/reviews/`로 이관했다.
 - host integrity monitoring 제안은 `docs/operations/proposals/`로 이관했다.
 
+## 2026-08-17 — 정본 지도 통합
+
+- `canonical-map.md`의 질문별 정본 선택표를 Architecture README에 통합했다.
+- Architecture README가 이 도메인의 유일한 진입점과 정본 탐색 지도가 되었으며, 기존 지도 파일은 링크를 교체한 뒤 삭제했다.
+
 ### 2026-08-15, 4차 — 나머지 14건 재검증(3표 완주) + 확정 반영
 `project-feature-design.md` 7차와 동일한 재검증 라운드(경위는 그쪽 항목
 참고). 이 문서에 해당하는 확정 발견 3건을 반영: (1) **major**

@@ -379,3 +379,8 @@ last_verified: "2026-08-15"
 - Architecture 진입점과 정본 지도를 기능별 현재 정본만 보이도록 재작성하고, 구현 참조를 코드 구조·제약 중심의 Derived 문서로 축소했다.
 - 비교·feasibility 문서 세 개는 `reviews/`로, host integrity 운영 제안은 `operations/proposals/`로 이관했다.
 - 엔티티 관계와 routing 문서는 현재 구현과 목표 계약을 분리해 재작성했다.
+
+## 2026-08-17 — Architecture 정본 지도 통합
+
+- 유형: `lint`
+- Architecture README에 질문별 단일 정본 선택표를 통합하고, 중복된 `architecture/canonical-map.md`를 inbound link 정리 뒤 삭제했다.

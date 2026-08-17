@@ -10,7 +10,7 @@ last_verified: "2026-08-15"
 # 시스템 엔티티 설계 비판·대안 보존 (Derived)
 
 > **지위: Derived review.** 이 문서는 위험과 대안을 보존한다. 현재 결정은
-> [아키텍처 정본 지도](../architecture/canonical-map.md)의 해당 정본만 변경할 수 있다.
+> [Architecture](../architecture/README.md)의 해당 정본만 변경할 수 있다.
 
 > 작성일: 2026-08-15  
 > **보고 주체**: 비판적 시스템 설계자 에이전트 (`critical_auditor`)  

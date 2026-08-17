@@ -12,7 +12,7 @@ owners: ["architecture"]
 # 현재 구현 참조
 
 이 문서는 현재 Rust 코드의 구조와 제약을 설명하는 Derived 참조다. 설계 결정은
-[정본 지도](canonical-map.md), 외부 호출 표면은 [Contracts](../contracts/README.md), 설치와
+[Architecture](README.md)의 정본 선택표, 외부 호출 표면은 [Contracts](../contracts/README.md), 설치와
 운영 절차는 [Deployment](../deployment/README.md)가 소유한다.
 
 ## 현재 구성

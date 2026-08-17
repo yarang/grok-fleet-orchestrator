@@ -18,26 +18,44 @@ owners: ["architecture"]
 
 | 순서 | 문서 | 책임 |
 |---:|---|---|
-| 1 | [정본 지도](canonical-map.md) | 질문별 단일 정본 선택 |
+| 1 | 이 문서의 정본 선택표 | 질문별 단일 정본 선택 |
 | 2 | [시스템 개요](overview.md) | 시스템 경계와 현재 구현의 빠른 탐색 |
 | 3 | [구현 참조](implementation-reference.md) | Rust 구성요소와 현재 제약 |
 | 4 | 해당 정본 | control plane, Task, Project, lifecycle, routing, Agent 플랫폼의 결정 |
 
-## 정본
+## 정본 선택
 
-| 주제 | 문서 |
-|---|---|
-| Control plane 운영 기관 | [control-plane-availability.md](control-plane-availability.md) |
-| 실행 의미론 | [task-execution-consistency.md](task-execution-consistency.md) |
-| Worker liveness | [worker-liveness-policy.md](worker-liveness-policy.md) |
-| Project 관리 | [project-feature-design.md](project-feature-design.md) |
-| Task 관리 | [task-management-design.md](task-management-design.md) |
-| 교차 lifecycle | [project-task-agent-lifecycle.md](project-task-agent-lifecycle.md) |
-| Agent 실행 플랫폼 | [agents/README.md](agents/README.md) |
-| 지능형 routing | [intelligent-task-routing-and-budget-control-design.md](intelligent-task-routing-and-budget-control-design.md) |
+설계 결정을 바꾸거나 구현하기 전 이 표에서 하나의 정본을 선택한다. 정본은 현재 결정과
+완료 조건만 담고, 코드 근거는 Derived, 비교·논의는 Reviews에 둔다.
+
+```mermaid
+flowchart TD
+    Question["구현할 질문"] --> Map["단일 정본 선택"]
+    Map --> Architecture["Architecture 정본"]
+    Map --> Security["Security"]
+    Map --> Contracts["Contracts"]
+    Architecture --> Evidence["Implementation reference\n코드 근거"]
+    Architecture --> Reviews["Reviews\n비교·대안"]
+```
+
+| 주제 | 단일 정본 | 답하는 질문 |
+|---|---|---|
+| 운영 기관 | [Control-plane availability](control-plane-availability.md) | dispatch 권한과 Cold Standby 승격은 어떻게 제한하는가? |
+| 신원·권한·시크릿 | [Security model](../security/control-plane-security-model.md) | principal, capability, Worker identity, secret 경계는 무엇인가? |
+| 외부 계약 | [Contracts](../contracts/README.md) | HTTP, MCP, Dashboard, Worker enrollment의 호출 표면은 무엇인가? |
+| 실행 의미론 | [Task execution consistency](task-execution-consistency.md) | TaskAttempt, retry, cancel, idempotency, side effect의 규칙은 무엇인가? |
+| Worker liveness | [Worker liveness policy](worker-liveness-policy.md) | heartbeat와 on-demand probe를 언제 쓰는가? |
+| Project 관리 | [Project model](project-feature-design.md) | Project 정책·권한·host/Worker 배정 제약은 무엇인가? |
+| Task 관리 | [Task management](task-management-design.md) | Task 제출·의존성·취소·결과·감사는 어떻게 관리하는가? |
+| 교차 lifecycle | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) | Project·Task·Attempt·Agent 전이는 어떻게 맞물리는가? |
+| Agent 실행 | [Agent domain](agents/README.md) | 격리, provisioning, runtime, harness, tool, memory, terminal은 어떻게 분리되는가? |
+| Routing | [Intelligent task routing](intelligent-task-routing-and-budget-control-design.md) | 현재 routing 구현과 목표 budget 정책은 무엇인가? |
 
 ## Derived와 기록
 
 [system-entities-mapping.md](system-entities-mapping.md)는 엔티티 관계를 빠르게 보는 Derived
 지도다. 비교·대안·feasibility 검토는 [Reviews](../reviews/README.md)에, 시간순 변경은
 [architecture log](log.md)에 둔다. 이 문서들은 정본을 바꾸지 않는다.
+
+정본과 코드가 다르면 정본의 `implementation`과 `verification`을 낮추고 현재 차이를 명시한다.
+Derived와 review는 정본을 재정의하지 않는다.
