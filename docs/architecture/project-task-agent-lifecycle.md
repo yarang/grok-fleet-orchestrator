@@ -18,8 +18,8 @@ TaskAttempt, Agent가 함께 전이할 때 지켜야 하는 교차 불변식과 
 | 엔티티 | 세부 정본 | 이 문서의 책임 |
 |---|---|---|
 | Project | [Project model & governance](project-feature-design.md) | Task/Agent를 허용하는 운영 상태 |
-| Task | [Task management](task-management-design.md) | terminal Task와 Project의 관계 |
-| TaskAttempt | [Task execution consistency](task-execution-consistency.md) | retry/cancel/부작용의 교차 우선순위 |
+| Task | [Task management](tasks/management.md) | terminal Task와 Project의 관계 |
+| TaskAttempt | [Task execution consistency](tasks/execution-consistency.md) | retry/cancel/부작용의 교차 우선순위 |
 | Agent | [Agent provisioning](agents/provisioning.md) | Project 종료 시 생성·정지 제약 |
 
 ## 핵심 구분
@@ -130,8 +130,8 @@ sequenceDiagram
 - 이 문서: Project·Agent·Task의 수명 범위와 cross-entity 전이
 - [Project 모델과 거버넌스](project-feature-design.md): Project 데이터·배정·권한 차단 조건
 - [Project 관리 계약](../contracts/project-management.md): 제안된 Dashboard HTTP·MCP 표면
-- [Task Management](task-management-design.md): Task 제출·의존성·우선순위·결과·감사
+- [Task Management](tasks/management.md): Task 제출·의존성·우선순위·결과·감사
 - [Agent 프로비저닝](agents/provisioning.md): Agent process/control 상태 전이
-- [Task 실행 일관성](task-execution-consistency.md): TaskAttempt CAS·retry·멱등성
+- [Task 실행 일관성](tasks/execution-consistency.md): TaskAttempt CAS·retry·멱등성
 
 구현 시 Project 상태, Agent idle 여부, Task/Attempt snapshot을 서로의 상태 필드로 대체하지 않는다.

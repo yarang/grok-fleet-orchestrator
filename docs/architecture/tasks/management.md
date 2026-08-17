@@ -3,7 +3,7 @@ type: architecture
 authority: canonical
 implementation: proposed
 verification: design-reviewed
-source: "docs/architecture/task-management-design.md"
+source: "docs/architecture/tasks/management.md"
 last_verified: "2026-08-16"
 ---
 
@@ -15,10 +15,10 @@ Task Management는 Project 안에서 수행할 **검증 가능한 한 건의 작
 
 | 이 문서가 소유 | 이 문서가 소유하지 않음 |
 |---|---|
-| Task 생성·Project 귀속·입력 snapshot | Project 정책·자원 소유 — `project-feature-design.md` |
-| 우선순위·의존성·취소·결과 조회 | Agent 생성/중지 — `agents/provisioning.md` |
-| Task → Attempt 생성 요청과 감사 | Attempt CAS·retry·부작용 fencing — `task-execution-consistency.md` |
-| 현재 구현과 목표 모델의 차이 | 교차 lifecycle 전이 — `project-task-agent-lifecycle.md` |
+| Task 생성·Project 귀속·입력 snapshot | Project 정책·자원 소유 — `../project-feature-design.md` |
+| 우선순위·의존성·취소·결과 조회 | Agent 생성/중지 — `../agents/provisioning.md` |
+| Task → Attempt 생성 요청과 감사 | Attempt CAS·retry·부작용 fencing — `execution-consistency.md` |
+| 현재 구현과 목표 모델의 차이 | 교차 lifecycle 전이 — `../project-task-agent-lifecycle.md` |
 
 ```mermaid
 flowchart LR
@@ -76,7 +76,7 @@ stateDiagram-v2
 - terminal Task는 재개하지 않는다. 같은 의도 재실행은 새 Task 또는 명시적 retry 요청으로 새 Attempt를 만든다.
 - cancel은 요청과 확정을 구분한다. 부작용이 이미 발생했을 수 있으므로 `Cancelled`가 rollback 성공을 의미하지 않는다.
 
-정확한 generation CAS, ack 유실, retry 분류와 외부 부작용의 보상 규칙은 [`task-execution-consistency.md`](task-execution-consistency.md)가 정본이다.
+정확한 generation CAS, ack 유실, retry 분류와 외부 부작용의 보상 규칙은 [`execution-consistency.md`](execution-consistency.md)가 정본이다.
 
 ## Project·Agent와의 관계
 

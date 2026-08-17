@@ -38,7 +38,7 @@ flowchart LR
 | 7 | Reproducible Skill loading | required revision inline, optional read-only fetch, attempt manifest/hash | 대기 |
 
 각 단계의 정본 설계는 [`control-plane-security-model.md`](../security/control-plane-security-model.md),
-[`task-execution-consistency.md`](../architecture/task-execution-consistency.md),
+[`task-execution-consistency.md`](../architecture/tasks/execution-consistency.md),
 [`control-plane-authority-and-failover.md`](../architecture/control-plane-authority-and-failover.md),
 [`agents/execution-isolation.md`](../architecture/agents/execution-isolation.md)를 따른다.
 

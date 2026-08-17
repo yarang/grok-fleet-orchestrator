@@ -3,7 +3,7 @@ type: architecture
 authority: canonical
 implementation: partial
 verification: code-checked
-source: "docs/architecture/task-routing-policy.md"
+source: "docs/architecture/tasks/routing-policy.md"
 last_verified: "2026-08-17"
 owners: ["scheduler"]
 ---
@@ -13,8 +13,8 @@ owners: ["scheduler"]
 ## 범위
 
 이 문서는 논리적 작업 요구를 Worker 선택으로 연결하는 정책을 정의한다. usage 예산과
-telemetry는 [Task 예산 제어](task-budget-control.md)가 소유하고, retry·OutcomeUnknown은
-[실행 의미론](task-execution-consistency.md)이 소유한다.
+telemetry는 [Task 예산 제어](budget-control.md)가 소유하고, retry·OutcomeUnknown은
+[실행 의미론](execution-consistency.md)이 소유한다.
 
 ## 현재 사실과 목표
 

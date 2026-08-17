@@ -3,7 +3,7 @@ type: architecture-decision
 authority: canonical
 implementation: proposed
 verification: design-reviewed
-source: "docs/architecture/task-execution-consistency.md"
+source: "docs/architecture/tasks/execution-consistency.md"
 last_verified: "2026-08-16"
 ---
 

@@ -15,9 +15,9 @@ Project는 개발 목표, 권한, 정책, 자원 소유를 묶는 경계다. 이
 
 | 이 문서가 소유 | 다른 정본이 소유 |
 |---|---|
-| Project 데이터·정책 revision·자원 소유 | [Task 관리](task-management-design.md)의 제출·결과·감사 |
+| Project 데이터·정책 revision·자원 소유 | [Task 관리](tasks/management.md)의 제출·결과·감사 |
 | host/worker의 Project 배정 불변식 | [Lifecycle 계약](project-task-agent-lifecycle.md)의 교차 상태 전이 |
-| Project Task의 Worker 선택 자격 | [실행 일관성](task-execution-consistency.md)의 Attempt·재시도·dead-letter |
+| Project Task의 Worker 선택 자격 | [실행 일관성](tasks/execution-consistency.md)의 Attempt·재시도·dead-letter |
 | Project 권한의 승인 조건 | [Project 관리 계약](../contracts/project-management.md)의 HTTP·MCP 표면 |
 
 화면 구성은 [UI Dashboard](../ui-dashboard/ui-design.md)가, Agent 생성·중지는 [Agent provisioning](agents/provisioning.md)이 소유한다. 이 문서는 SQL, Store 메서드 시그니처, 화면 명세, 구현 단계별 작업 목록을 반복하지 않는다.
@@ -53,7 +53,7 @@ Agent provisioning 관련 기본 템플릿, 유휴 시간, 작업 디렉터리 �
 
 ## 디스패치 자격
 
-`task.project_id`가 있으면 Worker 후보는 같은 `worker.project_id`를 가진 worker로 한정한다. 후보가 없더라도 일반 풀로 폴백하지 않는다. 이 경우의 재시도, 최종 실패, dead-letter 처리는 [실행 일관성](task-execution-consistency.md)의 `WorkerUnavailable` 경로를 따른다. `project_id`가 없는 Task는 기존 일반 풀 선택 규칙을 그대로 따른다.
+`task.project_id`가 있으면 Worker 후보는 같은 `worker.project_id`를 가진 worker로 한정한다. 후보가 없더라도 일반 풀로 폴백하지 않는다. 이 경우의 재시도, 최종 실패, dead-letter 처리는 [실행 일관성](tasks/execution-consistency.md)의 `WorkerUnavailable` 경로를 따른다. `project_id`가 없는 Task는 기존 일반 풀 선택 규칙을 그대로 따른다.
 
 Project가 `Draining`이면 새 Task, 새 Agent, 새 자원 배정을 받지 않는다. `Archived` 전이와 보존·정리 순서는 [Lifecycle 계약](project-task-agent-lifecycle.md)을 따른다.
 

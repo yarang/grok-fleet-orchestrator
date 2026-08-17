@@ -41,7 +41,7 @@ flowchart LR
 ## 현재 동작과 설계 경계
 
 Worker 선택은 hint, label, model, 현재 부하를 조합한다. 재시도, OutcomeUnknown, 멱등성,
-부작용 차단은 [실행 의미론](task-execution-consistency.md)의 목표 계약이므로 현재 dispatcher
+부작용 차단은 [실행 의미론](tasks/execution-consistency.md)의 목표 계약이므로 현재 dispatcher
 동작으로 추정하지 않는다.
 
 `AcpTransport`는 연결 단절에서 대기 요청을 실패시키고 재연결한다. Worker daemon은 HTTP로

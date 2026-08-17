@@ -24,11 +24,11 @@ flowchart LR
 
 | 엔티티 | 현재 상태 | 정본 |
 |---|---|---|
-| Task | 현재 `fleet-core`와 Store에 존재하며 Worker dispatch 단위다 | [Task management](task-management-design.md) |
+| Task | 현재 `fleet-core`와 Store에 존재하며 Worker dispatch 단위다 | [Task management](tasks/management.md) |
 | Worker | 현재 등록·heartbeat·model/label/capacity 정보를 가진 실행 대상이다 | [Worker liveness](worker-liveness-policy.md) |
 | Host | 현재 등록 표면이 있으며 inventory 경계다 | [HTTP contract](../contracts/http-api.md) |
 | Project | 목표 정책·권한·배정 경계다 | [Project model](project-feature-design.md) |
-| TaskAttempt | 목표 멱등성·재시도·부작용 기록이다 | [Execution consistency](task-execution-consistency.md) |
+| TaskAttempt | 목표 멱등성·재시도·부작용 기록이다 | [Execution consistency](tasks/execution-consistency.md) |
 | Agent | 목표 장기 실행 인스턴스다 | [Agent domain](agents/README.md) |
 | Skill·Tool·Memory | 목표 harness 입력과 capability 경계다 | [Agent harness](agents/harness-composition.md) |
 

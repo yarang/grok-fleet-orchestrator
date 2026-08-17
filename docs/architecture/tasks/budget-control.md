@@ -3,7 +3,7 @@ type: architecture
 authority: canonical
 implementation: proposed
 verification: design-reviewed
-source: "docs/architecture/task-budget-control.md"
+source: "docs/architecture/tasks/budget-control.md"
 last_verified: "2026-08-17"
 owners: ["scheduler"]
 ---
@@ -13,8 +13,8 @@ owners: ["scheduler"]
 ## 범위
 
 이 문서는 Task 실행 중 usage 기반 예산 제한과 routing telemetry의 목표 계약을 정의한다.
-Worker 선택은 [Task routing 정책](task-routing-policy.md), terminal 결과·retry·부작용은
-[실행 의미론](task-execution-consistency.md)이 소유한다.
+Worker 선택은 [Task routing 정책](routing-policy.md), terminal 결과·retry·부작용은
+[실행 의미론](execution-consistency.md)이 소유한다.
 
 ## 현재 사실과 목표
 

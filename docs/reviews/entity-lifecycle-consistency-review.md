@@ -23,7 +23,7 @@ Task와 Agent에는 각각 상태 다이어그램이 있으나, **Project에는 
 | 엔티티 | 현 정본 | 평가 | 조치 |
 |---|---|---|---|
 | Project | `project-feature-design.md`의 생성·배정·삭제 흐름 | 상태/Drain/Delete 계약 없음 | 사용자 결정 후 lifecycle 정본 추가 필요 |
-| Task | `overview.md`의 현재 5상태 + `task-execution-consistency.md`의 목표 Attempt | 현재와 목표가 분리돼 있으나 연결 규칙 부족 | legacy Task와 target TaskAttempt 계층을 명시 |
+| Task | `overview.md`의 현재 5상태 + `tasks/execution-consistency.md`의 목표 Attempt | 현재와 목표가 분리돼 있으나 연결 규칙 부족 | legacy Task와 target TaskAttempt 계층을 명시 |
 | Agent | `agent-provisioning-design.md`의 상세 상태 머신 | heartbeat polling 의존성, project drain/delete 전이 누락 | control polling 제약 및 project lifecycle 연계 필요 |
 
 ## 발견한 정합성 공백
@@ -90,7 +90,7 @@ stateDiagram-v2
 
 - `project-feature-design.md`: Project 데이터 모델·배정·권한·API의 정본으로 유지
 - `agent-provisioning-design.md`: Agent process/control 상태 머신의 정본으로 유지
-- `task-execution-consistency.md`: TaskAttempt 실행 의미론의 정본으로 유지
+- `tasks/execution-consistency.md`: TaskAttempt 실행 의미론의 정본으로 유지
 - 새 lifecycle 정본(결정 후): 세 엔티티의 cross-entity 전이, drain/delete 순서,
   snapshot 보존만 소유. 개별 상태 머신을 복제하지 않는다.
 
