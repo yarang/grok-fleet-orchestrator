@@ -30,7 +30,7 @@ use fleet_core::{
 };
 
 use crate::error::StoreError;
-use crate::{Store, StoredCredential};
+use crate::{Store, StoredCredential, WorkerOperationalCredential};
 
 /// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
 ///
@@ -637,12 +637,12 @@ impl Store for PgStore {
         sqlx::query(
             r#"
             INSERT INTO bootstrap_tokens
-                (token, created_at, created_by, expires_at, max_uses, use_count, notes,
+                (token_digest, created_at, created_by, expires_at, max_uses, use_count, notes,
                  last_used_by, last_used_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
-        .bind(&token.token)
+        .bind(&token.token_digest)
         .bind(token.created_at)
         .bind(&token.created_by)
         .bind(token.expires_at)
@@ -672,13 +672,13 @@ impl Store for PgStore {
                SET use_count = use_count + 1,
                    last_used_by = $2,
                    last_used_at = $3
-             WHERE token = $1
+             WHERE token_digest = $1
                AND use_count < max_uses
                AND (expires_at IS NULL OR expires_at > $3)
-            RETURNING token
+            RETURNING token_digest
             "#,
         )
-        .bind(token)
+        .bind(BootstrapToken::digest_for(token))
         .bind(used_by)
         .bind(now)
         .fetch_optional(&self.pool)
@@ -689,24 +689,22 @@ impl Store for PgStore {
         } else {
             // 토큰이 존재하는지 확인하여 적절한 에러 메시지 구성.
             let exists: Option<(String,)> =
-                sqlx::query_as("SELECT token FROM bootstrap_tokens WHERE token = $1")
-                    .bind(token)
+                sqlx::query_as("SELECT token_digest FROM bootstrap_tokens WHERE token_digest = $1")
+                    .bind(BootstrapToken::digest_for(token))
                     .fetch_optional(&self.pool)
                     .await?;
             let reason = match exists {
                 Some(_) => "token is exhausted or expired",
                 None => "token not found",
             };
-            Err(StoreError::BootstrapTokenInvalid(format!(
-                "{reason}: {token}"
-            )))
+            Err(StoreError::BootstrapTokenInvalid(reason.into()))
         }
     }
 
     async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
         let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
             r#"
-            SELECT token, created_at, created_by, expires_at, max_uses, use_count,
+            SELECT token_digest, created_at, created_by, expires_at, max_uses, use_count,
                    notes, last_used_by, last_used_at
               FROM bootstrap_tokens
              ORDER BY created_at DESC
@@ -718,12 +716,160 @@ impl Store for PgStore {
         rows.into_iter().map(row_to_bootstrap_token).collect()
     }
 
-    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
-        let result = sqlx::query("DELETE FROM bootstrap_tokens WHERE token = $1")
-            .bind(token)
+    async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query("DELETE FROM bootstrap_tokens WHERE token_digest = $1")
+            .bind(token_digest)
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn upsert_worker_operational_credential(
+        &self,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO worker_operational_credentials (worker_id, credential_digest, issued_at, expires_at, revoked_at, rotation_generation) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (worker_id) DO UPDATE SET credential_digest = EXCLUDED.credential_digest, issued_at = EXCLUDED.issued_at, expires_at = EXCLUDED.expires_at, revoked_at = EXCLUDED.revoked_at, rotation_generation = EXCLUDED.rotation_generation",
+        )
+        .bind(credential.worker_id.0)
+        .bind(&credential.credential_digest)
+        .bind(credential.issued_at)
+        .bind(credential.expires_at)
+        .bind(credential.revoked_at)
+        .bind(credential.rotation_generation)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn find_active_worker_operational_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<WorkerOperationalCredential>, StoreError> {
+        let row = sqlx::query("SELECT worker_id, credential_digest, issued_at, expires_at, revoked_at, rotation_generation FROM worker_operational_credentials WHERE credential_digest = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())")
+            .bind(credential_digest)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| Ok(WorkerOperationalCredential {
+            worker_id: WorkerId(row.try_get("worker_id")?),
+            credential_digest: row.try_get("credential_digest")?,
+            issued_at: row.try_get("issued_at")?,
+            expires_at: row.try_get("expires_at")?,
+            revoked_at: row.try_get("revoked_at")?,
+            rotation_generation: row.try_get("rotation_generation")?,
+        })).transpose()
+    }
+
+    /// bootstrap 토큰 소비 + worker insert + operational credential insert를 단일
+    /// DB 트랜잭션으로 묶는다 (로드맵 #60). 세 단계 중 하나라도 실패하면
+    /// `tx`가 드롭되며 자동 롤백되어 토큰도 소비되지 않고 worker도 남지 않는다.
+    ///
+    /// 각 단계의 SQL은 `consume_bootstrap_token`/`upsert_worker`/
+    /// `upsert_worker_operational_credential`과 동일한 조건이지만, 트랜잭션
+    /// executor(`&mut *tx`)를 대상으로 재실행한다 — 원본 메서드들은
+    /// `&self.pool`을 직접 사용하므로 그대로 재사용할 수 없다.
+    async fn enroll_worker(
+        &self,
+        bootstrap_token: &str,
+        used_by: &str,
+        worker: &Worker,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now();
+
+        // 1. bootstrap 토큰 atomic 소비 (consume_bootstrap_token과 동일한 SQL).
+        let digest = fleet_core::BootstrapToken::digest_for(bootstrap_token);
+        let consumed = sqlx::query(
+            r#"
+            UPDATE bootstrap_tokens
+               SET use_count = use_count + 1,
+                   last_used_by = $2,
+                   last_used_at = $3
+             WHERE token_digest = $1
+               AND use_count < max_uses
+               AND (expires_at IS NULL OR expires_at > $3)
+            RETURNING token_digest
+            "#,
+        )
+        .bind(&digest)
+        .bind(used_by)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if consumed.is_none() {
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT token_digest FROM bootstrap_tokens WHERE token_digest = $1")
+                    .bind(&digest)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            // tx는 여기서 drop되어 자동 롤백 — 토큰/worker/credential 모두 미반영.
+            let reason = match exists {
+                Some(_) => "token is exhausted or expired",
+                None => "token not found",
+            };
+            return Err(StoreError::BootstrapTokenInvalid(reason.into()));
+        }
+
+        // 2. worker insert. `workers.name` UNIQUE 제약 위반은 Conflict로 매핑.
+        //    join은 항상 신규 worker_id를 발급하므로 upsert가 아닌 순수 INSERT로
+        //    이름 충돌을 확실히 거부한다 (TOCTOU 방지 — 사전 get_worker_by_name
+        //    검사와 이 INSERT 사이의 race도 여기서 최종적으로 막힌다).
+        let labels_json = serde_json::to_value(&worker.labels)?;
+        let status_str = worker_status_to_str(worker.status);
+        let circuit_str = circuit_state_to_str(worker.circuit_state);
+        sqlx::query(
+            r#"
+            INSERT INTO workers
+                (id, name, endpoint, labels, status, circuit_state,
+                 last_seen, active_tasks, max_concurrent, worker_version, registered_at)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(worker.id.as_uuid())
+        .bind(&worker.name)
+        .bind(&worker.endpoint)
+        .bind(labels_json)
+        .bind(status_str)
+        .bind(circuit_str)
+        .bind(worker.last_seen)
+        .bind(worker.active_tasks as i32)
+        .bind(worker.max_concurrent as i32)
+        .bind(worker.worker_version.as_ref())
+        .bind(worker.registered_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!("worker name already exists: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+
+        // 3. operational credential insert. `credential_digest` UNIQUE 제약
+        //    위반(다른 worker_id가 이미 같은 digest를 쓰고 있음)은 Conflict로 매핑.
+        sqlx::query(
+            "INSERT INTO worker_operational_credentials (worker_id, credential_digest, issued_at, expires_at, revoked_at, rotation_generation) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(credential.worker_id.0)
+        .bind(&credential.credential_digest)
+        .bind(credential.issued_at)
+        .bind(credential.expires_at)
+        .bind(credential.revoked_at)
+        .bind(credential.rotation_generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!("credential digest already exists: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     // ── Worker credentials (Phase 8.6) ─────────────────────────────────
@@ -1874,7 +2020,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
 }
 
 fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, StoreError> {
-    let token: String = row.try_get("token")?;
+    let token_digest: String = row.try_get("token_digest")?;
     let created_at = row.try_get("created_at")?;
     let created_by: Option<String> = row.try_get("created_by")?;
     let expires_at = row.try_get("expires_at")?;
@@ -1885,7 +2031,7 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
     let last_used_at = row.try_get("last_used_at")?;
 
     Ok(BootstrapToken {
-        token,
+        token_digest,
         created_at,
         created_by,
         expires_at,

@@ -19,6 +19,10 @@ pub enum ApiError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// 인증은 됐지만 대상 리소스에 대한 권한이 없음 (예: 다른 worker의 신원 조작 시도).
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// 리소스를 찾을 수 없음 (예: 없는 worker_id).
     #[error("not found: {0}")]
     NotFound(String),
@@ -43,6 +47,7 @@ impl ApiError {
         match self {
             BadRequest(_) => StatusCode::BAD_REQUEST,
             Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Forbidden(_) => StatusCode::FORBIDDEN,
             NotFound(_) => StatusCode::NOT_FOUND,
             Conflict(_) => StatusCode::CONFLICT,
             Store(_) | Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -55,6 +60,7 @@ impl ApiError {
         match self {
             BadRequest(_) => "bad_request",
             Unauthorized(_) => "unauthorized",
+            Forbidden(_) => "forbidden",
             NotFound(_) => "not_found",
             Conflict(_) => "conflict",
             Store(_) => "store_error",

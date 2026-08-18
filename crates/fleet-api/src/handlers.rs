@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use chrono::Utc;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 
-use crate::app::AppState;
+use crate::app::{AppState, AuthorizationContext};
 use crate::error::ApiError;
 use crate::schema::{
     BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
@@ -71,6 +71,7 @@ fn continue_trace_from_headers(headers: &HeaderMap) {
 #[tracing::instrument(skip(state, req, headers), fields(worker_name = %req.name))]
 pub async fn register_worker(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, ApiError> {
@@ -118,6 +119,10 @@ pub async fn register_worker(
         .map(|w| w.id)
         .unwrap_or_else(WorkerId::new);
 
+    // Worker self-binding (로드맵 #60): operational credential로 인증된 요청은
+    // 자기 자신의 worker_id만 (재)등록할 수 있다.
+    enforce_worker_self_binding(ctx.as_deref(), worker_id)?;
+
     let worker = build_worker(
         worker_id,
         name,
@@ -160,6 +165,7 @@ pub async fn register_worker(
 #[tracing::instrument(skip(state, req, headers), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
 pub async fn heartbeat(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Json<HeartbeatResponse>, ApiError> {
@@ -170,6 +176,10 @@ pub async fn heartbeat(
         .map_err(|e| ApiError::BadRequest(format!("invalid worker_id: {e}")))?;
 
     let worker_id = WorkerId(worker_id);
+
+    // Worker self-binding (로드맵 #60): operational credential로 인증된 요청은
+    // 자기 자신의 heartbeat만 보낼 수 있다.
+    enforce_worker_self_binding(ctx.as_deref(), worker_id)?;
 
     // 존재 확인
     let worker = state
@@ -421,12 +431,17 @@ pub async fn get_worker(
 /// `DELETE /v1/workers/:id`.
 pub async fn deregister_worker(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Path(id_str): Path<String>,
     body: Option<Json<DeregisterRequest>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let uuid = Uuid::parse_str(&id_str)
         .map_err(|e| ApiError::BadRequest(format!("invalid worker_id: {e}")))?;
     let worker_id = WorkerId(uuid);
+
+    // Worker self-binding (로드맵 #60): operational credential로 인증된 요청은
+    // 자기 자신만 등록 해제할 수 있다.
+    enforce_worker_self_binding(ctx.as_deref(), worker_id)?;
 
     let reason = body
         .and_then(|Json(b)| b.reason)
@@ -494,26 +509,17 @@ pub async fn join_worker(
         ));
     }
 
-    // 1. 부트스트랩 토큰 atomic 소비.
-    if let Err(e) = state.store.consume_bootstrap_token(&req.token, name).await {
-        match e {
-            fleet_store::StoreError::BootstrapTokenInvalid(msg) => {
-                return Err(ApiError::Unauthorized(format!(
-                    "bootstrap token rejected: {msg}"
-                )));
-            }
-            other => return Err(other.into()),
-        }
-    }
-
-    // 2. 동일 name이 이미 존재하면 거부 — join은 항상 신규.
+    // 1. 동일 name이 이미 존재하면 조기 거부 — 사용자에게 더 명확한 메시지를
+    //    주기 위한 best-effort 사전 검사. 이 검사와 아래 `enroll_worker` 사이의
+    //    TOCTOU race는 `enroll_worker`의 원자적 이름/digest 검사가 최종적으로
+    //    막는다 (그 경우 일반 Conflict 메시지로 반환됨).
     if let Some(_existing) = state.store.get_worker_by_name(name).await? {
         return Err(ApiError::Conflict(format!(
             "worker name '{name}' already exists — use POST /v1/workers/register to re-register"
         )));
     }
 
-    // 3. Worker 엔티티 생성 + 등록.
+    // 2. Worker 엔티티 + operational credential 준비 (아직 저장하지 않음).
     let worker_id = WorkerId::new();
     let worker = build_worker(
         worker_id,
@@ -524,7 +530,59 @@ pub async fn join_worker(
         req.worker_version.clone(),
         None,
     );
-    let worker_id = upsert_and_register(&state, &worker).await?;
+
+    // Bootstrap token은 join 승인에만 쓰며, 이후 Worker는 별도 operational credential을
+    // 사용한다. 저장소에는 원문 대신 digest만 보관한다.
+    let operational_token = format!(
+        "fwo_{}",
+        base64url(
+            &generate_random_bytes(32)
+                .map_err(|error| ApiError::Internal(format!("CSPRNG failure: {error}")))?,
+        ),
+    );
+    let credential = fleet_store::WorkerOperationalCredential {
+        worker_id,
+        credential_digest: fleet_core::BootstrapToken::digest_for(&operational_token),
+        issued_at: Utc::now(),
+        expires_at: None,
+        revoked_at: None,
+        rotation_generation: 1,
+    };
+
+    // 3. bootstrap 토큰 소비 + worker 생성 + credential 저장을 하나의 단위로 실행
+    //    (로드맵 #60). 셋 중 하나라도 실패하면 아무 것도 반영되지 않는다 —
+    //    토큰은 소비되지 않고 worker도 생성되지 않는다.
+    if let Err(e) = state
+        .store
+        .enroll_worker(&req.token, name, &worker, &credential)
+        .await
+    {
+        match e {
+            fleet_store::StoreError::BootstrapTokenInvalid(msg) => {
+                return Err(ApiError::Unauthorized(format!(
+                    "bootstrap token rejected: {msg}"
+                )));
+            }
+            other => return Err(other.into()),
+        }
+    }
+
+    // Transport 등록은 best-effort — 실패해도 이미 커밋된 Store enrollment는
+    // 되돌리지 않는다 (register_worker와 동일한 정책, upsert_and_register 참고).
+    if let Some(transport) = &state.transport {
+        if let Err(e) = transport
+            .register(worker.id, &worker.endpoint, worker.max_concurrent)
+            .await
+        {
+            tracing::warn!(
+                worker_id = %worker.id,
+                endpoint = %worker.endpoint,
+                max_concurrent = worker.max_concurrent,
+                error = %e,
+                "transport.register failed — worker is in Store but cannot accept tasks until healthy"
+            );
+        }
+    }
 
     info!(%worker_id, name = %worker.name, "worker joined via bootstrap token");
     let _ = state
@@ -541,7 +599,7 @@ pub async fn join_worker(
         name,
         &req.agent_endpoint,
         &req.labels,
-        &req.token,
+        &operational_token,
         worker_id,
         state.heartbeat_interval_secs,
         req.max_concurrent_tasks,
@@ -595,7 +653,7 @@ pub async fn create_bootstrap_token(
         .map(|s| now + chrono::Duration::seconds(s as i64));
 
     let bt = fleet_core::BootstrapToken {
-        token: token.clone(),
+        token_digest: fleet_core::BootstrapToken::digest_for(&token),
         created_at: now,
         created_by: req.created_by.clone(),
         expires_at,
@@ -635,15 +693,9 @@ pub async fn revoke_bootstrap_token(
     State(state): State<Arc<AppState>>,
     Path(token_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let token = state
-        .store
-        .list_bootstrap_tokens()
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.public_id() == token_id)
-        .map(|candidate| candidate.token)
+    let token_digest = fleet_core::BootstrapToken::digest_from_public_id(&token_id)
         .ok_or_else(|| ApiError::NotFound("bootstrap token not found".into()))?;
-    let revoked = state.store.revoke_bootstrap_token(&token).await?;
+    let revoked = state.store.revoke_bootstrap_token(&token_digest).await?;
     if !revoked {
         return Err(ApiError::NotFound("bootstrap token not found".into()));
     }
@@ -662,7 +714,7 @@ fn render_worker_config_toml(
     name: &str,
     agent_endpoint: &str,
     labels: &HashMap<String, String>,
-    bootstrap_token: &str,
+    operational_token: &str,
     worker_id: WorkerId,
     heartbeat_interval_secs: u32,
     max_concurrent_tasks: u32,
@@ -698,7 +750,7 @@ fn render_worker_config_toml(
     out.push_str(&format!(
         "heartbeat_interval_secs = {heartbeat_interval_secs}\n"
     ));
-    out.push_str(&format!("bootstrap_token = \"{bootstrap_token}\"\n"));
+    out.push_str(&format!("operational_token = \"{operational_token}\"\n"));
     out.push_str(&format!("existing_worker_id = \"{worker_id}\"\n"));
     if !labels.is_empty() {
         let mut sorted: Vec<_> = labels.iter().collect();
@@ -773,6 +825,26 @@ fn base64url(input: &[u8]) -> String {
 }
 
 // ── 기존 헬퍼 ────────────────────────────────────────────────────────────
+
+/// Worker self-binding 검사 (로드맵 #60).
+///
+/// `ctx.worker_id`가 `Some`인 경우(요청자가 worker operational credential로
+/// 인증됨) — 조작하려는 대상이 자기 자신이 아니면 403을 반환한다.
+/// `ctx`가 없거나(`None`) `ctx.worker_id`가 `None`(admin bearer, development
+/// no-auth, CF Access)이면 기존처럼 제한 없이 통과시킨다.
+fn enforce_worker_self_binding(
+    ctx: Option<&AuthorizationContext>,
+    target: WorkerId,
+) -> Result<(), ApiError> {
+    if let Some(ctx_worker_id) = ctx.and_then(|c| c.worker_id) {
+        if ctx_worker_id != target {
+            return Err(ApiError::Forbidden(format!(
+                "worker {ctx_worker_id} is not authorized to act on worker {target}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// DNS-safe 워커 이름 검증.
 fn validate_worker_name(name: &str) -> Result<(), ApiError> {

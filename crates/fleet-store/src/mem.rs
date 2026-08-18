@@ -34,7 +34,7 @@ use fleet_core::{
     UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
-use crate::{Store, StoreError, StoredCredential};
+use crate::{Store, StoreError, StoredCredential, WorkerOperationalCredential};
 
 /// 모든 메서드가 실제로 동작하는 인메모리 [`Store`] — 테스트 전용 단일 구현.
 #[derive(Default)]
@@ -44,6 +44,7 @@ pub struct MemStore {
     events: Mutex<Vec<EventEntry>>,
     outputs: Mutex<HashMap<TaskId, Vec<String>>>,
     bootstrap_tokens: Mutex<HashMap<String, BootstrapToken>>,
+    worker_operational_credentials: Mutex<HashMap<String, WorkerOperationalCredential>>,
     credentials: Mutex<HashMap<(String, String), StoredCredential>>,
     users: Mutex<HashMap<UserId, User>>,
     roles: Mutex<HashMap<RoleId, Role>>,
@@ -343,30 +344,29 @@ impl Store for MemStore {
 
     async fn create_bootstrap_token(&self, token: &BootstrapToken) -> Result<(), StoreError> {
         let mut tokens = self.bootstrap_tokens.lock().unwrap();
-        if tokens.contains_key(&token.token) {
+        if tokens.contains_key(&token.token_digest) {
             return Err(StoreError::Conflict(format!(
                 "bootstrap token already exists: {}",
-                token.token
+                token.public_id()
             )));
         }
-        tokens.insert(token.token.clone(), token.clone());
+        tokens.insert(token.token_digest.clone(), token.clone());
         Ok(())
     }
 
     async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError> {
         let mut tokens = self.bootstrap_tokens.lock().unwrap();
+        let digest = BootstrapToken::digest_for(token);
         let entry = tokens
-            .get_mut(token)
-            .ok_or_else(|| StoreError::BootstrapTokenInvalid(format!("token not found: {token}")))?;
+            .get_mut(&digest)
+            .ok_or_else(|| StoreError::BootstrapTokenInvalid("token not found".into()))?;
         if !entry.is_usable() {
             let reason = if entry.use_count >= entry.max_uses {
                 "exhausted"
             } else {
                 "expired"
             };
-            return Err(StoreError::BootstrapTokenInvalid(format!(
-                "token {reason}: {token}"
-            )));
+            return Err(StoreError::BootstrapTokenInvalid(format!("token {reason}")));
         }
         entry.use_count += 1;
         entry.last_used_by = Some(used_by.to_string());
@@ -386,8 +386,96 @@ impl Store for MemStore {
         Ok(all)
     }
 
-    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
-        Ok(self.bootstrap_tokens.lock().unwrap().remove(token).is_some())
+    async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
+        Ok(self.bootstrap_tokens.lock().unwrap().remove(token_digest).is_some())
+    }
+
+    async fn upsert_worker_operational_credential(
+        &self,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        self.worker_operational_credentials
+            .lock()
+            .unwrap()
+            .insert(credential.credential_digest.clone(), credential.clone());
+        Ok(())
+    }
+
+    async fn find_active_worker_operational_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<WorkerOperationalCredential>, StoreError> {
+        Ok(self
+            .worker_operational_credentials
+            .lock()
+            .unwrap()
+            .get(credential_digest)
+            .filter(|credential| {
+                credential.revoked_at.is_none()
+                    && credential.expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+            })
+            .cloned())
+    }
+
+    /// bootstrap 토큰 소비 + worker 생성 + operational credential 저장을 하나의
+    /// 임계 구역으로 묶는다. `bootstrap_tokens`/`workers`/`worker_operational_credentials`
+    /// 세 `Mutex`를 모두 이 스코프 동안 보유해, 검사와 반영 사이에 다른 호출
+    /// (`get_worker_by_name` 등)이 중간 상태를 관찰하지 못하게 한다 — 실패 시
+    /// 어떤 락도 mutate되지 않은 채로 반환되므로 all-or-nothing이 성립한다.
+    async fn enroll_worker(
+        &self,
+        bootstrap_token: &str,
+        used_by: &str,
+        worker: &Worker,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        let mut tokens = self.bootstrap_tokens.lock().unwrap();
+        let mut workers = self.workers.lock().unwrap();
+        let mut credentials = self.worker_operational_credentials.lock().unwrap();
+
+        // 1. bootstrap 토큰 검증 (아직 반영하지 않음 — 뒤 단계가 실패하면 그대로 둔다).
+        let digest = BootstrapToken::digest_for(bootstrap_token);
+        let entry = tokens
+            .get(&digest)
+            .ok_or_else(|| StoreError::BootstrapTokenInvalid("token not found".into()))?;
+        if !entry.is_usable() {
+            let reason = if entry.use_count >= entry.max_uses {
+                "exhausted"
+            } else {
+                "expired"
+            };
+            return Err(StoreError::BootstrapTokenInvalid(format!("token {reason}")));
+        }
+
+        // 2. worker 이름 충돌 검사 (upsert_worker는 id 기준이라 이 검사가 없으면
+        //    동일 이름의 워커가 여러 id로 중복 생성될 수 있다).
+        if workers.values().any(|w| w.name == worker.name) {
+            return Err(StoreError::Conflict(format!(
+                "worker name already exists: {}",
+                worker.name
+            )));
+        }
+
+        // 3. credential digest 충돌 검사 (postgres의 UNIQUE(credential_digest)와 동등).
+        if credentials
+            .values()
+            .any(|c| c.credential_digest == credential.credential_digest)
+        {
+            return Err(StoreError::Conflict(
+                "credential digest already exists".into(),
+            ));
+        }
+
+        // 모든 검사를 통과했을 때만 세 상태를 함께 반영한다.
+        let token_entry = tokens.get_mut(&digest).expect("checked usable above");
+        token_entry.use_count += 1;
+        token_entry.last_used_by = Some(used_by.to_string());
+        token_entry.last_used_at = Some(Utc::now());
+
+        workers.insert(worker.id, worker.clone());
+        credentials.insert(credential.credential_digest.clone(), credential.clone());
+
+        Ok(())
     }
 
     // ── RBAC: Users ────────────────────────────────────────────────────
@@ -963,5 +1051,165 @@ impl Store for MemStore {
 
     async fn delete_ssh_key(&self, name: &str) -> Result<bool, StoreError> {
         Ok(self.ssh_keys.lock().unwrap().remove(name).is_some())
+    }
+}
+
+#[cfg(test)]
+mod enroll_worker_tests {
+    use super::*;
+
+    fn token(raw: &str, max_uses: u32) -> BootstrapToken {
+        BootstrapToken {
+            token_digest: BootstrapToken::digest_for(raw),
+            created_at: Utc::now(),
+            created_by: None,
+            expires_at: None,
+            max_uses,
+            use_count: 0,
+            notes: None,
+            last_used_by: None,
+            last_used_at: None,
+        }
+    }
+
+    fn worker(name: &str) -> Worker {
+        Worker::new(name, format!("wss://{name}.local/ws"))
+    }
+
+    /// 로드맵 #60 완료 게이트 — 중간 실패 rollback test.
+    ///
+    /// credential digest 충돌로 3단계 중 마지막(credential insert) 단계가
+    /// 실패하면, bootstrap token도 소비되지 않고 worker도 생성되지 않아야 한다.
+    #[tokio::test]
+    async fn enroll_worker_rolls_back_on_credential_digest_conflict() {
+        let store = MemStore::new();
+
+        // 기존 워커 + credential을 미리 심어 digest 충돌을 유도.
+        let existing_worker = worker("existing-worker");
+        store.upsert_worker(&existing_worker).await.unwrap();
+        store
+            .upsert_worker_operational_credential(&WorkerOperationalCredential {
+                worker_id: existing_worker.id,
+                credential_digest: "dup-digest".to_string(),
+                issued_at: Utc::now(),
+                expires_at: None,
+                revoked_at: None,
+                rotation_generation: 1,
+            })
+            .await
+            .unwrap();
+
+        store.create_bootstrap_token(&token("join-token", 1)).await.unwrap();
+
+        let new_worker = worker("new-worker");
+        let new_credential = WorkerOperationalCredential {
+            worker_id: new_worker.id,
+            credential_digest: "dup-digest".to_string(), // 기존 credential과 충돌
+            issued_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            rotation_generation: 1,
+        };
+
+        let result = store
+            .enroll_worker("join-token", "new-worker", &new_worker, &new_credential)
+            .await;
+
+        assert!(
+            matches!(result, Err(StoreError::Conflict(_))),
+            "expected Conflict on digest collision, got {result:?}"
+        );
+
+        // (a) 호출은 에러를 반환했고 — 위에서 확인.
+        // (b) bootstrap token은 여전히 미소비 상태.
+        let tokens = store.list_bootstrap_tokens().await.unwrap();
+        let stored = tokens
+            .iter()
+            .find(|t| t.token_digest == BootstrapToken::digest_for("join-token"))
+            .expect("token still exists");
+        assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+        assert!(stored.last_used_by.is_none());
+
+        // (c) worker는 생성되지 않음.
+        assert!(store.get_worker_by_name("new-worker").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn enroll_worker_rolls_back_on_name_conflict() {
+        let store = MemStore::new();
+
+        let existing_worker = worker("taken-name");
+        store.upsert_worker(&existing_worker).await.unwrap();
+        store.create_bootstrap_token(&token("join-token-2", 1)).await.unwrap();
+
+        // 동일 이름이지만 다른 id를 가진 worker로 enroll을 시도.
+        let mut colliding_worker = worker("taken-name");
+        colliding_worker.id = WorkerId::new();
+        let credential = WorkerOperationalCredential {
+            worker_id: colliding_worker.id,
+            credential_digest: "unique-digest".to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            rotation_generation: 1,
+        };
+
+        let result = store
+            .enroll_worker("join-token-2", "taken-name", &colliding_worker, &credential)
+            .await;
+        assert!(
+            matches!(result, Err(StoreError::Conflict(_))),
+            "expected Conflict on name collision, got {result:?}"
+        );
+
+        let tokens = store.list_bootstrap_tokens().await.unwrap();
+        let stored = tokens
+            .iter()
+            .find(|t| t.token_digest == BootstrapToken::digest_for("join-token-2"))
+            .unwrap();
+        assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+
+        // credential도 저장되지 않아야 한다.
+        assert!(store
+            .find_active_worker_operational_credential("unique-digest")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn enroll_worker_commits_all_three_on_success() {
+        let store = MemStore::new();
+        store.create_bootstrap_token(&token("join-token-3", 1)).await.unwrap();
+
+        let new_worker = worker("success-worker");
+        let credential = WorkerOperationalCredential {
+            worker_id: new_worker.id,
+            credential_digest: "success-digest".to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            revoked_at: None,
+            rotation_generation: 1,
+        };
+
+        store
+            .enroll_worker("join-token-3", "success-worker", &new_worker, &credential)
+            .await
+            .expect("enroll should succeed");
+
+        let tokens = store.list_bootstrap_tokens().await.unwrap();
+        let stored = tokens
+            .iter()
+            .find(|t| t.token_digest == BootstrapToken::digest_for("join-token-3"))
+            .unwrap();
+        assert_eq!(stored.use_count, 1);
+        assert_eq!(stored.last_used_by.as_deref(), Some("success-worker"));
+
+        assert!(store.get_worker_by_name("success-worker").await.unwrap().is_some());
+        assert!(store
+            .find_active_worker_operational_credential("success-digest")
+            .await
+            .unwrap()
+            .is_some());
     }
 }

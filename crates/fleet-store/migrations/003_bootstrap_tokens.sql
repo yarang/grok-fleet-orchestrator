@@ -5,7 +5,7 @@
 -- use_count를 증가시켜 race condition을 방지.
 --
 -- 설계:
---   * token TEXT PK — 호출자가 생성한 난수 (base64url, prefix 포함 가능)
+--   * token TEXT PK — 이후 migration에서 원문 SHA-256 digest로 전환됨
 --   * max_uses / use_count — 다회용 토큰 지원 (기본 1)
 --   * expires_at — 선택적 만료 (NULL = 무기한)
 --   * last_used_by / last_used_at — 감사 추적용

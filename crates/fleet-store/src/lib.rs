@@ -41,6 +41,17 @@ use fleet_core::{
 };
 use uuid::Uuid;
 
+/// Worker operational credential의 저장 형태. 원문 credential은 이 타입에 포함하지 않는다.
+#[derive(Debug, Clone)]
+pub struct WorkerOperationalCredential {
+    pub worker_id: WorkerId,
+    pub credential_digest: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub rotation_generation: i64,
+}
+
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
 ///
 /// 구현체:
@@ -163,6 +174,46 @@ pub trait Store: Send + Sync {
 
     /// 부트스트랩 토큰 삭제 (revocation). 존재하지 않으면 false 반환.
     async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError>;
+
+    // ── Worker operational credentials ─────────────────────────────
+
+    async fn upsert_worker_operational_credential(
+        &self,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        let _ = credential;
+        Err(StoreError::Unsupported("worker operational credentials"))
+    }
+
+    async fn find_active_worker_operational_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<WorkerOperationalCredential>, StoreError> {
+        let _ = credential_digest;
+        Err(StoreError::Unsupported("worker operational credentials"))
+    }
+
+    /// bootstrap 토큰 소비, Worker 생성, operational credential 저장을 하나의 단위로
+    /// 실행한다 (로드맵 #60, worker 등록 원자성).
+    ///
+    /// 셋 중 하나라도 실패하면 아무 것도 반영되지 않는다 — 토큰은 소비되지 않고
+    /// Worker도 생성되지 않는다. `join_worker` 핸들러가 사용하는 authoritative
+    /// entry point이며, 이름/digest 충돌은 `StoreError::Conflict`로 반환된다.
+    ///
+    /// 기본 구현은 순차 호출 fallback — 진짜 atomic을 지원하지 않는 Store(테스트
+    /// mock 등)용이며, [`crate::postgres::PgStore`]/[`crate::mem::MemStore`]는
+    /// 각자의 저장 구조에 맞춰 진짜 원자적으로 재정의한다.
+    async fn enroll_worker(
+        &self,
+        bootstrap_token: &str,
+        used_by: &str,
+        worker: &fleet_core::Worker,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        self.consume_bootstrap_token(bootstrap_token, used_by).await?;
+        self.upsert_worker(worker).await?;
+        self.upsert_worker_operational_credential(credential).await
+    }
 
     // ── RBAC: Users (Phase 9.1) ───────────────────────────────────
     //
