@@ -39,9 +39,15 @@ enum Command {
         #[arg(long, env = "FLEET_ORCHESTRATOR_URL")]
         orchestrator_url: String,
 
-        /// 어드민이 발급한 부트스트랩 토큰.
+        /// 어드민이 발급한 부트스트랩 토큰. argv/환경변수는 `ps`/`/proc`에 노출될 수
+        /// 있으므로 deprecated — `--token-file`을 권장한다(당장 제거하지는 않음).
         #[arg(long, env = "FLEET_BOOTSTRAP_TOKEN")]
-        token: String,
+        token: Option<String>,
+
+        /// 부트스트랩 토큰이 담긴 파일 경로. `-`를 주면 stdin에서 읽는다.
+        /// `--token`과 동시에 지정할 수 없다.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
 
         /// 워커 이름 (DNS-safe).
         #[arg(long, env = "FLEET_WORKER_NAME")]
@@ -84,6 +90,7 @@ async fn main() -> ExitCode {
         Some(Command::Join {
             orchestrator_url,
             token,
+            token_file,
             name,
             labels,
             agent_endpoint,
@@ -93,9 +100,14 @@ async fn main() -> ExitCode {
             start,
         }) => async {
             let label_map = parse_labels(&labels)?;
+            let resolved_token = fleet_worker::join::resolve_bootstrap_token(
+                token.as_deref(),
+                token_file.as_deref(),
+                &mut std::io::stdin(),
+            )?;
             let args = JoinArgs {
                 orchestrator_url,
-                token,
+                token: resolved_token,
                 name,
                 labels: label_map,
                 agent_endpoint,

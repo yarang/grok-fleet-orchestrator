@@ -280,6 +280,30 @@ impl From<BootstrapToken> for BootstrapTokenSummary {
     }
 }
 
+// ── Worker operational credential rotate/revoke (로드맵 #60 6단계) ─────
+
+/// `POST /v1/workers/:id/credential/rotate` 요청 바디 (전부 옵션).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RotateWorkerCredentialRequest {
+    /// 새 credential의 만료까지 초. 생략하면 무기한.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+}
+
+/// `POST /v1/workers/:id/credential/rotate` 응답.
+///
+/// `operational_token`은 이 응답에서만 원문으로 반환된다 — 저장소에는 digest만
+/// 남으므로 클라이언트는 이 값을 즉시 worker.toml에 반영해야 한다. 이전 토큰은
+/// 이 호출 즉시 무효화되며 자동 fallback을 허용하지 않는다.
+#[derive(Debug, Clone, Serialize)]
+pub struct RotateWorkerCredentialResponse {
+    pub worker_id: String,
+    pub operational_token: String,
+    pub rotation_generation: i64,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Phase 8.6: Worker credentials
 // ═══════════════════════════════════════════════════════════════════════

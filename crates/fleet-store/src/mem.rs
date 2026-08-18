@@ -417,6 +417,45 @@ impl Store for MemStore {
             .cloned())
     }
 
+    async fn revoke_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        let mut credentials = self.worker_operational_credentials.lock().unwrap();
+        let entry = credentials
+            .values_mut()
+            .find(|c| c.worker_id == worker_id && c.revoked_at.is_none());
+        match entry {
+            Some(credential) => {
+                credential.revoked_at = Some(Utc::now());
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn rotate_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+        new_credential_digest: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<WorkerOperationalCredential, StoreError> {
+        let mut credentials = self.worker_operational_credentials.lock().unwrap();
+        let old_digest = credentials
+            .values()
+            .find(|c| c.worker_id == worker_id)
+            .map(|c| c.credential_digest.clone())
+            .ok_or(StoreError::NotFound)?;
+        let mut credential = credentials.remove(&old_digest).expect("checked above");
+        credential.credential_digest = new_credential_digest.to_string();
+        credential.issued_at = Utc::now();
+        credential.expires_at = expires_at;
+        credential.revoked_at = None;
+        credential.rotation_generation += 1;
+        credentials.insert(new_credential_digest.to_string(), credential.clone());
+        Ok(credential)
+    }
+
     /// bootstrap 토큰 소비 + worker 생성 + operational credential 저장을 하나의
     /// 임계 구역으로 묶는다. `bootstrap_tokens`/`workers`/`worker_operational_credentials`
     /// 세 `Mutex`를 모두 이 스코프 동안 보유해, 검사와 반영 사이에 다른 호출

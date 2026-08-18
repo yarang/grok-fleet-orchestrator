@@ -760,6 +760,53 @@ impl Store for PgStore {
         })).transpose()
     }
 
+    async fn revoke_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE worker_operational_credentials SET revoked_at = NOW() WHERE worker_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(worker_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn rotate_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+        new_credential_digest: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<WorkerOperationalCredential, StoreError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE worker_operational_credentials
+               SET credential_digest = $2,
+                   issued_at = NOW(),
+                   expires_at = $3,
+                   revoked_at = NULL,
+                   rotation_generation = rotation_generation + 1
+             WHERE worker_id = $1
+            RETURNING worker_id, credential_digest, issued_at, expires_at, revoked_at, rotation_generation
+            "#,
+        )
+        .bind(worker_id.0)
+        .bind(new_credential_digest)
+        .bind(expires_at)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+        Ok(WorkerOperationalCredential {
+            worker_id: WorkerId(row.try_get("worker_id")?),
+            credential_digest: row.try_get("credential_digest")?,
+            issued_at: row.try_get("issued_at")?,
+            expires_at: row.try_get("expires_at")?,
+            revoked_at: row.try_get("revoked_at")?,
+            rotation_generation: row.try_get("rotation_generation")?,
+        })
+    }
+
     /// bootstrap 토큰 소비 + worker insert + operational credential insert를 단일
     /// DB 트랜잭션으로 묶는다 (로드맵 #60). 세 단계 중 하나라도 실패하면
     /// `tx`가 드롭되며 자동 롤백되어 토큰도 소비되지 않고 worker도 남지 않는다.

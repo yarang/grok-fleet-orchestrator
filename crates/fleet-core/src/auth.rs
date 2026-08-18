@@ -341,6 +341,10 @@ pub enum PermissionKind {
     WorkerRegister,
     #[serde(rename = "worker:delete")]
     WorkerDelete,
+    /// worker operational credential rotate/revoke (로드맵 #60 6단계).
+    /// admin 전용 — Operator 기본 역할에는 부여하지 않는다.
+    #[serde(rename = "worker:credential:manage")]
+    WorkerCredentialManage,
     // 토큰
     #[serde(rename = "token:issue")]
     TokenIssue,
@@ -387,6 +391,7 @@ impl PermissionKind {
             Self::WorkerList => "worker:list",
             Self::WorkerRegister => "worker:register",
             Self::WorkerDelete => "worker:delete",
+            Self::WorkerCredentialManage => "worker:credential:manage",
             Self::TokenIssue => "token:issue",
             Self::TokenList => "token:list",
             Self::TokenRevoke => "token:revoke",
@@ -416,6 +421,7 @@ impl PermissionKind {
             Self::WorkerList,
             Self::WorkerRegister,
             Self::WorkerDelete,
+            Self::WorkerCredentialManage,
             Self::TokenIssue,
             Self::TokenList,
             Self::TokenRevoke,

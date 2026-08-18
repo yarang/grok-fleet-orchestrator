@@ -4,7 +4,7 @@
 //!
 //! 1. POST /v1/workers/register
 //!    - body: `{ name, agent_endpoint, labels, max_concurrent_tasks, existing_worker_id? }`
-//!    - Authorization: Bearer <bootstrap_token>
+//!    - Authorization: Bearer <operational_token>
 //!    - 응답: `{ worker_id, heartbeat_interval_secs, ... }`
 //!
 //! 2. worker_id를 반환받아 이후 heartbeat에 사용.
@@ -205,7 +205,7 @@ impl RegistrationClient {
             .post(&url)
             .headers(trace_context_headers())
             .json(&body);
-        if let Some(token) = &self.config.worker.bootstrap_token {
+        if let Some(token) = &self.config.worker.operational_token {
             req = req.bearer_auth(token);
         }
 
@@ -278,7 +278,7 @@ impl RegistrationClient {
             .post(&url)
             .headers(trace_context_headers())
             .json(&body);
-        if let Some(token) = &self.config.worker.bootstrap_token {
+        if let Some(token) = &self.config.worker.operational_token {
             req = req.bearer_auth(token);
         }
 
@@ -356,7 +356,7 @@ impl RegistrationClient {
             reason: reason.to_string(),
         };
         let mut req = self.http.delete(&url).json(&body);
-        if let Some(token) = &self.config.worker.bootstrap_token {
+        if let Some(token) = &self.config.worker.operational_token {
             req = req.bearer_auth(token);
         }
 
@@ -617,6 +617,9 @@ mod tests {
         deregisters: Arc<TokioMutex<Vec<Value>>>,
         /// 등록 응답 상태 코드.
         register_status: Arc<TokioMutex<u16>>,
+        /// register 요청의 Authorization 헤더 원문 (없으면 None) — operational_token이
+        /// 실제로 bearer로 전송되는지 검증하는 데 쓴다 (로드맵 #60 8단계).
+        register_auth_headers: Arc<TokioMutex<Vec<Option<String>>>>,
     }
 
     impl Default for MockState {
@@ -626,12 +629,14 @@ mod tests {
                 heartbeats: Arc::new(TokioMutex::new(Vec::new())),
                 deregisters: Arc::new(TokioMutex::new(Vec::new())),
                 register_status: Arc::new(TokioMutex::new(200)),
+                register_auth_headers: Arc::new(TokioMutex::new(Vec::new())),
             }
         }
     }
 
     async fn start_mock_orchestrator(state: MockState) -> String {
         use axum::extract::Path;
+        use axum::http::HeaderMap;
         use axum::routing::delete;
 
         let register_state = state.clone();
@@ -641,9 +646,14 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/workers/register",
-                post(move |Json(body): Json<Value>| {
+                post(move |headers: HeaderMap, Json(body): Json<Value>| {
                     let s = register_state.clone();
                     async move {
+                        let auth = headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        s.register_auth_headers.lock().await.push(auth);
                         s.registers.lock().await.push(body);
                         let status = *s.register_status.lock().await;
                         if status == 200 {
@@ -728,6 +738,44 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("server-key="));
+    }
+
+    /// 로드맵 #60 8단계 회귀 테스트 — `worker.operational_token`이 실제로
+    /// register/heartbeat/deregister의 Authorization bearer로 전송되는지 확인.
+    /// (이 배선이 없으면 join이 발급한 credential이 조용히 무시되고, 워커는
+    /// 인증 없이 요청을 보내다 보호된 orchestrator에서 매번 401을 받는다.)
+    #[tokio::test]
+    async fn operational_token_is_sent_as_register_bearer() {
+        let state = MockState::default();
+        let url = start_mock_orchestrator(state.clone()).await;
+
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url(url)
+                .operational_token("fwo_test-secret")
+                .build(),
+        );
+        let client = RegistrationClient::new(config).unwrap();
+        client.register_once().await.unwrap();
+
+        let headers = state.register_auth_headers.lock().await;
+        assert_eq!(
+            headers.last().cloned().flatten().as_deref(),
+            Some("Bearer fwo_test-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_operational_token_sends_no_authorization_header() {
+        let state = MockState::default();
+        let url = start_mock_orchestrator(state.clone()).await;
+
+        let config = Arc::new(WorkerConfig::for_test().orchestrator_url(url).build());
+        let client = RegistrationClient::new(config).unwrap();
+        client.register_once().await.unwrap();
+
+        let headers = state.register_auth_headers.lock().await;
+        assert_eq!(headers.last().cloned().flatten(), None);
     }
 
     /// 회귀 테스트: 비어있지 않은 labels가 JSON *배열*이 아니라 *객체*로 직렬화되는지

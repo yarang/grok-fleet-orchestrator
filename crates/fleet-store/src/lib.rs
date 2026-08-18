@@ -193,6 +193,37 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("worker operational credentials"))
     }
 
+    /// worker의 operational credential을 즉시 회수한다 (로드맵 #60 6단계).
+    ///
+    /// `revoked_at`을 설정할 뿐 row는 삭제하지 않는다 — 회수 이력을 보존하고
+    /// `find_active_worker_operational_credential`의 필터가 이후 인증을 거부한다.
+    /// 대상 credential이 없거나 이미 회수된 경우 `false`를 반환한다.
+    async fn revoke_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        let _ = worker_id;
+        Err(StoreError::Unsupported("revoke_worker_operational_credential"))
+    }
+
+    /// worker의 operational credential을 새 digest로 회전한다 (로드맵 #60 6단계).
+    ///
+    /// 기존 row를 새 digest로 in-place 갱신하며 `rotation_generation`을 1
+    /// 증가시킨다 — PK가 `worker_id` 단일 row이므로 과거 세대 이력은 별도로
+    /// 남기지 않는다. 이전 digest는 이 호출 즉시 무효화된다(자동 fallback
+    /// 없음). 대상 worker에 credential이 없으면 `StoreError::NotFound`.
+    async fn rotate_worker_operational_credential(
+        &self,
+        worker_id: WorkerId,
+        new_credential_digest: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<WorkerOperationalCredential, StoreError> {
+        let _ = (worker_id, new_credential_digest, expires_at);
+        Err(StoreError::Unsupported(
+            "rotate_worker_operational_credential",
+        ))
+    }
+
     /// bootstrap 토큰 소비, Worker 생성, operational credential 저장을 하나의 단위로
     /// 실행한다 (로드맵 #60, worker 등록 원자성).
     ///

@@ -69,6 +69,60 @@ struct JoinApiResponse {
     worker_config_toml: String,
 }
 
+/// bootstrap token을 안전한 경로에서 읽는다 (로드맵 #60 7단계).
+///
+/// `--token`(argv 직접 전달, `ps`/쉘 히스토리에 노출)은 deprecated지만 하위
+/// 호환을 위해 계속 지원한다. `--token-file <path>`가 더 안전한 대안이며,
+/// 경로로 `-`를 주면 stdin에서 읽는다(파일에 평문으로 남기고 싶지 않을 때).
+/// 정확히 하나의 출처만 허용한다 — 두 값을 동시에 주면 모호하므로 거부.
+pub fn resolve_bootstrap_token(
+    token_arg: Option<&str>,
+    token_file: Option<&Path>,
+    stdin: &mut dyn std::io::Read,
+) -> Result<String, WorkerError> {
+    if token_arg.is_some() && token_file.is_some() {
+        return Err(WorkerError::Config(
+            "specify exactly one of --token or --token-file, not both".into(),
+        ));
+    }
+
+    let raw = if let Some(path) = token_file {
+        if path.as_os_str() == "-" {
+            let mut buf = String::new();
+            stdin
+                .read_to_string(&mut buf)
+                .map_err(WorkerError::ConfigIo)?;
+            buf
+        } else {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading --token-file {}", path.display()))
+                .map_err(|e| WorkerError::Config(e.to_string()))?
+        }
+    } else if let Some(token) = token_arg {
+        // 원문 자체는 로그에 남기지 않고, 사용 사실만 경고한다.
+        tracing::warn!(
+            "--token (or FLEET_BOOTSTRAP_TOKEN) passes the bootstrap token via argv/env, which \
+             is visible to other local users via `ps`/`/proc`. Prefer --token-file <path> \
+             (or --token-file - to read from stdin) — deprecated, not removed yet."
+        );
+        token.to_string()
+    } else {
+        return Err(WorkerError::Config(
+            "no bootstrap token provided — use --token, --token-file <path>, or \
+             --token-file - (stdin)"
+                .into(),
+        ));
+    };
+
+    let token = raw.trim().to_string();
+    if token.is_empty() {
+        return Err(WorkerError::Config(
+            "bootstrap token must not be empty".into(),
+        ));
+    }
+    Ok(token)
+}
+
 /// join 흐름 실행. 성공하면 config_out에 worker.toml이 기록됨.
 pub async fn run_join(args: JoinArgs) -> Result<()> {
     // 1. 워커 이름 검증.
@@ -288,6 +342,110 @@ fn exec_daemon(config_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 로드맵 #60 7단계: bootstrap token stdin/file 전달 ──────────────────
+
+    #[test]
+    fn resolve_token_reads_from_stdin_when_path_is_dash() {
+        let mut stdin = std::io::Cursor::new(b"fleet_from_stdin\n".to_vec());
+        let token = resolve_bootstrap_token(None, Some(Path::new("-")), &mut stdin).unwrap();
+        assert_eq!(token, "fleet_from_stdin");
+    }
+
+    #[test]
+    fn resolve_token_reads_from_file() {
+        let dir = std::env::temp_dir().join(format!("fleet-worker-token-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token.txt");
+        std::fs::write(&path, "fleet_from_file\n").unwrap();
+
+        let mut stdin = std::io::empty();
+        let token = resolve_bootstrap_token(None, Some(&path), &mut stdin).unwrap();
+        assert_eq!(token, "fleet_from_file");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_token_accepts_deprecated_arg() {
+        let mut stdin = std::io::empty();
+        let token = resolve_bootstrap_token(Some("fleet_from_argv"), None, &mut stdin).unwrap();
+        assert_eq!(token, "fleet_from_argv");
+    }
+
+    #[test]
+    fn resolve_token_rejects_both_sources() {
+        let mut stdin = std::io::empty();
+        let err = resolve_bootstrap_token(
+            Some("a"),
+            Some(Path::new("/tmp/nonexistent-fleet-token")),
+            &mut stdin,
+        )
+        .unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    #[test]
+    fn resolve_token_rejects_no_source() {
+        let mut stdin = std::io::empty();
+        let err = resolve_bootstrap_token(None, None, &mut stdin).unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    #[test]
+    fn resolve_token_rejects_empty_after_trim() {
+        let mut stdin = std::io::Cursor::new(b"   \n".to_vec());
+        let err = resolve_bootstrap_token(None, Some(Path::new("-")), &mut stdin).unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    /// argv 경로(`--token`) 사용 시 나가는 경고 로그에 토큰 원문이 절대 포함되지
+    /// 않아야 한다 — 경고는 고정 문자열이고 토큰 값을 보간하지 않는다.
+    #[test]
+    fn resolve_token_argv_path_does_not_leak_token_into_logs() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        const SECRET: &str = "fwo_super-secret-do-not-leak-1234567890";
+        let writer = CapturingWriter::default();
+        let buffer = writer.0.clone();
+        let subscriber =
+            tracing_subscriber::Registry::default().with(tracing_subscriber::fmt::layer().with_writer(writer));
+
+        let mut stdin = std::io::empty();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            resolve_bootstrap_token(Some(SECRET), None, &mut stdin)
+        });
+        assert_eq!(result.unwrap(), SECRET);
+
+        let logged = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(
+            !logged.contains(SECRET),
+            "log output must not contain the raw token, got: {logged}"
+        );
+        assert!(
+            logged.contains("Prefer --token-file"),
+            "expected deprecation warning to be logged, got: {logged}"
+        );
+    }
 
     #[test]
     fn validate_name_accepts_valid() {

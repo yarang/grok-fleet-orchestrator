@@ -23,7 +23,8 @@ use crate::schema::{
     BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
     CredentialSummary, DeregisterRequest, ExportedCredential, HealthResponse, HeartbeatRequest,
     HeartbeatResponse, HostRegisterRequest, HostRegisterResponse, JoinRequest, JoinResponse,
-    PutCredentialRequest, PutCredentialResponse, RegisterRequest, RegisterResponse, WorkerSummary,
+    PutCredentialRequest, PutCredentialResponse, RegisterRequest, RegisterResponse,
+    RotateWorkerCredentialRequest, RotateWorkerCredentialResponse, WorkerSummary,
 };
 
 /// `GET /v1/health` — 단순 헬스 프로브.
@@ -478,6 +479,90 @@ pub async fn deregister_worker(
         "worker_id": id_str,
         "status": "deregistered",
         "reason": reason,
+    })))
+}
+
+/// `POST /v1/workers/:id/credential/rotate` — 관리자가 worker의 operational
+/// credential을 새로 발급하고 이전 값을 즉시 무효화한다 (로드맵 #60 6단계).
+///
+/// `PermissionKind::WorkerCredentialManage` 필요 — worker operational
+/// credential 인증(`worker:self`)에는 이 capability를 부여하지 않으므로,
+/// worker 스스로 자기 credential을 회전시킬 수 없다(관리자 전용).
+pub async fn rotate_worker_credential(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+    body: Option<Json<RotateWorkerCredentialRequest>>,
+) -> Result<Json<RotateWorkerCredentialResponse>, ApiError> {
+    let uuid = Uuid::parse_str(&id_str)
+        .map_err(|e| ApiError::BadRequest(format!("invalid worker_id: {e}")))?;
+    let worker_id = WorkerId(uuid);
+
+    state
+        .store
+        .get_worker(worker_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("worker {id_str}")))?;
+
+    let expires_in_secs = body.and_then(|Json(b)| b.expires_in_secs);
+    let expires_at = expires_in_secs.map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
+
+    let new_token = format!(
+        "fwo_{}",
+        base64url(
+            &generate_random_bytes(32)
+                .map_err(|error| ApiError::Internal(format!("CSPRNG failure: {error}")))?,
+        ),
+    );
+    let new_digest = fleet_core::BootstrapToken::digest_for(&new_token);
+
+    let credential = state
+        .store
+        .rotate_worker_operational_credential(worker_id, &new_digest, expires_at)
+        .await
+        .map_err(|e| match e {
+            fleet_store::StoreError::NotFound => {
+                ApiError::NotFound(format!("no operational credential for worker {id_str}"))
+            }
+            other => other.into(),
+        })?;
+
+    info!(%worker_id, rotation_generation = credential.rotation_generation, "worker operational credential rotated — previous credential invalidated");
+
+    Ok(Json(RotateWorkerCredentialResponse {
+        worker_id: worker_id.to_string(),
+        operational_token: new_token,
+        rotation_generation: credential.rotation_generation,
+        issued_at: credential.issued_at,
+        expires_at: credential.expires_at,
+    }))
+}
+
+/// `DELETE /v1/workers/:id/credential` — worker의 operational credential을
+/// 즉시 회수한다 (로드맵 #60 6단계). 회수 뒤에는 이전 토큰으로 register/
+/// heartbeat/deregister 모두 거부된다. Worker 자체는 삭제하지 않는다 —
+/// worker 엔티티 삭제는 `DELETE /v1/workers/:id`(`deregister_worker`)의 역할.
+pub async fn revoke_worker_credential(
+    State(state): State<Arc<AppState>>,
+    Path(id_str): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let uuid = Uuid::parse_str(&id_str)
+        .map_err(|e| ApiError::BadRequest(format!("invalid worker_id: {e}")))?;
+    let worker_id = WorkerId(uuid);
+
+    let revoked = state
+        .store
+        .revoke_worker_operational_credential(worker_id)
+        .await?;
+    if !revoked {
+        return Err(ApiError::NotFound(format!(
+            "no active operational credential for worker {id_str}"
+        )));
+    }
+
+    info!(%worker_id, "worker operational credential revoked");
+    Ok(Json(serde_json::json!({
+        "worker_id": id_str,
+        "status": "revoked",
     })))
 }
 

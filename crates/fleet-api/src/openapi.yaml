@@ -242,6 +242,63 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /workers/{id}/credential/rotate:
+    post:
+      operationId: rotateWorkerCredential
+      tags: [workers]
+      summary: Rotate a worker's operational credential
+      description: >-
+        Admin-only (requires worker:credential:manage). Issues a new
+        operational credential and immediately invalidates the previous one
+        — no automatic fallback to the old token. The raw token is returned
+        exactly once in this response.
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateWorkerCredentialRequest"
+      responses:
+        "200":
+          description: Rotated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateWorkerCredentialResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workers/{id}/credential:
+    delete:
+      operationId: revokeWorkerCredential
+      tags: [workers]
+      summary: Revoke a worker's operational credential
+      description: >-
+        Admin-only (requires worker:credential:manage). After revocation the
+        previous credential is rejected by register/heartbeat/deregister.
+        Does not delete the worker entity itself.
+      parameters:
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [worker_id, status]
+                properties:
+                  worker_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [revoked]
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /workers/{name}/credentials:
     put:
       operationId: putWorkerCredential
@@ -764,6 +821,35 @@ components:
           enum: [deregistered]
         reason:
           type: string
+          nullable: true
+
+    RotateWorkerCredentialRequest:
+      type: object
+      properties:
+        expires_in_secs:
+          type: integer
+          format: int64
+          nullable: true
+
+    RotateWorkerCredentialResponse:
+      type: object
+      required: [worker_id, operational_token, rotation_generation, issued_at]
+      properties:
+        worker_id:
+          type: string
+          format: uuid
+        operational_token:
+          type: string
+          description: Raw token, returned once. Store it — it cannot be retrieved again.
+        rotation_generation:
+          type: integer
+          format: int64
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
           nullable: true
 
     PutCredentialRequest:

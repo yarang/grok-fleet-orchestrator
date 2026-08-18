@@ -45,7 +45,7 @@ async fn start_mock_orchestrator(state: MockState) -> String {
 name = "{}"
 orchestrator_url = "https://fleet.example.com"
 heartbeat_interval_secs = 15
-bootstrap_token = "{}"
+operational_token = "{}"
 existing_worker_id = "00000000-0000-0000-0000-000000000001"
 
 [grok]
@@ -105,7 +105,7 @@ async fn join_writes_config_to_disk() {
     // config 파일이 생성되었는지 확인.
     let content = std::fs::read_to_string(&config_out).unwrap();
     assert!(content.contains("name = \"w1\""));
-    assert!(content.contains("bootstrap_token = \"fleet_testtok\""));
+    assert!(content.contains("operational_token = \"fleet_testtok\""));
     assert!(content.contains("existing_worker_id"));
 
     // 요청이 정확히 도착했는지 확인.

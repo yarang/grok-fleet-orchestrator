@@ -7,7 +7,7 @@
 //! name = "build-farm-1"
 //! orchestrator_url = "https://fleet.example.com"
 //! heartbeat_interval_secs = 15
-//! bootstrap_token = "fleet-xxx"        # bearer auth (옵션)
+//! operational_token = "fwo_xxx"        # register/heartbeat/deregister bearer (join이 발급)
 //! labels = { arch = "arm64", gpu = "false" }
 //! existing_worker_id = "550e8400-..."  # 재등록 시 ID 유지 (옵션)
 //!
@@ -76,9 +76,16 @@ pub struct WorkerSection {
     /// 하트비트 주기 (초).
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u32,
-    /// bearer auth 토큰 (orchestrator가 `--api-tokens`로 보호된 경우 필요).
+    /// register/heartbeat/deregister bearer 인증에 쓰는 worker operational
+    /// credential (로드맵 #60). `fleet-worker join`이 발급받아 이 필드에
+    /// 기록하며, `fleet workers credential rotate/revoke` 뒤에는 재-join하거나
+    /// 새로 발급된 원문 토큰으로 이 값을 갱신해야 한다.
+    ///
+    /// 예전 필드명 `bootstrap_token`은 더 이상 사용하지 않는다 — 그 이름의
+    /// 키가 남아있는 worker.toml은 `FromStr`에서 명시적으로 거부된다(구 형식
+    /// 자동 fallback 금지, 로드맵 #60 8단계).
     #[serde(default)]
-    pub bootstrap_token: Option<String>,
+    pub operational_token: Option<String>,
     /// 워커 라벨 (필터링용).
     #[serde(default)]
     pub labels: HashMap<String, String>,
@@ -324,11 +331,40 @@ pub(crate) fn ws_scheme_for(orchestrator_url: &str) -> &'static str {
 impl std::str::FromStr for WorkerConfig {
     type Err = WorkerError;
     fn from_str(contents: &str) -> Result<Self, Self::Err> {
+        reject_legacy_bootstrap_token_field(contents)?;
         let mut config: WorkerConfig = toml::from_str(contents)?;
         config.normalize();
         config.validate()?;
         Ok(config)
     }
+}
+
+/// 구 `[worker] bootstrap_token` 키를 명시적으로 거부한다 (로드맵 #60 8단계).
+///
+/// `WorkerSection`에서 그 필드를 제거했으므로 serde는 이제 이 키를 조용히
+/// 무시한다 — 그대로 두면 워커가 인증 없이(빈 Authorization 헤더로) 기동돼
+/// register/heartbeat가 매번 401로 실패하는 조용한 장애가 된다. 대신 설정
+/// 로드 시점에 명확한 에러로 fail-closed 하고 재-join을 안내한다. 자동
+/// 마이그레이션(예: bootstrap_token 값을 operational_token으로 복사)은 하지
+/// 않는다 — bootstrap_token은 join 승인용 일회성 토큰이라 이미 소진되었을
+/// 수 있고, 계속 유효하더라도 digest 기반 operational credential이 아니므로
+/// 그대로 재사용하면 안 된다.
+fn reject_legacy_bootstrap_token_field(contents: &str) -> Result<(), WorkerError> {
+    let raw: toml::Value = toml::from_str(contents)?;
+    let has_legacy = raw
+        .get("worker")
+        .and_then(|w| w.get("bootstrap_token"))
+        .is_some();
+    if has_legacy {
+        return Err(WorkerError::Config(
+            "worker.toml uses the legacy '[worker] bootstrap_token' field, which is no longer \
+             used for register/heartbeat/deregister authentication. Re-run `fleet-worker join` \
+             to obtain a config with 'operational_token', or if the worker is already enrolled, \
+             set 'operational_token' from `fleet workers credential rotate <worker_id>` output."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 impl WorkerConfig {
@@ -343,7 +379,7 @@ impl WorkerConfig {
 pub struct WorkerConfigBuilder {
     name: Option<String>,
     orchestrator_url: Option<String>,
-    bootstrap_token: Option<String>,
+    operational_token: Option<String>,
     grok_bin: Option<String>,
     grok_secret: Option<String>,
     bind_addr: Option<String>,
@@ -360,6 +396,11 @@ impl WorkerConfigBuilder {
     }
     pub fn orchestrator_url(mut self, u: impl Into<String>) -> Self {
         self.orchestrator_url = Some(u.into());
+        self
+    }
+    /// worker operational credential (register/heartbeat/deregister bearer) 설정.
+    pub fn operational_token(mut self, t: impl Into<String>) -> Self {
+        self.operational_token = Some(t.into());
         self
     }
     pub fn grok_bin(mut self, b: impl Into<String>) -> Self {
@@ -401,7 +442,7 @@ impl WorkerConfigBuilder {
                     .orchestrator_url
                     .unwrap_or_else(|| "http://127.0.0.1:8080".into()),
                 heartbeat_interval_secs: 1,
-                bootstrap_token: self.bootstrap_token,
+                operational_token: self.operational_token,
                 labels: self.labels,
                 existing_worker_id: None,
             },
@@ -683,6 +724,69 @@ advertised_host = "worker-1.fleet"
         );
         assert_eq!(mtls.advertised_host.as_deref(), Some("worker-1.fleet"));
         assert!(config.agent_endpoint().starts_with("wss://"));
+    }
+
+    // ── 로드맵 #60 8단계: legacy bootstrap_token 필드 fail-closed ──────────
+
+    #[test]
+    fn operational_token_field_parses_correctly() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+operational_token = "fwo_abc123"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        assert_eq!(config.worker.operational_token.as_deref(), Some("fwo_abc123"));
+    }
+
+    #[test]
+    fn legacy_bootstrap_token_field_is_explicitly_rejected() {
+        // 구 join 응답/수동 설정이 여전히 `[worker] bootstrap_token`을 쓰면
+        // 조용히 무시하고 인증 없이 기동하는 대신, 명시적으로 거부해야 한다
+        // (자동 fallback 금지 — 로드맵 원칙).
+        let toml = r#"
+[worker]
+name = "legacy"
+orchestrator_url = "https://fleet.example.com"
+bootstrap_token = "fleet_old_token"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let err = toml.parse::<WorkerConfig>().unwrap_err();
+        match err {
+            WorkerError::Config(msg) => {
+                assert!(
+                    msg.contains("bootstrap_token") && msg.contains("operational_token"),
+                    "error should explain the legacy field and the replacement: {msg}"
+                );
+            }
+            other => panic!("expected WorkerError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_without_any_token_field_still_parses() {
+        // operational_token은 옵션 — daemon 모드에서 no-auth orchestrator에
+        // 연결하는 배포(개발/테스트)는 토큰이 없어도 기동해야 한다. 실제
+        // 인증 실패는 register 호출 시점에 orchestrator가 401로 거부한다.
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "http://localhost:8080"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        assert!(config.worker.operational_token.is_none());
     }
 
     #[test]

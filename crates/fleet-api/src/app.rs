@@ -173,6 +173,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route(
             "/:id",
             get(handlers::get_worker).delete(handlers::deregister_worker),
+        )
+        // Worker operational credential rotate/revoke (로드맵 #60 6단계). LLM
+        // model credential 하위 자원(`/:name/credentials`, 복수형)과는 별개의
+        // 단수형 경로 — worker 자신을 인증하는 데 쓰는 단일 credential이다.
+        .route(
+            "/:id/credential/rotate",
+            post(handlers::rotate_worker_credential),
+        )
+        .route(
+            "/:id/credential",
+            axum::routing::delete(handlers::revoke_worker_credential),
         );
 
     // Phase 8.6: worker credentials (sub-resource under /v1/workers/:name/credentials).
@@ -484,6 +495,14 @@ fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
         (&Method::GET, "/v1/workers") => PermissionKind::WorkerList,
         (&Method::POST, "/v1/workers/register") | (&Method::POST, "/v1/workers/heartbeat") => {
             PermissionKind::WorkerRegister
+        }
+        (&Method::POST, path) if path.ends_with("/credential/rotate") => {
+            PermissionKind::WorkerCredentialManage
+        }
+        (&Method::DELETE, path)
+            if path.starts_with("/v1/workers/") && path.ends_with("/credential") =>
+        {
+            PermissionKind::WorkerCredentialManage
         }
         (&Method::DELETE, path) if path.starts_with("/v1/workers/") => PermissionKind::WorkerDelete,
         (&Method::POST, "/v1/bootstrap-tokens") => PermissionKind::TokenIssue,

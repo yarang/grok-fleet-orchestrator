@@ -71,6 +71,7 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::WorkerList => "List registered workers",
         PermissionKind::WorkerRegister => "Register new workers",
         PermissionKind::WorkerDelete => "Delete/deregister workers",
+        PermissionKind::WorkerCredentialManage => "Rotate or revoke worker operational credentials",
         PermissionKind::TokenIssue => "Issue bootstrap tokens",
         PermissionKind::TokenList => "List bootstrap tokens",
         PermissionKind::TokenRevoke => "Revoke bootstrap tokens",

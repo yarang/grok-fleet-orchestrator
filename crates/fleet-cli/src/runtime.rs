@@ -34,7 +34,7 @@ use fleet_core::{
     WorkerStatus,
 };
 // CLI 하위 명령 enum (main.rs).
-use crate::{EventsAction, TasksAction, WorkersAction};
+use crate::{EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig,
@@ -566,7 +566,117 @@ pub async fn run_workers(action: WorkersAction) -> Result<()> {
     match action {
         WorkersAction::List { status, json } => run_workers_list(status, json).await,
         WorkersAction::Show { name } => run_workers_show(&name).await,
+        WorkersAction::Credential { action } => run_workers_credential(action).await,
     }
+}
+
+/// `workers credential` 명령 그룹 디스패치 (로드맵 #60 6단계).
+async fn run_workers_credential(action: WorkerCredentialAction) -> Result<()> {
+    match action {
+        WorkerCredentialAction::Rotate {
+            api_url,
+            api_token,
+            worker_id,
+            expires_in_secs,
+            json,
+        } => run_workers_credential_rotate(&api_url, &api_token, &worker_id, expires_in_secs, json).await,
+        WorkerCredentialAction::Revoke {
+            api_url,
+            api_token,
+            worker_id,
+        } => run_workers_credential_revoke(&api_url, &api_token, &worker_id).await,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RotateCredentialApiRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in_secs: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct RotateCredentialApiResponse {
+    worker_id: String,
+    operational_token: String,
+    rotation_generation: i64,
+    issued_at: String,
+    expires_at: Option<String>,
+}
+
+/// `workers credential rotate <worker_id>` — 새 operational credential 발급.
+async fn run_workers_credential_rotate(
+    api_url: &str,
+    api_token: &str,
+    worker_id: &str,
+    expires_in_secs: Option<u64>,
+    json: bool,
+) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!(
+        "{}/v1/workers/{}/credential/rotate",
+        api_url.trim_end_matches('/'),
+        worker_id
+    );
+    let resp = http
+        .post(&url)
+        .bearer_auth(api_token)
+        .json(&RotateCredentialApiRequest { expires_in_secs })
+        .send()
+        .await
+        .context("credential rotate request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("credential rotate failed: {status} — {text}"));
+    }
+    let parsed: RotateCredentialApiResponse =
+        resp.json().await.context("parsing rotate response")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&parsed)?);
+        return Ok(());
+    }
+    println!("worker_id:           {}", parsed.worker_id);
+    println!("rotation_generation: {}", parsed.rotation_generation);
+    println!("issued_at:           {}", parsed.issued_at);
+    println!(
+        "expires_at:          {}",
+        parsed.expires_at.as_deref().unwrap_or("(none)")
+    );
+    println!("operational_token:   {}", parsed.operational_token);
+    println!("(store this token in worker.toml now — it will not be shown again)");
+    Ok(())
+}
+
+/// `workers credential revoke <worker_id>` — operational credential 즉시 회수.
+async fn run_workers_credential_revoke(
+    api_url: &str,
+    api_token: &str,
+    worker_id: &str,
+) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!(
+        "{}/v1/workers/{}/credential",
+        api_url.trim_end_matches('/'),
+        worker_id
+    );
+    let resp = http
+        .delete(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .context("credential revoke request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("credential revoke failed: {status} — {text}"));
+    }
+    println!("revoked: worker {worker_id}");
+    Ok(())
 }
 
 /// `tasks` 명령 그룹 디스패치.

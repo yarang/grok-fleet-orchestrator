@@ -466,6 +466,54 @@ enum WorkersAction {
         /// 워커 이름.
         name: String,
     },
+
+    /// worker operational credential rotate/revoke (로드맵 #60 6단계).
+    /// 관리자 bearer 토큰(`worker:credential:manage` capability)이 필요하다.
+    Credential {
+        #[command(subcommand)]
+        action: WorkerCredentialAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkerCredentialAction {
+    /// worker의 operational credential을 새로 발급하고 이전 값을 즉시 무효화.
+    /// 새 원문 토큰은 이 명령의 출력에서만 확인 가능하다 — 다시 조회할 수 없다.
+    Rotate {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// 관리자 bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 대상 워커 ID (UUID).
+        worker_id: String,
+
+        /// 새 credential 만료까지 초. 생략하면 무기한.
+        #[arg(long)]
+        expires_in_secs: Option<u64>,
+
+        /// JSON 형식으로 결과 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// worker의 operational credential을 즉시 회수. 이후 이전 토큰으로 register/
+    /// heartbeat/deregister가 모두 거부된다. Worker 엔티티는 삭제하지 않는다.
+    Revoke {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// 관리자 bearer 토큰.
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 대상 워커 ID (UUID).
+        worker_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
