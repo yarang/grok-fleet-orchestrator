@@ -37,5 +37,8 @@ fleet-store = { workspace = true, features = ["test-support"] }
 fleet-transport = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde_yaml = { workspace = true }
+# bootstrap token digest 회귀 테스트(로드맵 #59)에서 임시 데이터베이스를
+# 만들고 마이그레이션을 적용하기 위한 직접 풀 접근.
+sqlx = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber = { version = "0.3" }
