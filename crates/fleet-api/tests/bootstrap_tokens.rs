@@ -376,6 +376,185 @@ async fn multi_use_token_supports_multiple_joins() {
     assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
 }
 
+// ── API↔CLI 라운드트립 (로드맵 #57) ─────────────────────────────────────
+
+/// `fleet token issue`가 역직렬화하는 응답 형태(+ 공개 식별자).
+///
+/// 필드 집합이 `crates/fleet-cli/src/token.rs`의 `CreateTokenApiResponse`와
+/// 같아야 CLI가 발급 응답을 읽을 수 있다.
+#[derive(serde::Deserialize)]
+struct CliCreateTokenResponse {
+    token: String,
+    token_id: String,
+    #[allow(dead_code)]
+    created_at: String,
+    #[allow(dead_code)]
+    expires_at: Option<String>,
+    #[allow(dead_code)]
+    max_uses: u32,
+}
+
+/// `fleet token list`가 역직렬화하는 목록 항목.
+///
+/// `crates/fleet-cli/src/token.rs`의 `TokenListItem`과 동일한 필드 집합.
+/// `Option` 필드에 `#[serde(default)]`가 없으므로 서버가 해당 키를
+/// 생략하면(예: `skip_serializing_if`) CLI 파싱이 깨진다 — 이 테스트가
+/// 그 회귀를 잡는다.
+#[derive(serde::Deserialize)]
+struct CliTokenListItem {
+    token_id: String,
+    #[allow(dead_code)]
+    created_at: String,
+    #[allow(dead_code)]
+    expires_at: Option<String>,
+    #[allow(dead_code)]
+    max_uses: u32,
+    #[allow(dead_code)]
+    use_count: u32,
+    #[allow(dead_code)]
+    remaining_uses: u32,
+    #[allow(dead_code)]
+    notes: Option<String>,
+    #[allow(dead_code)]
+    last_used_by: Option<String>,
+    #[allow(dead_code)]
+    last_used_at: Option<String>,
+}
+
+/// 로드맵 #57 완료 게이트 — API↔CLI E2E.
+///
+/// 발급 → 목록에서 `token_id` 노출 → 그 `token_id`로 회수까지가 CLI가 쓰는
+/// 필드 이름 그대로 동작해야 한다. 원문 토큰은 발급 응답 이후 어떤 관리
+/// API에도 다시 나타나지 않는다.
+#[tokio::test]
+async fn cli_roundtrip_issue_list_revoke_by_public_token_id() {
+    let store = make_store();
+
+    // 1) 발급 — CLI `token issue`.
+    let (status, issued_json) = api_call(
+        store.clone(),
+        axum::http::Method::POST,
+        "/v1/bootstrap-tokens",
+        Some(json!({"prefix": "fleet", "bytes": 32, "max_uses": 1, "notes": "e2e"})),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let issued: CliCreateTokenResponse =
+        serde_json::from_value(issued_json).expect("CLI must parse the issue response");
+    assert!(issued.token.starts_with("fleet_"));
+    assert_eq!(
+        issued.token_id,
+        BootstrapToken::public_id_for(&issued.token),
+        "token_id must be the public identifier derived from the raw token"
+    );
+
+    // 2) 목록 — CLI `token list`. 원문은 어디에도 없어야 한다.
+    let (status, list_json) = api_call(
+        store.clone(),
+        axum::http::Method::GET,
+        "/v1/bootstrap-tokens",
+        None,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert!(
+        !list_json.to_string().contains(&issued.token),
+        "raw bootstrap token must never appear in the list response"
+    );
+    let items: Vec<CliTokenListItem> =
+        serde_json::from_value(list_json).expect("CLI must parse the list response");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].token_id, issued.token_id);
+
+    // 3) 원문을 경로에 넣은 회수는 거부 — 공개 식별자만 받는다.
+    let (status, _) = api_call(
+        store.clone(),
+        axum::http::Method::DELETE,
+        &format!("/v1/bootstrap-tokens/{}", issued.token),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::NOT_FOUND,
+        "raw token must not be accepted as a revoke identifier"
+    );
+
+    // 4) 목록에서 얻은 token_id로 회수 — CLI `token revoke <TOKEN_ID>`.
+    let (status, _) = api_call(
+        store.clone(),
+        axum::http::Method::DELETE,
+        &format!("/v1/bootstrap-tokens/{}", items[0].token_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    let (_, list_json) = api_call(
+        store.clone(),
+        axum::http::Method::GET,
+        "/v1/bootstrap-tokens",
+        None,
+    )
+    .await;
+    assert!(list_json.as_array().unwrap().is_empty());
+
+    // 5) 회수된 토큰 원문으로는 join도 실패해야 한다.
+    let (status, _) = api_call(
+        store,
+        axum::http::Method::POST,
+        "/v1/workers/join",
+        Some(json!({
+            "token": issued.token,
+            "name": "revoked-join",
+            "agent_endpoint": "ws://h/ws",
+        })),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+}
+
+/// 발급받은 원문 토큰이 join에 바로 쓰이고, 그 다음 목록의 `token_id`는
+/// 여전히 원문에서 파생된 값과 같아야 한다(사용 이력이 붙어도 식별자 불변).
+#[tokio::test]
+async fn issued_token_joins_and_public_id_is_stable_after_use() {
+    let store = make_store();
+    let (_, issued_json) = api_call(
+        store.clone(),
+        axum::http::Method::POST,
+        "/v1/bootstrap-tokens",
+        Some(json!({"prefix": "fleet", "bytes": 16, "max_uses": 2})),
+    )
+    .await;
+    let issued: CliCreateTokenResponse = serde_json::from_value(issued_json).unwrap();
+
+    let (status, _) = api_call(
+        store.clone(),
+        axum::http::Method::POST,
+        "/v1/workers/join",
+        Some(json!({
+            "token": issued.token,
+            "name": "joined-worker",
+            "agent_endpoint": "ws://h/ws",
+        })),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+
+    let (_, list_json) = api_call(
+        store,
+        axum::http::Method::GET,
+        "/v1/bootstrap-tokens",
+        None,
+    )
+    .await;
+    let items: Vec<CliTokenListItem> = serde_json::from_value(list_json).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].token_id, issued.token_id);
+    assert_eq!(items[0].use_count, 1);
+    assert_eq!(items[0].last_used_by.as_deref(), Some("joined-worker"));
+}
+
 // ── 픽스처 ──────────────────────────────────────────────────────────────
 
 async fn seed_token(store: &Arc<dyn Store>, token: &str, max_uses: u32) {
