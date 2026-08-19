@@ -28,6 +28,10 @@ pub enum TaskPriority {
 /// `id`, `created_at`은 오케스트레이터가 채웁니다. `Task::from_request` 사용.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskRequest {
+    /// 선택 Project 경계. `None`은 기존과 동일한 일반 풀 Task를 뜻한다.
+    /// Project 정책 검증은 control plane 구현 단계에서 수행한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     #[serde(default)]
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,7 +161,7 @@ impl Task {
             dispatched_at: None,
             thread_id: id,
             parent_task_id: req.parent_task_id,
-            project_id: None,
+            project_id: req.project_id,
             retry_count: 0,
             dependency_ids: req.dependency_ids,
             checkpoint_branch: None,
@@ -286,6 +290,12 @@ pub enum FailureKind {
     CircuitOpen,
     /// 클라이언트가 취소.
     Cancelled,
+    /// 요청된 model의 credential을 보유한 워커가 하나도 없어 dispatch 후보가
+    /// 전부 걸러짐 (로드맵 #71). `WorkerUnavailable`과 달리 원인이 명확히
+    /// "credential 미프로비저닝"이므로, 재시도로는 해소되지 않고
+    /// `fleet provision`의 `PushCredentials` 스텝으로 해당 워커에 credential을
+    /// 배포해야 해소된다.
+    CredentialMissing,
 }
 
 /// 작업 목록 조회용 필터. Store::list_tasks에 전달.
@@ -374,6 +384,17 @@ mod tests {
         assert!(matches!(task.status, TaskStatus::Pending));
         assert!(!task.is_terminal());
         assert!(!task.is_running());
+    }
+
+    #[test]
+    fn request_project_id_is_retained() {
+        let project_id = ProjectId::new();
+        let task = Task::from_request(TaskRequest {
+            prompt: "project task".into(),
+            project_id: Some(project_id),
+            ..Default::default()
+        });
+        assert_eq!(task.project_id, Some(project_id));
     }
 
     #[test]
@@ -480,6 +501,12 @@ mod tests {
     fn failure_kind_snake_case() {
         let json = serde_json::to_string(&FailureKind::CircuitOpen).unwrap();
         assert_eq!(json, "\"circuit_open\"");
+    }
+
+    #[test]
+    fn failure_kind_credential_missing_snake_case() {
+        let json = serde_json::to_string(&FailureKind::CredentialMissing).unwrap();
+        assert_eq!(json, "\"credential_missing\"");
     }
 
     #[test]

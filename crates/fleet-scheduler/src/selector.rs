@@ -4,9 +4,28 @@
 //! 1. 라벨 매칭 필터 (`required_labels`)
 //! 2. 모델 매칭 필터 (`task.model` — 지정된 경우 `labels["model"]`이 정확히
 //!    일치하는 워커만 후보로 남긴다. 지정하지 않으면 기존과 동일)
-//! 3. 회로 차단된 워커 제외
-//! 4. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
-//! 5. 없으면 least-loaded (활성 작업 수 최소)
+//! 3. Credential 매칭 필터 (로드맵 #71 — `task.model`이 지정된 경우
+//!    `Store::get_worker_credential(worker.name, model)`이 `Some`을 반환하는
+//!    워커만 후보로 남긴다. 아래 "credential 필터 기준 필드" 설명 참고)
+//! 4. 회로 차단된 워커 제외
+//! 5. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
+//! 6. 없으면 least-loaded (활성 작업 수 최소)
+//!
+//! ## Credential 필터 기준 필드: `task.model` (`task.resolved_model` 아님)
+//!
+//! 로드맵 #71 설계 노트는 `task.resolved_model` 기준 필터링을 제안했으나,
+//! 실제 코드를 대조해보면 두 가지 이유로 `task.model`이 맞는 기준이다:
+//! 1. `dispatcher.rs`의 `DispatchRequest.model`(워커에 실제로 전달되는 필드)은
+//!    `task.model.clone()`이지 `task.resolved_model`이 아니다 — 즉
+//!    "실행에 실제로 쓰이는" 필드는 `task.model`이다.
+//! 2. `HeuristicTaskRouter::resolve_routing`은 사용자가 `model`을 지정하지
+//!    않아도 프로파일 휴리스틱으로 항상 `resolved_model`을 채운다
+//!    (`Dispatcher::submit`의 0단계에서 무조건 호출됨). 따라서
+//!    `resolved_model`을 기준으로 삼으면 사용자가 model을 지정하지 않은
+//!    일반 태스크까지 credential 보유 워커로 강제 제한하게 되어(모든
+//!    fleet가 사실상 전 모델에 credential을 프로비저닝해야 함) 문제
+//!    배경(사용자가 명시적으로 model을 지정한 경우)의 범위를 크게 벗어나고
+//!    기존 동작(및 기존 테스트 스위트 대부분)을 깨뜨린다.
 
 use std::sync::Arc;
 
@@ -34,6 +53,9 @@ pub enum SelectionError {
 
     #[error("no online worker is labeled for model '{0}'")]
     NoWorkerForModel(String),
+
+    #[error("no online worker holds a credential for model '{0}'")]
+    NoWorkerForCredential(String),
 }
 
 /// 워커 선택기.
@@ -85,6 +107,38 @@ impl WorkerSelector {
 
             if candidates.is_empty() {
                 return Err(SelectionError::NoWorkerForModel(model.clone()));
+            }
+        }
+
+        // 2.6. Credential 매칭 필터 (로드맵 #71) — task.model이 지정된 경우에만
+        // 적용. `Store::get_worker_credential(worker.name, model)`이 `Some`을
+        // 반환하는(= 해당 model의 credential을 실제로 보유한) 워커만 후보로
+        // 남긴다. task.model이 None이면 어떤 credential이 필요한지 알 수
+        // 없으므로 이 단계 전체를 건너뛴다 — 모델 라벨 필터와 동일한 조건.
+        //
+        // Store 조회 자체가 실패하면(예: credential을 지원하지 않는 Store
+        // 구현) 해당 워커를 "credential 미보유"와 동일하게 후보에서 제외한다
+        // — credential 보유 여부를 확인할 수 없는 워커에 dispatch하는 것보다
+        // 안전한 방향(fail-safe)이다.
+        if let Some(model) = &task.model {
+            let mut with_credential = Vec::with_capacity(candidates.len());
+            for w in candidates {
+                match self.store.get_worker_credential(&w.name, model).await {
+                    Ok(Some(_)) => with_credential.push(w),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::error!(
+                            target: "fleet::selector",
+                            error = %e, worker = %w.name, model = %model,
+                            "store error checking worker credential — excluding worker from candidates"
+                        );
+                    }
+                }
+            }
+            candidates = with_credential;
+
+            if candidates.is_empty() {
+                return Err(SelectionError::NoWorkerForCredential(model.clone()));
             }
         }
 
@@ -158,13 +212,28 @@ mod tests {
     /// 인메모리 mock Store (selector 테스트용).
     struct MockStore {
         workers: std::sync::Mutex<Vec<Worker>>,
+        /// (worker_name, model_id) 쌍 — credential 필터 테스트용 fixture.
+        /// 로드맵 #71 — 실제 blob 내용은 selector 로직에서 쓰지 않으므로
+        /// 존재 여부만 추적한다.
+        credentials: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
     }
 
     impl MockStore {
         fn new(workers: Vec<Worker>) -> Self {
             Self {
                 workers: std::sync::Mutex::new(workers),
+                credentials: std::sync::Mutex::new(std::collections::HashSet::new()),
             }
+        }
+
+        /// 빌더 헬퍼 — 주어진 (worker_name, model_id)에 대한 credential이
+        /// 존재하는 것으로 fixture를 채운다.
+        fn with_credential(self, worker_name: &str, model_id: &str) -> Self {
+            self.credentials
+                .lock()
+                .unwrap()
+                .insert((worker_name.to_string(), model_id.to_string()));
+            self
         }
     }
 
@@ -246,7 +315,8 @@ mod tests {
             unimplemented!()
         }
 
-        // Phase 8.6: credentials 메서드 — selector 테스트에서 미사용.
+        // Phase 8.6: credentials 메서드. `get_worker_credential`은 로드맵 #71
+        // credential 필터 테스트에서 `with_credential` fixture와 함께 사용됨.
         async fn upsert_worker_credential(
             &self,
             _: &str,
@@ -261,10 +331,28 @@ mod tests {
         }
         async fn get_worker_credential(
             &self,
-            _: &str,
-            _: &str,
+            worker_name: &str,
+            model_id: &str,
         ) -> Result<Option<fleet_store::StoredCredential>, StoreError> {
-            unimplemented!()
+            let has_cred = self
+                .credentials
+                .lock()
+                .unwrap()
+                .contains(&(worker_name.to_string(), model_id.to_string()));
+            if !has_cred {
+                return Ok(None);
+            }
+            Ok(Some(fleet_store::StoredCredential {
+                worker_name: worker_name.to_string(),
+                model_id: model_id.to_string(),
+                encrypted_blob: "test-encrypted-blob".into(),
+                base_url: "https://example.test".into(),
+                api_backend: "test-backend".into(),
+                context_window: 128_000,
+                model_name: None,
+                created_at: chrono::Utc::now(),
+                rotated_at: chrono::Utc::now(),
+            }))
         }
         async fn list_worker_credentials(
             &self,
@@ -378,7 +466,9 @@ mod tests {
             make_worker("gemini-1", 0, &[("model", "gemini")]),
             make_worker("glm-1", 0, &[("model", "glm-5")]),
         ];
-        let store = Arc::new(MockStore::new(workers));
+        // 로드맵 #71 — credential 필터가 이 테스트의 대상 워커를 걸러내지
+        // 않도록 gemini-1에 gemini credential을 부여한다.
+        let store = Arc::new(MockStore::new(workers).with_credential("gemini-1", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
         let selector = WorkerSelector::new(store.clone(), breakers);
 
@@ -457,7 +547,8 @@ mod tests {
             // 둘 다 만족 → 선택되어야 함
             make_worker("gpu-gemini", 0, &[("gpu", "true"), ("model", "gemini")]),
         ];
-        let store = Arc::new(MockStore::new(workers));
+        // 로드맵 #71 — credential 필터가 gpu-gemini를 걸러내지 않도록 credential 부여.
+        let store = Arc::new(MockStore::new(workers).with_credential("gpu-gemini", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
         let selector = WorkerSelector::new(store.clone(), breakers);
 
@@ -474,5 +565,81 @@ mod tests {
             selected, expected.id,
             "must satisfy both required_labels AND model filters"
         );
+    }
+
+    // ── 로드맵 #71: credential 매칭 필터 ────────────────────────────────
+
+    #[tokio::test]
+    async fn select_credential_required_and_present_routes_normally() {
+        // 지정된 model의 credential을 가진 worker만 있을 때 정상 dispatch.
+        let workers = vec![make_worker("gemini-1", 0, &[("model", "gemini")])];
+        let store = Arc::new(MockStore::new(workers).with_credential("gemini-1", "gemini"));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let mut task = make_task("work", None, &[]);
+        task.model = Some("gemini".into());
+
+        let selected = selector.select(&task).await.unwrap();
+        let gemini_worker = store.get_worker_by_name("gemini-1").await.unwrap().unwrap();
+        assert_eq!(selected, gemini_worker.id);
+    }
+
+    #[tokio::test]
+    async fn select_credential_missing_on_all_candidates_errors() {
+        // credential 없는 worker만 있을 때 — 재시도 대상인 NoWorkerForCredential.
+        let workers = vec![make_worker("gemini-1", 0, &[("model", "gemini")])];
+        let store = Arc::new(MockStore::new(workers)); // credential 미부여
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let mut task = make_task("work", None, &[]);
+        task.model = Some("gemini".into());
+
+        let result = selector.select(&task).await;
+        match result {
+            Err(SelectionError::NoWorkerForCredential(m)) => {
+                assert!(m.contains("gemini"), "error should mention model: {m}");
+            }
+            other => panic!("expected NoWorkerForCredential, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_credential_partial_provisioning_routes_to_credentialed_worker() {
+        // 일부 worker만 credential을 가진 fleet — credential 있는 worker로만 라우팅.
+        let workers = vec![
+            make_worker("gemini-1", 0, &[("model", "gemini")]),
+            make_worker("gemini-2", 0, &[("model", "gemini")]),
+        ];
+        // gemini-2만 credential 프로비저닝 완료.
+        let store = Arc::new(MockStore::new(workers).with_credential("gemini-2", "gemini"));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let mut task = make_task("work", None, &[]);
+        task.model = Some("gemini".into());
+
+        let selected = selector.select(&task).await.unwrap();
+        let gemini_2 = store.get_worker_by_name("gemini-2").await.unwrap().unwrap();
+        assert_eq!(
+            selected, gemini_2.id,
+            "must route only to the credentialed worker, ignoring the uncredentialed one"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_no_model_skips_credential_check() {
+        // model 미지정 task는 credential 유무와 무관하게 기존처럼 정상 dispatch.
+        let workers = vec![make_worker("plain-1", 0, &[])]; // credential 없음
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let task = make_task("work", None, &[]); // model: None
+
+        let selected = selector.select(&task).await.unwrap();
+        let plain = store.get_worker_by_name("plain-1").await.unwrap().unwrap();
+        assert_eq!(selected, plain.id);
     }
 }

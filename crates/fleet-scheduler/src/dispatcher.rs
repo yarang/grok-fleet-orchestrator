@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use crate::breaker::{BreakerState, Outcome};
 use crate::router::TaskRouter;
+use crate::selector::SelectionError;
 use crate::skill_loader::inject_skills;
 use crate::state::FleetState;
 
@@ -340,10 +341,17 @@ impl Dispatcher {
             Ok(id) => id,
             Err(e) => {
                 if mark_unavailable_as_failed {
-                    // 선택 실패 → 작업을 Failed로 표시
+                    // 선택 실패 → 작업을 Failed로 표시. credential 부재로 인한
+                    // 후보 소진(로드맵 #71)은 일반 워커 가용성 문제와 원인이
+                    // 다르므로 별도 FailureKind로 구분한다 — 재시도로 해소되지
+                    // 않고 credential 프로비저닝이 필요함을 명확히 하기 위함.
+                    let kind = match &e {
+                        SelectionError::NoWorkerForCredential(_) => FailureKind::CredentialMissing,
+                        _ => FailureKind::WorkerUnavailable,
+                    };
                     let failure = TaskFailure {
                         error: e.to_string(),
-                        kind: FailureKind::WorkerUnavailable,
+                        kind,
                         worker_id: None,
                         attempts: 0,
                     };
@@ -824,5 +832,106 @@ mod tests {
             stored.status
         );
         assert_eq!(stored.retry_count, 1);
+    }
+
+    // 로드맵 #71 — worker는 온라인이고 `model` 라벨도 일치하지만 해당 model의
+    // credential을 보유하지 않은 경우: 재시도 비활성(기본값) 상태에서는
+    // WorkerUnavailable이 아니라 FailureKind::CredentialMissing으로 즉시
+    // Failed 확정되어야 한다 — 원인이 명확히 credential 미프로비저닝임을
+    // 나타내기 위함.
+    #[tokio::test]
+    async fn submit_marks_credential_missing_when_worker_lacks_credential() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker = fleet_core::Worker::new("gemini-1", "wss://gemini-1/ws");
+        worker.status = fleet_core::WorkerStatus::Online;
+        worker.labels.insert("model".into(), "gemini".into());
+        store.upsert_worker(&worker).await.unwrap();
+        // 의도적으로 credential을 프로비저닝하지 않는다.
+
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(FleetState::new(
+            store.clone(),
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        let mut task = sample_task();
+        task.model = Some("gemini".into());
+        let task_id = task.id;
+
+        let err = dispatcher
+            .submit(task)
+            .await
+            .expect_err("no credentialed worker — submit() must fail");
+        assert!(matches!(err, DispatchError::NoWorker(_)));
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        match stored.status {
+            TaskStatus::Failed(f) => assert_eq!(
+                f.kind,
+                fleet_core::FailureKind::CredentialMissing,
+                "expected CredentialMissing, got {:?}",
+                f.kind
+            ),
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    // 지정된 model의 credential을 가진 worker만 있을 때는 정상적으로
+    // 즉시(재시도 없이) 워커가 선택되어야 한다 — credential 필터가 정상
+    // 경로를 막지 않음을 확인.
+    #[tokio::test]
+    async fn submit_selects_worker_when_credential_present() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker = fleet_core::Worker::new("gemini-1", "wss://gemini-1/ws");
+        worker.status = fleet_core::WorkerStatus::Online;
+        worker.labels.insert("model".into(), "gemini".into());
+        let worker_id = worker.id;
+        store.upsert_worker(&worker).await.unwrap();
+        store
+            .upsert_worker_credential(
+                "gemini-1",
+                "gemini",
+                "encrypted-blob",
+                "https://example.test",
+                "test-backend",
+                128_000,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let transport = fleet_transport::MockTransport::new();
+        transport
+            .add_worker(fleet_transport::MockWorker::new(
+                worker_id,
+                "wss://gemini-1/ws",
+            ))
+            .await;
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+        let state = Arc::new(FleetState::new(
+            store.clone(),
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        let mut task = sample_task();
+        task.model = Some("gemini".into());
+        let task_id = task.id;
+
+        dispatcher
+            .submit(task)
+            .await
+            .expect("submit() must succeed — worker holds the required credential");
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Dispatched { .. }),
+            "expected Dispatched, got {:?}",
+            stored.status
+        );
     }
 }

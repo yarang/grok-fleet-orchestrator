@@ -81,9 +81,12 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use fleet_core::{FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter, WorkerStatus};
+use fleet_core::{
+    FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter, WorkerStatus,
+};
 
 use crate::dispatcher::{DispatchError, Dispatcher};
+use crate::selector::SelectionError;
 use crate::state::FleetState;
 
 /// 한 사이클에서 스캔할 최대 pending/dispatched 작업 수.
@@ -282,16 +285,27 @@ impl Reconciler {
                 && task.retry_count >= self.config.max_dispatch_retries
             {
                 let retry_count = task.retry_count;
+                // dead-letter 원인을 분류하기 위해 선택 로직을 한 번 더
+                // (부작용 없는 순수 조회로) 돌려본다 — 로드맵 #71. 이 시점까지
+                // 재시도가 소진됐다는 건 이전 사이클들에서도 계속 같은 이유로
+                // 실패해왔다는 뜻이므로, 지금 다시 물어봐도 같은 분류가 나올
+                // 가능성이 매우 높다. credential 부재가 지속적인 원인이면
+                // `CredentialMissing`으로 구분해 재프로비저닝이 필요함을
+                // 모니터링/대시보드에서 바로 알 수 있게 한다.
+                let kind = match self.state.selector.select(&task).await {
+                    Err(SelectionError::NoWorkerForCredential(_)) => FailureKind::CredentialMissing,
+                    _ => FailureKind::WorkerUnavailable,
+                };
                 let failure = TaskFailure {
                     error: format!("dispatch retries exhausted ({retry_count} attempts)"),
-                    kind: FailureKind::WorkerUnavailable,
+                    kind,
                     worker_id: None,
                     attempts: retry_count,
                 };
                 self.dispatcher.mark_failed(task_id, failure).await;
                 summary.dead_lettered += 1;
                 warn!(
-                    %task_id, retry_count,
+                    %task_id, retry_count, ?kind,
                     "reconcile: dispatch retries exhausted, dead-lettering task"
                 );
                 continue;
@@ -692,6 +706,56 @@ mod tests {
             "task should be dead-lettered as Failed: {:?}",
             failed.status
         );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_task_dead_letters_as_credential_missing_when_no_worker_has_credential() {
+        // 로드맵 #71 — worker는 온라인이고 model 라벨도 일치하지만 그 model의
+        // credential을 아무도 보유하지 않은 경우: 재시도를 계속 소진해도
+        // 해소되지 않으므로(정적인 원인), dead-letter는 일반
+        // `WorkerUnavailable`이 아니라 `FailureKind::CredentialMissing`으로
+        // 구분되어야 한다.
+        let store = Arc::new(MemStore::new());
+        let mut worker = Worker::new("gemini-1", "wss://gemini-1/ws");
+        worker.status = WorkerStatus::Online;
+        worker.labels.insert("model".into(), "gemini".into());
+        store.upsert_worker(&worker).await.unwrap();
+        // 의도적으로 credential을 프로비저닝하지 않는다.
+
+        let mut task = make_pending_task("credential-less work", chrono::Duration::seconds(120));
+        task.model = Some("gemini".into());
+        task.retry_count = 3;
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 3,
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.stale_found, 1);
+        assert_eq!(summary.dead_lettered, 1);
+
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        match failed.status {
+            TaskStatus::Failed(f) => assert_eq!(
+                f.kind,
+                fleet_core::FailureKind::CredentialMissing,
+                "expected CredentialMissing, got {:?}",
+                f.kind
+            ),
+            other => panic!("expected Failed, got {:?}", other),
+        }
     }
 
     #[tokio::test]
