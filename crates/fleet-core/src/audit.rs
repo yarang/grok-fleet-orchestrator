@@ -67,6 +67,16 @@ pub mod action {
     pub const USER_TOGGLE: &str = "user.toggle";
     /// 사용자 삭제.
     pub const USER_DELETE: &str = "user.delete";
+    /// worker LLM credential 평문 export (로드맵 #66).
+    ///
+    /// 이 액션은 "누군가 API 키 원문을 가져갔다"는 뜻이다. 키가 유출됐을 때
+    /// 회수 범위를 정하려면 이 기록이 유일한 근거이므로, 기록에 실패하면
+    /// export 자체를 거부한다.
+    pub const WORKER_LLM_CREDENTIAL_EXPORT: &str = "worker.llm_credential.export";
+    /// worker LLM credential 저장/회전 (로드맵 #66).
+    pub const WORKER_LLM_CREDENTIAL_PUT: &str = "worker.llm_credential.put";
+    /// worker LLM credential 삭제 (로드맵 #66).
+    pub const WORKER_LLM_CREDENTIAL_DELETE: &str = "worker.llm_credential.delete";
 }
 
 /// 감사 로그 한 건.

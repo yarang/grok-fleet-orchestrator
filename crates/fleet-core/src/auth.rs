@@ -343,8 +343,35 @@ pub enum PermissionKind {
     WorkerDelete,
     /// worker operational credential rotate/revoke (로드맵 #60 6단계).
     /// admin 전용 — Operator 기본 역할에는 부여하지 않는다.
+    ///
+    /// **주의**: 이것은 worker가 스스로를 인증할 때 쓰는 `fwo_` 토큰(단수형
+    /// `/credential` 경로)에 대한 권한이다. 워커가 모델 호출에 쓰는 LLM
+    /// 프로바이더 API 키(복수형 `/credentials` 경로)는 아래 `WorkerLlmCredential*`
+    /// 권한이 따로 통제한다. 두 개념을 하나의 capability로 묶지 않는다.
     #[serde(rename = "worker:credential:manage")]
     WorkerCredentialManage,
+    /// worker LLM credential 메타데이터 조회(`GET /v1/workers/:name/credentials`).
+    /// 응답에 api_key는 포함되지 않는다 — 어떤 모델이 설정돼 있는지만 노출.
+    #[serde(rename = "worker:llm_credential:read")]
+    WorkerLlmCredentialRead,
+    /// worker LLM credential **평문 export**
+    /// (`GET /v1/workers/:name/credentials/:model_id/export`).
+    ///
+    /// 이 권한을 가진 주체는 해당 orchestrator가 보관한 모든 워커의 LLM
+    /// 프로바이더 API 키 원문을 획득할 수 있다. 프로비저너처럼 실제로 키를
+    /// 배포해야 하는 주체에게만 부여한다. 저장·삭제 권한
+    /// ([`PermissionKind::WorkerLlmCredentialManage`])과 분리해 둔 이유는,
+    /// 프로비저너 토큰이 유출되더라도 credential을 덮어쓰거나 지울 수는 없게
+    /// 하기 위함이다.
+    #[serde(rename = "worker:llm_credential:export")]
+    WorkerLlmCredentialExport,
+    /// worker LLM credential 저장/회전/삭제
+    /// (`PUT`/`DELETE /v1/workers/:name/credentials...`).
+    ///
+    /// export를 허용하지 않는다 — 평문 열람은
+    /// [`PermissionKind::WorkerLlmCredentialExport`]가 따로 통제한다.
+    #[serde(rename = "worker:llm_credential:manage")]
+    WorkerLlmCredentialManage,
     // 토큰
     #[serde(rename = "token:issue")]
     TokenIssue,
@@ -392,6 +419,9 @@ impl PermissionKind {
             Self::WorkerRegister => "worker:register",
             Self::WorkerDelete => "worker:delete",
             Self::WorkerCredentialManage => "worker:credential:manage",
+            Self::WorkerLlmCredentialRead => "worker:llm_credential:read",
+            Self::WorkerLlmCredentialExport => "worker:llm_credential:export",
+            Self::WorkerLlmCredentialManage => "worker:llm_credential:manage",
             Self::TokenIssue => "token:issue",
             Self::TokenList => "token:list",
             Self::TokenRevoke => "token:revoke",
@@ -422,6 +452,9 @@ impl PermissionKind {
             Self::WorkerRegister,
             Self::WorkerDelete,
             Self::WorkerCredentialManage,
+            Self::WorkerLlmCredentialRead,
+            Self::WorkerLlmCredentialExport,
+            Self::WorkerLlmCredentialManage,
             Self::TokenIssue,
             Self::TokenList,
             Self::TokenRevoke,
@@ -599,6 +632,40 @@ mod tests {
             let s = p.as_str();
             assert_eq!(PermissionKind::from_name(s), Some(p));
         }
+    }
+
+    #[test]
+    fn llm_credential_permissions_are_distinct_from_operational_credential() {
+        // 로드맵 #66: worker operational identity(`fwo_` 토큰) 권한과 LLM
+        // 프로바이더 API 키 권한이 같은 capability로 뭉개지면, 워커 등록용
+        // 토큰을 가진 주체가 모든 워커의 API 키를 꺼낼 수 있게 된다.
+        let names = [
+            PermissionKind::WorkerCredentialManage.as_str(),
+            PermissionKind::WorkerLlmCredentialRead.as_str(),
+            PermissionKind::WorkerLlmCredentialExport.as_str(),
+            PermissionKind::WorkerLlmCredentialManage.as_str(),
+        ];
+        let mut unique = names.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "capability 이름이 중복되면 안 된다"
+        );
+
+        // 기본 역할 중 admin만 평문 export 권한을 갖는다.
+        for role in [BuiltinRole::Operator, BuiltinRole::Viewer] {
+            let perms = role.permissions();
+            assert!(
+                !perms.contains(&PermissionKind::WorkerLlmCredentialExport),
+                "{role:?}에게 LLM credential 평문 export 권한을 주면 안 된다"
+            );
+            assert!(!perms.contains(&PermissionKind::WorkerLlmCredentialManage));
+        }
+        assert!(BuiltinRole::Admin
+            .permissions()
+            .contains(&PermissionKind::WorkerLlmCredentialExport));
     }
 
     #[test]

@@ -15,6 +15,7 @@ use tracing::{debug, info};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use fleet_core::audit::{action, AuditEvent};
 use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 
 use crate::app::{AppState, AuthorizationContext};
@@ -1031,6 +1032,7 @@ fn worker_to_summary(w: &Worker) -> WorkerSummary {
 pub async fn put_worker_credential(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Json(req): Json<PutCredentialRequest>,
 ) -> Result<Json<PutCredentialResponse>, ApiError> {
     // worker 존재 확인.
@@ -1091,6 +1093,25 @@ pub async fn put_worker_credential(
         "worker credential stored/rotated"
     );
 
+    // 변경은 이미 커밋됐으므로 감사 기록 실패로 요청을 되돌릴 수 없다.
+    // export와 달리 여기서는 로그만 남기고 성공을 반환한다.
+    record_credential_audit(
+        &state,
+        ctx.as_deref(),
+        action::WORKER_LLM_CREDENTIAL_PUT,
+        &worker.name,
+        &req.model_id,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(
+            worker = %worker.name,
+            model_id = %req.model_id,
+            error = %e,
+            "failed to record audit event for LLM credential write"
+        );
+    });
+
     Ok(Json(PutCredentialResponse {
         status: "rotated",
         worker_name: worker.name,
@@ -1120,10 +1141,18 @@ pub async fn list_worker_credentials(
 /// `GET /v1/workers/:name/credentials/:model_id/export` — 복호화된 전체 자격 증명.
 ///
 /// **주의**: api_key가 평문으로 반환됨. 프로비저닝 스크립트 전용 엔드포인트.
-/// 운영 환경에서는 bearer 토큰 인증 (또는 CF Access) 하에서만 노출되어야 함.
+///
+/// 접근 통제는 `worker:llm_credential:export` capability가 담당한다
+/// (`required_capability`, 로드맵 #66). 이 capability 매핑이 없던 동안에는
+/// 인증만 통과하면 누구나 모든 워커의 LLM API 키를 평문으로 가져갈 수 있었다.
+///
+/// 감사 기록은 응답 **전에** 남기고, 기록에 실패하면 평문을 반환하지 않는다.
+/// 키가 유출됐을 때 "누가 언제 어떤 키를 가져갔는지"가 회수 범위를 정하는
+/// 유일한 근거이므로, 근거를 남기지 못하면 열람 자체를 허용하지 않는다.
 pub async fn export_worker_credential(
     State(state): State<Arc<AppState>>,
     Path((name, model_id)): Path<(String, String)>,
+    ctx: Option<Extension<AuthorizationContext>>,
 ) -> Result<Json<ExportedCredential>, ApiError> {
     let worker = state
         .store
@@ -1166,6 +1195,24 @@ pub async fn export_worker_credential(
     };
     let grok_config_section = cred.render_grok_config_section();
 
+    record_credential_audit(
+        &state,
+        ctx.as_deref(),
+        action::WORKER_LLM_CREDENTIAL_EXPORT,
+        &stored.worker_name,
+        &stored.model_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(
+            worker = %stored.worker_name,
+            model_id = %stored.model_id,
+            error = %e,
+            "refusing credential export — audit event could not be recorded"
+        );
+        ApiError::Internal("audit log unavailable; credential export refused".into())
+    })?;
+
     debug!(
         worker = %stored.worker_name,
         model_id = %stored.model_id,
@@ -1189,6 +1236,7 @@ pub async fn export_worker_credential(
 pub async fn delete_worker_credential(
     State(state): State<Arc<AppState>>,
     Path((name, model_id)): Path<(String, String)>,
+    ctx: Option<Extension<AuthorizationContext>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let deleted = state
         .store
@@ -1200,11 +1248,68 @@ pub async fn delete_worker_credential(
         )));
     }
     info!(worker = %name, model_id = %model_id, "credential deleted");
+
+    // 삭제는 이미 반영됐다 — 감사 기록 실패로 200을 500으로 바꾸면 호출자에게
+    // "삭제되지 않았다"는 잘못된 신호를 준다. 로그로만 경보한다.
+    record_credential_audit(
+        &state,
+        ctx.as_deref(),
+        action::WORKER_LLM_CREDENTIAL_DELETE,
+        &name,
+        &model_id,
+    )
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(
+            worker = %name,
+            model_id = %model_id,
+            error = %e,
+            "failed to record audit event for LLM credential delete"
+        );
+    });
+
     Ok(Json(serde_json::json!({
         "status": "deleted",
         "worker_name": name,
         "model_id": model_id,
     })))
+}
+
+/// 감사 로그에 남길 행위자 표시 문자열.
+///
+/// 인증 컨텍스트가 없는 경우(개발용 무인증 모드에서 미들웨어가 컨텍스트를
+/// 넣지 못한 경우 등)에도 "누군지 모른다"는 사실 자체를 기록한다. 행위자를
+/// 특정하지 못했다는 이유로 기록을 생략하면, 가장 수상한 접근이 흔적 없이
+/// 사라진다.
+fn audit_actor_label(ctx: Option<&AuthorizationContext>) -> String {
+    match ctx {
+        Some(ctx) => ctx.principal_id.clone(),
+        None => "unattributed".to_string(),
+    }
+}
+
+/// worker LLM credential 관련 감사 이벤트 기록 (로드맵 #66).
+///
+/// **비밀 값을 detail에 넣지 않는다** — 어떤 워커의 어떤 모델인지까지만 남긴다.
+async fn record_credential_audit(
+    state: &AppState,
+    ctx: Option<&AuthorizationContext>,
+    action_name: &str,
+    worker_name: &str,
+    model_id: &str,
+) -> Result<(), fleet_store::StoreError> {
+    let mut detail = serde_json::json!({
+        "worker_name": worker_name,
+        "model_id": model_id,
+    });
+    if let Some(ctx) = ctx {
+        detail["authentication_method"] =
+            serde_json::json!(format!("{:?}", ctx.authentication_method));
+    }
+    let event = AuditEvent::success(audit_actor_label(ctx), action_name)
+        .target("worker_llm_credential", format!("{worker_name}/{model_id}"))
+        .detail(detail);
+    state.store.record_audit_event(&event).await
 }
 
 #[cfg(test)]

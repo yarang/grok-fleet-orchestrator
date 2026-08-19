@@ -72,6 +72,13 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::WorkerRegister => "Register new workers",
         PermissionKind::WorkerDelete => "Delete/deregister workers",
         PermissionKind::WorkerCredentialManage => "Rotate or revoke worker operational credentials",
+        PermissionKind::WorkerLlmCredentialRead => {
+            "List worker LLM credential metadata (no API key)"
+        }
+        PermissionKind::WorkerLlmCredentialExport => {
+            "Export worker LLM provider API keys in plaintext"
+        }
+        PermissionKind::WorkerLlmCredentialManage => "Store or delete worker LLM credentials",
         PermissionKind::TokenIssue => "Issue bootstrap tokens",
         PermissionKind::TokenList => "List bootstrap tokens",
         PermissionKind::TokenRevoke => "Revoke bootstrap tokens",

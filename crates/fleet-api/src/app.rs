@@ -603,11 +603,52 @@ fn normalized_v1_path(path: &str) -> &str {
     }
 }
 
+/// LLM credential 하위 자원(`/workers/{name}/credentials…`)의 route 종류.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmCredentialRoute {
+    /// `/workers/{name}/credentials` — 목록 조회 / 저장.
+    Collection,
+    /// `/workers/{name}/credentials/{model_id}` — 개별 credential.
+    Item,
+    /// `/workers/{name}/credentials/{model_id}/export` — **평문 API 키 반환**.
+    Export,
+}
+
+/// 경로가 LLM credential 하위 자원인지 분류한다.
+///
+/// worker operational credential의 단수형 경로(`/workers/{id}/credential`,
+/// `/workers/{id}/credential/rotate`)와 반드시 구분돼야 한다. 두 자원은 이름만
+/// 비슷할 뿐 완전히 다른 비밀이다 — 전자는 워커가 자신을 인증하는 토큰이고,
+/// 후자는 LLM 프로바이더 API 키다. `strip_prefix("credentials")`는 단수형에
+/// 매칭되지 않으므로 이 구분이 문자열 수준에서 보장된다.
+fn llm_credential_route(path: &str) -> Option<LlmCredentialRoute> {
+    let rest = path.strip_prefix("/workers/")?;
+    let (name, tail) = rest.split_once('/')?;
+    if name.is_empty() {
+        return None;
+    }
+    let tail = tail.strip_prefix("credentials")?;
+    match tail.trim_end_matches('/') {
+        "" => Some(LlmCredentialRoute::Collection),
+        item if item.starts_with('/') && item.ends_with("/export") => {
+            Some(LlmCredentialRoute::Export)
+        }
+        item if item.starts_with('/') => Some(LlmCredentialRoute::Item),
+        // `/credentialsomething` 처럼 route 표면에 없는 형태. capability를
+        // 요구하는 쪽(fail-closed)으로 분류해 둔다.
+        _ => Some(LlmCredentialRoute::Item),
+    }
+}
+
 /// route별 최소 capability 행렬. 경로는 [`normalized_v1_path`] 기준
 /// (`/workers`, `/bootstrap-tokens` …)이다.
 ///
 /// `None`이면 capability 요구가 없는 route다. Worker join은 bootstrap token
 /// 자체가 인증 수단이라 여기서 걸지 않는다.
+///
+/// **행렬에서 빠진 route는 인증만 통과하면 누구나 호출할 수 있다**(로드맵 #58,
+/// #66에서 두 번 발생한 결함). 새 route를 추가할 때는 반드시 여기에 함께
+/// 등록하고, 아래 `capability_matrix_covers_protected_routes` 테스트를 늘린다.
 fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
     let capability = match (method, path) {
         (&Method::GET, "/workers") => PermissionKind::WorkerList,
@@ -621,6 +662,19 @@ fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
             if path.starts_with("/workers/") && path.ends_with("/credential") =>
         {
             PermissionKind::WorkerCredentialManage
+        }
+        // LLM 프로바이더 credential 하위 자원 (로드맵 #66). worker 삭제
+        // (`WorkerDelete`) 매칭보다 **먼저** 판정해야 한다 — 그렇지 않으면
+        // `DELETE /workers/{name}/credentials/{model}`이 worker 삭제 권한으로
+        // 잘못 흡수된다.
+        (&Method::GET, path) if llm_credential_route(path) == Some(LlmCredentialRoute::Export) => {
+            PermissionKind::WorkerLlmCredentialExport
+        }
+        (&Method::GET, path) if llm_credential_route(path).is_some() => {
+            PermissionKind::WorkerLlmCredentialRead
+        }
+        (&Method::PUT, path) | (&Method::DELETE, path) if llm_credential_route(path).is_some() => {
+            PermissionKind::WorkerLlmCredentialManage
         }
         (&Method::DELETE, path) if path.starts_with("/workers/") => PermissionKind::WorkerDelete,
         (&Method::POST, "/bootstrap-tokens") => PermissionKind::TokenIssue,
@@ -943,6 +997,86 @@ mod tests {
         // join은 bootstrap token 자체가 인증 수단.
         assert_eq!(required_capability(&Method::POST, "/workers/join"), None);
         assert_eq!(required_capability(&Method::GET, "/health"), None);
+    }
+
+    // ── LLM credential route capability (로드맵 #66) ─────────────────────
+
+    #[test]
+    fn capability_matrix_covers_llm_credential_routes() {
+        // 이 네 route가 행렬에서 빠져 있던 동안, 인증만 통과하면 누구나
+        // 모든 워커의 LLM 프로바이더 API 키를 평문으로 가져갈 수 있었다.
+        assert_eq!(
+            required_capability(&Method::GET, "/workers/w1/credentials"),
+            Some(PermissionKind::WorkerLlmCredentialRead)
+        );
+        assert_eq!(
+            required_capability(&Method::GET, "/workers/w1/credentials/grok-4/export"),
+            Some(PermissionKind::WorkerLlmCredentialExport)
+        );
+        assert_eq!(
+            required_capability(&Method::PUT, "/workers/w1/credentials"),
+            Some(PermissionKind::WorkerLlmCredentialManage)
+        );
+        assert_eq!(
+            required_capability(&Method::DELETE, "/workers/w1/credentials/grok-4"),
+            Some(PermissionKind::WorkerLlmCredentialManage)
+        );
+        // mount 지점이 남아 있는 형태도 같은 결론이어야 한다.
+        assert_eq!(
+            required_capability(
+                &Method::GET,
+                normalized_v1_path("/v1/workers/w1/credentials/grok-4/export")
+            ),
+            Some(PermissionKind::WorkerLlmCredentialExport)
+        );
+    }
+
+    #[test]
+    fn llm_credential_routes_do_not_collide_with_operational_credential() {
+        // 단수형 `/credential`(worker 자신을 인증하는 `fwo_` 토큰)과
+        // 복수형 `/credentials`(LLM 프로바이더 API 키)는 서로 다른 비밀이다.
+        assert_eq!(llm_credential_route("/workers/w1/credential"), None);
+        assert_eq!(llm_credential_route("/workers/w1/credential/rotate"), None);
+        assert_eq!(llm_credential_route("/workers"), None);
+        assert_eq!(llm_credential_route("/bootstrap-tokens"), None);
+        assert_eq!(
+            llm_credential_route("/workers/w1/credentials"),
+            Some(LlmCredentialRoute::Collection)
+        );
+        assert_eq!(
+            llm_credential_route("/workers/w1/credentials/"),
+            Some(LlmCredentialRoute::Collection)
+        );
+        assert_eq!(
+            llm_credential_route("/workers/w1/credentials/grok-4"),
+            Some(LlmCredentialRoute::Item)
+        );
+        assert_eq!(
+            llm_credential_route("/workers/w1/credentials/grok-4/export"),
+            Some(LlmCredentialRoute::Export)
+        );
+
+        // 단수형은 기존 capability를 그대로 유지한다.
+        assert_eq!(
+            required_capability(&Method::DELETE, "/workers/w1/credential"),
+            Some(PermissionKind::WorkerCredentialManage)
+        );
+        // 복수형 DELETE가 worker 삭제 권한으로 흡수되면 안 된다.
+        assert_ne!(
+            required_capability(&Method::DELETE, "/workers/w1/credentials/grok-4"),
+            Some(PermissionKind::WorkerDelete)
+        );
+    }
+
+    #[test]
+    fn llm_credential_export_is_not_covered_by_manage() {
+        // 평문 export는 저장/삭제 권한과 분리돼 있어야 한다 — 프로비저너
+        // 토큰이 credential을 덮어쓰거나 지울 수 있으면 안 되고, 반대로
+        // 저장 권한만 있는 주체가 키 원문을 읽을 수 있어도 안 된다.
+        assert_ne!(
+            required_capability(&Method::GET, "/workers/w1/credentials/grok-4/export"),
+            required_capability(&Method::PUT, "/workers/w1/credentials")
+        );
     }
 
     // ── CF Access principal/capability (로드맵 #58) ──────────────────────

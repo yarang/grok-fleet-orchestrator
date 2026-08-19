@@ -309,6 +309,10 @@ paths:
         sent in plaintext over this authenticated channel and encrypted at
         rest (AES-256-GCM via `FLEET_MASTER_KEY`). Requires the master key
         to be configured — returns 503 otherwise.
+
+
+        Requires the `worker:llm_credential:manage` capability. Recorded in
+        the audit log as `worker.llm_credential.put`.
       parameters:
         - $ref: "#/components/parameters/WorkerName"
       requestBody:
@@ -334,7 +338,9 @@ paths:
       operationId: listWorkerCredentials
       tags: [credentials]
       summary: List a worker's stored credentials (metadata only)
-      description: Never returns the decrypted `api_key` — see the `/export` endpoint for that.
+      description: >-
+        Never returns the decrypted `api_key` — see the `/export` endpoint
+        for that. Requires the `worker:llm_credential:read` capability.
       parameters:
         - $ref: "#/components/parameters/WorkerName"
       responses:
@@ -354,9 +360,15 @@ paths:
       summary: Export a decrypted credential (provisioning use only)
       description: >-
         Returns the decrypted `api_key` plus a rendered `grok_config_section`
-        TOML snippet for the worker's `~/.grok/config.toml`. Requires bearer
-        auth like every other `/v1` route — there is no additional
-        elevated-permission check.
+        TOML snippet for the worker's `~/.grok/config.toml`.
+
+
+        Requires the dedicated `worker:llm_credential:export` capability —
+        authentication alone is not sufficient, and neither the worker's own
+        operational credential nor `worker:llm_credential:manage` grants it.
+        Every successful export is recorded in the audit log as
+        `worker.llm_credential.export`; if the audit event cannot be
+        recorded the export is refused (500).
       parameters:
         - $ref: "#/components/parameters/WorkerName"
         - $ref: "#/components/parameters/ModelId"
@@ -367,6 +379,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExportedCredential"
+        "403":
+          description: Caller lacks the `worker:llm_credential:export` capability
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -375,6 +389,10 @@ paths:
       operationId: deleteWorkerCredential
       tags: [credentials]
       summary: Remove a stored credential
+      description: >-
+        Requires the `worker:llm_credential:manage` capability — the
+        `worker:delete` capability does not cover this route. Recorded in the
+        audit log as `worker.llm_credential.delete`.
       parameters:
         - $ref: "#/components/parameters/WorkerName"
         - $ref: "#/components/parameters/ModelId"
