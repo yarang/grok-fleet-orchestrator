@@ -94,14 +94,8 @@ workers:
   # ═══════════════════════════════════════════════════════════════════════
   # 3. OCI - ajou 계정
   # ═══════════════════════════════════════════════════════════════════════
-  - host: oci-ajou-arm1.fcoinfup.com
-    name: oci-ajou-arm1
-    ssh_key: ~/CERT/login_oci3
-    labels:
-      arch: arm64
-      group: ajou
-      cloud: oci
-
+  # oci-ajou-arm1은 2026-08-19 인스턴스 삭제(중지 아님 — 검토 후 종료 결정)로
+  # 제거됨. arm2는 swuniv-chatbot(RAG+Gemini, nginx 80/443 공개)을 서비스 중이라 유지.
   - host: oci-ajou-arm2.fcoinfup.com
     name: oci-ajou-arm2
     ssh_key: ~/CERT/login_oci3
