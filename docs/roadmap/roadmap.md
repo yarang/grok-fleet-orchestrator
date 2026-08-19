@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/roadmap/roadmap.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-19"
 last_verified_commit: "working-tree"
 owners: ["planning"]
 ---
@@ -67,6 +67,7 @@ P1은 프로덕션 보안과 실행 신뢰성 게이트다. P2 기능 확장은 
 | #63 | Cold Standby fencing | P1 · 설계 확정·구현 대기 | [권한과 장애 전환](../architecture/control-plane-authority-and-failover.md) | 이중 lease 거부, lease 상실 fail-closed, 이전 epoch 거부, 수동 승격 E2E |
 | #64 | Agent 실행 격리 | P1 · 설계 확정·구현 대기 | [실행 격리](../architecture/agents/execution-isolation.md) | 다른 Agent의 process·workspace·credential 접근 차단과 wipe 실패 안전성 테스트 |
 | #65 | 재현 가능한 Skill loading | P2 · 설계 확정·구현 대기 | [Harness composition](../architecture/agents/harness-composition.md) | revision 불일치 fail-closed, manifest 기록, 재실행 입력 동일성 테스트 |
+| #71 | Task dispatch credential precondition | P1 · 설계 확정·구현 대기 | 이 행 (설계 요약: `Task.resolved_model`이 `Some`인 경우, worker 후보 선택 단계에서 `Store::get_worker_credential(worker.name, model)`로 해당 worker가 그 model의 활성 credential을 가졌는지 확인한다. 없는 worker는 후보에서 제외 — label 필터와 동일한 자리에 합류시킨다. 후보가 전부 제외되면 기존 `DispatchError::NoWorker` 경로(재시도 → Reconciler 소진 시 dead-letter)를 그대로 재사용하되, dead-letter 시 `FailureKind`에 신설한 `CredentialMissing`을 붙여 원인을 구분한다. `model`이 없는 task는 이 검사를 건너뛴다 — 어떤 credential이 필요한지 알 수 없기 때문이다.) | credential 없는 worker로 model 지정 task가 라우팅되지 않음, 재시도 소진 뒤 `FailureKind::CredentialMissing`으로 dead-letter, 정상/부분 provisioned fleet에서의 정상 dispatch 회귀 테스트 |
 
 ## 보존 항목 레지스트리 (#1-#47)
 
