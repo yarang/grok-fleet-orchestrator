@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 
 use fleet_api::{build_app, AppState};
+use fleet_core::PermissionKind;
 use fleet_store::Store;
 
 use fleet_store::mem::MemStore;
@@ -226,6 +227,174 @@ async fn cf_access_rejects_malformed_jwt() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 401);
+}
+
+// ── CF Access principal → capability authorization (로드맵 #58) ─────────
+
+/// CF Access 전용 배포에서 endpoint capability 검사가 실제로 평가되는지
+/// 확인하기 위한 서버. principal(JWT email)별 capability를 명시한다.
+async fn spawn_with_cf_capabilities(
+    aud: &str,
+    mapping: Vec<(String, Vec<PermissionKind>)>,
+) -> std::net::SocketAddr {
+    let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+    let state = Arc::new(
+        AppState::new(store)
+            .with_cf_audience(aud)
+            .with_cf_principal_capabilities(mapping),
+    );
+    let app = build_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+/// CF JWT를 붙여 GET 요청.
+async fn cf_get(addr: std::net::SocketAddr, path: &str, jwt: &str) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .get(format!("http://{addr}{path}"))
+        .header("cf-access-jwt-assertion", jwt)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// CF JWT를 붙여 POST 요청.
+async fn cf_post(
+    addr: std::net::SocketAddr,
+    path: &str,
+    jwt: &str,
+    body: serde_json::Value,
+) -> reqwest::StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://{addr}{path}"))
+        .header("cf-access-jwt-assertion", jwt)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// 로드맵 #58 — CF Access 세션도 `authorize_http_endpoint`를 통과해야 한다.
+///
+/// 이전에는 CF 전용 배포(`valid_tokens == None` + `cf_audience` 설정)에서
+/// auth_middleware가 `AuthorizationContext`를 만들지 않고 그대로 통과시켜
+/// capability 검사가 한 번도 수행되지 않았다.
+#[tokio::test]
+async fn cf_access_session_is_subject_to_endpoint_capability_check() {
+    let iss = "https://test.cloudflareaccess.com";
+    fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
+
+    // worker 목록 조회만 허용된 principal.
+    let addr = spawn_with_cf_capabilities(
+        "cap-aud",
+        vec![(
+            "reader@example.com".to_string(),
+            vec![PermissionKind::WorkerList],
+        )],
+    )
+    .await;
+    let jwt = make_jwt(iss, "cap-aud", unix_now() + 3600, Some("reader@example.com"));
+
+    // 허용된 capability는 통과.
+    assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 200);
+
+    // 허용되지 않은 capability는 403 — 401(인증 실패)이 아니라 인가 실패여야
+    // 한다. 즉 principal은 인식됐고 capability만 부족한 상태.
+    assert_eq!(
+        cf_post(
+            addr,
+            "/v1/bootstrap-tokens",
+            &jwt,
+            serde_json::json!({"prefix": "fleet", "bytes": 16}),
+        )
+        .await,
+        403
+    );
+}
+
+/// principal_id는 CF JWT의 `email` 클레임이다. 매핑 조회가 그 이메일로
+/// 이뤄지므로, 이메일이 다르면 권한도 달라진다.
+#[tokio::test]
+async fn cf_access_principal_is_the_jwt_email() {
+    let iss = "https://test.cloudflareaccess.com";
+    fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
+
+    let addr = spawn_with_cf_capabilities(
+        "principal-aud",
+        vec![(
+            "ops@example.com".to_string(),
+            vec![PermissionKind::WorkerList],
+        )],
+    )
+    .await;
+
+    // 매핑에 있는 이메일 → 통과.
+    let allowed = make_jwt(
+        iss,
+        "principal-aud",
+        unix_now() + 3600,
+        Some("ops@example.com"),
+    );
+    assert_eq!(cf_get(addr, "/v1/workers", &allowed).await, 200);
+
+    // 대소문자만 다른 같은 이메일 → 동일하게 통과 (정규화).
+    let mixed_case = make_jwt(
+        iss,
+        "principal-aud",
+        unix_now() + 3600,
+        Some("OPS@Example.com"),
+    );
+    assert_eq!(cf_get(addr, "/v1/workers", &mixed_case).await, 200);
+
+    // 매핑에 없는 이메일 → 인증은 됐지만 capability 없음(403).
+    let stranger = make_jwt(
+        iss,
+        "principal-aud",
+        unix_now() + 3600,
+        Some("stranger@example.com"),
+    );
+    assert_eq!(cf_get(addr, "/v1/workers", &stranger).await, 403);
+
+    // email 클레임이 없는 세션도 매핑에 없으므로 403.
+    let anonymous = make_jwt(iss, "principal-aud", unix_now() + 3600, None);
+    assert_eq!(cf_get(addr, "/v1/workers", &anonymous).await, 403);
+}
+
+/// principal capability 매핑을 설정하지 않은 배포는 기존 동작(전권)을 유지한다.
+///
+/// **임시 정책이며 최소 권한이 아니다** — cf. `app::cf_access_capabilities`
+/// 주석과 docs/roadmap/roadmap.md의 #58 행.
+#[tokio::test]
+async fn cf_access_without_capability_mapping_keeps_full_access() {
+    let iss = "https://test.cloudflareaccess.com";
+    fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
+
+    let state = spawn_with_cf_audience("legacy-aud").await;
+    let app = build_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let jwt = make_jwt(iss, "legacy-aud", unix_now() + 3600, Some("any@example.com"));
+    assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 200);
+    assert_eq!(
+        cf_post(
+            addr,
+            "/v1/bootstrap-tokens",
+            &jwt,
+            serde_json::json!({"prefix": "fleet", "bytes": 16}),
+        )
+        .await,
+        200
+    );
 }
 
 #[tokio::test]

@@ -3,6 +3,7 @@
 //! `AppState`는 모든 핸들러가 공유하는 의존성(Store, 인증 설정 등)을 캡슐화.
 //! `build_app`는 라우터를 조립하고, `run_http_server`는 바인딩 후 serve.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -51,6 +52,10 @@ pub enum AuthenticationMethod {
     DevelopmentNoAuth,
     /// join에서 발급된 worker operational credential(`fwo_...`)로 인증됨.
     WorkerOperational,
+    /// Cloudflare Access가 서명 검증한 세션(`Cf-Access-Jwt-Assertion`)으로 인증됨.
+    ///
+    /// principal은 JWT의 `email` 클레임이다.
+    CloudflareAccess,
 }
 
 /// 환경 manifest에 정의하는 bearer credential. token은 로그나 API 응답에 기록하지 않는다.
@@ -77,6 +82,12 @@ pub struct AppState {
     /// Cloudflare Access Application AUD (Phase 4).
     /// 설정된 경우 CF-Access-Jwt-Assertion 헤더의 aud 클레임과 비교.
     pub cf_audience: Option<String>,
+    /// CF Access principal(JWT `email` 클레임) → capability 매핑.
+    ///
+    /// 키는 소문자 이메일. `None`이면 CF Access를 통과한 모든 세션이
+    /// [`PermissionKind::all`]을 갖는다 — 아래 [`cf_access_capabilities`]의
+    /// 임시 정책 주석 참조.
+    pub cf_principal_capabilities: Option<Arc<HashMap<String, Vec<PermissionKind>>>>,
     /// Credentials 암호화용 마스터 키 (Phase 8.6).
     /// `None`이면 credentials API 엔드포인트가 503 반환.
     pub master_key: Option<Arc<MasterKey>>,
@@ -103,6 +114,7 @@ impl AppState {
             allow_no_auth: true,
             valid_tokens: None,
             cf_audience: None,
+            cf_principal_capabilities: None,
             master_key: None,
             cors_allowed_origins: Vec::new(),
             http_metrics: Arc::new(crate::metrics::HttpMetrics::new()),
@@ -131,6 +143,24 @@ impl AppState {
     pub fn with_cf_audience(mut self, aud: impl Into<String>) -> Self {
         self.cf_audience = Some(aud.into());
         self.allow_no_auth = false;
+        self
+    }
+
+    /// CF Access principal별 capability allow-list 설정 (로드맵 #58).
+    ///
+    /// 이메일은 대소문자를 구분하지 않도록 소문자로 정규화해서 보관한다.
+    /// 매핑을 설정하면 **열거되지 않은 이메일은 capability가 없다**
+    /// (fail-closed). 매핑을 아예 설정하지 않은 배포는 기존 동작대로
+    /// 전체 capability를 받는다 — [`cf_access_capabilities`] 참조.
+    pub fn with_cf_principal_capabilities(
+        mut self,
+        capabilities: impl IntoIterator<Item = (String, Vec<PermissionKind>)>,
+    ) -> Self {
+        let map: HashMap<String, Vec<PermissionKind>> = capabilities
+            .into_iter()
+            .map(|(email, caps)| (email.trim().to_ascii_lowercase(), caps))
+            .collect();
+        self.cf_principal_capabilities = Some(Arc::new(map));
         self
     }
 
@@ -223,7 +253,24 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest("/workers", api_routes)
         .nest("/bootstrap-tokens", token_routes);
 
-    // Cloudflare Access 미들웨어 (가장 바깥).
+    // 인증 미들웨어 순서 (로드맵 #58).
+    //
+    // tower/axum에서 나중에 붙인 `layer`가 더 바깥이라 **먼저** 실행된다.
+    // 따라서 아래 순서는 실행 순서로 "CF Access → auth_middleware"가 된다.
+    //
+    // 이 순서는 필수다: CF Access 미들웨어가 JWT 서명을 검증한 뒤
+    // `VerifiedUser`를 request extension에 넣어야, `auth_middleware`가 그
+    // principal로 `AuthorizationContext`를 구성하고 capability를 강제할 수
+    // 있다. 반대 순서였을 때는 CF Access 전용 배포에서 auth_middleware가
+    // principal을 전혀 볼 수 없어 `authorize_http_endpoint`가 한 번도
+    // 호출되지 않았다.
+    let state_for_auth = state.clone();
+    let v1 = v1.layer(middleware::from_fn(move |req, next| {
+        let state = state_for_auth.clone();
+        async move { auth_middleware(state, req, next).await }
+    }));
+
+    // Cloudflare Access 미들웨어 (가장 바깥 = 가장 먼저 실행).
     // 설정된 경우 모든 요청이 CF-Access-Jwt-Assertion 검증을 받음.
     let state_for_cf = state.clone();
     let v1 = if state.cf_audience.is_some() {
@@ -234,13 +281,6 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     } else {
         v1
     };
-
-    // Bearer token 인증 미들웨어 (CF Access 뒤).
-    let state_for_auth = state.clone();
-    let v1 = v1.layer(middleware::from_fn(move |req, next| {
-        let state = state_for_auth.clone();
-        async move { auth_middleware(state, req, next).await }
-    }));
 
     Router::new()
         .nest("/v1", v1)
@@ -401,7 +441,7 @@ async fn auth_middleware(
     }
 
     // health 엔드포인트는 인증 provider 구성 여부와 관계없이 LB 프로브에 허용한다.
-    if req.uri().path() == "/v1/health" {
+    if normalized_v1_path(req.uri().path()) == "/health" {
         return Ok(next.run(req).await);
     }
 
@@ -436,13 +476,36 @@ async fn auth_middleware(
     }
 
     let Some(tokens) = &state.valid_tokens else {
-        // CF Access 전용 배포는 별도 middleware가 인증을 담당한다. 이 경로의
-        // principal extraction은 CF claims → AuthorizationContext 단계에서 추가한다.
+        // CF Access 전용 배포. 서명 검증 자체는 바깥의 CF middleware가 이미
+        // 끝냈고, 여기서는 그 결과(VerifiedUser)를 principal로 승격시켜
+        // capability를 강제한다 (로드맵 #58).
         if state
             .cf_audience
             .as_deref()
             .is_some_and(|audience| !audience.trim().is_empty())
         {
+            let Some(user) = req
+                .extensions()
+                .get::<crate::cloudflare::VerifiedUser>()
+                .cloned()
+            else {
+                // CF middleware가 통과시켰는데 principal이 없다면 미들웨어
+                // 구성이 깨진 것이다. 무인증 통과 대신 fail-closed.
+                tracing::error!(
+                    path = %req.uri().path(),
+                    "cf_audience is configured but no verified CF Access principal was attached"
+                );
+                return Err(StatusCode::UNAUTHORIZED);
+            };
+            let capabilities = cf_access_capabilities(&state, &user.email);
+            let mut req = req;
+            req.extensions_mut().insert(AuthorizationContext {
+                principal_id: cf_access_principal_id(&user),
+                authentication_method: AuthenticationMethod::CloudflareAccess,
+                capabilities,
+                worker_id: None,
+            });
+            authorize_http_endpoint(&req)?;
             return Ok(next.run(req).await);
         }
         tracing::error!(path = %req.uri().path(), "protected API has no authentication provider");
@@ -484,35 +547,101 @@ async fn auth_middleware(
     }
 }
 
-/// 현재 `/v1` route 표면의 최소 capability 행렬. 등록되지 않은 보호 route는
-/// fail-closed 한다. Worker self identity와 Project scope는 후속 identity 단계에서 추가한다.
-fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
-    let path = req.uri().path();
-    if path == "/v1/health" {
-        return Ok(());
+/// CF Access 세션의 principal 식별자.
+///
+/// `email` 클레임이 있으면 그대로 쓴다(감사 로그와 향후 매핑의 기준값).
+/// service token처럼 email이 없는 세션은 개별 주체를 특정할 수 없으므로
+/// audience 기반 식별자를 부여해 최소한 사람 계정과는 구분되게 한다.
+fn cf_access_principal_id(user: &crate::cloudflare::VerifiedUser) -> String {
+    if user.email.trim().is_empty() {
+        format!("cf-access:aud:{}", user.audience)
+    } else {
+        user.email.clone()
     }
-    let required = match (req.method(), path) {
-        (&Method::GET, "/v1/workers") => PermissionKind::WorkerList,
-        (&Method::POST, "/v1/workers/register") | (&Method::POST, "/v1/workers/heartbeat") => {
+}
+
+/// CF Access principal에게 부여할 capability.
+///
+/// ## 임시 정책 — least privilege 아님
+///
+/// `cf_principal_capabilities`가 설정되지 않은 배포에서는 CF Access를 통과한
+/// 모든 세션이 [`PermissionKind::all`]을 받는다. 이는 CF Access 전용 배포가
+/// 지금까지 capability 검사를 아예 거치지 않던 동작과의 호환성을 위한
+/// **한시적** 기본값이며, 최소 권한 원칙을 만족하지 않는다. CF Access
+/// application 정책이 곧 유일한 접근 통제이므로, 그 정책이 넓게 열려 있으면
+/// 통과한 누구나 토큰 발급·워커 삭제까지 수행할 수 있다.
+///
+/// 후속 작업(#66 / #58 잔여)에서 principal→role 매핑을 정본 설정(manifest)으로
+/// 옮기고 이 기본값을 제거해야 한다. 잔여 범위는 docs/roadmap/roadmap.md의
+/// #58 행에 기록돼 있다.
+///
+/// 매핑이 설정된 경우에는 열거되지 않은 이메일에 capability를 주지 않는다
+/// (fail-closed). 매핑을 명시한 운영자의 의도는 "여기 적힌 principal만
+/// 권한을 갖는다"이지, "적지 않으면 전권"이 아니다.
+fn cf_access_capabilities(state: &AppState, email: &str) -> Vec<PermissionKind> {
+    match state.cf_principal_capabilities.as_ref() {
+        None => PermissionKind::all().to_vec(),
+        Some(map) => map
+            .get(email.trim().to_ascii_lowercase().as_str())
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+/// `/v1` 하위 경로를 mount 지점과 무관한 형태로 정규화한다.
+///
+/// axum `nest`는 하위 라우터로 요청을 넘기기 전에 요청 URI에서 prefix를
+/// 제거한다. `/v1` 라우터에 붙인 미들웨어는 따라서 `/v1/workers`가 아니라
+/// `/workers`를 본다. 이 사실을 놓치면 capability 행렬이 어떤 경로와도
+/// 매칭되지 않아 **모든 요청이 검사 없이 통과**한다(로드맵 #58에서 발견).
+///
+/// mount 지점이 바뀌어도 안전하도록 두 형태를 모두 같은 값으로 접는다.
+fn normalized_v1_path(path: &str) -> &str {
+    match path.strip_prefix("/v1") {
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => path,
+    }
+}
+
+/// route별 최소 capability 행렬. 경로는 [`normalized_v1_path`] 기준
+/// (`/workers`, `/bootstrap-tokens` …)이다.
+///
+/// `None`이면 capability 요구가 없는 route다. Worker join은 bootstrap token
+/// 자체가 인증 수단이라 여기서 걸지 않는다.
+fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
+    let capability = match (method, path) {
+        (&Method::GET, "/workers") => PermissionKind::WorkerList,
+        (&Method::POST, "/workers/register") | (&Method::POST, "/workers/heartbeat") => {
             PermissionKind::WorkerRegister
         }
         (&Method::POST, path) if path.ends_with("/credential/rotate") => {
             PermissionKind::WorkerCredentialManage
         }
         (&Method::DELETE, path)
-            if path.starts_with("/v1/workers/") && path.ends_with("/credential") =>
+            if path.starts_with("/workers/") && path.ends_with("/credential") =>
         {
             PermissionKind::WorkerCredentialManage
         }
-        (&Method::DELETE, path) if path.starts_with("/v1/workers/") => PermissionKind::WorkerDelete,
-        (&Method::POST, "/v1/bootstrap-tokens") => PermissionKind::TokenIssue,
-        (&Method::GET, "/v1/bootstrap-tokens") => PermissionKind::TokenList,
-        (&Method::DELETE, path) if path.starts_with("/v1/bootstrap-tokens/") => {
+        (&Method::DELETE, path) if path.starts_with("/workers/") => PermissionKind::WorkerDelete,
+        (&Method::POST, "/bootstrap-tokens") => PermissionKind::TokenIssue,
+        (&Method::GET, "/bootstrap-tokens") => PermissionKind::TokenList,
+        (&Method::DELETE, path) if path.starts_with("/bootstrap-tokens/") => {
             PermissionKind::TokenRevoke
         }
-        // Worker join은 bootstrap token을 자체 인증 수단으로 사용한다. 이 route의 bearer
-        // bypass/worker identity 전환은 #60에서 별도로 분리한다.
-        _ => return Ok(()),
+        _ => return None,
+    };
+    Some(capability)
+}
+
+/// 현재 `/v1` route 표면의 최소 capability 행렬을 강제한다. Worker self
+/// identity와 Project scope는 후속 identity 단계에서 추가한다.
+fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
+    let path = normalized_v1_path(req.uri().path());
+    if path == "/health" {
+        return Ok(());
+    }
+    let Some(required) = required_capability(req.method(), path) else {
+        return Ok(());
     };
     let authorized = req
         .extensions()
@@ -744,6 +873,159 @@ mod tests {
         assert_eq!(call(Some("good-token ")).await, StatusCode::UNAUTHORIZED);
         assert_eq!(call(Some("")).await, StatusCode::UNAUTHORIZED);
         assert_eq!(call(None).await, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── capability 행렬 경로 정규화 (로드맵 #58) ─────────────────────────
+
+    #[test]
+    fn normalized_path_folds_mounted_and_stripped_forms() {
+        // axum nest가 prefix를 제거한 형태(미들웨어가 실제로 보는 값).
+        assert_eq!(normalized_v1_path("/workers"), "/workers");
+        // 마운트 지점이 남아 있는 형태.
+        assert_eq!(normalized_v1_path("/v1/workers"), "/workers");
+        assert_eq!(normalized_v1_path("/v1/health"), "/health");
+        // `/v1`으로 시작하지만 경계가 아닌 경로는 건드리지 않는다.
+        assert_eq!(normalized_v1_path("/v1beta/workers"), "/v1beta/workers");
+    }
+
+    #[test]
+    fn capability_matrix_matches_both_path_forms() {
+        for (mounted, stripped) in [
+            ("/v1/workers", "/workers"),
+            ("/v1/bootstrap-tokens", "/bootstrap-tokens"),
+        ] {
+            assert_eq!(
+                required_capability(&Method::GET, normalized_v1_path(mounted)),
+                required_capability(&Method::GET, stripped),
+                "path form must not change the required capability"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_matrix_covers_protected_routes() {
+        assert_eq!(
+            required_capability(&Method::GET, "/workers"),
+            Some(PermissionKind::WorkerList)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/workers/register"),
+            Some(PermissionKind::WorkerRegister)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/workers/heartbeat"),
+            Some(PermissionKind::WorkerRegister)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/workers/abc/credential/rotate"),
+            Some(PermissionKind::WorkerCredentialManage)
+        );
+        assert_eq!(
+            required_capability(&Method::DELETE, "/workers/abc/credential"),
+            Some(PermissionKind::WorkerCredentialManage)
+        );
+        assert_eq!(
+            required_capability(&Method::DELETE, "/workers/abc"),
+            Some(PermissionKind::WorkerDelete)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/bootstrap-tokens"),
+            Some(PermissionKind::TokenIssue)
+        );
+        assert_eq!(
+            required_capability(&Method::GET, "/bootstrap-tokens"),
+            Some(PermissionKind::TokenList)
+        );
+        assert_eq!(
+            required_capability(&Method::DELETE, "/bootstrap-tokens/bt_x"),
+            Some(PermissionKind::TokenRevoke)
+        );
+        // join은 bootstrap token 자체가 인증 수단.
+        assert_eq!(required_capability(&Method::POST, "/workers/join"), None);
+        assert_eq!(required_capability(&Method::GET, "/health"), None);
+    }
+
+    // ── CF Access principal/capability (로드맵 #58) ──────────────────────
+
+    fn verified_user(email: &str) -> crate::cloudflare::VerifiedUser {
+        crate::cloudflare::VerifiedUser {
+            email: email.to_string(),
+            audience: "aud-123".to_string(),
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn cf_principal_id_is_the_jwt_email() {
+        assert_eq!(
+            cf_access_principal_id(&verified_user("ops@example.com")),
+            "ops@example.com"
+        );
+    }
+
+    #[test]
+    fn cf_principal_id_falls_back_to_audience_when_email_missing() {
+        // service token 등 email 클레임이 없는 세션.
+        assert_eq!(
+            cf_access_principal_id(&verified_user("")),
+            "cf-access:aud:aud-123"
+        );
+    }
+
+    #[test]
+    fn cf_capabilities_default_to_all_when_unmapped_deployment() {
+        // 임시 정책: 매핑을 설정하지 않은 배포는 기존 동작(전권)을 유지한다.
+        let state = AppState::new(MemStore::new_arc()).with_cf_audience("aud-123");
+        assert_eq!(
+            cf_access_capabilities(&state, "ops@example.com"),
+            PermissionKind::all().to_vec()
+        );
+    }
+
+    #[test]
+    fn cf_capabilities_use_mapping_case_insensitively() {
+        let state = AppState::new(MemStore::new_arc())
+            .with_cf_audience("aud-123")
+            .with_cf_principal_capabilities([(
+                "Ops@Example.com".to_string(),
+                vec![PermissionKind::WorkerList],
+            )]);
+        assert_eq!(
+            cf_access_capabilities(&state, "OPS@example.com "),
+            vec![PermissionKind::WorkerList]
+        );
+    }
+
+    #[test]
+    fn cf_capabilities_are_empty_for_principal_missing_from_mapping() {
+        // 매핑이 설정되면 열거되지 않은 principal은 fail-closed.
+        let state = AppState::new(MemStore::new_arc())
+            .with_cf_audience("aud-123")
+            .with_cf_principal_capabilities([(
+                "ops@example.com".to_string(),
+                vec![PermissionKind::WorkerList],
+            )]);
+        assert!(cf_access_capabilities(&state, "stranger@example.com").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cf_only_deployment_without_verified_principal_is_rejected() {
+        use tower::ServiceExt;
+        // CF middleware가 붙지 않은(=VerifiedUser가 없는) 상태를 강제로 만든 뒤
+        // auth_middleware가 무인증 통과 대신 401을 내는지 확인.
+        let mut state = AppState::new(MemStore::new_arc());
+        state.allow_no_auth = false;
+        state.cf_audience = Some("aud-123".into());
+        // build_app이 CF 미들웨어를 붙이지 못하도록 라우터를 직접 구성하는 대신,
+        // 여기서는 CF JWT 없이 요청한다. CF 미들웨어가 401로 막아야 하고,
+        // 설령 통과하더라도 auth_middleware가 principal 부재로 401을 낸다.
+        let app = build_app(Arc::new(state));
+        let req = axum::http::Request::builder()
+            .uri("/v1/workers")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

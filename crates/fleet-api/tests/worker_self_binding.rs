@@ -146,3 +146,64 @@ async fn deregister_self_succeeds_but_deregistering_other_worker_is_forbidden() 
         .unwrap();
     assert_eq!(resp.status(), 200, "self deregister should succeed");
 }
+
+/// Worker operational credential은 자기 자신의 등록/해제 권한만 가진다
+/// (`WorkerRegister` + `WorkerDelete`). 제어평면 관리 endpoint는 capability
+/// 밖이므로 403이어야 한다.
+///
+/// 로드맵 #58 — 이전에는 capability 행렬이 `/v1/...` 경로로 매칭을 시도했지만
+/// axum `nest`가 prefix를 제거한 뒤라 어떤 route와도 매칭되지 않았고, 그래서
+/// 워커 자격증명으로 bootstrap token 발급·회수까지 가능했다(권한 상승).
+#[tokio::test]
+async fn worker_credential_cannot_reach_control_plane_endpoints() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let (_worker_id, token) = seed_worker_with_credential(&store, "scoped-worker").await;
+    let url = spawn_server(store).await;
+    let client = reqwest::Client::new();
+
+    // bootstrap token 발급 — TokenIssue capability 없음.
+    let resp = client
+        .post(format!("{url}/v1/bootstrap-tokens"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"prefix": "fleet", "bytes": 16}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "worker credential must not be able to issue bootstrap tokens"
+    );
+
+    // bootstrap token 목록 — TokenList capability 없음.
+    let resp = client
+        .get(format!("{url}/v1/bootstrap-tokens"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "worker credential must not list tokens");
+
+    // worker 목록 — WorkerList capability 없음.
+    let resp = client
+        .get(format!("{url}/v1/workers"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "worker credential must not list workers");
+
+    // 다른 워커의 credential rotate — WorkerCredentialManage capability 없음.
+    let resp = client
+        .post(format!("{url}/v1/workers/{_worker_id}/credential/rotate"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "worker credential must not manage operational credentials"
+    );
+}
