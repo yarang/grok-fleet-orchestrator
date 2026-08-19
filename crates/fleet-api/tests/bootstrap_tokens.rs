@@ -17,7 +17,7 @@ use fleet_core::{
     BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
     Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
-use fleet_store::{Store, StoreError};
+use fleet_store::{Store, StoreError, WorkerOperationalCredential};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -109,7 +109,7 @@ async fn create_token_persists_to_store() {
 
     let tokens = store.list_bootstrap_tokens().await.unwrap();
     assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].token, token);
+    assert_eq!(tokens[0].token_digest, BootstrapToken::digest_for(token));
     assert_eq!(tokens[0].max_uses, 3);
     assert_eq!(tokens[0].use_count, 0);
 }
@@ -227,7 +227,7 @@ async fn join_with_exhausted_token_returns_401() {
     // 직접 소비된 상태로 시드.
     store
         .create_bootstrap_token(&BootstrapToken {
-            token: "used-up".into(),
+            token_digest: BootstrapToken::digest_for("used-up"),
             created_at: Utc::now(),
             created_by: None,
             expires_at: None,
@@ -257,7 +257,7 @@ async fn join_with_expired_token_returns_401() {
     let past = Utc::now() - chrono::Duration::seconds(3600);
     store
         .create_bootstrap_token(&BootstrapToken {
-            token: "expired".into(),
+            token_digest: BootstrapToken::digest_for("expired"),
             created_at: Utc::now(),
             created_by: None,
             expires_at: Some(past),
@@ -331,7 +331,8 @@ async fn join_response_config_toml_contains_required_fields() {
     let toml = json["worker_config_toml"].as_str().unwrap();
     assert!(toml.contains("name = \"w1\""));
     assert!(toml.contains("existing_worker_id = "));
-    assert!(toml.contains("bootstrap_token = \"tok\""));
+    assert!(toml.contains("operational_token = \"fwo_"));
+    assert!(!toml.contains("bootstrap_token"));
     assert!(toml.contains("secret = \"sekret\""));
     assert!(toml.contains("bind_addr = \"host:2419\""));
     assert!(toml.contains("max_concurrent_tasks = 8"));
@@ -380,7 +381,7 @@ async fn multi_use_token_supports_multiple_joins() {
 async fn seed_token(store: &Arc<dyn Store>, token: &str, max_uses: u32) {
     store
         .create_bootstrap_token(&BootstrapToken {
-            token: token.into(),
+            token_digest: BootstrapToken::digest_for(token),
             created_at: Utc::now(),
             created_by: Some("test".into()),
             expires_at: None,
@@ -403,6 +404,7 @@ fn make_store() -> Arc<dyn Store> {
 struct BsStore {
     workers: Mutex<HashMap<WorkerId, Worker>>,
     tokens: Mutex<HashMap<String, BootstrapToken>>,
+    operational_credentials: Mutex<HashMap<String, WorkerOperationalCredential>>,
     events: Mutex<Vec<EventEntry>>,
 }
 
@@ -482,15 +484,16 @@ impl Store for BsStore {
     }
     async fn create_bootstrap_token(&self, t: &BootstrapToken) -> Result<(), StoreError> {
         let mut tokens = self.tokens.lock().unwrap();
-        if tokens.contains_key(&t.token) {
+        if tokens.contains_key(&t.token_digest) {
             return Err(StoreError::Conflict("exists".into()));
         }
-        tokens.insert(t.token.clone(), t.clone());
+        tokens.insert(t.token_digest.clone(), t.clone());
         Ok(())
     }
     async fn consume_bootstrap_token(&self, token: &str, used_by: &str) -> Result<(), StoreError> {
         let mut tokens = self.tokens.lock().unwrap();
-        let entry = tokens.get_mut(token).ok_or_else(|| {
+        let token_digest = BootstrapToken::digest_for(token);
+        let entry = tokens.get_mut(&token_digest).ok_or_else(|| {
             StoreError::BootstrapTokenInvalid(format!("token not found: {token}"))
         })?;
         if !entry.is_usable() {
@@ -506,8 +509,29 @@ impl Store for BsStore {
     async fn list_bootstrap_tokens(&self) -> Result<Vec<BootstrapToken>, StoreError> {
         Ok(self.tokens.lock().unwrap().values().cloned().collect())
     }
-    async fn revoke_bootstrap_token(&self, token: &str) -> Result<bool, StoreError> {
-        Ok(self.tokens.lock().unwrap().remove(token).is_some())
+    async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
+        Ok(self.tokens.lock().unwrap().remove(token_digest).is_some())
+    }
+    async fn upsert_worker_operational_credential(
+        &self,
+        credential: &WorkerOperationalCredential,
+    ) -> Result<(), StoreError> {
+        self.operational_credentials
+            .lock()
+            .unwrap()
+            .insert(credential.credential_digest.clone(), credential.clone());
+        Ok(())
+    }
+    async fn find_active_worker_operational_credential(
+        &self,
+        credential_digest: &str,
+    ) -> Result<Option<WorkerOperationalCredential>, StoreError> {
+        Ok(self
+            .operational_credentials
+            .lock()
+            .unwrap()
+            .get(credential_digest)
+            .cloned())
     }
     async fn upsert_worker_credential(
         &self,

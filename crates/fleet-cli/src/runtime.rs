@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use fleet_api::{run_http_server, AppState};
+use fleet_api::{run_http_server, ApiTokenCredential, AppState};
 use fleet_core::{
     CircuitBreakerConfig, TaskFilter, TaskId, TaskStatus, TaskStatusFilter, WorkerFilter,
     WorkerStatus,
@@ -409,6 +409,17 @@ pub async fn run_serve(
             .parse()
             .with_context(|| format!("invalid --http-bind address: {bind_str}"))?;
 
+        let scoped_tokens = api_tokens
+            .map(parse_scoped_api_tokens)
+            .transpose()?;
+        let has_bearer_tokens = scoped_tokens.as_ref().is_some_and(|tokens| !tokens.is_empty());
+        let has_cf_access = cf_audience.is_some_and(|aud| !aud.trim().is_empty());
+        if !bind.ip().is_loopback() && !has_bearer_tokens && !has_cf_access {
+            return Err(anyhow!(
+                "refusing unauthenticated non-loopback HTTP bind {bind}; configure FLEET_API_TOKENS or FLEET_CF_AUDIENCE"
+            ));
+        }
+
         let mut app_state = AppState::new(store.clone())
             .with_heartbeat_interval(health_interval_secs as u32)
             .with_transport(transport_handle.clone());
@@ -453,23 +464,18 @@ pub async fn run_serve(
             }
         }
 
-        if let Some(aud) = cf_audience {
+        if let Some(aud) = cf_audience.filter(|aud| !aud.trim().is_empty()) {
             app_state = app_state.with_cf_audience(aud);
             tracing::info!(bind = %bind, aud = %aud, "HTTP API server with Cloudflare Access auth");
         }
-        if let Some(tokens) = api_tokens {
-            let token_list: Vec<String> = tokens
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+        if let Some(token_list) = scoped_tokens {
             if !token_list.is_empty() {
                 app_state = app_state.with_tokens(token_list);
                 tracing::info!(bind = %bind, "HTTP API server with bearer auth");
-            } else if cf_audience.is_none() {
+            } else if !has_cf_access {
                 tracing::warn!(bind = %bind, "HTTP API server in NO-AUTH mode (empty token list)");
             }
-        } else if cf_audience.is_none() {
+        } else if !has_cf_access {
             tracing::warn!(bind = %bind, "HTTP API server in NO-AUTH mode (dev only)");
         }
 
@@ -552,6 +558,26 @@ pub async fn run_serve(
         h.abort();
     }
     Ok(())
+}
+
+/// JSON token manifest을 엄격하게 검증한다. 평면 쉼표 bearer 목록은 권한을 표현하지
+/// 못하므로 더 이상 허용하지 않는다.
+fn parse_scoped_api_tokens(raw: &str) -> Result<Vec<ApiTokenCredential>> {
+    let tokens: Vec<ApiTokenCredential> = serde_json::from_str(raw).context(
+        "FLEET_API_TOKENS must be a JSON array of {principal_id, token, capabilities}",
+    )?;
+    if tokens.is_empty()
+        || tokens.iter().any(|token| {
+            token.principal_id.trim().is_empty()
+                || token.token.trim().is_empty()
+                || token.capabilities.is_empty()
+        })
+    {
+        return Err(anyhow!(
+            "each FLEET_API_TOKENS entry requires non-empty principal_id, token, and capabilities"
+        ));
+    }
+    Ok(tokens)
 }
 
 /// `migrate` 명령.
@@ -700,6 +726,7 @@ pub async fn run_tasks(action: TasksAction) -> Result<()> {
             required_labels,
             cwd,
             created_by,
+            project_id,
             json,
         } => {
             run_tasks_submit(
@@ -713,6 +740,7 @@ pub async fn run_tasks(action: TasksAction) -> Result<()> {
                 required_labels,
                 cwd,
                 created_by,
+                project_id,
                 json,
             )
             .await
@@ -1049,6 +1077,7 @@ async fn run_tasks_submit(
     required_labels: Vec<String>,
     cwd: Option<String>,
     created_by: String,
+    project_id: Option<String>,
     json_output: bool,
 ) -> Result<()> {
     let store = connect_and_migrate(2).await?;
@@ -1065,6 +1094,11 @@ async fn run_tasks_submit(
         "high" => fleet_core::TaskPriority::High,
         _ => fleet_core::TaskPriority::Normal,
     };
+    let project_id = project_id
+        .filter(|value| !value.is_empty())
+        .map(|value| value.parse::<fleet_core::ProjectId>())
+        .transpose()
+        .context("project_id must be a UUID")?;
 
     let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
         prompt: final_prompt,
@@ -1076,6 +1110,7 @@ async fn run_tasks_submit(
         timeout_secs,
         priority: task_priority,
         created_by,
+        project_id,
         skills_required: skills.clone(),
         ..Default::default()
     });

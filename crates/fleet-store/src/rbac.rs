@@ -155,7 +155,7 @@ pub async fn issue_admin_bootstrap_if_needed(
     let prefixed = format!("fleet_boot_{}", token_value);
 
     let token = BootstrapToken {
-        token: prefixed.clone(),
+        token_digest: BootstrapToken::digest_for(&prefixed),
         created_at: Utc::now(),
         created_by: Some("system".to_string()),
         expires_at: Some(Utc::now() + Duration::hours(24)),
@@ -192,7 +192,7 @@ pub async fn issue_admin_bootstrap_token(
     };
 
     let token = BootstrapToken {
-        token: prefixed.clone(),
+        token_digest: BootstrapToken::digest_for(&prefixed),
         created_at: Utc::now(),
         created_by: Some("cli".to_string()),
         expires_at,

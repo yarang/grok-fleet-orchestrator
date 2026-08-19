@@ -248,6 +248,11 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "type": "integer",
                         "minimum": 1,
                         "description": "Per-task timeout in seconds (optional)."
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Project boundary for this task (optional). Stored now; policy enforcement arrives with the Project control-plane feature."
                     }
                 },
                 "required": ["prompt"]

@@ -2366,7 +2366,8 @@ pub async fn bootstrap(
         ));
     }
 
-    // 활성 토큰 중에서 정확히 일치하는 것을 상수시간으로 검색.
+    // DB에는 원문이 없으므로 입력 원문의 digest로 활성 토큰을 찾는다. 실제 소비는
+    // 원문을 Store의 atomic consume 경로에 전달해 사용자 생성과 함께 처리한다.
     let tokens = state.store.list_bootstrap_tokens().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2375,14 +2376,12 @@ pub async fn bootstrap(
         )
     })?;
 
+    let token_digest = fleet_core::BootstrapToken::digest_for(token_input);
     let matching_token = tokens
         .iter()
-        .find(|t| {
-            t.is_usable() && fleet_core::auth::password::constant_time_eq(&t.token, token_input)
-        })
-        .cloned();
+        .any(|t| t.is_usable() && t.token_digest == token_digest);
 
-    let Some(token) = matching_token else {
+    if !matching_token {
         crate::auth::record_login_failure(
             &state,
             &bootstrap_id,
@@ -2396,7 +2395,7 @@ pub async fn bootstrap(
             jar,
             bootstrap_failed_page("Invalid or expired bootstrap token. Check the CLI output."),
         ));
-    };
+    }
 
     // username 검증.
     // email 형식 검증.
@@ -2440,7 +2439,7 @@ pub async fn bootstrap(
 
     // 부트스트랩 처리 (토큰 소비 + 사용자 생성 + admin 역할 부여 + 첫 세션).
     let (_new_user, session_token, _session_id) =
-        consume_bootstrap_and_create_admin(&*state.store, &token.token, user, password_hash)
+        consume_bootstrap_and_create_admin(&*state.store, token_input, user, password_hash)
             .await
             .map_err(|e| {
                 let (status, msg) = match &e {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fleet_api::{build_app, AppState};
+use fleet_api::{build_app, ApiTokenCredential, AppState};
 use fleet_core::{
     TaskId, WorkerId,
 };
@@ -92,7 +92,11 @@ async fn spawn_server(transport: Arc<dyn WorkerTransport>) -> String {
     let state = Arc::new(
         AppState::new(store)
             .with_transport(transport)
-            .with_tokens(vec!["test-token".to_string()]),
+            .with_tokens(vec![ApiTokenCredential {
+                principal_id: "transport-test".into(),
+                token: "test-token".into(),
+                capabilities: fleet_core::PermissionKind::all().to_vec(),
+            }]),
     );
 
     // 미리 bind하여 addr 확보 후, listener를 그대로 spawn된 task에 전달.

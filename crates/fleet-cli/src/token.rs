@@ -100,7 +100,7 @@ struct CreateTokenApiResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct TokenListItem {
-    token: String,
+    token_id: String,
     created_at: String,
     expires_at: Option<String>,
     max_uses: u32,
@@ -185,10 +185,11 @@ async fn run_token_list(api_url: &str, api_token: &str, json: bool) -> Result<()
     );
     println!("{}", "-".repeat(112));
     for t in items {
-        let truncated = if t.token.len() > 38 {
-            format!("{}…{}", &t.token[..24], &t.token[t.token.len() - 12..])
+        let token_id = t.token_id;
+        let truncated = if token_id.len() > 38 {
+            format!("{}…{}", &token_id[..24], &token_id[token_id.len() - 12..])
         } else {
-            t.token.clone()
+            token_id
         };
         println!(
             "{:<40} {:<23} {}/{}        {:<11} {:<20}",

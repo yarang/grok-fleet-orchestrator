@@ -167,8 +167,9 @@ enum Command {
         #[arg(long, env = "FLEET_HTTP_BIND")]
         http_bind: Option<String>,
 
-        /// HTTP API 인증용 bearer 토큰 (쉼표 구분).
-        /// 생략하면 no-auth 모드 (개발용). Phase 4에서 OIDC로 대체.
+        /// HTTP API scoped bearer token manifest JSON.
+        /// 예: [{"principal_id":"ci","token":"...","capabilities":["task:read"]}]
+        /// 쉼표 구분 평면 token 목록은 허용하지 않는다.
         #[arg(long, env = "FLEET_API_TOKENS")]
         api_tokens: Option<String>,
 
@@ -597,6 +598,10 @@ enum TasksAction {
         /// 제출자 식별자 (감사 로그용). 기본값: `"cli"`.
         #[arg(long, default_value = "cli")]
         created_by: String,
+
+        /// Project UUID. 생략하면 기존 일반 풀 Task로 제출합니다.
+        #[arg(long)]
+        project_id: Option<String>,
 
         /// JSON 형식으로 결과 출력.
         #[arg(long, default_value_t = false)]

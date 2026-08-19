@@ -444,7 +444,7 @@ async fn issue_bootstrap_token(
         let tokens = store.list_bootstrap_tokens().await.unwrap_or_default();
         for t in tokens {
             if t.is_usable() {
-                let _ = store.revoke_bootstrap_token(&t.token).await;
+                let _ = store.revoke_bootstrap_token(&t.token_digest).await;
             }
         }
     }

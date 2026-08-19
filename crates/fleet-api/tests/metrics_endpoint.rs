@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use fleet_api::AppState;
+use fleet_api::{ApiTokenCredential, AppState};
 use fleet_core::{
     Task, TaskRequest, Worker,
 };
@@ -68,7 +68,11 @@ async fn metrics_returns_prometheus_text() {
 async fn metrics_does_not_require_auth() {
     // 인증이 활성화된 AppState에서도 /metrics는 인증 미들웨어 바깥에 있음.
     let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
-    let state = Arc::new(AppState::new(store).with_tokens(vec!["secret".into()]));
+    let state = Arc::new(AppState::new(store).with_tokens(vec![ApiTokenCredential {
+        principal_id: "metrics-test".into(),
+        token: "secret".into(),
+        capabilities: fleet_core::PermissionKind::all().to_vec(),
+    }]));
     let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
     let addr = listener.local_addr().unwrap();

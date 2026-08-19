@@ -18,6 +18,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
 use fleet_scheduler::{Dispatcher, FleetState};
+use fleet_core::PermissionKind;
 
 use crate::handlers::ToolContext;
 use crate::schema::{
@@ -27,13 +28,95 @@ use crate::schema::{
 /// MCP 서버. `ToolContext`를 들고 있으며 stdio 루프를 실행.
 pub struct McpServer {
     ctx: ToolContext,
+    authorization: McpAuthorization,
+}
+
+/// stdio MCP launcher가 명시적으로 부여한 capability 집합.
+///
+/// 이는 OS process 경계 밖의 bearer assertion을 대체하지 않는다. 다만 MCP client의
+/// 자연어 입력이나 tool argument가 권한을 만들어낼 수 없도록, 서버 시작 시 고정한다.
+#[derive(Debug, Clone)]
+pub struct McpAuthorization {
+    capabilities: Vec<PermissionKind>,
+}
+
+impl McpAuthorization {
+    /// `FLEET_MCP_CAPABILITIES`의 쉼표 구분 capability를 읽는다.
+    /// 빈 값 또는 알 수 없는 값은 fail-closed 한다.
+    pub fn from_environment() -> std::io::Result<Self> {
+        let raw = std::env::var("FLEET_MCP_CAPABILITIES").map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "FLEET_MCP_CAPABILITIES is required for MCP stdio",
+            )
+        })?;
+        let mut capabilities = Vec::new();
+        for value in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+            let permission = PermissionKind::all()
+                .iter()
+                .copied()
+                .find(|permission| permission.as_str() == value)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("unknown MCP capability: {value}"),
+                    )
+                })?;
+            if !capabilities.contains(&permission) {
+                capabilities.push(permission);
+            }
+        }
+        if capabilities.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "FLEET_MCP_CAPABILITIES must contain at least one capability",
+            ));
+        }
+        Ok(Self { capabilities })
+    }
+
+    fn permits_tool(&self, tool: &str) -> bool {
+        required_permission(tool).is_some_and(|required| self.capabilities.contains(&required))
+    }
+}
+
+fn required_permission(tool: &str) -> Option<PermissionKind> {
+    use crate::schema::*;
+    Some(match tool {
+        TOOL_DISPATCH_TASK => PermissionKind::TaskCreate,
+        TOOL_GET_TASK_STATUS | TOOL_LIST_TASKS | TOOL_WAIT_FOR_TASK | TOOL_COLLECT_RESULTS => {
+            PermissionKind::TaskRead
+        }
+        TOOL_STREAM_TASK_OUTPUT => PermissionKind::TaskOutput,
+        TOOL_CANCEL_TASK => PermissionKind::TaskCancel,
+        TOOL_LIST_WORKERS | TOOL_LIST_HOSTS => PermissionKind::WorkerList,
+        TOOL_RESET_WORKER_BREAKER => PermissionKind::WorkerDelete,
+        TOOL_LIST_BOOTSTRAP_TOKENS => PermissionKind::TokenList,
+        TOOL_REVOKE_BOOTSTRAP_TOKEN => PermissionKind::TokenRevoke,
+        _ => return None,
+    })
 }
 
 impl McpServer {
     /// 서버 인스턴스 생성. FleetState와 Dispatcher는 외부에서 주입.
     pub fn new(state: Arc<FleetState>, dispatcher: Arc<Dispatcher>) -> Self {
+        Self::new_with_authorization(
+            state,
+            dispatcher,
+            McpAuthorization {
+                capabilities: Vec::new(),
+            },
+        )
+    }
+
+    pub fn new_with_authorization(
+        state: Arc<FleetState>,
+        dispatcher: Arc<Dispatcher>,
+        authorization: McpAuthorization,
+    ) -> Self {
         Self {
             ctx: ToolContext::new(state, dispatcher),
+            authorization,
         }
     }
 
@@ -120,7 +203,13 @@ impl McpServer {
                 Ok(Value::Null)
             }
 
-            "tools/list" => Ok(serde_json::to_value(all_tools()).map_err(|e| {
+            "tools/list" => Ok(serde_json::to_value(
+                all_tools()
+                    .into_iter()
+                    .filter(|tool| self.authorization.permits_tool(&tool.name))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| {
                 JsonRpcError::internal(format!("failed to serialize tool list: {e}"))
             })?),
 
@@ -149,6 +238,10 @@ impl McpServer {
 
         let arguments = obj.get("arguments").cloned().unwrap_or(Value::Null);
 
+        if !self.authorization.permits_tool(name) {
+            return Err(JsonRpcError::invalid_request("tool is not permitted for this MCP launcher"));
+        }
+
         crate::handlers::dispatch_tool(&self.ctx, name, &arguments).await
     }
 }
@@ -158,7 +251,8 @@ pub async fn run_mcp_server(
     state: Arc<FleetState>,
     dispatcher: Arc<Dispatcher>,
 ) -> std::io::Result<()> {
-    let server = McpServer::new(state, dispatcher);
+    let authorization = McpAuthorization::from_environment()?;
+    let server = McpServer::new_with_authorization(state, dispatcher, authorization);
     server.run().await
 }
 
@@ -170,6 +264,17 @@ mod tests {
     fn version_constant_present() {
         // 단순 컴파일 보장용
         assert_eq!(PROTOCOL_VERSION, "2024-11-05");
+    }
+
+    #[test]
+    fn launcher_capabilities_gate_tools() {
+        let authorization = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskRead],
+        };
+        assert!(authorization.permits_tool(crate::schema::TOOL_GET_TASK_STATUS));
+        assert!(authorization.permits_tool(crate::schema::TOOL_LIST_TASKS));
+        assert!(!authorization.permits_tool(crate::schema::TOOL_DISPATCH_TASK));
+        assert!(!authorization.permits_tool(crate::schema::TOOL_REVOKE_BOOTSTRAP_TOKEN));
     }
 
     // 더 깊은 통합 테스트는 fleet-cli/tests/에서 수행 (실제 Dispatcher + Store 필요).

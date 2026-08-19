@@ -16,8 +16,8 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fleet_core::{
-    CircuitState, FleetEvent, Host, Task, TaskFilter, TaskId, TaskRequest, TaskStatusFilter,
-    WorkerFilter, WorkerId, WorkerStatus,
+    CircuitState, FleetEvent, Host, ProjectId, Task, TaskFilter, TaskId, TaskRequest,
+    TaskStatusFilter, WorkerFilter, WorkerId, WorkerStatus,
 };
 use fleet_scheduler::{BreakerState, Dispatcher, FleetState};
 use tracing::debug;
@@ -110,6 +110,16 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         .and_then(|v| v.as_u64())
         .map(|n| n as u32);
     req.timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
+    req.project_id = match args.get("project_id") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| JsonRpcError::invalid_params("project_id must be a UUID string"))?
+                .parse::<ProjectId>()
+                .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?,
+        ),
+        None => None,
+    };
     req.skills_required = args
         .get("skills_required")
         .and_then(|v| v.as_array())
@@ -845,24 +855,14 @@ async fn handle_revoke_bootstrap_token(
         .and_then(|v| v.as_str())
         .ok_or_else(|| JsonRpcError::invalid_params("missing required field: token_id"))?;
 
-    let token = ctx
-        .state
-        .store
-        .list_bootstrap_tokens()
-        .await
-        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
-        .into_iter()
-        .find(|candidate| candidate.public_id() == token_id)
-        .map(|candidate| candidate.token);
-
-    let Some(token) = token else {
+    let Some(token_digest) = fleet_core::BootstrapToken::digest_from_public_id(token_id) else {
         return Ok(schema::tool_error("bootstrap token not found"));
     };
 
     let revoked = ctx
         .state
         .store
-        .revoke_bootstrap_token(&token)
+        .revoke_bootstrap_token(&token_digest)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
@@ -927,6 +927,19 @@ mod tests {
     fn parse_task_status_filter_rejects_unknown() {
         assert!(parse_task_status_filter("bogus").is_err());
         assert!(parse_task_status_filter("").is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_invalid_project_id() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "test", "project_id": "not-a-uuid"}),
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1195,7 +1208,7 @@ mod tests {
     async fn list_and_revoke_bootstrap_tokens_round_trip() {
         let ctx = test_ctx(fleet_store::mem::MemStore::new());
         let token = fleet_core::BootstrapToken {
-            token: "fbt_test123".into(),
+            token_digest: fleet_core::BootstrapToken::digest_for("fbt_test123"),
             created_at: chrono::Utc::now(),
             created_by: None,
             expires_at: None,

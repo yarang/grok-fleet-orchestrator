@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 /// 부트스트랩 토큰 엔티티.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapToken {
-    /// 토큰 문자열 (base64url, prefix 포함 가능).
-    pub token: String,
+    /// 원문 토큰의 SHA-256 digest. 원문은 발급 응답에서만 한 번 반환되며 저장하지 않는다.
+    pub token_digest: String,
     pub created_at: DateTime<Utc>,
     /// 발급한 어드민 식별자 (옵션).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,15 +38,26 @@ pub struct BootstrapToken {
 impl BootstrapToken {
     /// 원문 token을 대체하는 공개 식별자.
     ///
-    /// 목록·감사·회수 API에는 이 값만 노출한다. token은 충분한 엔트로피로
-    /// 생성되므로 SHA-256 digest를 공개해도 원문 복구가 실질적으로 불가능하다.
+    /// 목록·감사·회수 API에는 이 값만 노출한다.
     pub fn public_id(&self) -> String {
-        Self::public_id_for(&self.token)
+        format!("bt_{}", self.token_digest)
     }
 
     /// 원문 token의 공개 식별자를 계산한다.
     pub fn public_id_for(token: &str) -> String {
-        format!("bt_{}", hex::encode(Sha256::digest(token.as_bytes())))
+        format!("bt_{}", Self::digest_for(token))
+    }
+
+    /// 원문 토큰으로부터 저장·검색에 사용할 digest를 계산한다.
+    pub fn digest_for(token: &str) -> String {
+        hex::encode(Sha256::digest(token.as_bytes()))
+    }
+
+    /// 공개 식별자에서 digest를 추출한다. 잘못된 식별자는 거부한다.
+    pub fn digest_from_public_id(token_id: &str) -> Option<String> {
+        let digest = token_id.strip_prefix("bt_")?;
+        (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| digest.to_ascii_lowercase())
     }
 
     /// 현재 사용 가능한지 (만료 안 됨 + use_count < max_uses).
@@ -74,7 +85,7 @@ mod tests {
 
     fn token(max_uses: u32, use_count: u32, expires_at: Option<DateTime<Utc>>) -> BootstrapToken {
         BootstrapToken {
-            token: "fleet_test".into(),
+            token_digest: BootstrapToken::digest_for("fleet_test"),
             created_at: Utc::now(),
             created_by: None,
             expires_at,
@@ -124,5 +135,17 @@ mod tests {
         let future = Utc::now() + chrono::Duration::days(7);
         let t = token(1, 0, Some(future));
         assert!(t.is_usable());
+    }
+
+    #[test]
+    fn public_id_round_trip_uses_digest_not_raw_token() {
+        let raw = "fleet_secret_token";
+        let public_id = BootstrapToken::public_id_for(raw);
+        assert!(!public_id.contains(raw));
+        assert_eq!(
+            BootstrapToken::digest_from_public_id(&public_id).as_deref(),
+            Some(BootstrapToken::digest_for(raw).as_str())
+        );
+        assert!(BootstrapToken::digest_from_public_id("bt_not-a-digest").is_none());
     }
 }
