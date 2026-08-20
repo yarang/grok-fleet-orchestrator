@@ -9,24 +9,27 @@
 
 | 이름 | 목적 | 저장 위치 | 형식 | 소비자 | 회전 주기 | 상태 |
 |---|---|---|---|---|---|---|
-| `FLEET_MASTER_KEY` | `fleet-credentials`(워커 LLM API 키 암호화)의 AES-256-GCM 마스터 키 | `arm2:/etc/fleet/master.key` (`r--------`, fleet:fleet) | 32B, hex 또는 base64url | `fleet-api`, `fleet-cli`(provision/rotate) | 수동(미정) — 회전 시 `worker_credentials` 테이블 전체 재암호화 필요 | 사용 중 |
-| `DATABASE_URL` 등 오케스트레이터 환경변수 | Postgres 접속·기타 orchestrator 설정 | `arm2:/etc/fleet/fleet.env` (`rw-r-----`, root:fleet) | dotenv | `fleet.service`(EnvironmentFile) | 수동(미정) | 사용 중 |
+| `FLEET_MASTER_KEY` | `fleet-credentials`(워커 LLM API 키 암호화)의 AES-256-GCM 마스터 키 | `arm1:/etc/fleet/master.key` (`r--------`, fleet:fleet) | 32B, hex 또는 base64url | `fleet-api`, `fleet-cli`(provision/rotate) | 수동(미정) — 회전 시 `worker_credentials` 테이블 전체 재암호화 필요 | 사용 중 |
+| `DATABASE_URL` 등 오케스트레이터 환경변수 | Postgres 접속·기타 orchestrator 설정 | `arm1:/etc/fleet/fleet.env` (`rw-r-----`, root:fleet) | dotenv | `fleet.service`(EnvironmentFile) | 수동(미정) | 사용 중 |
 | 워커별 LLM API 키 (`grok-build` 모델 등: GLM, Gemini 등) | grok agent가 워커에서 실행 시 사용하는 모델 프로바이더 키 | Postgres `worker_credentials` 테이블 (AES-256-GCM 암호화, `fleet-credentials` 크레이트) | `WorkerCredentials` 구조체 → `~/.grok/config.toml` `[model.X]` 섹션 렌더링 | 각 워커 호스트의 grok 클라이언트 | `WorkerCredentials.rotated_at`로 감사 추적 (자동 회전 없음) | 사용 중 — 이미 전용 시스템으로 관리됨, 이 파일 기반 규칙 대상 아님 |
 | `WIKI_MCP_API_KEY` | `wiki.agentthread.dev/mcp` Streamable HTTP 엔드포인트 Bearer 인증 | `ec1:/etc/fleet/secrets/wiki-mcp.env` (`rw-------`, root:root) | `secrets.token_urlsafe(32)`, base64url 문자열 | `wiki-mcp.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 2026-08-10 생성 |
-| Cloudflare API 토큰 (`agentthread.dev` 존, DNS 편집 권한) | DNS 레코드 자동화(A 레코드 생성 등) | `arm2:/etc/fleet/secrets/cloudflare.env` (원격), 로컬 Mac `~/.config/cloudflare/hosts/agentthread.dev.env` (로컬) | Cloudflare API Token (`cfut_...`) | 수동 실행(현재 자동화된 서비스 소비자 없음 — ad-hoc 작업용) | 수동(미정) | 사용 중 — 2026-08-11 원격 저장 완료, 2026-08-15 로컬 저장 완료 |
-| ec1 워커 부트스트랩 시크릿 | 워커 등록/조인 인증 | `ec1:/etc/fleet/worker.toml` | 현재 원문 저장, 목표 digest·Worker identity는 [`worker-enrollment.md`](../contracts/worker-enrollment.md) 참고 | `fleet-worker.service` | 수동(미정) | 사용 중 — 현재 전달·보관은 [가입 Runbook](../worker-bootstrap/join.md), 보안 목표는 enrollment 계약 참조 |
-| SSH 호스트 접근 키 (`oci-yarangdev-arm1/arm2/ec1/ec2`) | 운영자(사람/Claude 세션)의 프로덕션 호스트 SSH 접근 | 로컬 Mac `~/.ssh/`(config·개인키), 각 호스트 `~/.ssh/authorized_keys` | OpenSSH 개인/공개키 | 사람 운영자 SSH 클라이언트 | 수동(미정) | 사용 중 — 이 registry의 관리 범위 밖(로컬 머신 전용, 서버 배치 대상 아님) |
-| `LITELLM_MASTER_KEY` | liteLLM 게이트웨이(`/api-gateway/`) 전체 인증용 단일 Bearer 마스터 키 | `arm2:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | `sk-litellm-...` (임의 문자열) | `litellm-gateway.service`(EnvironmentFile), 게이트웨이를 경유하는 워커의 `~/.grok/config.toml` `api_key` | 수동(미정) | 사용 중 — 2026-08-11 생성 |
-| `GEMINI_API_KEY` / `ZAI_API_KEY` / `GROQ_API_KEY` | liteLLM `config.yaml`의 `model_list`가 참조하는 업스트림 프로바이더 키 | `arm2:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | 각 프로바이더 발급 형식 | `litellm-gateway.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 상세는 [liteLLM 배포 Runbook](../deployment/litellm-gateway.md) 참고, 값 위치만 여기 등재 |
-| `FLEET_API_TOKENS` | HTTP API(`/v1/...`) bearer 토큰 인증 (쉼표 구분 다중 토큰). 미설정 시 no-auth 모드(개발용) | `arm2:/etc/fleet/fleet.env` (`DATABASE_URL`과 동일 파일, `rw-r-----`, root:fleet) | 쉼표 구분 임의 문자열 목록 | `fleet.service`(`--api-tokens`/`FLEET_API_TOKENS`, `crates/fleet-cli/src/main.rs`) | 수동(미정) | 사용 중 — 프로덕션 배포 여부는 `fleet.env` 실제 값 확인 필요(미확인) |
-| `FLEET_CF_AUDIENCE` | Cloudflare Access Application AUD — 설정 시 `CF-Access-Jwt-Assertion` 헤더 검증 활성화 | `arm2:/etc/fleet/fleet.env` (위 `FLEET_API_TOKENS`와 동일 파일) | Cloudflare Access AUD 문자열 | `fleet.service`(`--cf-audience`/`FLEET_CF_AUDIENCE`) | 수동(미정) | 사용 중 여부 미확인 — Cloudflare API 토큰(위 행)과는 별개 값(Access AUD ≠ API 토큰) |
+| Cloudflare API 토큰 (`agentthread.dev` 존, DNS 편집 권한) | DNS 레코드 자동화(A 레코드 생성 등) | `arm1:/etc/fleet/secrets/cloudflare.env` (원격), 로컬 Mac `~/.config/cloudflare/hosts/agentthread.dev.env` (로컬) | Cloudflare API Token (`cfut_...`) | 수동 실행(현재 자동화된 서비스 소비자 없음 — ad-hoc 작업용) | 수동(미정) | 사용 중 — 2026-08-11 원격 저장 완료, 2026-08-15 로컬 저장 완료 |
+| ec1 워커 부트스트랩 시크릿 | 워커 등록/조인 인증 | `ec1:/etc/fleet/worker.toml` (worker의 일회성 입력) | Fleet 저장소는 SHA-256 digest만 저장하며 발급 응답에서만 원문을 1회 표시. Worker identity 전환은 [`worker-enrollment.md`](../contracts/worker-enrollment.md) 참고 | `fleet-worker.service` | 수동(미정) | 사용 중 — 기존 DB token은 migration에서 digest로 치환. 기존 worker 설정의 원문은 join 뒤 제거해야 함 |
+| SSH 호스트 접근 키 (`oci-yarangdev-arm1/ec1/ec2` — arm2는 2026-08-20 terminate로 폐기) | 운영자(사람/Claude 세션)의 프로덕션 호스트 SSH 접근 | 로컬 Mac `~/.ssh/`(config·개인키), 각 호스트 `~/.ssh/authorized_keys` | OpenSSH 개인/공개키 | 사람 운영자 SSH 클라이언트 | 수동(미정) | 사용 중 — 이 registry의 관리 범위 밖(로컬 머신 전용, 서버 배치 대상 아님) |
+| `LITELLM_MASTER_KEY` | liteLLM 게이트웨이(`/api-gateway/`) 전체 인증용 단일 Bearer 마스터 키 | `arm1:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | `sk-litellm-...` (임의 문자열) | `litellm-gateway.service`(EnvironmentFile), 게이트웨이를 경유하는 워커의 `~/.grok/config.toml` `api_key` | 수동(미정) | 사용 중 — 2026-08-11 생성 |
+| `GEMINI_API_KEY` / `ZAI_API_KEY` / `GROQ_API_KEY` | liteLLM `config.yaml`의 `model_list`가 참조하는 업스트림 프로바이더 키 | `arm1:/etc/fleet/secrets/litellm-gateway.env` (`rw-------`, root:root) | 각 프로바이더 발급 형식 | `litellm-gateway.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 상세는 [liteLLM 배포 Runbook](../deployment/litellm-gateway.md) 참고, 값 위치만 여기 등재 |
+| `FLEET_API_TOKENS` | HTTP API(`/v1/...`) scoped bearer credential manifest | `arm1:/etc/fleet/fleet.env` (`DATABASE_URL`과 동일 파일, `rw-r-----`, root:fleet) | JSON 배열: `principal_id`, `token`, `capabilities` | `fleet.service`(`--api-tokens`/`FLEET_API_TOKENS`) | 수동(미정) | 평면 쉼표 token 목록은 거부. capability 최소화, principal별 분리 필요 |
+| `FLEET_CF_AUDIENCE` | Cloudflare Access Application AUD — 설정 시 `CF-Access-Jwt-Assertion` 헤더 검증 활성화 | `arm1:/etc/fleet/fleet.env` (위 `FLEET_API_TOKENS`와 동일 파일) | Cloudflare Access AUD 문자열 | `fleet.service`(`--cf-audience`/`FLEET_CF_AUDIENCE`) | 수동(미정) | 사용 중 여부 미확인 — Cloudflare API 토큰(위 행)과는 별개 값(Access AUD ≠ API 토큰) |
+| `FLEET_MCP_CAPABILITIES` | MCP stdio launcher의 명시적 도구 capability allow-list | MCP를 실행하는 service/launcher의 environment | 쉼표 구분 `task:read,task:create` 등 | `fleet serve`의 MCP stdio | launcher 배포 시 갱신 | 필수 — 미설정·빈 값·알 수 없는 값이면 MCP가 fail-closed. OS process identity/signed assertion을 대체하지 않음 |
 | `FLEET_GMAIL_USER` / `FLEET_GMAIL_APP_PASS` | 대시보드 알림 메일 발송용 Gmail SMTP 인증 (`smtp.gmail.com:587`) | 배포 환경변수 (파일 위치 미확인) | `gmail_user`: 이메일 주소, `gmail_app_pass`: Google App Password 16자리 | `fleet-dashboard`(`crates/fleet-dashboard/src/email.rs`) | 수동(미정) | 사용 중 여부 미확인 — 코드에 구현 완료, 실배포 값 저장 위치는 이 세션에서 확인 못함 |
 | SSH 키 금고 (`ssh_keys` 테이블) | 대시보드 프로비저닝(`fleet_provisioner`)이 사용하는 원격 호스트 SSH 개인키 저장소 — 개인 `~/.ssh/` 키·`worker_credentials`(LLM 키)와는 별도의 **세 번째** 자격증명 저장소 | Postgres `ssh_keys` 테이블 (AES-256-GCM 암호화, `encrypted_blob` = nonce+ciphertext+tag, `fleet-credentials`의 `MasterKey`로 암호화) | `id, name(UNIQUE), encrypted_blob, fingerprint, key_type(ed25519\|rsa\|ecdsa)` (`crates/fleet-store/migrations/010_ssh_keys.sql`) | `fleet-provisioner`, 대시보드 프로비저닝 API (`ssh_key_name`으로 참조, `PermissionKind::HostProvision` 권한 필요) | 회전 없음 — 교체는 삭제 후 재등록(update 엔드포인트 없음) | 사용 중 — 감사 로그 미연동, MCP 미노출, CLI 직접 조작은 금고를 우회할 수 있음. 현재 SSH 절차는 [Worker 프로비저닝](../deployment/worker-provisioning.md) 참고 |
 
 ## 알려진 미정 항목 (조치 필요)
 
-- `arm2:/etc/fleet/fleet.env.bak-debug` — 소유자/생성 경위 불명. `README.md` "알려진 위생
-  이슈" 참고.
+- ~~`arm2:/etc/fleet/fleet.env.bak-debug` — 소유자/생성 경위 불명~~ — 2026-08-20 arm2
+  terminate로 호스트 자체가 사라져 해소(파일도 함께 소멸). 상세는 아래 변경 이력 참고.
+- `FLEET_API_TOKENS`, `FLEET_GMAIL_APP_PASS` — 2026-08-20 이전(migration) 작업 중 세션
+  로그에 평문 노출됨(마스킹 정규식 누락). **회전 필요** — 아직 미완료.
 
 ## 변경 이력
 
@@ -86,3 +89,31 @@
   노출되어 2026-08-16 폐기·재발급했다. 문서와 레지스트리에는 이후 token id,
   fingerprint 또는 last4만 기록하고 원문은 기록하지 않는다.
 - 본 자격증명 레지스트리에 저장 위치와 상태를 원격/로컬 병행 관리로 현행화 갱신함.
+
+### 2026-08-20 — arm2 예고 없는 terminate → orchestrator arm1 이전, 시크릿 일괄 재배치
+
+- 사용자가 OCI 콘솔에서 `oci-yarangdev-arm2` 인스턴스를 **terminate**(복구 불가)하면서
+  `fleet.agentthread.dev` 실서비스가 중단됨. DNS는 여전히 옛 IP를 가리키고 있어 즉시
+  장애로 이어졌다.
+- 복구 절차로 orchestrator 전체(`fleet.service`, `litellm-gateway.service`, Postgres
+  `fleet`/`litellm` DB, nginx+TLS)를 `oci-yarangdev-arm1`으로 이전:
+  - `FLEET_MASTER_KEY`(`master.key`), `fleet.env`, `secrets/cloudflare.env`,
+    `secrets/litellm-gateway.env` — arm2에서 확보해둔 사본을 그대로 arm1의 동일 경로·
+    동일 권한(`fleet:fleet`/`root:fleet`/`root:root`)으로 재배치. 값 자체는 변경 없음.
+  - `DATABASE_URL`의 Postgres 비밀번호(`fleet`, `litellm` role)만 **새로 발급**
+    (arm1 신규 설치이므로 재사용하지 않음) — 레지스트리 표의 저장 위치만 arm1로 갱신,
+    비밀번호 값은 세션에 노출하지 않음.
+  - Cloudflare API 토큰(로컬 Mac 사본, `~/.config/cloudflare/hosts/agentthread.dev.env`)
+    으로 `fleet.agentthread.dev` A 레코드를 arm1 IP로 직접 갱신(Cloudflare API 호출,
+    Claude 세션이 수행). 값은 노출하지 않음, 토큰 자체는 회전하지 않았음.
+- **위생 사고**: 이전 작업 중 `fleet.env`를 마스킹해 출력하려다 정규식이
+  `DATABASE_URL`(URL 내장 비밀번호), `FLEET_API_TOKENS`(`TOKEN=` 패턴 불일치),
+  `FLEET_GMAIL_APP_PASS`(`PASS`≠`PASSWORD`)를 걸러내지 못해 **세 값이 세션 로그에
+  평문 노출**됨. `DATABASE_URL`의 비밀번호는 위 이전 과정에서 신규 발급으로 이미
+  무효화됐으나, `FLEET_API_TOKENS`와 `FLEET_GMAIL_APP_PASS`는 **아직 회전하지 않은
+  채 그대로 사용 중** — 위 "알려진 미정 항목" 참고, 조속히 회전 필요.
+- **미이관 항목**: `puwu`(삭제 예정 프로젝트, arm2 terminate와 함께 소멸 확정),
+  `wiki.agentthread.dev`(ec1의 `wiki-mcp`를 arm2 경유로 리버스 프록시하던 구조 —
+  arm2 소멸로 함께 다운, 이 세션에서 미복구), worker `ec1`/`ec2`의 ACP 리버스 SSH
+  터널(구 도착지 arm2 → arm1로 재설정 필요, 이 세션에서 미착수). 모두 후속 조치
+  필요.
