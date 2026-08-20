@@ -305,6 +305,18 @@ last_verified: "2026-08-15"
 - `server-management/`의 README와 세 개의 레거시 포인터를 삭제했다. 포인터는 설계 근거나 독자적 운영 절차를 갖지 않고 `operations/proposals/`의 정본 위치만 반복했다.
 - 다이어그램 색인, 문서화 정책, roadmap의 경로를 `operations/proposals/`로 정정했다. 과거 log 항목은 당시의 경로 기록으로 보존했다.
 
+## 2026-08-17 — Worker·Agent process·맥락 보존 계약 확정
+
+- 유형: `ingest` + `lint`
+- Worker daemon은 Host에서 지속 실행하고, Agent는 Project의 durable context를 가진 논리 엔티티,
+  Agent process는 TaskAttempt마다 필요 시 실행하는 ephemeral 자원으로 분리했다.
+- 기본 Task 완료 경로를 process 종료·`Hibernated`로 정하고 `WarmIdle`은 TTL·slot 상한이 있는
+  명시적 최적화로 제한했다.
+- Project archive는 모든 Agent process cleanup ACK 뒤에만 완료하되 일반 풀 Worker는 종료하지 않고,
+  Project reservation Worker만 해제·반납 또는 deprovision하도록 정했다.
+- Tool/Skill catalog → Project grant → Agent binding → Task 요청 → Attempt snapshot의 deny 우선순위와
+  immutable revision/hash 규칙을 추가했다.
+
 ## 2026-08-17 — 설계문서 품질·정본성 합동 감사
 
 - 유형: `lint`
@@ -489,6 +501,133 @@ last_verified: "2026-08-15"
 - Worker enrollment의 HTTP 오류 응답 원문 token 노출을 현재 위험에 추가하고, Agent·Project 문서를 `proposed-contract`로 분류해 transport·권한·동시성 활성화 게이트를 명시했다.
 - OpenAPI의 삭제된 Architecture 문서 참조를 Contracts 정본으로 교체하고 Roadmap #49와 중앙 색인을 동기화했다.
 
+## 2026-08-18 — 공유 Worker pool과 Project Task 경계 기반 추가
+
+- 유형: `ingest` + `lint`
+- Project가 Host/Worker를 예약하는 모델을 폐기하고, Project-owned Agent의 일시적 Worker execution lease와 agent 수 상한 모델로 정정했다.
+- 기본 admission은 Project active agent 1, warm agent 0, Agent당 동시 Attempt 1이며 Worker의 process 상한을 함께 적용한다. 이는 자원 격리가 아닌 동시성 제어다.
+- `TaskRequest.project_id`를 core, CLI `fleet tasks submit --project-id`, MCP `fleet_dispatch_task.project_id`에 연결해 UUID 검증 후 `tasks.project_id`로 영속한다. Project 엔터티·정책 enforcement 이전에는 스케줄링이나 권한을 바꾸지 않는다.
+
+## 2026-08-18 — Fleet 내부 Security Manager credential authority 확정
+
+- 유형: `ingest`
+- Project·Agent·TaskAttempt credential의 원문 authority를 Fleet Security Manager로 정했다. Orchestrator는 policy/reference만 다루고 암호문 backend를 직접 복호화·export하지 않는다.
+- 초기 encrypted backend는 Postgres를 허용하되, Security Manager 뒤에 캡슐화해 KMS/HSM·외부 backend로 교체 가능하게 한다.
+- Worker에는 Attempt·Worker identity에 묶인 one-time short-lived delivery grant로만 전달하며, tmpfs/file descriptor 전달·fail-closed revision reconcile·break-glass export를 원칙으로 정했다.
+
+## 2026-08-18 — Agent execution lease의 self-fencing 보강
+
+- 유형: `ingest`
+- 단순 TTL/ACK 모델의 network partition, ACK 유실, Worker 재기동 뒤 중복 Agent process 위험을 확인하고 `worker_execution_lease`에 Worker incarnation·control epoch·단조 fencing token을 추가했다.
+- slot claim은 DB CAS 단일 writer로 계산하고, Worker는 stale token을 거절하며 control lease 상실 시 새 실행을 멈추고 grace 뒤 self-fence/drain한다.
+- Start/stop 결과 불명확은 `OutcomeUnknown`으로 유지해 inventory 관측 전 새 lease·중복 start를 금지한다.
+
+## 2026-08-18 — Host당 단일 Worker daemon 기본 확정
+
+- 유형: `ingest`
+- 기본 운영 모델을 Host 1 : Worker daemon 1로 정했다. 단일 Worker가 다수 Agent process를 slot·container isolation·cleanup 아래 관리한다.
+- 다중 Worker는 `multi_worker_enabled`, capability partition, 독립 namespace, 별도 capacity accounting이 모두 갖춰진 예외 운영으로만 허용하며 Project 배정 수단으로 쓰지 않는다.
+
+## 2026-08-18 — TaskAttempt effect ledger와 부분 적용 규칙 확정
+
+- 유형: `ingest`
+- Task 의도와 TaskAttempt 실행을 분리하고 외부 부작용은 durable effect ledger에 `Planned`부터 receipt/보상 상태까지 기록하도록 정했다.
+- 전달 결과가 불명확하거나 보상이 실패한 effect는 `PartiallyApplied`이며, 현재 외부 Task API에는 `Failed + failure_disposition`으로 호환 투영한다. 자동 retry는 금지한다.
+- 외부 idempotency key는 Attempt generation이 아니라 Task 의도와 effect scope에서 안정적으로 파생하고, 완료는 checkpoint·effect 증거·credential/lease 정리까지 확인한 뒤에만 확정한다.
+
+## 2026-08-18 — 공유 Host Agent 격리·privileged helper 규칙 확정
+
+- 유형: `ingest`
+- 공유 Host는 rootless·비특권 `container_required`를 기본으로 하고, read-only rootfs·Agent 전용 worktree·tmpfs secret·deny-by-default egress·고정 image digest를 Attempt snapshot으로 확정했다.
+- Git/secret/workspace 경계를 명시하고 다른 Agent worktree, host socket, global credential store, metadata/private network 접근을 기본 거부했다.
+- Fleet의 sudo 허용은 Agent의 arbitrary sudo가 아니라 fencing·scope·typed schema를 재검증하는 root-owned `fleet-privileged-helper`의 allow-listed operation으로 제한했다.
+
+## 2026-08-18 — Hibernated 기본과 WarmIdle bounded optimization 확정
+
+- 유형: `ingest`
+- 기본 `max_warm_agents = 0`에서 Task 종료 뒤 Agent process는 Hibernated로 전이한다. WarmIdle은 별도 Project 상한과 Worker process slot을 소비하는 opt-in 최적화다.
+- WarmIdle에는 credential·attach grant를 남기지 않고 runtime/image·isolation·workspace·Tool/Skill·egress/privileged 정책이 모두 호환될 때만 재사용한다.
+- TTL, drain/revoke, control lease 상실, policy 변경, Worker 압박에서 WarmIdle을 종료하며 만료→drain/revoked→LRU 순서의 eviction과 cleanup/lease release를 확정했다.
+
+## 2026-08-18 — Project archive·hold·retention 규칙 확정
+
+- 유형: `ingest`
+- archive를 idempotent drain workflow로 정하고, Attempt terminal뿐 아니라 Worker inventory의 process 부재, lease/credential grant cleanup, effect/security/legal hold 해소를 모두 `Archived` 전이 조건으로 했다.
+- 미해결 `PartiallyApplied` effect나 cleanup 실패는 `ArchiveBlocked`와 durable hold로 보존하며, 보상·risk acceptance·hold 전환 없이는 archive하지 않는다.
+- archive 뒤 context는 read-only로 봉인하고 retention 이후의 영구 삭제는 Git·audit 증거를 각각 남기는 별도 관리 작업으로 분리했다. reopen은 새 policy/Agent/lease/grant만 만든다.
+
+## 2026-08-18 — 관측성·재조정·장애 복구 계약 확정
+
+- 유형: `ingest`
+- desired/observed/reconciliation result를 분리하고 control plane, Worker, Agent lease, TaskAttempt, effect, credential grant, archive hold별 불일치 상태를 정했다.
+- Reconciler의 자동 범위를 safe cleanup·quarantine·증거 수집으로 제한하고, external redrive·risk acceptance·hold 해제·durable data 삭제는 운영자 권한으로 남겼다.
+- inventory-first recovery, metric/audit 상관관계와 고카디널리티·secret 금지, alert별 초기 운영 action과 구현 게이트를 새 정본에 기록했다.
+
+## 2026-08-18 — Principal·capability·Project scope·감사 계약 확정
+
+- 유형: `ingest`
+- HTTP, Dashboard, MCP, Worker control에 공통 AuthorizationContext와 fail-closed evaluator를 적용하는 목표 계약을 만들었다.
+- Human/Automation/Worker/AgentProcess/SecurityManager/Bootstrap principal을 분리하고, Agent process는 일반 control-plane principal을 갖지 않도록 정했다.
+- Project scope resolver, capability matrix, non-enumerating 오류, MCP authenticated launcher, break-glass dual approval, append-only secret-free audit의 규칙과 구현 게이트를 추가했다.
+
+## 2026-08-18 — Project·Agent 운영 모델 구현 increment 재정렬
+
+- 유형: `ingest`
+- Roadmap #66~#70을 Security Manager, Agent execution lease, archive/retention/hold, Git checkpoint recovery, observability/reconciliation으로 등록했다.
+- 구현 순서를 production trust → Worker identity/credential authority → execution consistency/control authority → workspace/isolation → 최소 Project/Agent → 운영 완결성 → 확장 기능으로 재구성했다.
+- 첫 착수 단위를 #58 AuthorizationContext/fail-closed middleware와 #59 bootstrap digest migration으로 고정하고, 그 전에는 새 Project/Agent/Security Manager 외부 API를 활성화하지 않도록 했다.
+
+## 2026-08-18 — Production trust foundation 초기 구현
+
+- 유형: `implementation` + `verification`
+- HTTP는 no-auth provider가 없으면 fail-closed로 거절하고, non-loopback bind는 bearer token 또는 Cloudflare Access audience 없이 기동하지 않도록 했다. AuthorizationContext의 최소 기반을 추가했으며 capability/scope와 Cloudflare claim principal 추출은 후속 #58 범위다.
+- BootstrapToken은 원문 대신 SHA-256 digest만 보관하도록 core·memory/PostgreSQL store·API/MCP 회수 경로를 전환했다. PostgreSQL migration은 기존 원문 primary key를 digest로 원자 치환하며 발급 응답에서만 원문을 반환한다.
+- `cargo check --workspace`, bootstrap API 통합 테스트, MCP/core/store/dashboard 단위 테스트와 `git diff --check`를 통과했다. 실제 PostgreSQL migration/DB dump 검증은 별도 환경에서 수행해야 한다.
+
+## 2026-08-18 — MCP launcher capability 경계 초기 구현
+
+- 유형: `implementation` + `verification`
+- MCP stdio는 `FLEET_MCP_CAPABILITIES`의 명시 capability allow-list가 없으면 기동하지 않으며, 허용된 도구만 목록과 호출 경로에 노출하도록 했다. 자연어·tool argument로 권한을 확장할 수 없다.
+- 이는 authenticated launcher assertion/local peer identity, Project scope evaluator, audit actor를 대체하지 않는 초기 경계다. 해당 identity 전파와 HTTP endpoint별 enforcement는 #58의 남은 범위로 유지한다.
+
+## 2026-08-18 — HTTP scoped bearer credential 전환
+
+- 유형: `implementation` + `verification`
+- `FLEET_API_TOKENS`를 쉼표 구분 평면 allow-list에서 `principal_id`·`token`·`capabilities`를 가진 JSON manifest로 전환했다. 빈/unknown/권한 없는 manifest는 fail-closed하며, token 원문은 context·로그에 남기지 않는다.
+- Worker 목록/등록·삭제 및 bootstrap token 관리 route에 최소 capability 행렬을 적용했다. Project scope, credential endpoint, Cloudflare principal, Worker self binding, audit은 아직 후속 단계다.
+- `cargo test -p fleet-api --tests`, `cargo check --workspace`, `git diff --check`로 검증했다.
+
+## 2026-08-18 — Worker operational credential enrollment 계약 확정
+
+- 유형: `design`
+- bootstrap token은 join 단 한 번의 승인에만 사용하고, 성공 뒤 worker_id 결합 operational credential을 1회 발급·digest 저장하는 흐름을 Worker enrollment 정본에 추가했다.
+- `worker:self` principal은 register/heartbeat/deregister의 자기 worker_id만 조작하며, old `bootstrap_token`을 worker.toml의 장기 bearer로 보관하지 않는다. 구현은 새 credential store schema, atomic enrollment transaction, worker config migration, self-binding middleware를 한 increment로 진행한다.
+- `worker_operational_credentials`의 digest-only PostgreSQL schema migration을 추가했다. 아직 실행 경로가 새 table을 읽거나 credential을 발급하지 않으므로 migration만 적용한 상태에서 Worker 동작은 바뀌지 않는다.
+
+## 2026-08-18 — Worker operational credential join 경로 초기 구현
+
+- 유형: `implementation` + `verification`
+- join 성공 시 `fwo_` operational token을 새로 생성해 worker.toml에만 1회 넣고, DB/memory store에는 SHA-256 digest·worker_id·lifecycle metadata만 기록하도록 연결했다. Worker daemon은 `operational_token`으로 register/heartbeat/deregister bearer를 보낸다.
+- HTTP middleware는 active digest를 `worker:<worker_id>` principal과 `worker:self` 최소 capability로 해석한다. register의 `existing_worker_id`와 heartbeat의 body worker_id가 credential binding과 다르면 거절한다. join route는 bootstrap body를 자체 인증 수단으로 처리한다.
+- enrollment의 bootstrap consume·Worker 생성·credential 발급이 아직 하나의 DB transaction은 아니며, credential rotation/revoke·deregister binding·mTLS·agent endpoint query secret 제거는 남은 #60 범위다. `cargo test -p fleet-api --test bootstrap_tokens`, `cargo test -p fleet-worker --lib`, `cargo check --workspace`, `git diff --check`를 통과했다.
+
+## 2026-08-18 — Worker credential 10단계 점진 전환 계획
+
+- 유형: `implementation-plan`
+- 새 Worker operational credential 경로를 먼저 완결하고 검증한 뒤, bootstrap_token·평면 bearer·fallback을 삭제하는 10개 단계와 각 완료 증거를 Roadmap 정본으로 고정했다.
+
+## 2026-08-18 — 설계 문서 판단 방법 정본화
+
+- 유형: `governance`
+- 문서 권위·현재 구현·목표 계약을 분리하고, entity/authority/state/effect/failure를 기준으로 설계를 읽어 Roadmap·log·test까지 연결하는 공통 판단 방법을 Governance 정본으로 추가했다.
+
+## 2026-08-18 — Worker credential 전환 상태 표기 정정 (lint)
+
+- 유형: `lint`
+- [설계 문서 판단 방법](governance/design-document-reading-and-judgment.md)을 적용해 [Worker credential 전환](roadmap/worker-credential-migration.md)과 `roadmap.md` #60을 코드와 대조한 결과, 앞선 "join 경로 초기 구현" 로그 항목과 두 정본이 실제 코드보다 앞서 있음을 확인했다.
+- 사실 확인: `crates/fleet-store/src/postgres.rs`에 트랜잭션 경계(`.begin()`)가 없어 join의 bootstrap 소비·Worker 생성·credential 발급은 atomic하지 않다(2·3·4단계 미착수). `find_active_worker_operational_credential`을 호출하는 코드가 없고 `AuthorizationContext`에 worker 식별자 필드도 없어, register/heartbeat/deregister의 `worker:self` binding은 부분 구현이 아니라 미착수다(5단계) — `app.rs`의 `authorize_http_endpoint` 자체 주석도 이를 명시한다. 따라서 임의의 `worker:register`/`worker:delete` capability 보유 principal이 다른 worker_id를 조작할 수 있는 상태다.
+- `worker-credential-migration.md`의 2~5단계 상태·완료 증거·"현재 경계" 절과 `roadmap.md` #60 설명을 코드에 맞게 정정했다. 코드 변경은 없으며, 다음 증분(atomic enrollment + self-binding 미들웨어를 한 단위로 구현)은 별도로 진행한다.
+
 ## 2026-08-18 — Worker credential atomic enrollment·self-binding 구현 (2~5단계)
 
 - 유형: `implementation`
@@ -520,45 +659,3 @@ last_verified: "2026-08-15"
 - 사용자 질의("orchestrator가 일을 요청받으면 credential이 없어서 진행 못 하는 경우가 있는가")에 답하며 코드를 추적한 결과, `fleet-scheduler`의 worker 선택 로직(`crates/fleet-scheduler/src/selector.rs`)이 `worker_credentials`를 전혀 참조하지 않고, LLM credential은 `fleet provision`의 `PushCredentials` 스텝(Task 흐름과 완전히 분리된 수동 프로비저닝 단계)을 통해서만 워커 호스트의 `~/.grok/config.toml`에 반영되며, credential이 비어 있으면 그 스텝조차 조용히 no-op함을 확인했다. `crates/fleet-core/src/task.rs`의 `FailureKind`에도 credential 관련 분류가 없어, LLM 인증 실패가 발생해도 일반 `WorkerError`로만 남는다.
 - 이 갭을 `#71`(Task dispatch credential precondition)로 로드맵에 등록했다. 설계는 이미 코드 관례로 확정된다: `Task.resolved_model`이 있으면 worker 후보 필터에 해당 model의 활성 credential 보유 여부를 추가하고(label 필터와 동일 자리), 후보가 전부 제외되면 기존 `DispatchError::NoWorker` 재시도/dead-letter 경로를 재사용하되 최종 실패 사유를 신설 `FailureKind::CredentialMissing`으로 구분한다. `model`이 없는 task는 검사 대상이 아니다.
 - 별도 architecture 문서를 새로 만들지 않고 `roadmap.md` 행 자체에 설계 요약을 담았다 — 범위가 스케줄러 한 곳의 필터 조건 추가와 실패 사유 taxonomy 확장으로 좁고 자기완결적이기 때문이다.
-
-## 2026-08-19 — Task dispatch credential precondition 구현 (#71)
-
-- 유형: `implementation`
-- `crates/fleet-core/src/task.rs`의 `FailureKind`에 `CredentialMissing` variant를 추가했다(`#[serde(rename_all = "snake_case")]` → `"credential_missing"`). 이 enum을 `match`하는 exhaustive 지점이 코드베이스 어디에도 없어(`cargo check --all-features`/`--no-default-features` 둘 다로 확인) 다른 크레이트 수정은 필요 없었다.
-- `crates/fleet-scheduler/src/selector.rs`의 `WorkerSelector::select`에 모델 라벨 필터 직후 credential 매칭 필터를 추가했다: `task.model`이 `Some(model)`이면 `Store::get_worker_credential(worker.name, model)`이 `Some`을 반환하는 worker만 후보로 남기고, 전부 제외되면 신설한 `SelectionError::NoWorkerForCredential(model)`을 반환한다. `#71` 등록 당시 설계 초안은 `Task.resolved_model` 기준을 제안했지만, 구현 중 `dispatcher.rs`를 다시 대조해 두 가지 사실을 확인하고 `Task.model` 기준으로 조정했다: (1) 워커에 실제로 전달되는 `DispatchRequest.model`은 `task.model.clone()`이지 `resolved_model`이 아니다 — "실행에 실제로 쓰이는" 필드는 `model`이다. (2) `HeuristicTaskRouter::resolve_routing`은 `Dispatcher::submit`의 0단계에서 항상 호출되며, 사용자가 `model`을 지정하지 않은 task에도 프로파일 휴리스틱으로 `resolved_model`을 채운다 — 이를 기준으로 삼으면 `#71`의 문제 배경(사용자가 명시적으로 model을 지정한 경우)을 크게 벗어나 사실상 모든 fleet가 전 모델에 credential을 프로비저닝해야 하게 되고, 기존 dispatch 테스트 스위트 대부분(worker에 credential을 등록하지 않은 채 `submit()` 성공을 기대하는 테스트들)이 깨진다. `SelectionError` 매칭이 필요한 두 지점(`Dispatcher::dispatch_existing`의 즉시 실패 경로, `Reconciler::reconcile_once`의 재시도 소진 dead-letter 직전)에서 `crate::selector::SelectionError`를 import해 `NoWorkerForCredential`이면 `FailureKind::CredentialMissing`, 그 외에는 기존과 동일하게 `FailureKind::WorkerUnavailable`로 매핑했다. `Reconciler`의 dead-letter 분기는 재시도 소진 판정 자체가 실제 dispatch 시도 없이 `retry_count` 비교만으로 이뤄지므로, 원인 분류를 위해 `self.state.selector.select(&task)`를 부작용 없는 순수 조회로 한 번 더 호출한다.
-- `crates/fleet-scheduler/src/selector.rs`의 테스트용 `MockStore`에 `credentials: HashSet<(worker_name, model_id)>` fixture와 `with_credential` 빌더를 추가하고(기존에는 `get_worker_credential`이 `unimplemented!()`였다), 이미 `task.model`을 지정하던 기존 테스트 `select_model_routes_to_matching_worker`/`select_model_and_required_labels_compose`에 해당 worker의 credential fixture를 채워 회귀를 피했다.
-- `DATABASE_URL`을 주입하지 않아 `PgStore`의 `get_worker_credential` 실구현은 이번 작업으로 변경하지 않았다(기존 구현을 그대로 재사용) — `MemStore`(테스트·기본 배포)만 실제로 검증했다.
-
-## 2026-08-19 — Task dispatch credential precondition 검증 (#71)
-
-- 유형: `verification`
-- 신규 테스트: `crates/fleet-scheduler/src/selector.rs`의 `select_credential_required_and_present_routes_normally`(a: credential 보유 worker로 정상 dispatch), `select_credential_missing_on_all_candidates_errors`(credential 없는 worker만 있을 때 `NoWorkerForCredential`), `select_credential_partial_provisioning_routes_to_credentialed_worker`(c: 일부만 provisioned된 fleet에서 credential 보유 worker로만 라우팅), `select_no_model_skips_credential_check`(d: model 미지정 task는 credential 무관 정상 dispatch); `crates/fleet-scheduler/src/dispatcher.rs`의 `submit_marks_credential_missing_when_worker_lacks_credential`(재시도 비활성 시 즉시 `FailureKind::CredentialMissing`으로 Failed), `submit_selects_worker_when_credential_present`; `crates/fleet-scheduler/src/reconcile.rs`의 `stale_pending_task_dead_letters_as_credential_missing_when_no_worker_has_credential`(b: 재시도 소진 뒤 dead-letter가 `FailureKind::CredentialMissing`으로 분류됨); `crates/fleet-core/src/task.rs`의 `failure_kind_credential_missing_snake_case`.
-- `cargo check --workspace --all-features`, `cargo check --workspace --no-default-features`, `cargo clippy --all-targets --all-features`(이번에 건드린 파일 기준 경고 0 — 도입 당시 `selector.rs` 모듈 문서 주석의 `clippy::doc_lazy_continuation` 경고 1건을 리스트 번호 재정렬로 해소했다), `cargo test --workspace`(전부 통과, vendor doctest 포함), `git diff --check`를 통과했다.
-
-## 2026-08-19 — 로드맵 단계 0 잔여 게이트 마무리 (#57·#58·#59)
-
-- 유형: `implementation` + `verification`
-- `#57`: `crates/fleet-api/tests/bootstrap_tokens.rs`에 발급→`token_id` 노출→그 식별자로 회수까지의 API/CLI 라운드트립 E2E를 추가했다. `crates/fleet-store/tests/bootstrap_token_migration.rs`는 016까지만 적용한 옛 스키마(`token TEXT PRIMARY KEY`)에 plaintext 토큰 행을 직접 심고 017/018을 적용한 뒤, 저장 값이 digest로 바뀌었음에도 원래 원문으로 `consume_bootstrap_token` 인증이 그대로 성공함을 검증한다(`legacy_plaintext_token_still_authenticates_after_digest_migration`).
-- `#58`: `crates/fleet-api/src/cloudflare.rs`의 `cloudflare_access_middleware`가 CF Access JWT를 서명까지 검증해 `VerifiedUser`를 요청에 넣어도, `auth_middleware`가 CF-only 배포 분기에서 그 값을 전혀 읽지 않고 `AuthorizationContext`도 만들지 않아 `authorize_http_endpoint`(capability 검사) 자체가 통째로 스킵되던 것을 연결했다 — 이제 검증된 이메일이 `principal_id`로 들어가고 capability 검사를 반드시 거친다. 매핑되지 않은 CF principal은 하위 호환을 위해 잠정적으로 전체 capability를 받는다(least privilege 아님, 이메일별 capability manifest는 후속 작업). Project scope/confused-deputy 검증은 `#48`(Project 기능) 부재로 의도적으로 미착수 상태로 남겼다.
-- `#59`: `crates/fleet-api/tests/bootstrap_token_dump.rs`가 신선한 PostgreSQL에 전체 마이그레이션을 적용하고, bootstrap token 발급과 join으로 얻은 worker operational token(`fwo_...`) 모두 `pg_dump` 결과(schema+data)에 원문이 등장하지 않음을 검증한다. digest·행 존재를 함께 단언해 빈 덤프로 인한 거짓 통과를 막는다.
-- 이전 시도가 하네스 프로세스 정지(600초 무진행)로 중단됐으나, 이미 만들어진 코드(3개 커밋)와 미완성 상태로 남아 있던 `bootstrap_token_dump.rs`(완성된 상태였음)를 이어받아 검증만 완료하고 마지막 조각을 커밋했다.
-- `cargo check --workspace`(`--all-features`/`--no-default-features`), `cargo clippy --all-targets --all-features`(이번에 건드린 파일 기준 경고 0), `cargo test --workspace`(전부 통과), `DATABASE_URL=postgres://$(whoami)@localhost/fleet_test`로 `bootstrap_token_dump`/`bootstrap_token_migration`/`enroll_worker`/`worker_credential_rotation`/`integration`/`auth_integration`/`audit_integration`과 fleet-api 전체 스위트 재실행(전부 통과), `git diff --check`를 통과했다.
-- 로드맵 "현재 구현 순서" 표(단계 0: `#58`, `#59`)가 이걸로 완료·부분 구현으로 닫혔다 — 단계 1(`#60`, 이미 완료)로의 순차 전환 조건을 충족한다.
-
-## 2026-08-20 — Worker LLM credential 인가 우회 차단과 감사 기록 (#66)
-
-- 유형: `implementation`
-- 발견: `crates/fleet-api/src/app.rs`의 `required_capability` 행렬이 LLM credential 하위 자원을 하나도 매핑하지 않아 `authorize_http_endpoint`가 `Ok(())`로 통과시키고 있었다. 결과적으로 **인증만 성공하면**(capability가 빈 bearer principal, CF Access 세션, 심지어 `#60`에서 만든 워커 자신의 `fwo_` operational 토큰으로도) `GET /v1/workers/{name}/credentials/{model}/export`로 **아무 워커의 LLM 프로바이더 API 키든 평문으로** 가져갈 수 있었고, 핸들러는 `tracing::debug!`만 남겨 누가 무엇을 가져갔는지 사후에 확인할 방법이 없었다. `GET .../credentials`(목록)와 `PUT .../credentials`(저장·덮어쓰기)도 같은 이유로 무방비였다. `DELETE .../credentials/{model}`은 매핑이 없던 게 아니라 더 넓은 `(&Method::DELETE, path) if path.starts_with("/workers/")` 항목에 흡수돼 `worker:delete`만 요구했는데, 워커 operational 토큰이 바로 그 capability를 갖고 있어(`app.rs`의 `WorkerRegister`+`WorkerDelete` 부여) 워커가 다른 워커의 credential을 지울 수 있었다. `#58`(CF Access 경로), `#60`에 이어 "route를 추가하면서 capability 행렬에 등록하지 않는" 동일 결함의 세 번째 사례다.
-- `crates/fleet-core/src/auth.rs`의 `PermissionKind`에 `worker:llm_credential:read`/`:export`/`:manage`를 신설했다. 기존 `worker:credential:manage`는 `#60`의 operational identity(워커가 자신을 인증하는 `fwo_` 토큰) 전용으로 그대로 두고, 이름과 doc comment로 두 비밀의 차이를 명시했다 — 하나의 capability로 뭉치면 워커 등록 권한이 곧 API 키 열람 권한이 된다. `read`/`export`를 나눈 것은 목록 조회가 `api_key`를 반환하지 않기 때문이고, `export`를 `manage`에서 분리한 것은 프로비저너 토큰(장기 보관·프로비저닝 호스트 상주)이 credential을 덮어쓰거나 지울 수 없게 하기 위해서다.
-- `required_capability`에 `llm_credential_route()` 분류기를 추가해 GET 목록=`read`, GET export=`export`, PUT/DELETE=`manage`로 매핑하고, 이 항목들을 기존 `worker:delete` 항목보다 **앞에** 배치했다(뒤에 두면 DELETE가 다시 흡수된다). 분류기는 `strip_prefix("credentials")` 기반이라 단수형 operational credential 경로(`/credential`, `/credential/rotate`)와 문자열 수준에서 겹치지 않으며, 알 수 없는 `/credentials…` 변형은 capability를 요구하는 쪽(fail-closed)으로 분류한다.
-- `crates/fleet-api/src/handlers.rs`의 export/put/delete 핸들러가 `AuthorizationContext`를 받아 `Store::record_audit_event`로 `worker.llm_credential.export`/`.put`/`.delete`를 기록한다(`crates/fleet-core/src/audit.rs`에 action 상수 신설). 기록 실패 처리는 의도적으로 비대칭이다: export는 응답 **전에** 기록하고 실패하면 500으로 거부하며 평문을 반환하지 않는다(키가 유출됐을 때 회수 범위를 정하는 유일한 근거이므로 근거를 남기지 못하면 열람을 허용하지 않는다), put/delete는 변경이 이미 커밋된 뒤이므로 기록 실패를 `tracing::error!`로만 경보하고 성공을 반환한다(500을 내면 "변경되지 않았다"는 거짓 신호가 된다). 감사 `detail`에는 worker/model 식별자와 인증 방식만 넣고 비밀 값은 넣지 않는다.
-- `MemStore`/`PgStore` 모두 `record_audit_event`를 이미 구현하고 있어 store 변경은 없었다. `crates/fleet-store/src/rbac.rs`의 `permission_description`은 exhaustive match라 신규 capability 설명 세 줄을 추가했다(`seed_rbac_if_empty`가 `PermissionKind::all()`에서 DB로 자동 동기화하므로 마이그레이션은 불필요).
-- `crates/fleet-api/src/openapi.yaml`의 네 엔드포인트 설명을 갱신했다 — export 항목에 남아 있던 "there is no additional elevated-permission check"는 이제 사실이 아니다.
-- **운영 영향(하위 호환 깨짐, 의도적)**: `fleet-provisioner`의 `PushCredentials` 스텝과 `fleet-cli`의 credential 명령은 계속 이 엔드포인트를 사용하므로, 배포 manifest의 bearer 토큰에 새 capability(프로비저너는 `worker:llm_credential:read`+`:export`, credential 등록용 토큰은 `:manage`)를 추가하지 않으면 403으로 실패한다. 엔드포인트를 삭제하지 않고 게이트만 추가한 이유는 프로비저닝 경로가 이 API에 정상적으로 의존하고 있기 때문이다.
-
-## 2026-08-20 — Worker LLM credential 인가·감사 검증 (#66)
-
-- 유형: `verification`
-- 신규 통합 테스트 `crates/fleet-api/tests/worker_llm_credential_authz.rs`: capability 없는 인증 principal의 export가 403이고 응답 본문에 키가 실리지 않으며 감사 이벤트도 남지 않음, `worker:llm_credential:export` 보유 principal은 200과 평문 키를 받고 감사 이벤트가 정확히 1건(행위자 라벨·target 확인, detail에 비밀 값 없음) 기록됨, `manage`만 가진 principal은 export 403, 워커 자신의 operational 토큰(`fwo_`)으로는 **자기 자신의** LLM credential export도 403, 목록 조회는 `read` 없이는 403, DELETE는 `worker:delete`나 워커 토큰으로는 403이고 `manage`로만 200이며 감사 이벤트가 남음, PUT은 `read`/`export`/무권한 모두 403이고 `manage`로만 200.
-- 신규 단위 테스트: `crates/fleet-api/src/app.rs`의 `capability_matrix_covers_llm_credential_routes`(네 route의 요구 capability 고정, mount 지점 유무 무관), `llm_credential_routes_do_not_collide_with_operational_credential`(단수형 `/credential`은 LLM 경로로 분류되지 않고, 복수형 DELETE가 `worker:delete`로 흡수되지 않음), `llm_credential_export_is_not_covered_by_manage`; `crates/fleet-core/src/auth.rs`의 `llm_credential_permissions_are_distinct_from_operational_credential`(capability 이름 중복 없음, Operator/Viewer 기본 역할에 export·manage 미부여, Admin은 보유).
-- `cargo check --workspace --all-features`, `cargo check --workspace --no-default-features`, `cargo clippy --all-targets --all-features`(이번에 건드린 파일 기준 경고 0), `cargo test --workspace`(전부 통과), `git diff --check`를 통과했다. `DATABASE_URL`은 주입하지 않았다 — 이번 변경은 `PgStore` 쿼리를 건드리지 않고 `MemStore` 기준으로만 검증했다.

@@ -665,6 +665,8 @@ components:
           format: uuid
           nullable: true
           description: Preserve this worker_id across re-registration if provided
+        liveness_mode:
+          $ref: "#/components/schemas/WorkerLivenessMode"
 
     RegisterResponse:
       type: object
@@ -705,6 +707,8 @@ components:
         worker_version:
           type: string
           nullable: true
+        liveness_mode:
+          $ref: "#/components/schemas/WorkerLivenessMode"
 
     JoinResponse:
       allOf:
@@ -790,6 +794,7 @@ components:
         - active_tasks
         - max_concurrent
         - circuit_state
+        - liveness_mode
         - registered_at
       properties:
         id:
@@ -816,9 +821,25 @@ components:
           type: string
           format: date-time
           nullable: true
+        liveness_mode:
+          type: string
+          enum: [periodic, on_demand]
+          description: >-
+            Roadmap #61. `on_demand` currently only affects schema storage and
+            HealthChecker heartbeat-timeout exemption — dispatch-time ACP
+            probing is not implemented yet (roadmap #67 dependency).
         registered_at:
           type: string
           format: date-time
+
+    WorkerLivenessMode:
+      type: string
+      enum: [periodic, on_demand]
+      default: periodic
+      description: >-
+        Roadmap #61. Defaults to `periodic` for backward compatibility with
+        existing deployments. `on_demand` is schema-only in this increment —
+        see the `liveness_mode` field description on `WorkerSummary`.
 
     DeregisterRequest:
       type: object

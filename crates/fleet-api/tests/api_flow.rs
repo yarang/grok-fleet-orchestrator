@@ -98,6 +98,38 @@ async fn register_then_list_shows_worker() {
     assert_eq!(workers[0]["name"], "build-01");
     assert_eq!(workers[0]["labels"]["arch"], "arm64");
     assert_eq!(workers[0]["status"], "online");
+    // 로드맵 #61 1단계 — liveness_mode 생략 시 기존 클라이언트와 동일하게
+    // periodic으로 취급되어야 한다.
+    assert_eq!(workers[0]["liveness_mode"], "periodic");
+}
+
+/// 로드맵 #61 1단계 — 신규 워커가 `liveness_mode: "on_demand"`로 등록을
+/// 요청하면 그 값이 그대로 저장/조회된다. (실제 on-demand dispatch 동작은
+/// 이 증분의 범위 밖 — 스키마 배관만 검증.)
+#[tokio::test]
+async fn register_with_on_demand_liveness_mode_is_persisted() {
+    let srv = spawn_server().await;
+
+    let resp = client()
+        .post(format!("http://{}/v1/workers/register", srv.addr))
+        .json(&json!({
+            "name": "on-demand-01",
+            "agent_endpoint": "wss://10.0.1.20:2419/ws",
+            "liveness_mode": "on_demand",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "register should succeed");
+
+    let resp = client()
+        .get(format!("http://{}/v1/workers", srv.addr))
+        .send()
+        .await
+        .unwrap();
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0]["liveness_mode"], "on_demand");
 }
 
 #[tokio::test]

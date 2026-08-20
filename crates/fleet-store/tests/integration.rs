@@ -305,6 +305,93 @@ async fn worker_upsert_and_get() {
     assert!(matches!(fetched.status, WorkerStatus::Online));
 }
 
+/// 로드맵 #61 1단계 회귀 테스트 — `Worker::new`(및 `sample_worker`)가 만드는
+/// 워커는 `liveness_mode`를 명시하지 않아도 `periodic`으로 저장/조회되어야
+/// 한다 (기존 배포와의 하위 호환).
+#[tokio::test]
+async fn worker_upsert_defaults_liveness_mode_to_periodic() {
+    require_db!(store);
+
+    let worker = sample_worker("legacy-worker-1");
+    store.upsert_worker(&worker).await.unwrap();
+
+    let fetched = store
+        .get_worker(worker.id)
+        .await
+        .unwrap()
+        .expect("worker should exist");
+    assert_eq!(
+        fetched.liveness_mode,
+        fleet_core::WorkerLivenessMode::Periodic
+    );
+}
+
+/// 로드맵 #61 1단계 — 신규 워커를 `on_demand`로 등록하고 그대로 저장/조회할
+/// 수 있어야 한다.
+#[tokio::test]
+async fn worker_upsert_persists_on_demand_liveness_mode() {
+    require_db!(store);
+
+    let mut worker = sample_worker("on-demand-worker-1");
+    worker.liveness_mode = fleet_core::WorkerLivenessMode::OnDemand;
+    store.upsert_worker(&worker).await.unwrap();
+
+    let fetched = store
+        .get_worker(worker.id)
+        .await
+        .unwrap()
+        .expect("worker should exist");
+    assert_eq!(
+        fetched.liveness_mode,
+        fleet_core::WorkerLivenessMode::OnDemand
+    );
+
+    // list_workers 경로도 동일하게 반영되는지 확인.
+    let listed = store
+        .list_workers(&WorkerFilter::default())
+        .await
+        .unwrap();
+    let found = listed
+        .iter()
+        .find(|w| w.id == worker.id)
+        .expect("worker should be listed");
+    assert_eq!(found.liveness_mode, fleet_core::WorkerLivenessMode::OnDemand);
+}
+
+/// 로드맵 #61 1단계 마이그레이션 회귀 테스트 — 마이그레이션 019 적용 전에
+/// 존재했을 법한 행을 흉내내어, `liveness_mode` 컬럼을 명시하지 않고 직접
+/// INSERT해도 `DEFAULT 'periodic'`이 적용되는지 확인한다 (컬럼 자체가 없던
+/// 시절의 행이 아니라, 마이그레이션 직후 기존 행이 채워지는 경로를 검증).
+#[tokio::test]
+async fn pre_existing_worker_row_backfilled_to_periodic_by_column_default() {
+    require_db!(store);
+
+    let worker_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO workers
+             (id, name, endpoint, labels, status, circuit_state,
+              active_tasks, max_concurrent, registered_at)
+           VALUES ($1, $2, $3, '{}'::jsonb, 'online', 'closed', 0, 4, NOW())"#,
+    )
+    .bind(worker_id)
+    .bind("raw-insert-worker")
+    .bind("wss://raw-insert/ws")
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let fetched = store
+        .get_worker(fleet_core::WorkerId::from(worker_id))
+        .await
+        .unwrap()
+        .expect("worker should exist");
+    assert_eq!(
+        fetched.liveness_mode,
+        fleet_core::WorkerLivenessMode::Periodic,
+        "rows inserted without an explicit liveness_mode must default to periodic"
+    );
+}
+
 #[tokio::test]
 async fn worker_get_by_name() {
     require_db!(store);

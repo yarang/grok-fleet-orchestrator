@@ -371,14 +371,15 @@ impl Store for PgStore {
         let labels_json = serde_json::to_value(&worker.labels)?;
         let status_str = worker_status_to_str(worker.status);
         let circuit_str = circuit_state_to_str(worker.circuit_state);
+        let liveness_str = liveness_mode_to_str(worker.liveness_mode);
 
         sqlx::query(
             r#"
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
-                 last_seen, active_tasks, max_concurrent, worker_version, registered_at)
+                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO UPDATE SET
                 name            = EXCLUDED.name,
                 endpoint        = EXCLUDED.endpoint,
@@ -388,7 +389,8 @@ impl Store for PgStore {
                 last_seen       = EXCLUDED.last_seen,
                 active_tasks    = EXCLUDED.active_tasks,
                 max_concurrent  = EXCLUDED.max_concurrent,
-                worker_version  = EXCLUDED.worker_version
+                worker_version  = EXCLUDED.worker_version,
+                liveness_mode   = EXCLUDED.liveness_mode
             "#,
         )
         .bind(worker.id.as_uuid())
@@ -401,6 +403,7 @@ impl Store for PgStore {
         .bind(worker.active_tasks as i32)
         .bind(worker.max_concurrent as i32)
         .bind(worker.worker_version.as_ref())
+        .bind(liveness_str)
         .bind(worker.registered_at)
         .execute(&self.pool)
         .await?;
@@ -411,7 +414,7 @@ impl Store for PgStore {
     async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
                FROM workers WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -424,7 +427,7 @@ impl Store for PgStore {
     async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
                FROM workers WHERE name = $1"#,
         )
         .bind(name)
@@ -451,7 +454,7 @@ impl Store for PgStore {
 
         let rows = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
                FROM workers
               WHERE ($1::text IS NULL OR status = $1)
                 AND ($2::jsonb IS NULL OR labels @> $2)
@@ -866,13 +869,14 @@ impl Store for PgStore {
         let labels_json = serde_json::to_value(&worker.labels)?;
         let status_str = worker_status_to_str(worker.status);
         let circuit_str = circuit_state_to_str(worker.circuit_state);
+        let liveness_str = liveness_mode_to_str(worker.liveness_mode);
         sqlx::query(
             r#"
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
-                 last_seen, active_tasks, max_concurrent, worker_version, registered_at)
+                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(worker.id.as_uuid())
@@ -885,6 +889,7 @@ impl Store for PgStore {
         .bind(worker.active_tasks as i32)
         .bind(worker.max_concurrent as i32)
         .bind(worker.worker_version.as_ref())
+        .bind(liveness_str)
         .bind(worker.registered_at)
         .execute(&mut *tx)
         .await
@@ -2047,6 +2052,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
     let active_tasks: i32 = row.try_get("active_tasks")?;
     let max_concurrent: i32 = row.try_get("max_concurrent")?;
     let worker_version: Option<String> = row.try_get("worker_version")?;
+    let liveness_str: String = row.try_get("liveness_mode")?;
     let registered_at = row.try_get("registered_at")?;
 
     let labels: Labels = serde_json::from_value(labels_json).unwrap_or_else(|_| HashMap::new());
@@ -2062,6 +2068,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
         max_concurrent: max_concurrent as u32,
         circuit_state: str_to_circuit_state(&circuit_str)?,
         worker_version,
+        liveness_mode: str_to_liveness_mode(&liveness_str)?,
         registered_at,
     })
 }
@@ -2177,6 +2184,23 @@ fn str_to_circuit_state(s: &str) -> Result<CircuitState, StoreError> {
         "half_open" => Ok(CircuitState::HalfOpen),
         other => Err(StoreError::Decode(format!(
             "unknown circuit state: {other}"
+        ))),
+    }
+}
+
+fn liveness_mode_to_str(m: fleet_core::WorkerLivenessMode) -> &'static str {
+    match m {
+        fleet_core::WorkerLivenessMode::Periodic => "periodic",
+        fleet_core::WorkerLivenessMode::OnDemand => "on_demand",
+    }
+}
+
+fn str_to_liveness_mode(s: &str) -> Result<fleet_core::WorkerLivenessMode, StoreError> {
+    match s {
+        "periodic" => Ok(fleet_core::WorkerLivenessMode::Periodic),
+        "on_demand" => Ok(fleet_core::WorkerLivenessMode::OnDemand),
+        other => Err(StoreError::Decode(format!(
+            "unknown liveness mode: {other}"
         ))),
     }
 }

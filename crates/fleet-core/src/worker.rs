@@ -38,6 +38,13 @@ pub struct Worker {
     /// 워커 사이드카 버전 (예: "0.1.0").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_version: Option<String>,
+    /// Liveness 보고 방식 (로드맵 #61). 기본값 `Periodic` — 기존 배포와의
+    /// 하위 호환을 위해 필드가 없는 구 페이로드/행은 이 값으로 취급한다.
+    /// `OnDemand`는 스키마·모니터링 예외만 이 증분에서 구현되며, 실제 dispatch
+    /// 경로(사전 ACP probe 등)는 별도 control-stream 인프라(로드맵 #67) 없이는
+    /// 아직 안전하지 않다 — [`docs/architecture/worker-liveness-policy.md`] 참고.
+    #[serde(default)]
+    pub liveness_mode: WorkerLivenessMode,
     /// 등록 시각.
     pub registered_at: DateTime<Utc>,
 }
@@ -60,6 +67,7 @@ impl Worker {
             max_concurrent: 4,
             circuit_state: CircuitState::Closed,
             worker_version: None,
+            liveness_mode: WorkerLivenessMode::default(),
             registered_at: Utc::now(),
         }
     }
@@ -97,6 +105,23 @@ pub enum WorkerStatus {
     Offline,
     /// CircuitBreaker가 열려 자동 차단됨.
     CircuitOpen,
+}
+
+/// 워커 liveness 보고 방식 (로드맵 #61,
+/// `docs/architecture/worker-liveness-policy.md`).
+///
+/// - `Periodic`: 기본값. `heartbeat_interval_secs`마다 heartbeat 전송,
+///   fleet-scheduler의 HealthChecker가 누락 시 Offline으로 전이.
+/// - `OnDemand`: idle 시 트래픽 없음. 이 열거값은 스키마/모니터링 예외
+///   (HealthChecker skip)만 이번 증분에서 지원한다 — dispatch 직전 ACP probe는
+///   아직 구현되지 않았으므로(로드맵 #67 의존) `on_demand`로 설정된 워커에
+///   실제로 task를 배정하는 로직은 이 증분의 범위 밖이다.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerLivenessMode {
+    #[default]
+    Periodic,
+    OnDemand,
 }
 
 /// CircuitBreaker 3상태.
@@ -236,5 +261,51 @@ mod tests {
     fn status_snake_case() {
         let s = serde_json::to_string(&WorkerStatus::CircuitOpen).unwrap();
         assert_eq!(s, "\"circuit_open\"");
+    }
+
+    #[test]
+    fn new_worker_defaults_to_periodic_liveness() {
+        let w = Worker::new("build-farm-1", "wss://localhost:2419/ws");
+        assert_eq!(w.liveness_mode, WorkerLivenessMode::Periodic);
+    }
+
+    #[test]
+    fn liveness_mode_snake_case_serialization() {
+        assert_eq!(
+            serde_json::to_string(&WorkerLivenessMode::Periodic).unwrap(),
+            "\"periodic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WorkerLivenessMode::OnDemand).unwrap(),
+            "\"on_demand\""
+        );
+    }
+
+    #[test]
+    fn liveness_mode_deserializes_from_snake_case() {
+        let periodic: WorkerLivenessMode = serde_json::from_str("\"periodic\"").unwrap();
+        let on_demand: WorkerLivenessMode = serde_json::from_str("\"on_demand\"").unwrap();
+        assert_eq!(periodic, WorkerLivenessMode::Periodic);
+        assert_eq!(on_demand, WorkerLivenessMode::OnDemand);
+    }
+
+    #[test]
+    fn worker_json_missing_liveness_mode_defaults_to_periodic() {
+        // 하위 호환 회귀 테스트 — 로드맵 #61 이전에 저장/전송된 Worker JSON은
+        // liveness_mode 필드가 없다. #[serde(default)]가 없으면 기존 데이터
+        // 역직렬화가 깨진다.
+        let json = serde_json::json!({
+            "id": WorkerId::new(),
+            "name": "legacy-worker",
+            "endpoint": "wss://legacy/ws",
+            "labels": {},
+            "status": "online",
+            "active_tasks": 0,
+            "max_concurrent": 4,
+            "circuit_state": "closed",
+            "registered_at": Utc::now(),
+        });
+        let w: Worker = serde_json::from_value(json).unwrap();
+        assert_eq!(w.liveness_mode, WorkerLivenessMode::Periodic);
     }
 }

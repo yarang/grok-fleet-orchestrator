@@ -53,4 +53,6 @@ pub use task::{
     FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,
     TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,
 };
-pub use worker::{CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat, WorkerStatus};
+pub use worker::{
+    CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat, WorkerLivenessMode, WorkerStatus,
+};

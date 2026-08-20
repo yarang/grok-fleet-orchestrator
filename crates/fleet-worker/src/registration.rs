@@ -100,6 +100,10 @@ struct RegisterRequest {
     max_concurrent_tasks: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     existing_worker_id: Option<String>,
+    /// liveness 보고 방식 (로드맵 #61). `Default`(periodic)이면 orchestrator
+    /// 쪽 `#[serde(default)]`가 기존과 동일하게 처리하므로 항상 실어 보내도
+    /// 하위 호환에 문제없다.
+    liveness_mode: fleet_core::WorkerLivenessMode,
 }
 
 /// `POST /v1/workers/heartbeat` 요청.
@@ -190,6 +194,7 @@ impl RegistrationClient {
             labels,
             max_concurrent_tasks: self.config.grok.max_concurrent_tasks,
             existing_worker_id: self.config.worker.existing_worker_id.clone(),
+            liveness_mode: self.config.worker.liveness_mode,
         };
 
         let url = format!(

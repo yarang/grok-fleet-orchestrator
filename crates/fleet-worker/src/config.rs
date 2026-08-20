@@ -10,6 +10,7 @@
 //! operational_token = "fwo_xxx"        # register/heartbeat/deregister bearer (join이 발급)
 //! labels = { arch = "arm64", gpu = "false" }
 //! existing_worker_id = "550e8400-..."  # 재등록 시 ID 유지 (옵션)
+//! liveness_mode = "periodic"           # "periodic" | "on_demand" (기본 periodic, 옵션)
 //!
 //! [grok]
 //! bin = "/usr/local/bin/grok"
@@ -37,6 +38,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::WorkerError;
+use fleet_core::WorkerLivenessMode;
 
 /// worker.toml 전체.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +94,13 @@ pub struct WorkerSection {
     /// 재등록 시 유지할 기존 worker_id (UUID 문자열). 신규 등록이면 None.
     #[serde(default)]
     pub existing_worker_id: Option<String>,
+    /// liveness 보고 방식 (로드맵 #61). 기본값 `periodic` — 기존 배포와 동일하게
+    /// `heartbeat_interval_secs`마다 heartbeat를 전송한다. `on_demand`는 스키마·
+    /// HealthChecker 예외 처리만 이 증분에서 지원하며, dispatch 전 ACP probe
+    /// 인프라(로드맵 #67) 없이는 실제 운영에 쓸 수 없다 —
+    /// `docs/architecture/worker-liveness-policy.md` 참고.
+    #[serde(default)]
+    pub liveness_mode: WorkerLivenessMode,
 }
 
 /// `[grok]` 섹션.
@@ -387,6 +396,7 @@ pub struct WorkerConfigBuilder {
     labels: HashMap<String, String>,
     mtls: Option<MtlsSection>,
     llm_proxy: Option<LlmProxySection>,
+    liveness_mode: WorkerLivenessMode,
 }
 
 impl WorkerConfigBuilder {
@@ -434,6 +444,11 @@ impl WorkerConfigBuilder {
         self.llm_proxy = Some(proxy);
         self
     }
+    /// liveness 보고 방식 오버라이드 (테스트용). 기본값 `periodic`.
+    pub fn liveness_mode(mut self, mode: WorkerLivenessMode) -> Self {
+        self.liveness_mode = mode;
+        self
+    }
     pub fn build(self) -> WorkerConfig {
         WorkerConfig {
             worker: WorkerSection {
@@ -445,6 +460,7 @@ impl WorkerConfigBuilder {
                 operational_token: self.operational_token,
                 labels: self.labels,
                 existing_worker_id: None,
+                liveness_mode: self.liveness_mode,
             },
             grok: GrokSection {
                 bin: self.grok_bin.unwrap_or_else(|| "/bin/true".into()),
@@ -787,6 +803,39 @@ secret = "x"
 "#;
         let config: WorkerConfig = toml.parse().unwrap();
         assert!(config.worker.operational_token.is_none());
+    }
+
+    // ── 로드맵 #61 1단계: liveness_mode ──────────────────────────────
+
+    #[test]
+    fn liveness_mode_defaults_to_periodic_when_omitted() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "http://localhost:8080"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        assert_eq!(config.worker.liveness_mode, WorkerLivenessMode::Periodic);
+    }
+
+    #[test]
+    fn liveness_mode_parses_on_demand() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "http://localhost:8080"
+liveness_mode = "on_demand"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        assert_eq!(config.worker.liveness_mode, WorkerLivenessMode::OnDemand);
     }
 
     #[test]

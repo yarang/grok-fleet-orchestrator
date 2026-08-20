@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/roadmap/roadmap.md"
-last_verified: "2026-08-19"
+last_verified: "2026-08-18"
 last_verified_commit: "working-tree"
 owners: ["planning"]
 ---
@@ -17,18 +17,22 @@ owners: ["planning"]
 
 ## 현재 구현 순서
 
-| 순서 | 항목 | 우선순위 | 상태 | 선행 조건 |
+각 단계는 이전 단계의 정상·실패 경로 검증을 통과한 뒤에만 활성화한다. 신규 Agent/Project 기능은
+direct-worker Task 경로를 대체하지 않고 feature flag 뒤에서 점진적으로 도입한다.
+
+| 단계 | 배포 가능한 increment | 포함 Roadmap ID | 우선순위 | 활성화 게이트 |
 |---:|---|---|---|---|
-| 1 | [#58 HTTP·MCP authorization](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | 없음 |
-| 2 | [#59 Bootstrap token digest](#보안과-실행-신뢰성-57-65) | P1 | 부분 구현 | #58과 병행 가능 |
-| 3 | [#60 Worker operational identity](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | #58 |
-| 4 | [#61 Worker liveness mode](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | #60과 병행 가능 |
-| 5 | [#62 TaskAttempt·멱등성](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | #58 |
-| 6 | [#63 Cold Standby fencing](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | #62 |
-| 7 | [#64 Agent 실행 격리](#보안과-실행-신뢰성-57-65) | P1 | 설계 확정·구현 대기 | #60 |
-| 8 | [#65 재현 가능한 Skill loading](#보안과-실행-신뢰성-57-65) | P2 | 설계 확정·구현 대기 | #62, #64 |
-| 9 | [#48~#52 Project·Agent 기능군](#기능-확장-48-52) | P2 | 설계 완료·구현 대기 | 관련 P1 경계 |
-| 10 | [#53~#56 LLM gateway 보강](#llm-gateway-53-56) | P1~P2 | 설계·구현 혼합 | #60 credential 경계와 조율 |
+| 0 | production trust foundation | #58, #59 | P1 | no-auth fail-closed, endpoint/tool authorization matrix, bootstrap 원문 DB 부재 |
+| 1 | Worker identity와 credential authority | #60, #66, #55 | P1 | mTLS/self binding, Security Manager delivery grant, raw export 비활성화 |
+| 2 | 실행 일관성과 제어 권한 | #62, #63, #61 | P1 | TaskAttempt CAS, control epoch, inventory-first recovery, bounded control channel |
+| 3 | durable workspace와 공유 Host 안전성 | #69, #64 | P1 | Git checkpoint 복구, container isolation, privileged helper 거절 경로 |
+| 4 | 최소 Project·Agent lifecycle | #48, #67, #49 | P2 | Project scope, one Agent/one Attempt, Hibernated E2E; WarmIdle 비활성 |
+| 5 | 운영 완결성 | #68, #70, #65, #50 | P1~P2 | archive hold, reconciliation/alert, reproducible skill, attach security gate |
+| 6 | 확장 기능 | #51, #52, #53, #54, #56 | P2 | 앞 단계 불변식 유지와 vendor/gateway 회귀 검증 |
+
+**첫 착수 단위**는 #58의 `AuthorizationContext`/fail-closed middleware와 #59의 bootstrap digest
+migration이다. 이 단계가 완료되기 전에는 Project/Agent control API, Security Manager delivery API,
+MCP mutation 확장을 외부에 노출하지 않는다.
 
 P1은 프로덕션 보안과 실행 신뢰성 게이트다. P2 기능 확장은 관련 P1 불변식을 우회하지 않는
 범위에서만 병행한다. 긴급 credential 폐기·재발급 같은 사고 대응은 이 순서보다 우선한다.
@@ -40,7 +44,7 @@ P1은 프로덕션 보안과 실행 신뢰성 게이트다. P2 기능 확장은 
 | ID | 항목 | 상태 | 설계 정본 | 다음 완료 게이트 |
 |---|---|---|---|---|
 | #48 | Project 기능 | 설계 완료·구현 대기 | [모델](../architecture/project-feature-design.md), [계약](../contracts/project-management.md) | 스키마·소유권·dispatch 자격·RBAC 통합 테스트 |
-| #49 | Agent provisioning·memory·summary·tool binding | 설계 완료·구현 대기 | [Agent provisioning](../architecture/agents/provisioning.md), [외부 계약](../contracts/agent-management.md) | Phase 0 뒤 transport·schema/API·worker lifecycle 단계 구현 |
+| #49 | Agent provisioning·memory·summary·tool binding | 설계 완료·구현 대기 | [Agent provisioning](../architecture/agents/provisioning.md), [외부 계약](../contracts/agent-management.md) | #48/#67 뒤 Hibernated 단일 Agent E2E; WarmIdle은 별도 flag |
 | #50 | Agent terminal monitoring·CLI attach | 설계 완료·구현 대기 | [Terminal access](../architecture/agents/terminal-access.md) | #49 Phase 4 뒤 cleanup·attach 권한·gateway E2E 검증 |
 | #51 | Agent harness·Skill·project constitution | 설계 완료·구현 대기 | [Harness composition](../architecture/agents/harness-composition.md) | #49 tool binding과 합성 순서·권한·revision 검증 |
 | #52 | Multi-vendor Agent runtime | 설계 완료·구현 대기 | [Runtime adapters](../architecture/agents/runtime-adapters.md) | #49 Phase 0에서 transport와 native Skill 동작 검증 |
@@ -54,21 +58,25 @@ P1은 프로덕션 보안과 실행 신뢰성 게이트다. P2 기능 확장은 
 | #55 | Worker-scoped gateway credential | P1 · 설계 필요 | [LLM Gateway](../architecture/llm-gateway.md), [보안 모델](../security/control-plane-security-model.md) | principal·scope·발급·전달·회수·회전·감사 계약과 격리 테스트 |
 | #56 | Provider·gateway·quota 실패 상태 분리 | P2 · 설계 필요 | [LLM Gateway](../architecture/llm-gateway.md), [Routing](../architecture/tasks/routing-policy.md) | 상태·telemetry·fallback 계약과 오분류 방지 테스트 |
 
-### 보안과 실행 신뢰성 (#57-#65)
+### 보안과 실행 신뢰성 (#57-#70)
 
 | ID | 항목 | 우선순위·상태 | 정본 | 완료 게이트 |
 |---|---|---|---|---|
-| #57 | Bootstrap token 공개 식별자 전환 | P1 · 완료 | [보안 발견 S9](../security/reports/security-findings.md) | API·CLI(`token_id` 발급/list/revoke) 라운드트립과 원문 미노출을 `crates/fleet-api/tests/bootstrap_tokens.rs`로, 017 마이그레이션 이전 발급된 plaintext 토큰이 마이그레이션 뒤에도 원문으로 인증됨을 `crates/fleet-store/tests/bootstrap_token_migration.rs::legacy_plaintext_token_still_authenticates_after_digest_migration`으로 검증 |
-| #58 | HTTP·MCP principal/capability authorization | P1 · 부분 구현 | [보안 모델](../security/control-plane-security-model.md) | HTTP scoped bearer·MCP launcher capability allow-list에 이어, CF Access 전용 배포에서도 `auth_middleware`가 검증된 `VerifiedUser.email`을 `AuthorizationContext.principal_id`로 연결하고 `authorize_http_endpoint` capability 검사를 반드시 거치도록 고쳤다(이전엔 CF-only 경로가 capability 검사 자체를 건너뛰었음). 매핑 없는 CF principal은 호환성을 위해 잠정적으로 전체 capability를 받는다 — least privilege 아님, 후속 작업 필요(문서화됨). Project scope/confused-deputy 검증은 `#48`(Project 기능) 구현 후에만 대상이 생기므로 의도적으로 열어둠 |
-| #59 | Bootstrap token digest 저장 | P1 · 완료 | [보안 모델](../security/control-plane-security-model.md) | digest 저장·1회 원문 반환·digest 기반 회수에 이어, 실제 PostgreSQL에 001~018 마이그레이션을 전부 적용하고 발급된 bootstrap token·join으로 얻은 worker operational token 모두 `pg_dump` 결과에 원문이 나타나지 않음을 `crates/fleet-api/tests/bootstrap_token_dump.rs::issued_bootstrap_token_never_appears_in_a_database_dump`로 검증 |
+| #57 | Bootstrap token 공개 식별자 전환 | P1 · 구현 중 | [보안 발견 S9](../security/reports/security-findings.md) | CLI list가 `token_id`를 표시하도록 동기화됨. API/CLI E2E와 기존 운영 token migration 검증이 남음 |
+| #58 | HTTP·MCP principal/capability authorization | P1 · 구현 중 | [Authorization](../security/authorization-and-audit.md) | HTTP scoped token manifest(principal·capability)와 관리 route capability, MCP launcher capability allow-list, no-provider fail-closed를 적용. Cloudflare claim principal, Worker self identity, Project scope/confused-deputy·audit 테스트가 남음 |
+| #59 | Bootstrap token digest 저장 | P1 · 구현 중 | [보안 모델](../security/control-plane-security-model.md) | core/store/API/MCP를 digest 저장·1회 원문 반환·digest 기반 회수로 전환. 실제 PostgreSQL migration/DB dump 회귀 테스트가 남음 |
 | #60 | Worker operational identity | P1 · 부분 구현 | [보안 모델](../security/control-plane-security-model.md), [Enrollment](../contracts/worker-enrollment.md) | join은 digest-only operational token을 1회 발급하며, bootstrap 소비·Worker 생성·credential 저장이 atomic enrollment transaction으로 묶였다(PgStore `.begin()`, MemStore 단일 lock). register/heartbeat/deregister는 `worker:self` binding을 검사해 다른 worker_id를 조작하면 403을 반환한다(테스트로 검증됨). credential rotate/revoke API(`worker:credential:manage` capability), stdin/token-file bootstrap 전달, worker.toml legacy `bootstrap_token` fail-closed 거부까지 구현·테스트 완료(6~8단계). mTLS(9단계), staging rehearsal(10단계)은 PKI/staging 인프라 부재로 착수 전. 상세는 [Worker credential 전환](worker-credential-migration.md) |
 | #61 | Worker liveness mode | P1 · 설계 확정·구현 대기 | [Worker liveness](../architecture/worker-liveness-policy.md) | periodic/on-demand 전이와 장기 idle 오판 방지 테스트 |
 | #62 | TaskAttempt·멱등성 | P1 · 설계 확정·구현 대기 | [실행 일관성](../architecture/tasks/execution-consistency.md) | 늦은 완료·취소 경쟁·중복 제출·이전 epoch·비가역 부작용 테스트 |
 | #63 | Cold Standby fencing | P1 · 설계 확정·구현 대기 | [권한과 장애 전환](../architecture/control-plane-authority-and-failover.md) | 이중 lease 거부, lease 상실 fail-closed, 이전 epoch 거부, 수동 승격 E2E |
 | #64 | Agent 실행 격리 | P1 · 설계 확정·구현 대기 | [실행 격리](../architecture/agents/execution-isolation.md) | 다른 Agent의 process·workspace·credential 접근 차단과 wipe 실패 안전성 테스트 |
 | #65 | 재현 가능한 Skill loading | P2 · 설계 확정·구현 대기 | [Harness composition](../architecture/agents/harness-composition.md) | revision 불일치 fail-closed, manifest 기록, 재실행 입력 동일성 테스트 |
-| #66 | Worker LLM credential 보관·전달 강화 | P1 · 부분 구현 | [보안 모델](../security/control-plane-security-model.md), [Credential 레지스트리](../credentials/registry.md) | 이번에 닫힌 범위(인가·감사): `crates/fleet-api/src/app.rs`의 `required_capability` 행렬에 LLM credential 하위 자원(`/workers/{name}/credentials…`) 네 route가 전부 빠져 있어, 인증만 통과하면(capability가 빈 principal이나 워커 자신의 `fwo_` operational 토큰으로도) 어떤 워커의 LLM 프로바이더 API 키든 `GET .../export`로 평문 열람이 가능했고 감사 기록도 남지 않았다(`DELETE .../credentials/{model}`은 `worker:delete` 행렬 항목에 잘못 흡수돼 워커 토큰으로도 삭제 가능). `PermissionKind`에 `worker:llm_credential:read`/`:export`/`:manage` 세 capability를 신설하고(operational identity용 기존 `worker:credential:manage`와 이름·의미 모두 분리), GET 목록=read, GET export=export, PUT/DELETE=manage로 fail-closed 매핑했다. export는 저장·삭제 권한으로도 열리지 않는다 — 프로비저너 토큰(read+export)이 credential을 덮어쓰거나 지울 수 없게 하기 위해서다. `export`/`put`/`delete`는 `AuditEvent`(`worker.llm_credential.*`)로 기록하며, export는 감사 기록에 실패하면 평문을 반환하지 않는다(누가 키를 가져갔는지 남기지 못하면 열람 자체를 거부). **운영 영향**: 기존 배포의 프로비저너/CLI bearer 토큰 manifest에 새 capability를 추가하지 않으면 `fleet provision`의 `PushCredentials` 스텝이 403으로 실패한다. 남은 범위: TaskAttempt·Worker에 바인딩된 1회용 전달 grant(`#62` 의존, 미착수), 암호화 backend 추상화 교체, rotation 전체 워크플로, Security Manager 분리 | `crates/fleet-api/tests/worker_llm_credential_authz.rs`(capability 없는 principal·워커 자신의 operational 토큰이 export/list/delete에서 403이고 응답에 키가 실리지 않음, export 성공 시 감사 이벤트 1건 기록·비밀 값 미포함, `manage`만으로는 export 불가, `worker:delete`로는 credential 삭제 불가), `crates/fleet-api/src/app.rs`의 `capability_matrix_covers_llm_credential_routes`/`llm_credential_routes_do_not_collide_with_operational_credential`(단수형 `/credential`과 복수형 `/credentials` 분리), `crates/fleet-core/src/auth.rs`의 `llm_credential_permissions_are_distinct_from_operational_credential` |
-| #71 | Task dispatch credential precondition | P1 · 완료 | 이 행 (구현 요약: `crates/fleet-scheduler/src/selector.rs`의 worker 후보 선택 단계에 credential 매칭 필터를 추가했다. 로드맵 설계 초안은 `Task.resolved_model` 기준을 제안했으나 구현 중 코드 대조 결과 두 가지 이유로 `Task.model` 기준으로 조정했다: (1) `dispatcher.rs`의 `DispatchRequest.model`(워커에 실제로 전달되는 필드)이 `task.model`이지 `resolved_model`이 아니고, (2) `HeuristicTaskRouter::resolve_routing`이 `model` 미지정 task에도 항상 `resolved_model`을 채우므로 이를 기준으로 삼으면 일반 task까지 credential 보유 워커로 강제 제한해 기존 동작과 테스트 스위트 대부분을 깨뜨린다. `task.model`이 `Some`이면 `Store::get_worker_credential(worker.name, model)`이 `Some`을 반환하는 worker만 후보로 남기고(label 필터와 동일 자리), 후보가 전부 제외되면 `SelectionError::NoWorkerForCredential`을 반환한다. `Dispatcher::dispatch_existing`은 재시도 비활성(즉시 실패) 경로에서 이 에러를 `FailureKind::CredentialMissing`으로 매핑하고, `Reconciler`는 재시도 소진 dead-letter 직전 selector를 한 번 더(부작용 없이) 호출해 같은 방식으로 분류한다. `model`이 없는 task는 이 검사를 건너뛴다.) | `crates/fleet-scheduler/src/selector.rs`의 `select_credential_required_and_present_routes_normally`/`select_credential_missing_on_all_candidates_errors`/`select_credential_partial_provisioning_routes_to_credentialed_worker`/`select_no_model_skips_credential_check`, `crates/fleet-scheduler/src/dispatcher.rs`의 `submit_marks_credential_missing_when_worker_lacks_credential`/`submit_selects_worker_when_credential_present`, `crates/fleet-scheduler/src/reconcile.rs`의 `stale_pending_task_dead_letters_as_credential_missing_when_no_worker_has_credential`, `crates/fleet-core/src/task.rs`의 `failure_kind_credential_missing_snake_case` |
+| #66 | Fleet Security Manager·credential delivery | P1 · 설계 확정·구현 대기 | [보안 모델](../security/control-plane-security-model.md), [Credential 지침](../credentials/README.md) | encrypted backend abstraction, Attempt/Worker-bound one-time grant, revoke/rotation, raw export 제거·break-glass 감사 |
+| #67 | Worker execution lease·Agent command ACK | P1 · 설계 확정·구현 대기 | [권한과 장애 전환](../architecture/control-plane-authority-and-failover.md), [Agent provisioning](../architecture/agents/provisioning.md) | CAS slot claim, fencing token, Worker incarnation, ACK 유실 `OutcomeUnknown`, self-fencing E2E |
+| #68 | Project archive·retention·hold | P2 · 설계 확정·구현 대기 | [Lifecycle](../architecture/project-task-agent-lifecycle.md) | idempotent drain, effect/cleanup hold, retention/reopen, archive-blocked E2E |
+| #69 | Project Git workspace·checkpoint recovery | P1 · 설계 확정·구현 대기 | [Entity placement](../architecture/entity-placement-and-context.md), [실행 격리](../architecture/agents/execution-isolation.md) | Agent worktree isolation, checkpoint push/restore, secret scan, Worker 이동 복구 E2E |
+| #70 | Observability·reconciliation·recovery | P1 · 설계 확정·구현 대기 | [관측성·재조정·장애 복구](../architecture/observability-and-reconciliation.md) | inventory-first recovery, orphan/grant/effect quarantine, secret-free metric/audit, alert/runbook E2E |
+| #71 | Task dispatch credential precondition | P1 · 설계 확정·구현 대기 | 이 행 (설계 요약: `Task.resolved_model`이 `Some`인 경우, worker 후보 선택 단계에서 `Store::get_worker_credential(worker.name, model)`로 해당 worker가 그 model의 활성 credential을 가졌는지 확인한다. 없는 worker는 후보에서 제외 — label 필터와 동일한 자리에 합류시킨다. 후보가 전부 제외되면 기존 `DispatchError::NoWorker` 경로(재시도 → Reconciler 소진 시 dead-letter)를 그대로 재사용하되, dead-letter 시 `FailureKind`에 신설한 `CredentialMissing`을 붙여 원인을 구분한다. `model`이 없는 task는 이 검사를 건너뛴다 — 어떤 credential이 필요한지 알 수 없기 때문이다.) | credential 없는 worker로 model 지정 task가 라우팅되지 않음, 재시도 소진 뒤 `FailureKind::CredentialMissing`으로 dead-letter, 정상/부분 provisioned fleet에서의 정상 dispatch 회귀 테스트 |
 
 ## 보존 항목 레지스트리 (#1-#47)
 

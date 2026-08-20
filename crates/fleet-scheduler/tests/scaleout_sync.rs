@@ -103,6 +103,7 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
         max_concurrent: 2,
         circuit_state: CircuitState::Closed,
         worker_version: None,
+        liveness_mode: fleet_core::WorkerLivenessMode::Periodic,
         registered_at: chrono::Utc::now(),
     };
     state_a.store.upsert_worker(&worker).await.unwrap();

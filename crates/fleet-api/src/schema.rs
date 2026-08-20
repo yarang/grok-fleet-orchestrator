@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use fleet_core::{BootstrapToken, WorkerStatus};
+use fleet_core::{BootstrapToken, WorkerLivenessMode, WorkerStatus};
 
 /// `POST /v1/workers/register` 요청 바디.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -29,6 +29,9 @@ pub struct RegisterRequest {
     /// 재연결 시 기존 worker_id (없으면 신규 등록).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing_worker_id: Option<String>,
+    /// liveness 보고 방식 (로드맵 #61). 생략 시 `periodic`(기존 동작과 동일).
+    #[serde(default)]
+    pub liveness_mode: WorkerLivenessMode,
 }
 
 fn default_max_concurrent() -> u32 {
@@ -140,6 +143,8 @@ pub struct WorkerSummary {
     pub max_concurrent: u32,
     pub circuit_state: String,
     pub last_seen: Option<DateTime<Utc>>,
+    /// liveness 보고 방식 (로드맵 #61) — `"periodic"` | `"on_demand"`.
+    pub liveness_mode: String,
     pub registered_at: DateTime<Utc>,
 }
 
@@ -151,6 +156,13 @@ impl WorkerSummary {
             WorkerStatus::Draining => "draining",
             WorkerStatus::Offline => "offline",
             WorkerStatus::CircuitOpen => "circuit_open",
+        }
+    }
+
+    pub fn liveness_mode_str(m: WorkerLivenessMode) -> &'static str {
+        match m {
+            WorkerLivenessMode::Periodic => "periodic",
+            WorkerLivenessMode::OnDemand => "on_demand",
         }
     }
 }
@@ -188,6 +200,9 @@ pub struct JoinRequest {
     /// 사이드카 버전.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_version: Option<String>,
+    /// liveness 보고 방식 (로드맵 #61). 생략 시 `periodic`(기존 동작과 동일).
+    #[serde(default)]
+    pub liveness_mode: WorkerLivenessMode,
 }
 
 /// `POST /v1/workers/join` 응답. `RegisterResponse`에 더해 클라이언트가

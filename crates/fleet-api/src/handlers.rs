@@ -126,12 +126,15 @@ pub async fn register_worker(
     enforce_worker_self_binding(ctx.as_deref(), worker_id)?;
 
     let worker = build_worker(
-        worker_id,
-        name,
-        req.agent_endpoint.as_str(),
-        req.labels.clone(),
-        req.max_concurrent_tasks,
-        req.worker_version.clone(),
+        NewWorkerParams {
+            worker_id,
+            name,
+            endpoint: req.agent_endpoint.as_str(),
+            labels: req.labels.clone(),
+            max_concurrent: req.max_concurrent_tasks,
+            worker_version: req.worker_version.clone(),
+            liveness_mode: req.liveness_mode,
+        },
         existing_by_name.as_ref().or(existing_by_id.as_ref()),
     );
 
@@ -608,12 +611,15 @@ pub async fn join_worker(
     // 2. Worker 엔티티 + operational credential 준비 (아직 저장하지 않음).
     let worker_id = WorkerId::new();
     let worker = build_worker(
-        worker_id,
-        name,
-        req.agent_endpoint.as_str(),
-        req.labels.clone(),
-        req.max_concurrent_tasks,
-        req.worker_version.clone(),
+        NewWorkerParams {
+            worker_id,
+            name,
+            endpoint: req.agent_endpoint.as_str(),
+            labels: req.labels.clone(),
+            max_concurrent: req.max_concurrent_tasks,
+            worker_version: req.worker_version.clone(),
+            liveness_mode: req.liveness_mode,
+        },
         None,
     );
 
@@ -681,15 +687,16 @@ pub async fn join_worker(
         .await;
 
     // 4. worker.toml 렌더링.
-    let worker_config_toml = render_worker_config_toml(
+    let worker_config_toml = render_worker_config_toml(WorkerConfigTomlParams {
         name,
-        &req.agent_endpoint,
-        &req.labels,
-        &operational_token,
+        agent_endpoint: &req.agent_endpoint,
+        labels: &req.labels,
+        operational_token: &operational_token,
         worker_id,
-        state.heartbeat_interval_secs,
-        req.max_concurrent_tasks,
-    );
+        heartbeat_interval_secs: state.heartbeat_interval_secs,
+        max_concurrent_tasks: req.max_concurrent_tasks,
+        liveness_mode: req.liveness_mode,
+    });
 
     Ok(Json(JoinResponse {
         worker_id: worker_id.to_string(),
@@ -792,19 +799,33 @@ pub async fn revoke_bootstrap_token(
     })))
 }
 
+/// [`render_worker_config_toml`]의 인자 묶음 (clippy::too_many_arguments 회피).
+struct WorkerConfigTomlParams<'a> {
+    name: &'a str,
+    agent_endpoint: &'a str,
+    labels: &'a HashMap<String, String>,
+    operational_token: &'a str,
+    worker_id: WorkerId,
+    heartbeat_interval_secs: u32,
+    max_concurrent_tasks: u32,
+    liveness_mode: fleet_core::WorkerLivenessMode,
+}
+
 /// worker.toml 문자열 렌더링.
 ///
 /// 클라이언트가 받아서 그대로 디스크에 기록할 수 있는 TOML을 생성.
 /// `[worker] existing_worker_id`를 포함하여, 이후 재시작 시 동일 ID로 재등록 가능.
-fn render_worker_config_toml(
-    name: &str,
-    agent_endpoint: &str,
-    labels: &HashMap<String, String>,
-    operational_token: &str,
-    worker_id: WorkerId,
-    heartbeat_interval_secs: u32,
-    max_concurrent_tasks: u32,
-) -> String {
+fn render_worker_config_toml(params: WorkerConfigTomlParams<'_>) -> String {
+    let WorkerConfigTomlParams {
+        name,
+        agent_endpoint,
+        labels,
+        operational_token,
+        worker_id,
+        heartbeat_interval_secs,
+        max_concurrent_tasks,
+        liveness_mode,
+    } = params;
     // server-key 시크릿 추출 (agent_endpoint에 포함된 경우).
     let grok_secret = agent_endpoint
         .find("server-key=")
@@ -838,6 +859,12 @@ fn render_worker_config_toml(
     ));
     out.push_str(&format!("operational_token = \"{operational_token}\"\n"));
     out.push_str(&format!("existing_worker_id = \"{worker_id}\"\n"));
+    if liveness_mode == fleet_core::WorkerLivenessMode::OnDemand {
+        // 로드맵 #61 — on_demand는 아직 스키마/모니터링 예외 처리까지만
+        // 구현되었다. dispatch 전 ACP probe(로드맵 #67 의존)가 없는 상태이므로
+        // 실제로 이 모드를 켜서 운영하는 것은 지원하지 않는다.
+        out.push_str("liveness_mode = \"on_demand\" # 로드맵 #61 3~5단계 미구현 — 아직 프로덕션에서 사용하지 말 것\n");
+    }
     if !labels.is_empty() {
         let mut sorted: Vec<_> = labels.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(b.0));
@@ -945,16 +972,28 @@ fn validate_worker_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// `Worker` 엔티티 생성. 기존 워커가 있으면 registered_at을 유지.
-fn build_worker(
+/// [`build_worker`]의 인자 묶음 (clippy::too_many_arguments 회피).
+struct NewWorkerParams<'a> {
     worker_id: WorkerId,
-    name: &str,
-    endpoint: &str,
+    name: &'a str,
+    endpoint: &'a str,
     labels: HashMap<String, String>,
     max_concurrent: u32,
     worker_version: Option<String>,
-    existing: Option<&Worker>,
-) -> Worker {
+    liveness_mode: fleet_core::WorkerLivenessMode,
+}
+
+/// `Worker` 엔티티 생성. 기존 워커가 있으면 registered_at을 유지.
+fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worker {
+    let NewWorkerParams {
+        worker_id,
+        name,
+        endpoint,
+        labels,
+        max_concurrent,
+        worker_version,
+        liveness_mode,
+    } = params;
     let now = Utc::now();
     let registered_at = existing.map(|w| w.registered_at).unwrap_or(now);
     Worker {
@@ -968,6 +1007,7 @@ fn build_worker(
         max_concurrent,
         circuit_state: fleet_core::CircuitState::Closed,
         worker_version,
+        liveness_mode,
         registered_at,
     }
 }
@@ -1015,6 +1055,7 @@ fn worker_to_summary(w: &Worker) -> WorkerSummary {
         max_concurrent: w.max_concurrent,
         circuit_state: format!("{:?}", w.circuit_state).to_lowercase(),
         last_seen: w.last_seen,
+        liveness_mode: WorkerSummary::liveness_mode_str(w.liveness_mode).to_string(),
         registered_at: w.registered_at,
     }
 }

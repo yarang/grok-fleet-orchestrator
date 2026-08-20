@@ -86,19 +86,28 @@ impl WorkerRunner {
             }
         };
 
-        // 3. heartbeat 루프 백그라운드 시작.
+        // 3. heartbeat 루프 백그라운드 시작 — `liveness_mode == periodic`일 때만
+        //    (로드맵 #61 2단계). `on_demand`는 idle 시 heartbeat 트래픽을 내지
+        //    않는 것이 계약이므로 루프 자체를 시작하지 않는다. shutdown 채널은
+        //    두 모드 모두 필요 없으므로 periodic 분기 안에서만 만든다.
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let hb_client = client.clone();
-        let hb_grok_bind = config.grok.bind_addr.clone();
-        let hb_interval = register_resp
-            .heartbeat_interval_secs
-            .max(config.worker.heartbeat_interval_secs);
-        let hb_shutdown_rx = shutdown_rx.clone();
-        let hb_handle = tokio::spawn(async move {
-            hb_client
-                .run_heartbeat_loop(hb_interval, hb_grok_bind, hb_shutdown_rx)
-                .await;
-        });
+        let hb_handle = if config.worker.liveness_mode == fleet_core::WorkerLivenessMode::Periodic
+        {
+            let hb_client = client.clone();
+            let hb_grok_bind = config.grok.bind_addr.clone();
+            let hb_interval = register_resp
+                .heartbeat_interval_secs
+                .max(config.worker.heartbeat_interval_secs);
+            let hb_shutdown_rx = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                hb_client
+                    .run_heartbeat_loop(hb_interval, hb_grok_bind, hb_shutdown_rx)
+                    .await;
+            }))
+        } else {
+            info!("liveness_mode=on_demand — periodic heartbeat loop not started");
+            None
+        };
 
         // 4. 신호 대기.
         let shutdown_reason = wait_for_signal().await;
@@ -119,11 +128,14 @@ impl WorkerRunner {
             Err(_) => warn!("grok runner did not exit within 10s — abandoning"),
         }
 
-        // heartbeat 루프 정리 (최대 5초).
-        let hb_join = tokio::time::timeout(std::time::Duration::from_secs(5), hb_handle).await;
-        match hb_join {
-            Ok(Ok(())) => info!("heartbeat loop exited"),
-            _ => warn!("heartbeat loop did not exit cleanly"),
+        // heartbeat 루프 정리 (최대 5초). on_demand 모드에서는 애초에 spawn되지
+        // 않았으므로 (`hb_handle` == None) 대기할 것이 없다.
+        if let Some(hb_handle) = hb_handle {
+            let hb_join = tokio::time::timeout(std::time::Duration::from_secs(5), hb_handle).await;
+            match hb_join {
+                Ok(Ok(())) => info!("heartbeat loop exited"),
+                _ => warn!("heartbeat loop did not exit cleanly"),
+            }
         }
 
         // mTLS proxy 정리 (최대 5초). shutdown 신호는 shutdown_rx 채널을 통해

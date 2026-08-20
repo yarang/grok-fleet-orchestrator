@@ -24,7 +24,7 @@ use chrono::Utc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use fleet_core::{FleetEvent, WorkerFilter, WorkerStatus};
+use fleet_core::{FleetEvent, WorkerFilter, WorkerLivenessMode, WorkerStatus};
 
 use crate::state::FleetState;
 
@@ -141,6 +141,19 @@ impl HealthChecker {
 
         let mut expired = 0usize;
         for worker in all {
+            // 로드맵 #61 — `on_demand` Worker는 heartbeat를 보내지 않는 것이
+            // 계약이므로, 여기서 heartbeat-timeout 기준으로 Offline 판정하면
+            // idle 상태인 정상 Worker를 잘못 오프라인 처리하게 된다
+            // (docs/architecture/worker-liveness-policy.md "모드 계약" 참고).
+            // dispatch 전 ACP probe(로드맵 #67 의존)가 없는 이 증분에서는
+            // on_demand Worker의 실제 liveness를 다른 방법으로 확인할 수
+            // 없으므로, 이 스캔에서는 그냥 skip한다 — Online도 Offline도
+            // 아니라 "판단하지 않음".
+            if worker.liveness_mode == WorkerLivenessMode::OnDemand {
+                debug!(worker = %worker.name, "on_demand worker — skipping heartbeat-timeout check");
+                continue;
+            }
+
             let Some(last_seen) = worker.last_seen else {
                 // last_seen이 없으면 (등록 직후 예외 케이스) 보수적으로 스킵.
                 // Phase 3 HTTP API에서는 등록 시 last_seen = now로 강제.
@@ -318,6 +331,88 @@ mod tests {
         // 상태는 그대로 Online
         let workers = store.list_workers(&WorkerFilter::default()).await.unwrap();
         assert_eq!(workers[0].status, WorkerStatus::Online);
+    }
+
+    // ── 로드맵 #61 2단계: on_demand Worker는 heartbeat-timeout 판정에서 제외 ──
+
+    #[tokio::test]
+    async fn on_demand_worker_not_marked_offline_despite_stale_last_seen() {
+        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let ancient = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut w = Worker::new("on-demand-1", "wss://on-demand/ws");
+        w.status = WorkerStatus::Online;
+        w.last_seen = Some(ancient);
+        w.liveness_mode = fleet_core::WorkerLivenessMode::OnDemand;
+        store.upsert_worker(&w).await.unwrap();
+
+        let state = make_state(store.clone());
+        let checker = HealthChecker::new(
+            state,
+            HealthConfig {
+                check_interval: Duration::from_secs(1),
+                missed_heartbeat_threshold: 3,
+            },
+        );
+
+        let expired = checker.scan_once().await.unwrap();
+        assert_eq!(
+            expired, 0,
+            "on_demand worker must not be marked offline due to heartbeat timeout"
+        );
+
+        let workers = store.list_workers(&WorkerFilter::default()).await.unwrap();
+        assert_eq!(workers[0].status, WorkerStatus::Online);
+    }
+
+    #[tokio::test]
+    async fn on_demand_worker_with_no_last_seen_also_skipped() {
+        // last_seen이 아예 없는 on_demand worker(등록 직후)도 안전하게 skip되어야
+        // 한다 — periodic 경로의 "no last_seen" 처리와 동일한 결과지만 별도
+        // 사유(liveness_mode 분기)로 도달한다는 것을 확인.
+        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let mut w = Worker::new("on-demand-fresh", "wss://on-demand-fresh/ws");
+        w.status = WorkerStatus::Online;
+        w.last_seen = None;
+        w.liveness_mode = fleet_core::WorkerLivenessMode::OnDemand;
+        store.upsert_worker(&w).await.unwrap();
+
+        let state = make_state(store.clone());
+        let checker = HealthChecker::new(state, HealthConfig::default());
+
+        let expired = checker.scan_once().await.unwrap();
+        assert_eq!(expired, 0);
+
+        let workers = store.list_workers(&WorkerFilter::default()).await.unwrap();
+        assert_eq!(workers[0].status, WorkerStatus::Online);
+    }
+
+    #[tokio::test]
+    async fn periodic_worker_still_marked_offline_when_stale() {
+        // 회귀 방지 — on_demand skip 로직 추가가 기존 periodic 경로에 영향을
+        // 주지 않는지 명시적으로 재확인 (liveness_mode를 명시적으로 Periodic으로
+        // 설정한 워커에 대해).
+        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let ancient = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut w = Worker::new("periodic-stale", "wss://periodic-stale/ws");
+        w.status = WorkerStatus::Online;
+        w.last_seen = Some(ancient);
+        w.liveness_mode = fleet_core::WorkerLivenessMode::Periodic;
+        store.upsert_worker(&w).await.unwrap();
+
+        let state = make_state(store.clone());
+        let checker = HealthChecker::new(
+            state,
+            HealthConfig {
+                check_interval: Duration::from_secs(1),
+                missed_heartbeat_threshold: 3,
+            },
+        );
+
+        let expired = checker.scan_once().await.unwrap();
+        assert_eq!(expired, 1);
+
+        let workers = store.list_workers(&WorkerFilter::default()).await.unwrap();
+        assert_eq!(workers[0].status, WorkerStatus::Offline);
     }
 
     #[test]
