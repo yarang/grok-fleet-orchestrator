@@ -30,8 +30,11 @@
 
 - ~~`arm2:/etc/fleet/fleet.env.bak-debug` — 소유자/생성 경위 불명~~ — 2026-08-20 arm2
   terminate로 호스트 자체가 사라져 해소(파일도 함께 소멸). 상세는 아래 변경 이력 참고.
-- `FLEET_API_TOKENS`, `FLEET_GMAIL_APP_PASS` — 2026-08-20 이전(migration) 작업 중 세션
-  로그에 평문 노출됨(마스킹 정규식 누락). **회전 필요** — 아직 미완료.
+- ~~`FLEET_API_TOKENS`~~ — 2026-08-20 이전(migration) 작업 중 세션 로그에 평문 노출됨
+  (마스킹 정규식 누락). 2026-08-21 primary 재배포 과정에서 완전히 새 값(JSON 형식)으로
+  교체하며 해소. 상세는 아래 변경 이력 참고.
+- `FLEET_GMAIL_APP_PASS` — 2026-08-20 같은 사고로 세션 로그에 평문 노출됨. **회전 필요**
+  — 아직 미완료.
 
 ## 변경 이력
 
@@ -252,3 +255,43 @@
   그대로 남아 있다 — 전부 무효화되어 즉각적 위험은 없지만, 완전한 위생을 원하면
   `journalctl --vacuum-time`/로그 재기록이 필요하다. 같은 날 다른 정상 운영 로그까지
   함께 사라지는 트레이드오프가 있어 사용자 확인 없이 진행하지 않았다.
+
+### 2026-08-21 — primary(`oci-yarangdev-arm1`) 보안 패치 배포 중 장애 및 레거시 토큰 발견·회전
+
+- ajou-ec1을 Fleet Worker로 정식 enrollment하기 위한 사전 조건으로, primary에도
+  `d3cc2f6`(부팅 로그 시크릿 유출 수정) 이후 최신 커밋까지 배포하려다 3중 장애가
+  연쇄로 발생했다.
+- **1) 마이그레이션 체크섬 불일치**: 새 바이너리가 `migration 3 was previously applied
+  but has been modified`로 즉시 종료. `git log --follow -p`로 대조한 결과 원인은
+  #60 커밋(`71396aa`)에서 이미 배포된 `003_bootstrap_tokens.sql`의 **주석 한 줄**을
+  수정한 것 — 실제 DDL은 완전히 동일. `fcoinfup-arm1`(현재 HEAD로 신규 설치돼
+  올바른 checksum을 가짐)의 `_sqlx_migrations.checksum`과 로컬 `shasum -a 384`
+  결과가 정확히 일치함을 검증한 뒤, primary DB의 해당 행만 그 값으로 `UPDATE`했다
+  (스키마 변경 없이 checksum 메타데이터만 현재 파일과 동기화 — 데이터 위험 없음).
+  이 프로젝트의 "이미 배포된 migration 파일은 절대 수정하지 않는다" 원칙이 실제로
+  왜 필요한지 보여준 사례다.
+- **2) 롤백 불가 상태 진입**: 체크섬 문제 확인 전 구버전으로 일단 롤백을
+  시도했는데, 그 직전 새 바이너리가 이미 migration 14~20을 전부 적용해버린 뒤라
+  구버전이 `migration 14 was previously applied but is missing in the resolved
+  migrations`로 아예 기동 불가 상태가 됐다. 앞으로(신버전, 토큰 형식 문제) 뒤로(구버전,
+  스키마 불일치) 모두 막힌 상태에서, 신버전으로 전진하며 문제를 해결하는 쪽을 택했다.
+- **3) 레거시 평문 CSV 토큰 발견**: 새 바이너리는 `FLEET_API_TOKENS must be a JSON
+  array` 오류로 재차 종료됐다 — primary의 `FLEET_API_TOKENS`가 이 registry가 이미
+  2026-08-20에 지적했던 "평면 쉼표 token 목록" 레거시 형식 그대로였다(JSON 전환이
+  한 번도 안 됨). 이 과정에서 **구버전 바이너리가 그 값 2건(대시보드 토큰과 동일한
+  값 1건 + 별도 값 1건)을 부팅 로그에 평문으로 그대로 찍었다** — fcoinfup-arm1과
+  같은 클래스의 사고가 primary에서도 처음 확인됨.
+- **즉시 조치**: `FLEET_API_TOKENS`를 `root` principal 전체 capability의 신규 JSON
+  형식 토큰으로, `FLEET_DASHBOARD_TOKEN`도 별도 신규 값으로 전부 교체(둘 다 원격
+  호스트 SSH 세션 내부에서만 생성, 로컬 세션에 노출 없음). `FLEET_MCP_CAPABILITIES`도
+  이 세션 전까지 미설정 상태였음을 발견해 함께 채워 넣었다(`task:create,task:read,
+  task:list,task:output,task:cancel,worker:list,worker:register,dashboard:view,
+  metrics:view`). 재기동 후 노출됐던 구 토큰 2건 `401`, 신규 토큰 `200`, 최신 부팅
+  로그 `command="serve"`(시크릿 없음) 확인.
+- **결과**: primary는 이제 최신 커밋(`8c42d51` 기준 소스 빌드)·최신 스키마(migration
+  20)·JSON 형식 admin 토큰·MCP capability 설정을 모두 갖춘 상태다. 이 기회에
+  `worker-ec1`/`ec2`/`arm1`의 offline 상태를 함께 확인했으나, 이는 이 작업 이전부터
+  이어진 상태로 이번 장애와는 무관하다.
+- **후속 필요**: 2026-08-20에 기록된 "FLEET_API_TOKENS, FLEET_GMAIL_APP_PASS 미회전"
+  항목 중 `FLEET_API_TOKENS`는 이번 조치로 사실상 해소됐다(완전히 새 값으로 교체).
+  `FLEET_GMAIL_APP_PASS`는 여전히 미회전 상태로 남아 있다.
