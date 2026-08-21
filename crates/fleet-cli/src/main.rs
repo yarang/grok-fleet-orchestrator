@@ -1064,6 +1064,33 @@ pub enum MtlsAction {
     },
 }
 
+/// 부팅 로그용 서브커맨드 이름만 반환한다.
+///
+/// `Command`는 `#[derive(Debug)]`가 있지만, `Serve { api_tokens, .. }` 같은
+/// variant는 admin bearer token 원문을 그대로 담고 있어 `{:?}`로 로그에 찍으면
+/// 시크릿이 그대로 노출된다(실제로 한 번 발생한 사고 — 회전으로 대응했다).
+/// 부팅 로그는 어떤 서브커맨드가 실행됐는지만 알면 충분하므로, 필드 값은 절대
+/// 로그에 싣지 않는다. 각 필드가 실제로 필요한 정보(bind 주소 등)는 해당
+/// 핸들러가 이미 개별적으로, 안전한 필드만 골라 로그에 남긴다.
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Serve { .. } => "serve",
+        Command::Migrate => "migrate",
+        Command::Workers { .. } => "workers",
+        Command::AdminTokens { .. } => "admin-tokens",
+        Command::Tasks { .. } => "tasks",
+        Command::Token { .. } => "token",
+        Command::Credentials { .. } => "credentials",
+        Command::Users { .. } => "users",
+        Command::Events { .. } => "events",
+        Command::Doctor { .. } => "doctor",
+        Command::Provision { .. } => "provision",
+        Command::ScanHostKeys { .. } => "scan-host-keys",
+        #[cfg(feature = "mtls")]
+        Command::Mtls { .. } => "mtls",
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // rustls 0.23+는 crypto backend(ring/aws-lc-rs)를 프로세스 시작 시 명시적으로
@@ -1088,7 +1115,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        command = ?cli.command,
+        command = command_name(&cli.command),
         "fleet CLI starting"
     );
 
