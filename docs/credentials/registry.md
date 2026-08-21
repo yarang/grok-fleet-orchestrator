@@ -172,3 +172,44 @@
   같은 AgentForge daemon이 있으나 이번 요청 범위 밖이라 손대지 않았다.
 - 재설치 후 검증은 이전 항목과 동일 절차(`fleet doctor` 5/5, health 200, 인증 401/200,
   loopback 바인딩, 재부팅 생존)를 다시 통과했다.
+
+### 2026-08-21 — fcoinfup-arm1 admin bearer token 코드 버그로 인한 유출·즉시 회전
+
+- MCP client가 `fcoinfup-arm1` Cold Standby의 `fleet serve`(SSH stdio 경유,
+  HTTP/dashboard bind 미설정)에 연결하도록 구성하는 작업 중, JSON-RPC
+  `initialize` 요청을 SSH로 수동 전달해 launcher를 검증하는 과정에서 `fleet`
+  CLI 자체의 부팅 로그 한 줄이 `Command::Serve { api_tokens: Some(...), .. }`를
+  `{:?}`(Debug)로 그대로 찍어 **`root` principal의 admin bearer token 원문이
+  세션 트랜스크립트에 그대로 노출**됨. 이번 사고는 앞서 2026-08-20 항목(마스킹
+  정규식 누락, 사람의 수작업 실수)과 달리 **소프트웨어 자체의 로깅 코드 버그**가
+  원인 — 사람이 값을 다루다 실수한 것이 아니라, `fleet` 바이너리가 시크릿을
+  구조체째 로그로 인쇄하도록 짜여 있었다.
+- **즉시 대응**(발견 직후 순서대로 수행):
+  1. `openssl rand` 기반 신규 토큰을 원격 호스트 SSH 세션 내부에서만 생성(로컬
+     세션에 값 노출 없음).
+  2. `oci-fcoinfup-arm1:/etc/fleet/fleet.env`의 `FLEET_API_TOKENS`를 SSH 경유
+     `python3` 정규식 치환으로 갱신.
+  3. `admin_api_tokens` 테이블의 `root` principal 행을 직접
+     `UPDATE ... SET token_digest = ..., rotated_at = NOW(), rotation_generation
+     = rotation_generation + 1`로 갱신 — env 값만 바꿔서는 무효화되지 않는다
+     (#72의 `sync_env_admin_tokens_to_store`는 기존 DB principal을 덮어쓰지
+     않고 신규 principal만 삽입하는 idempotent 동기화이므로, DB에 이미 있는
+     `root` digest는 env 변경만으로는 절대 갱신되지 않음 — 반드시 DB를 직접
+     같이 갱신해야 함).
+  4. `fleet.service` 재기동.
+  5. 유출됐던 구 토큰으로 재요청 → `401` 확인, 무효화 완료 검증.
+- **근본 원인 수정**: `crates/fleet-cli/src/main.rs`의 부팅 로그를
+  `command = ?cli.command`(전체 Debug)에서 `command = command_name(&cli.command)`
+  (서브커맨드 이름 문자열만 반환하는 신규 헬퍼)로 교체 — 커밋 `d3cc2f6`. 부팅
+  로그가 실제로 필요로 하는 정보(bind 주소 등)는 각 핸들러가 이미 개별적으로
+  안전한 필드만 골라 로그에 남기고 있어 정보 손실 없음. 기본 feature와
+  `--features "acp mtls"`(프로덕션 Dockerfile과 동일 조합) 양쪽에서
+  `cargo check`/`cargo test -p fleet-cli` 통과 확인.
+  GitHub `origin`에 push 완료(gitea는 9월까지 다운 처리 — [[gitea-remote-down]]).
+- **미해결 잔여 항목**: (a) `oci-fcoinfup-arm1`에서 현재 가동 중인 `fleet`
+  바이너리는 아직 수정 전 버전 — 토큰 자체는 이미 회전해 즉각적 위험은 닫혔지만,
+  로깅 버그는 재기동 시마다 여전히 재발할 수 있다. 수정된 바이너리 재빌드·배포
+  필요. (b) 최초 서비스 기동(`systemctl enable --now fleet.service`) 시점의
+  구 토큰이 원격 호스트 자체의 `journalctl` 로그에도 남아 있을 가능성 — 호스트
+  로컬 로그이며 이 세션 트랜스크립트에는 없고 해당 토큰은 이미 무효화됐으나,
+  정리 여부는 아직 미결정.
