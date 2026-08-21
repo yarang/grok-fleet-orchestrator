@@ -334,9 +334,49 @@ async fn join_response_config_toml_contains_required_fields() {
     assert!(toml.contains("operational_token = \"fwo_"));
     assert!(!toml.contains("bootstrap_token"));
     assert!(toml.contains("secret = \"sekret\""));
-    assert!(toml.contains("bind_addr = \"host:2419\""));
+    // bind_addr는 워커 자신의 로컬 리슨 주소이지 agent_endpoint(orchestrator가
+    // 이 워커에 도달하는 공개 주소, 흔히 tunnel 뒤)에서 파생시킬 값이 아니다 —
+    // 항상 고정 기본값을 쓴다 (기존 worker-ec1/ec2 배포와 동일).
+    assert!(toml.contains("bind_addr = \"0.0.0.0:2419\""));
     assert!(toml.contains("max_concurrent_tasks = 8"));
     assert!(toml.contains("gpu = \"true\""));
+    // AppState에 public_base_url을 설정하지 않았으므로 플레이스홀더가 남는다
+    // (아래 join_response_uses_configured_public_base_url이 설정된 경우를 검증).
+    assert!(toml.contains("orchestrator_url = \"<set-to-your-orchestrator-url>\""));
+}
+
+#[tokio::test]
+async fn join_response_uses_configured_public_base_url() {
+    // AppState::public_base_url(FLEET_BASE_URL env)이 설정되면 join 응답의
+    // worker.toml에 실제 orchestrator_url이 채워져야 한다 — 플레이스홀더가
+    // 아니라 이 값을 그대로 써야 fleet-worker가 즉시 register/heartbeat 가능.
+    let store = make_store();
+    seed_token(&store, "tok", 1).await;
+
+    let state = Arc::new(AppState::new(store).with_public_base_url("https://fleet.agentthread.dev"));
+    let app = build_app(state);
+
+    let body = json!({
+        "token": "tok",
+        "name": "w2",
+        "agent_endpoint": "wss://fleet.agentthread.dev/ws/w2?server-key=sekret",
+        "max_concurrent_tasks": 4,
+    });
+    let req = axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .uri("/v1/workers/join")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let toml = json["worker_config_toml"].as_str().unwrap();
+    assert!(toml.contains("orchestrator_url = \"https://fleet.agentthread.dev\""));
+    assert!(!toml.contains("<set-to-your-orchestrator-url>"));
 }
 
 #[tokio::test]

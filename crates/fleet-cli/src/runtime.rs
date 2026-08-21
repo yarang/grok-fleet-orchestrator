@@ -424,6 +424,16 @@ pub async fn run_serve(
             .with_heartbeat_interval(health_interval_secs as u32)
             .with_transport(transport_handle.clone());
 
+        // join 응답의 worker.toml에 채워 넣을 이 orchestrator의 공개 URL.
+        // 미설정이면 렌더링된 worker.toml의 orchestrator_url이 플레이스홀더로
+        // 남아 운영자가 수동으로 채워야 한다 (기존 동작, 하위 호환).
+        if let Ok(base_url) = std::env::var("FLEET_BASE_URL") {
+            let base_url = base_url.trim();
+            if !base_url.is_empty() {
+                app_state = app_state.with_public_base_url(base_url);
+            }
+        }
+
         // Phase 8.6: master key 로드 (credentials 암호화용).
         // FLEET_MASTER_KEY env 또는 /etc/fleet/master.key 파일에서.
         // 로드 실패 시 credentials API 엔드포인트가 503 반환 (다른 API는 정상 동작).

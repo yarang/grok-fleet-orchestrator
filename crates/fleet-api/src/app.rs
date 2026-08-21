@@ -103,6 +103,13 @@ pub struct AppState {
     /// 다른 메트릭과 달리 스토어에서 계산할 수 없어 미들웨어가 요청마다
     /// 기록한다. 프로세스 재시작 시 0으로 돌아간다.
     pub http_metrics: Arc<crate::metrics::HttpMetrics>,
+    /// 이 orchestrator를 외부에서 접근하는 공개 base URL(예:
+    /// `https://fleet.agentthread.dev`). `FLEET_BASE_URL` env로 설정.
+    ///
+    /// join 응답이 렌더링하는 `worker.toml`의 `orchestrator_url` 값으로 쓰인다
+    /// — 설정하지 않으면 그 필드는 플레이스홀더(`<set-to-your-orchestrator-url>`)로
+    /// 남아 운영자가 수동으로 채워야 한다.
+    pub public_base_url: Option<String>,
 }
 
 impl AppState {
@@ -118,6 +125,7 @@ impl AppState {
             master_key: None,
             cors_allowed_origins: Vec::new(),
             http_metrics: Arc::new(crate::metrics::HttpMetrics::new()),
+            public_base_url: None,
         }
     }
 
@@ -178,6 +186,13 @@ impl AppState {
     /// 모든 출처를 허용하면 CSRF/데이터 유출 경로가 열림.
     pub fn with_cors_origins(mut self, origins: Vec<String>) -> Self {
         self.cors_allowed_origins = origins;
+        self
+    }
+
+    /// 이 orchestrator의 공개 base URL 설정 (`FLEET_BASE_URL`). join 응답의
+    /// `worker.toml`에 `orchestrator_url`로 그대로 채워진다.
+    pub fn with_public_base_url(mut self, url: impl Into<String>) -> Self {
+        self.public_base_url = Some(url.into());
         self
     }
 }
