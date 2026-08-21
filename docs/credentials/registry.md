@@ -23,8 +23,8 @@
 | `FLEET_MCP_CAPABILITIES` | MCP stdio launcher의 명시적 도구 capability allow-list | MCP를 실행하는 service/launcher의 environment | 쉼표 구분 `task:read,task:create` 등 | `fleet serve`의 MCP stdio | launcher 배포 시 갱신 | 필수 — 미설정·빈 값·알 수 없는 값이면 MCP가 fail-closed. OS process identity/signed assertion을 대체하지 않음 |
 | `FLEET_GMAIL_USER` / `FLEET_GMAIL_APP_PASS` | 대시보드 알림 메일 발송용 Gmail SMTP 인증 (`smtp.gmail.com:587`) | 배포 환경변수 (파일 위치 미확인) | `gmail_user`: 이메일 주소, `gmail_app_pass`: Google App Password 16자리 | `fleet-dashboard`(`crates/fleet-dashboard/src/email.rs`) | 수동(미정) | 사용 중 여부 미확인 — 코드에 구현 완료, 실배포 값 저장 위치는 이 세션에서 확인 못함 |
 | SSH 키 금고 (`ssh_keys` 테이블) | 대시보드 프로비저닝(`fleet_provisioner`)이 사용하는 원격 호스트 SSH 개인키 저장소 — 개인 `~/.ssh/` 키·`worker_credentials`(LLM 키)와는 별도의 **세 번째** 자격증명 저장소 | Postgres `ssh_keys` 테이블 (AES-256-GCM 암호화, `encrypted_blob` = nonce+ciphertext+tag, `fleet-credentials`의 `MasterKey`로 암호화) | `id, name(UNIQUE), encrypted_blob, fingerprint, key_type(ed25519\|rsa\|ecdsa)` (`crates/fleet-store/migrations/010_ssh_keys.sql`) | `fleet-provisioner`, 대시보드 프로비저닝 API (`ssh_key_name`으로 참조, `PermissionKind::HostProvision` 권한 필요) | 회전 없음 — 교체는 삭제 후 재등록(update 엔드포인트 없음) | 사용 중 — 감사 로그 미연동, MCP 미노출, CLI 직접 조작은 금고를 우회할 수 있음. 현재 SSH 절차는 [Worker 프로비저닝](../deployment/worker-provisioning.md) 참고 |
-| `fcoinfup-arm1` Cold Standby — `FLEET_MASTER_KEY` | 위와 동일 목적. **arm1의 값과는 완전히 별개로 새로 생성** — 복제/공유 없음 | `oci-fcoinfup-arm1:/etc/fleet/master.key` (`r--------`, fleet:fleet) | 32B hex | `fleet.service`(이 호스트) | 수동(미정) | 사용 중 — 2026-08-21 Cold Standby 신규 설치 |
-| `fcoinfup-arm1` Cold Standby — `DATABASE_URL`/`FLEET_API_TOKENS`/`FLEET_MCP_CAPABILITIES` | Postgres 접속(로컬 `fleet` role, 네이티브 설치, arm1과 별개 인스턴스)·admin bearer 토큰(단일 `root` principal, 전체 capability)·MCP capability allow-list(`task:read,task:list,worker:list,dashboard:view,metrics:view`로 최소 설정) | `oci-fcoinfup-arm1:/etc/fleet/fleet.env` (`rw-------`, fleet:fleet) | dotenv | `fleet.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 2026-08-21 생성. **DNS·외부 공개 없음** — `FLEET_HTTP_BIND`/`FLEET_DASHBOARD_BIND`를 `127.0.0.1`로 고정해 SSH 터널 없이는 접근 불가. 승격 전까지 admin 토큰은 root 하나뿐이라 최소 권한 분리가 안 돼 있음 — 실제 승격 시 principal별 분리 필요 |
+| `fcoinfup-arm1` Cold Standby — `FLEET_MASTER_KEY` | 위와 동일 목적. **arm1의 값과는 완전히 별개로 새로 생성** — 복제/공유 없음 | `oci-fcoinfup-arm1:/etc/fleet/master.key` (`r--------`, fleet:fleet) | 32B hex | `fleet.service`(이 호스트) | 수동(미정) | 사용 중 — 2026-08-21 Cold Standby 신규 설치, 같은 날 Docker 빌드 설치를 삭제하고 GitHub clone + 네이티브 `cargo build`로 재설치하며 값 재생성(이전 값 폐기) |
+| `fcoinfup-arm1` Cold Standby — `DATABASE_URL`/`FLEET_API_TOKENS`/`FLEET_MCP_CAPABILITIES` | Postgres 접속(로컬 `fleet` role, 네이티브 설치, arm1과 별개 인스턴스)·admin bearer 토큰(단일 `root` principal, 전체 capability)·MCP capability allow-list(`task:read,task:list,worker:list,dashboard:view,metrics:view`로 최소 설정) | `oci-fcoinfup-arm1:/etc/fleet/fleet.env` (`rw-------`, fleet:fleet) | dotenv | `fleet.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 2026-08-21 생성, 같은 날 재설치로 값 재생성(이전 값 폐기). **DNS·외부 공개 없음** — `FLEET_HTTP_BIND`/`FLEET_DASHBOARD_BIND`를 `127.0.0.1`로 고정해 SSH 터널 없이는 접근 불가. 승격 전까지 admin 토큰은 root 하나뿐이라 최소 권한 분리가 안 돼 있음 — 실제 승격 시 principal별 분리 필요 |
 
 ## 알려진 미정 항목 (조치 필요)
 
@@ -147,3 +147,28 @@
   운영자 확인 필요. admin 토큰이 `root` principal 하나에 전체 capability를 몰아준
   상태라 승격 전 principal별 최소 권한 분리가 필요하다. liteLLM 게이트웨이·nginx·TLS·
   Cloudflare DNS는 이번 설치 범위 밖(승격 시점에 별도 결정).
+
+### 2026-08-21 — Docker 설치 삭제 → GitHub clone + 네이티브 build로 재설치, AgentForge 제거
+
+- 사용자 요청으로 위 Docker 기반 설치를 전부 삭제(systemd 유닛, 바이너리, `/etc/fleet`,
+  Postgres role/db, Docker 이미지·빌드소스)한 뒤, GitHub(`origin`, public repo)에서
+  `git clone` + `rustup`(stable, 1.98.0) 네이티브 `cargo build --release --features
+  "acp mtls"`로 재설치했다. **`origin`이 그동안 `8a2bc29`(오래전 커밋)에 멈춰 있어
+  재설치 전 로컬 main(당시 `d9ffa33`, 오늘 세션의 #57~#72 등 19개 커밋)을 먼저
+  `git push origin main`으로 fast-forward 반영**(gitea는 9월까지 다운이라 origin만
+  갱신). Postgres 비밀번호·`master.key`·admin bearer 토큰은 재설치 시점에 호스트에서
+  전부 새로 생성했다(기존 Docker 설치분 값은 이미 삭제되어 폐기).
+- Docker 빌드 잔여물(이미지 3.5GB + 빌드 캐시 3.9GB, 전부 이 세션이 만든 것이고
+  컨테이너·다른 이미지 참조 0건 확인 후) `docker system prune -af --volumes`로 정리.
+  Docker 엔진 자체(`docker.service`/`containerd.service`)는 이 호스트의 다른 서비스가
+  이미 쓰던 사전 설치 인프라라 제거하지 않았다.
+- 사용자 요청으로 이 호스트의 **AgentForge 플랫폼도 완전히 제거**했다:
+  `agentforge-daemon.service`(2026-08-01부터 구동, `oci-yarang-arm1`의 죽은 NATS
+  broker에 의존해 실제로는 연결 끊김 에러만 계속 내던 상태), 전용
+  `tunnel-nats.service`(AutoSSH, 다른 소비자 없음 확인), `/opt/agentforge`(NATS
+  자격증명 파일 포함), `/home/ubuntu/agentforge-daemon`(venv·템플릿·`work/` 디렉터리,
+  삭제 전 확인한 `work/`는 224KB `hello-forge` 테스트 프로젝트 하나뿐이었음)를 전부
+  삭제했다. **이 호스트(`fcoinfup-arm1`)로 범위를 한정** — `oci-ajou-arm1`/`arm2`에도
+  같은 AgentForge daemon이 있으나 이번 요청 범위 밖이라 손대지 않았다.
+- 재설치 후 검증은 이전 항목과 동일 절차(`fleet doctor` 5/5, health 200, 인증 401/200,
+  loopback 바인딩, 재부팅 생존)를 다시 통과했다.
