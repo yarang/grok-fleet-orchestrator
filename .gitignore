@@ -18,6 +18,10 @@ Thumbs.db
 *.pem
 *.key
 
+# Local MCP client config — embeds this machine's SSH access path to
+# production orchestrator hosts, not portable/shareable as repo config
+.mcp.json
+
 # Database
 *.db
 *.db-journal
