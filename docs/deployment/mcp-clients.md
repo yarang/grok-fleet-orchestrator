@@ -11,9 +11,10 @@ owners: ["deployment", "fleet-mcp"]
 
 # MCP client 연결 Runbook
 
-이 문서는 외부 MCP client(Claude Code, Gemini CLI, ChatGPT)가 `fleet serve`의 stdio MCP
-서버에 연결하는 절차를 다룬다. MCP 도구 표면·입출력 스키마의 정본은
-[MCP 도구 계약](../contracts/mcp-tools.md)이다. 이 문서는 "어떻게 붙이는가"만 다룬다.
+이 문서는 외부 MCP client(Claude Code, Antigravity CLI, Gemini CLI, ChatGPT)가
+`fleet serve`의 stdio MCP 서버에 연결하는 절차를 다룬다. MCP 도구 표면·입출력 스키마의
+정본은 [MCP 도구 계약](../contracts/mcp-tools.md)이다. 이 문서는 "어떻게 붙이는가"만
+다룬다.
 
 ## 현재 transport 제약
 
@@ -23,7 +24,8 @@ HTTP/SSE 같은 원격 transport는 구현돼 있지 않다. 이는 client별 �
 | Client | Transport 요구사항 | 이 문서로 연결 가능한가 |
 |---|---|---|
 | Claude Code | 로컬 stdio subprocess (`.mcp.json`) | 가능 |
-| Gemini CLI | 로컬 stdio subprocess (`.gemini/settings.json`) | 가능 |
+| Antigravity CLI (`agy`) | 로컬 stdio subprocess (`agy mcp add`) | 가능 — Gemini CLI의 후속, 아래 참고 |
+| Gemini CLI | 로컬 stdio subprocess (`.gemini/settings.json`) | 가능하지만 **단종 진행 중** — 아래 참고 |
 | ChatGPT (Developer Mode custom connector) | **원격 HTTPS + OAuth** 만 지원, 로컬 stdio 불가 | **불가** — 아래 참고 |
 
 ## 공통 구조 — SSH로 감싼 stdio
@@ -72,7 +74,36 @@ orchestrator 호스트 alias, `<fleet-os-user>`는 `/usr/local/bin/fleet` 실행
 
 설정 후 Claude Code를 재시작해야 로드된다(세션 중 갱신 불가).
 
-## Gemini CLI
+## Antigravity CLI (`agy`)
+
+Google이 2026-05-19부터 Gemini CLI를 Antigravity CLI로 통합 전환했다(아래 Gemini CLI
+항목 참고) — 신규로 Google 계열 터미널 에이전트를 붙인다면 이쪽이 정본이다. 설치·인증
+절차는 [`docs/deployment/install.md`](./install.md)가 아니라 이 세션에서 `ajou-ec1`에
+실제로 설치·검증한 절차를 참고(공식: `curl -fsSL https://antigravity.google/cli/install.sh
+| bash`). `agy`는 `~/.gemini/config/mcp_config.json`에 설정을 저장하는 자체 MCP client를
+갖고 있어(설정 경로가 `.gemini/`를 그대로 재사용 — Gemini CLI와 config 네임스페이스를
+공유한다), JSON을 직접 편집하는 대신 CLI로 등록한다:
+
+```bash
+agy mcp add grok-fleet ssh -- \
+  -o BatchMode=yes -o ConnectTimeout=10 \
+  <ssh-host-alias> \
+  "sudo -u <fleet-os-user> /usr/local/bin/fleet-mcp-launch.sh"
+```
+
+`<ssh-host-alias>`/`<fleet-os-user>`는 Claude Code 항목과 동일하다. `agy mcp list`로
+등록 확인, `agy mcp remove grok-fleet`로 제거. `fleet-mcp-launch.sh`가 그대로
+재사용되므로 client마다 별도 서버 구현이 필요 없다 — 이 명령 자체는 ajou-ec1에서
+`agy mcp add`/`list`/`remove`로 실제 등록·조회·삭제까지 검증했다(2026-08-21).
+
+## Gemini CLI — 단종 진행 중, 신규 연동엔 권장하지 않음
+
+Google이 2026-05-19 [Gemini CLI를 Antigravity CLI로 통합 전환](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)한다고
+발표했고, **2026-06-18부로 무료·Google AI Pro/Ultra 계정의 Gemini CLI 요청 서빙이
+중단**됐다(유료 Gemini Code Assist 라이선스 보유 조직만 예외적으로 계속 접근 가능).
+오늘(2026-08-21) 기준 이미 그 기한이 지났다 — 즉 대부분의 계정에서 Gemini CLI 자체가
+더 이상 동작하지 않을 가능성이 높다. 기존에 이 방식으로 연결해뒀다면 위 Antigravity
+CLI로 옮기는 걸 권장한다. 아래는 참고용으로만 남긴다.
 
 [Gemini CLI MCP 문서](https://geminicli.com/docs/tools/mcp-server/)가 정한 형식을
 따른다 — project-level `.gemini/settings.json`(**이 파일도 SSH 접근 경로에 종속적이므로
@@ -95,9 +126,6 @@ Claude Code의 `.mcp.json`과 동일하게 커밋하지 않는다** — `.gitign
   }
 }
 ```
-
-`fleet-mcp-launch.sh`가 그대로 재사용되므로 Claude Code 설정과 실행 경로가 완전히
-동일하다 — client마다 별도 서버 구현이 필요 없다.
 
 ## ChatGPT — 현재 지원하지 않음
 
