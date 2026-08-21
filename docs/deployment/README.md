@@ -32,6 +32,7 @@ owners: ["deployment"]
 | [`reverse-proxy.md`](./reverse-proxy.md) | 🟡 부분 구현 | Nginx TLS·trusted proxy·공개 endpoint 경계 |
 | [`topology.md`](./topology.md) | 🔵 사본·부분 구현 | Architecture 정본을 배포 관점으로 요약한 토폴로지·신뢰 경계 |
 | [`litellm-gateway.md`](./litellm-gateway.md) | 🟢 Runbook·부분 구현 | liteLLM 준비·기동·검증·rollback과 Worker 경유 확인 |
+| [`mcp-clients.md`](./mcp-clients.md) | 🟡 부분 구현 | Claude Code·Gemini CLI stdio 연결, ChatGPT 미지원 사유 |
 
 ## 인접 정본
 

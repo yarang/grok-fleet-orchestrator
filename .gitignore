@@ -21,6 +21,7 @@ Thumbs.db
 # Local MCP client config — embeds this machine's SSH access path to
 # production orchestrator hosts, not portable/shareable as repo config
 .mcp.json
+.gemini/settings.json
 
 # Database
 *.db
