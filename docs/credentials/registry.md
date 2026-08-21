@@ -23,6 +23,8 @@
 | `FLEET_MCP_CAPABILITIES` | MCP stdio launcher의 명시적 도구 capability allow-list | MCP를 실행하는 service/launcher의 environment | 쉼표 구분 `task:read,task:create` 등 | `fleet serve`의 MCP stdio | launcher 배포 시 갱신 | 필수 — 미설정·빈 값·알 수 없는 값이면 MCP가 fail-closed. OS process identity/signed assertion을 대체하지 않음 |
 | `FLEET_GMAIL_USER` / `FLEET_GMAIL_APP_PASS` | 대시보드 알림 메일 발송용 Gmail SMTP 인증 (`smtp.gmail.com:587`) | 배포 환경변수 (파일 위치 미확인) | `gmail_user`: 이메일 주소, `gmail_app_pass`: Google App Password 16자리 | `fleet-dashboard`(`crates/fleet-dashboard/src/email.rs`) | 수동(미정) | 사용 중 여부 미확인 — 코드에 구현 완료, 실배포 값 저장 위치는 이 세션에서 확인 못함 |
 | SSH 키 금고 (`ssh_keys` 테이블) | 대시보드 프로비저닝(`fleet_provisioner`)이 사용하는 원격 호스트 SSH 개인키 저장소 — 개인 `~/.ssh/` 키·`worker_credentials`(LLM 키)와는 별도의 **세 번째** 자격증명 저장소 | Postgres `ssh_keys` 테이블 (AES-256-GCM 암호화, `encrypted_blob` = nonce+ciphertext+tag, `fleet-credentials`의 `MasterKey`로 암호화) | `id, name(UNIQUE), encrypted_blob, fingerprint, key_type(ed25519\|rsa\|ecdsa)` (`crates/fleet-store/migrations/010_ssh_keys.sql`) | `fleet-provisioner`, 대시보드 프로비저닝 API (`ssh_key_name`으로 참조, `PermissionKind::HostProvision` 권한 필요) | 회전 없음 — 교체는 삭제 후 재등록(update 엔드포인트 없음) | 사용 중 — 감사 로그 미연동, MCP 미노출, CLI 직접 조작은 금고를 우회할 수 있음. 현재 SSH 절차는 [Worker 프로비저닝](../deployment/worker-provisioning.md) 참고 |
+| `fcoinfup-arm1` Cold Standby — `FLEET_MASTER_KEY` | 위와 동일 목적. **arm1의 값과는 완전히 별개로 새로 생성** — 복제/공유 없음 | `oci-fcoinfup-arm1:/etc/fleet/master.key` (`r--------`, fleet:fleet) | 32B hex | `fleet.service`(이 호스트) | 수동(미정) | 사용 중 — 2026-08-21 Cold Standby 신규 설치 |
+| `fcoinfup-arm1` Cold Standby — `DATABASE_URL`/`FLEET_API_TOKENS`/`FLEET_MCP_CAPABILITIES` | Postgres 접속(로컬 `fleet` role, 네이티브 설치, arm1과 별개 인스턴스)·admin bearer 토큰(단일 `root` principal, 전체 capability)·MCP capability allow-list(`task:read,task:list,worker:list,dashboard:view,metrics:view`로 최소 설정) | `oci-fcoinfup-arm1:/etc/fleet/fleet.env` (`rw-------`, fleet:fleet) | dotenv | `fleet.service`(EnvironmentFile) | 수동(미정) | 사용 중 — 2026-08-21 생성. **DNS·외부 공개 없음** — `FLEET_HTTP_BIND`/`FLEET_DASHBOARD_BIND`를 `127.0.0.1`로 고정해 SSH 터널 없이는 접근 불가. 승격 전까지 admin 토큰은 root 하나뿐이라 최소 권한 분리가 안 돼 있음 — 실제 승격 시 principal별 분리 필요 |
 
 ## 알려진 미정 항목 (조치 필요)
 
@@ -117,3 +119,31 @@
   arm2 소멸로 함께 다운, 이 세션에서 미복구), worker `ec1`/`ec2`의 ACP 리버스 SSH
   터널(구 도착지 arm2 → arm1로 재설정 필요, 이 세션에서 미착수). 모두 후속 조치
   필요.
+
+### 2026-08-21 — `fcoinfup-arm1`에 Cold Standby orchestrator 신규 설치
+
+- 사용자가 `oci-yarang-arm1`(primary) 장애/미확인 상태와 무관하게 이중화를 위해
+  두 번째 프로덕션급 인스턴스 설치를 요청. `control-plane-authority-and-failover.md`의
+  Single Active Primary + Cold Standby 모델을 따라, DNS 전환이나 외부 공개 없이
+  **Cold Standby**로 구축했다(primary 생사를 세션이 임의 판단해 트래픽을 돌리지 않음).
+- 절차: 로컬 저장소 소스를 rsync로 전송 → 호스트에서 Docker 멀티스테이지 빌드로
+  `fleet` 바이너리 추출(호스트에 Rust 툴체인 설치 없음) → PostgreSQL 16 네이티브 설치,
+  `fleet` role/DB를 호스트에서 직접 생성(비밀번호는 원격 호스트 안에서만
+  `openssl rand`로 생성해 세션에 노출된 적 없음) → `/etc/fleet/master.key`,
+  `/etc/fleet/fleet.env`(`FLEET_API_TOKENS` 포함, admin 토큰도 원격에서만 생성) →
+  systemd `fleet.service`.
+- **배선 이슈 발견·수정**: `fleet serve`가 MCP stdio 컴포넌트를 프로세스 마지막
+  blocking call로 실행하는 구조라, systemd 기본 `StandardInput=null`(즉시 EOF)에서는
+  HTTP/dashboard가 뜨자마자 전체 프로세스가 종료됨. `ExecStart`를
+  `tail -f /dev/null | fleet serve`로 감싸 절대 EOF 없는 stdin을 공급해 해결(표준
+  systemd stdio 데몬화 우회). 이건 이 프로젝트의 systemd 배포 문서에 없던 함정이라
+  `docs/deployment/install.md` 또는 `operations.md`에 후속으로 반영 필요.
+- 검증: `fleet migrate`(마이그레이션 20개 적용) → `fleet doctor`(5개 항목 전부 OK) →
+  `curl 127.0.0.1:8081/v1/health` 200 → admin 토큰 없이 `/v1/workers` 401, 토큰과 함께
+  200 → `ss -tlnp`로 `8081`/`8082` 둘 다 `127.0.0.1` 바인딩만 확인(외부 노출 없음) →
+  `fleet.service`/`postgresql.service` 둘 다 `enabled`(재부팅 생존).
+- **미해결**: `apt` 업그레이드가 커널 재부팅을 권고했으나, 이 호스트가 MariaDB/Redis/
+  AgentForge 등 다른 서비스를 공유하는 호스트라 세션이 임의로 재부팅을 하지 않았다 —
+  운영자 확인 필요. admin 토큰이 `root` principal 하나에 전체 capability를 몰아준
+  상태라 승격 전 principal별 최소 권한 분리가 필요하다. liteLLM 게이트웨이·nginx·TLS·
+  Cloudflare DNS는 이번 설치 범위 밖(승격 시점에 별도 결정).
