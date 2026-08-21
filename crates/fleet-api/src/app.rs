@@ -463,6 +463,19 @@ async fn auth_middleware(
         return Ok(next.run(req).await);
     }
 
+    // join은 자체적으로 body의 bootstrap token을 검증한다(join_worker 핸들러,
+    // enroll_worker 경유) — Authorization 헤더에 의존하지 않는다. `fleet-worker
+    // join` CLI는 애초에 이 헤더를 보내지 않으므로(worker-enrollment.md 참고),
+    // valid_tokens/cf_audience가 설정된 배포에서 아래 일반 분기를 그대로
+    // 통과시키면 join이 핸들러에 도달하기도 전에 401로 막힌다. join 요청 본문의
+    // token 자체가 인증 수단이므로 여기서 우회해도 보안 경계가 약해지지 않는다 —
+    // join_worker는 AuthorizationContext를 요구하지 않는다.
+    if req.method() == axum::http::Method::POST
+        && normalized_v1_path(req.uri().path()) == "/workers/join"
+    {
+        return Ok(next.run(req).await);
+    }
+
     // Worker operational credential 조회 — join에서 발급된 `fwo_...` 토큰인지
     // 먼저 확인한다. `valid_tokens`/`cf_audience` 설정 여부와 무관하게 동작해야
     // 하므로(워커는 admin bearer allow-list에 없다) 아래 관리자 bearer 분기보다
@@ -912,6 +925,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `POST /v1/workers/join`은 `fleet-worker join` CLI가 Authorization
+    /// header를 보내지 않으므로, admin bearer 보호가 켜진 배포(`with_tokens`)에서도
+    /// 미들웨어 단계에서 401로 막히면 안 된다 — bootstrap token은 request body로
+    /// 전달되고 join_worker 핸들러 자체가 검증한다. Authorization header 없이도
+    /// 핸들러까지 도달해 (빈 token이므로) 400 BadRequest를 받는지 확인한다 —
+    /// 401이 아니라는 게 핵심.
+    #[tokio::test]
+    async fn join_bypasses_admin_bearer_requirement() {
+        let state = AppState::new(MemStore::new_arc()).with_tokens(vec![ApiTokenCredential {
+            principal_id: "root".into(),
+            token: "admin-secret".into(),
+            capabilities: PermissionKind::all().to_vec(),
+        }]);
+        let app = build_app(Arc::new(state));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/workers/join")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "join must not be blocked by the admin bearer middleware — bootstrap token auth happens in the handler"
+        );
     }
 
     #[tokio::test]
