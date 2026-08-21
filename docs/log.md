@@ -659,3 +659,15 @@ last_verified: "2026-08-15"
 - 사용자 질의("orchestrator가 일을 요청받으면 credential이 없어서 진행 못 하는 경우가 있는가")에 답하며 코드를 추적한 결과, `fleet-scheduler`의 worker 선택 로직(`crates/fleet-scheduler/src/selector.rs`)이 `worker_credentials`를 전혀 참조하지 않고, LLM credential은 `fleet provision`의 `PushCredentials` 스텝(Task 흐름과 완전히 분리된 수동 프로비저닝 단계)을 통해서만 워커 호스트의 `~/.grok/config.toml`에 반영되며, credential이 비어 있으면 그 스텝조차 조용히 no-op함을 확인했다. `crates/fleet-core/src/task.rs`의 `FailureKind`에도 credential 관련 분류가 없어, LLM 인증 실패가 발생해도 일반 `WorkerError`로만 남는다.
 - 이 갭을 `#71`(Task dispatch credential precondition)로 로드맵에 등록했다. 설계는 이미 코드 관례로 확정된다: `Task.resolved_model`이 있으면 worker 후보 필터에 해당 model의 활성 credential 보유 여부를 추가하고(label 필터와 동일 자리), 후보가 전부 제외되면 기존 `DispatchError::NoWorker` 재시도/dead-letter 경로를 재사용하되 최종 실패 사유를 신설 `FailureKind::CredentialMissing`으로 구분한다. `model`이 없는 task는 검사 대상이 아니다.
 - 별도 architecture 문서를 새로 만들지 않고 `roadmap.md` 행 자체에 설계 요약을 담았다 — 범위가 스케줄러 한 곳의 필터 조건 추가와 실패 사유 taxonomy 확장으로 좁고 자기완결적이기 때문이다.
+
+## 2026-08-20 — `#71` 로드맵 상태 회귀 정정 (lint)
+
+- 유형: `lint`
+- `#72`를 등록하려고 `roadmap.md`를 열었다가, `#71`(완료로 기록됐어야 할 항목, 커밋 `5ca8d16`)이 최신 커밋(`df0be43`, `#61` 작업)에서 "설계 확정·구현 대기"로 되돌아가 있는 것을 발견했다. `git grep`으로 `crates/fleet-scheduler/src/selector.rs`의 `SelectionError::NoWorkerForCredential`, `crates/fleet-core/src/task.rs`의 `FailureKind::CredentialMissing`이 여전히 존재함을 확인 — **코드가 아니라 문서 상태만 회귀**했다. 원인은 여러 백그라운드 에이전트가 순차적으로 `docs/roadmap/roadmap.md`에 checkout-HEAD → 편집 → stage → WIP 복원 절차를 반복하는 과정에서, 특정 시점의 "HEAD" 스냅샷이 그보다 앞선 커밋의 완료 기록을 반영하지 못한 것으로 추정된다(정확한 재현은 하지 않았다). `#71` 행을 `5ca8d16` 커밋의 원문으로 복원했다.
+- **교훈**: 여러 세션/에이전트가 같은 세션 안에서 순차적으로 `roadmap.md`/`log.md`에 대해 checkout-dance를 반복할 때는, 각 단계가 끝난 뒤 이전에 완료로 기록한 항목들이 여전히 완료로 남아있는지 다음 단계 시작 전에 재확인해야 한다. 이번처럼 우연히 발견하지 못하면 조용히 누락될 수 있다.
+
+## 2026-08-20 — Admin API bearer token DB 기반 rotate/revoke를 #72로 등록
+
+- 유형: `ingest`
+- 사용자 요청("credential 회전 건을 먼저 정리")에 따라 `FLEET_API_TOKENS`/`FLEET_GMAIL_APP_PASS` 회전 경로를 검토했다. `FLEET_GMAIL_APP_PASS`는 Google이 발급하는 제3자 시크릿이라 orchestrator가 자동 회전할 수 없음을 확인 — 이 항목은 로드맵 대상이 아니다. `FLEET_API_TOKENS`는 orchestrator 자신이 값을 발급하는 admin bearer 토큰이라 `#60`(Worker operational credential)과 동일한 패턴(DB digest 저장, rotate API, 즉시 이전 값 무효화)을 적용할 수 있다고 판단해 `#72`로 등록했다. 사용자가 "orchestrator가 SSH로 자기 호스트를 직접 고치는 자동화"와 "DB 기반 rotate API" 두 방향 중 후자를 선택했다(자기 자신을 SSH로 재기동하는 자동화는 실패 시 서비스가 먹통이 될 위험이 커 배제).
+- 설계는 `roadmap.md` 행에 요약했다: 신규 `admin_api_tokens` 테이블, rotate/revoke/create/list API, 기존 `token:*` capability(bootstrap token 전용)와 겹치지 않는 새 capability, `FLEET_API_TOKENS` env 값을 최초 기동 시 DB로 1회 자동 가져오는 무중단 전환 경로. 아직 코드 변경은 없다.
