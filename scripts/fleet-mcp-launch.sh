@@ -19,6 +19,22 @@
 # runtime.rs: both are Option<String> binds, gated on being Some) — avoids
 # port conflicts with the orchestrator's already-running systemd-managed
 # instance, which owns those ports for real traffic.
+#
+# --transport acp is required — `fleet serve`'s default transport is `mock`
+# (no real workers contacted at all), not the systemd service's `acp`. Without
+# this flag every fleet_dispatch_task call would silently no-op against a
+# fake in-memory worker instead of reaching worker-ajou-ec1 or any other real
+# worker (caught while first testing this launcher against MCP tools).
+#
+# --no-health-check --no-cleanup --no-reconcile disable this ad-hoc process's
+# own copies of the background scheduler loops. Its only job is to answer MCP
+# calls for the duration of one client session — the real systemd-managed
+# `fleet.service` already runs these loops continuously, and running a second
+# set concurrently against the same DB risks duplicate/contending actions
+# (e.g. both processes reconciling the same stale task). --no-circuit-sync is
+# deliberately NOT passed — CircuitBreaker sync re-applies its own
+# self-published events idempotently, so it's harmless even duplicated (see
+# `fleet serve --help`).
 set -euo pipefail
 
 FLEET_ENV="${FLEET_ENV_PATH:-/etc/fleet/fleet.env}"
@@ -31,4 +47,4 @@ while IFS='=' read -r key value; do
 done < "$FLEET_ENV"
 
 unset FLEET_HTTP_BIND FLEET_DASHBOARD_BIND
-exec /usr/local/bin/fleet serve
+exec /usr/local/bin/fleet serve --transport acp --no-health-check --no-cleanup --no-reconcile
