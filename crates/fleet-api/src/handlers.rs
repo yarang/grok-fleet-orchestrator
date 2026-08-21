@@ -21,10 +21,11 @@ use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 use crate::app::{AppState, AuthorizationContext};
 use crate::error::ApiError;
 use crate::schema::{
-    BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse,
-    CredentialSummary, DeregisterRequest, ExportedCredential, HealthResponse, HeartbeatRequest,
-    HeartbeatResponse, HostRegisterRequest, HostRegisterResponse, JoinRequest, JoinResponse,
-    PutCredentialRequest, PutCredentialResponse, RegisterRequest, RegisterResponse,
+    AdminTokenSummary, BootstrapTokenSummary, CreateAdminTokenRequest, CreateAdminTokenResponse,
+    CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, CredentialSummary,
+    DeregisterRequest, ExportedCredential, HealthResponse, HeartbeatRequest, HeartbeatResponse,
+    HostRegisterRequest, HostRegisterResponse, JoinRequest, JoinResponse, PutCredentialRequest,
+    PutCredentialResponse, RegisterRequest, RegisterResponse, RotateAdminTokenResponse,
     RotateWorkerCredentialRequest, RotateWorkerCredentialResponse, WorkerSummary,
 };
 
@@ -797,6 +798,121 @@ pub async fn revoke_bootstrap_token(
         "status": "revoked",
         "token_id": token_id,
     })))
+}
+
+// ── Admin API tokens (로드맵 #72) ────────────────────────────────────────
+//
+// `FLEET_API_TOKENS` env var를 보완하는 DB 기반 admin bearer 토큰. worker
+// operational credential(로드맵 #60)과 동일한 패턴 — 원문은 이 핸들러들의
+// 응답에서만 1회 노출되고, 저장소에는 SHA-256 digest만 남는다.
+
+/// `POST /v1/admin/tokens` — 신규 principal의 admin API bearer 토큰 발급.
+/// 토큰 원문은 이 응답에서만 반환된다 — 다시 조회할 수 없다.
+pub async fn create_admin_token(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAdminTokenRequest>,
+) -> Result<Json<CreateAdminTokenResponse>, ApiError> {
+    let principal_id = req.principal_id.trim().to_string();
+    if principal_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "principal_id must not be empty".into(),
+        ));
+    }
+    if req.capabilities.is_empty() {
+        return Err(ApiError::BadRequest(
+            "capabilities must not be empty".into(),
+        ));
+    }
+
+    let raw = generate_random_bytes(32)
+        .map_err(|error| ApiError::Internal(format!("CSPRNG failure: {error}")))?;
+    let token = format!("fat_{}", base64url(&raw));
+    let token_digest = fleet_core::BootstrapToken::digest_for(&token);
+    let now = Utc::now();
+
+    let record = fleet_store::AdminApiToken {
+        principal_id: principal_id.clone(),
+        token_digest,
+        capabilities: req.capabilities.clone(),
+        created_at: now,
+        rotated_at: None,
+        revoked_at: None,
+        rotation_generation: 1,
+    };
+    state.store.create_admin_token(&record).await?;
+
+    info!(%principal_id, "admin API token created");
+    Ok(Json(CreateAdminTokenResponse {
+        principal_id,
+        token,
+        capabilities: req.capabilities,
+        created_at: now,
+        rotation_generation: 1,
+    }))
+}
+
+/// `POST /v1/admin/tokens/:principal_id/rotate` — 기존 principal의 토큰을
+/// 새로 발급하고 이전 값을 즉시 무효화한다. 새 원문은 이 응답에서만 반환된다
+/// — 호출자 자신의 토큰을 회전한 경우(self-rotate)에도 다음 요청은 반드시
+/// 이 응답의 새 원문으로 인증해야 한다.
+pub async fn rotate_admin_token(
+    State(state): State<Arc<AppState>>,
+    Path(principal_id): Path<String>,
+) -> Result<Json<RotateAdminTokenResponse>, ApiError> {
+    let raw = generate_random_bytes(32)
+        .map_err(|error| ApiError::Internal(format!("CSPRNG failure: {error}")))?;
+    let token = format!("fat_{}", base64url(&raw));
+    let token_digest = fleet_core::BootstrapToken::digest_for(&token);
+
+    let record = state
+        .store
+        .rotate_admin_token(&principal_id, &token_digest)
+        .await
+        .map_err(|e| match e {
+            fleet_store::StoreError::NotFound => {
+                ApiError::NotFound(format!("no admin token for principal {principal_id}"))
+            }
+            other => other.into(),
+        })?;
+
+    info!(%principal_id, rotation_generation = record.rotation_generation, "admin API token rotated — previous token invalidated");
+    Ok(Json(RotateAdminTokenResponse {
+        principal_id: record.principal_id,
+        token,
+        capabilities: record.capabilities,
+        rotation_generation: record.rotation_generation,
+        rotated_at: record.rotated_at.unwrap_or(record.created_at),
+    }))
+}
+
+/// `DELETE /v1/admin/tokens/:principal_id` — admin API 토큰을 즉시 회수한다.
+/// 회수 뒤에는 이전 토큰으로 어떤 요청도 인증되지 않는다.
+pub async fn revoke_admin_token(
+    State(state): State<Arc<AppState>>,
+    Path(principal_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let revoked = state.store.revoke_admin_token(&principal_id).await?;
+    if !revoked {
+        return Err(ApiError::NotFound(format!(
+            "no active admin token for principal {principal_id}"
+        )));
+    }
+    info!(%principal_id, "admin API token revoked");
+    Ok(Json(serde_json::json!({
+        "principal_id": principal_id,
+        "status": "revoked",
+    })))
+}
+
+/// `GET /v1/admin/tokens` — 발급된 admin 토큰의 메타데이터 목록. `token_digest`는
+/// 절대 포함되지 않는다.
+pub async fn list_admin_tokens(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AdminTokenSummary>>, ApiError> {
+    let tokens = state.store.list_admin_tokens().await?;
+    Ok(Json(
+        tokens.into_iter().map(AdminTokenSummary::from).collect(),
+    ))
 }
 
 /// [`render_worker_config_toml`]의 인자 묶음 (clippy::too_many_arguments 회피).

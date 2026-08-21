@@ -30,10 +30,13 @@ mod handlers;
 pub mod metrics;
 mod schema;
 
-pub use app::{build_app, run_http_server, ApiTokenCredential, AppState};
+pub use app::{
+    build_app, run_http_server, sync_env_admin_tokens_to_store, ApiTokenCredential, AppState,
+};
 pub use cloudflare::{cloudflare_access_middleware, setup_test_jwks_for_testing, VerifiedUser};
 pub use error::ApiError;
 pub use schema::{
-    BootstrapTokenSummary, CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, JoinRequest,
-    JoinResponse,
+    AdminTokenSummary, BootstrapTokenSummary, CreateAdminTokenRequest, CreateAdminTokenResponse,
+    CreateBootstrapTokenRequest, CreateBootstrapTokenResponse, JoinRequest, JoinResponse,
+    RotateAdminTokenResponse,
 };

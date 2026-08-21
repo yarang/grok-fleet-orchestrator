@@ -24,13 +24,13 @@ use uuid::Uuid;
 
 use fleet_core::{
     AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, EventEntry, FleetEvent,
-    Labels, LoginAttempt, Permission, Role, Session, SessionId, Task, TaskFilter, TaskId,
-    TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    Labels, LoginAttempt, Permission, PermissionKind, Role, Session, SessionId, Task, TaskFilter,
+    TaskId, TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
-use crate::{Store, StoredCredential, WorkerOperationalCredential};
+use crate::{AdminApiToken, Store, StoredCredential, WorkerOperationalCredential};
 
 /// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
 ///
@@ -724,6 +724,87 @@ impl Store for PgStore {
             .bind(token_digest)
             .execute(&self.pool)
             .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ── Admin API tokens (로드맵 #72) ────────────────────────────────
+
+    async fn create_admin_token(&self, token: &AdminApiToken) -> Result<(), StoreError> {
+        let capabilities_json = serde_json::to_value(&token.capabilities)?;
+        sqlx::query(
+            "INSERT INTO admin_api_tokens (principal_id, token_digest, capabilities, created_at, rotated_at, revoked_at, rotation_generation) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&token.principal_id)
+        .bind(&token.token_digest)
+        .bind(capabilities_json)
+        .bind(token.created_at)
+        .bind(token.rotated_at)
+        .bind(token.revoked_at)
+        .bind(token.rotation_generation)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::Conflict(
+                format!("admin token principal or digest already exists: {}", db.message()),
+            ),
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn find_active_admin_token_by_digest(
+        &self,
+        token_digest: &str,
+    ) -> Result<Option<AdminApiToken>, StoreError> {
+        let row = sqlx::query(
+            "SELECT principal_id, token_digest, capabilities, created_at, rotated_at, revoked_at, rotation_generation FROM admin_api_tokens WHERE token_digest = $1 AND revoked_at IS NULL",
+        )
+        .bind(token_digest)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_admin_token).transpose()
+    }
+
+    async fn list_admin_tokens(&self) -> Result<Vec<AdminApiToken>, StoreError> {
+        let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+            "SELECT principal_id, token_digest, capabilities, created_at, rotated_at, revoked_at, rotation_generation FROM admin_api_tokens ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_admin_token).collect()
+    }
+
+    async fn rotate_admin_token(
+        &self,
+        principal_id: &str,
+        new_token_digest: &str,
+    ) -> Result<AdminApiToken, StoreError> {
+        let row = sqlx::query(
+            r#"
+            UPDATE admin_api_tokens
+               SET token_digest = $2,
+                   rotated_at = NOW(),
+                   revoked_at = NULL,
+                   rotation_generation = rotation_generation + 1
+             WHERE principal_id = $1
+            RETURNING principal_id, token_digest, capabilities, created_at, rotated_at, revoked_at, rotation_generation
+            "#,
+        )
+        .bind(principal_id)
+        .bind(new_token_digest)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+        row_to_admin_token(row)
+    }
+
+    async fn revoke_admin_token(&self, principal_id: &str) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE admin_api_tokens SET revoked_at = NOW() WHERE principal_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(principal_id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -2094,6 +2175,20 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
         notes,
         last_used_by,
         last_used_at,
+    })
+}
+
+fn row_to_admin_token(row: sqlx::postgres::PgRow) -> Result<AdminApiToken, StoreError> {
+    let capabilities_json: serde_json::Value = row.try_get("capabilities")?;
+    let capabilities: Vec<PermissionKind> = serde_json::from_value(capabilities_json)?;
+    Ok(AdminApiToken {
+        principal_id: row.try_get("principal_id")?,
+        token_digest: row.try_get("token_digest")?,
+        capabilities,
+        created_at: row.try_get("created_at")?,
+        rotated_at: row.try_get("rotated_at")?,
+        revoked_at: row.try_get("revoked_at")?,
+        rotation_generation: row.try_get("rotation_generation")?,
     })
 }
 

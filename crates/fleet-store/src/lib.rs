@@ -36,8 +36,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission,
-    PermissionId, Role, RoleId, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput,
-    TaskStatus, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    PermissionId, PermissionKind, Role, RoleId, Session, SessionId, Task, TaskFilter, TaskId,
+    TaskOutput, TaskStatus, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -48,6 +48,20 @@ pub struct WorkerOperationalCredential {
     pub credential_digest: String,
     pub issued_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub rotation_generation: i64,
+}
+
+/// Admin API bearer token의 저장 형태 (로드맵 #72). 원문 토큰은 이 타입에
+/// 포함하지 않는다 — `token_digest`만 보관하며, 원문은 생성/rotate 응답에서만
+/// 1회 노출된다.
+#[derive(Debug, Clone)]
+pub struct AdminApiToken {
+    pub principal_id: String,
+    pub token_digest: String,
+    pub capabilities: Vec<PermissionKind>,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub rotation_generation: i64,
 }
@@ -244,6 +258,56 @@ pub trait Store: Send + Sync {
         self.consume_bootstrap_token(bootstrap_token, used_by).await?;
         self.upsert_worker(worker).await?;
         self.upsert_worker_operational_credential(credential).await
+    }
+
+    // ── Admin API tokens (로드맵 #72) ────────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — mock store(테스트용)는 재정의하지 않아도
+    // 됨. `PgStore`/`mem::MemStore`만 실제 구현.
+
+    /// 신규 principal의 admin API 토큰을 생성한다. 동일 `principal_id`가
+    /// 이미 존재하면 `StoreError::Conflict`.
+    async fn create_admin_token(&self, token: &AdminApiToken) -> Result<(), StoreError> {
+        let _ = token;
+        Err(StoreError::Unsupported("create_admin_token"))
+    }
+
+    /// digest로 활성(`revoked_at IS NULL`) admin 토큰을 조회한다.
+    /// `auth_middleware`의 인증 경로에서 사용 — env `valid_tokens`와 함께
+    /// 검사되는 두 번째 소스다.
+    async fn find_active_admin_token_by_digest(
+        &self,
+        token_digest: &str,
+    ) -> Result<Option<AdminApiToken>, StoreError> {
+        let _ = token_digest;
+        Err(StoreError::Unsupported("find_active_admin_token_by_digest"))
+    }
+
+    /// 모든 admin 토큰의 메타데이터를 생성일 역순으로 조회한다 (회수된 것
+    /// 포함). `token_digest`가 포함되어 있으므로 API 응답으로 그대로
+    /// 내보내면 안 된다 — 호출부(`GET /v1/admin/tokens` 핸들러)가 digest를
+    /// 제외한 요약 타입으로 변환해야 한다.
+    async fn list_admin_tokens(&self) -> Result<Vec<AdminApiToken>, StoreError> {
+        Err(StoreError::Unsupported("list_admin_tokens"))
+    }
+
+    /// principal의 admin 토큰을 새 digest로 회전한다. 이전 digest는 이 호출
+    /// 즉시 무효화되며(자동 fallback 없음) `rotation_generation`이 1 증가한다.
+    /// 대상 principal에 토큰이 없으면 `StoreError::NotFound`.
+    async fn rotate_admin_token(
+        &self,
+        principal_id: &str,
+        new_token_digest: &str,
+    ) -> Result<AdminApiToken, StoreError> {
+        let _ = (principal_id, new_token_digest);
+        Err(StoreError::Unsupported("rotate_admin_token"))
+    }
+
+    /// principal의 admin 토큰을 즉시 회수한다. `revoked_at`을 설정할 뿐 row는
+    /// 삭제하지 않는다. 대상이 없거나 이미 회수된 경우 `false`.
+    async fn revoke_admin_token(&self, principal_id: &str) -> Result<bool, StoreError> {
+        let _ = principal_id;
+        Err(StoreError::Unsupported("revoke_admin_token"))
     }
 
     // ── RBAC: Users (Phase 9.1) ───────────────────────────────────

@@ -34,7 +34,7 @@ use fleet_core::{
     UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
-use crate::{Store, StoreError, StoredCredential, WorkerOperationalCredential};
+use crate::{AdminApiToken, Store, StoreError, StoredCredential, WorkerOperationalCredential};
 
 /// 모든 메서드가 실제로 동작하는 인메모리 [`Store`] — 테스트 전용 단일 구현.
 #[derive(Default)]
@@ -45,6 +45,9 @@ pub struct MemStore {
     outputs: Mutex<HashMap<TaskId, Vec<String>>>,
     bootstrap_tokens: Mutex<HashMap<String, BootstrapToken>>,
     worker_operational_credentials: Mutex<HashMap<String, WorkerOperationalCredential>>,
+    /// principal_id → admin API token (로드맵 #72). PG의 `principal_id` PK와
+    /// 동일하게 키를 잡아 "1 principal = 1 활성 토큰"을 mem 구현에서도 강제.
+    admin_api_tokens: Mutex<HashMap<String, AdminApiToken>>,
     credentials: Mutex<HashMap<(String, String), StoredCredential>>,
     users: Mutex<HashMap<UserId, User>>,
     roles: Mutex<HashMap<RoleId, Role>>,
@@ -388,6 +391,75 @@ impl Store for MemStore {
 
     async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
         Ok(self.bootstrap_tokens.lock().unwrap().remove(token_digest).is_some())
+    }
+
+    // ── Admin API tokens (로드맵 #72) ────────────────────────────────
+
+    async fn create_admin_token(&self, token: &AdminApiToken) -> Result<(), StoreError> {
+        let mut tokens = self.admin_api_tokens.lock().unwrap();
+        if tokens.contains_key(&token.principal_id) {
+            return Err(StoreError::Conflict(format!(
+                "admin token principal already exists: {}",
+                token.principal_id
+            )));
+        }
+        if tokens.values().any(|t| t.token_digest == token.token_digest) {
+            return Err(StoreError::Conflict(
+                "admin token digest already exists".into(),
+            ));
+        }
+        tokens.insert(token.principal_id.clone(), token.clone());
+        Ok(())
+    }
+
+    async fn find_active_admin_token_by_digest(
+        &self,
+        token_digest: &str,
+    ) -> Result<Option<AdminApiToken>, StoreError> {
+        Ok(self
+            .admin_api_tokens
+            .lock()
+            .unwrap()
+            .values()
+            .find(|t| t.token_digest == token_digest && t.revoked_at.is_none())
+            .cloned())
+    }
+
+    async fn list_admin_tokens(&self) -> Result<Vec<AdminApiToken>, StoreError> {
+        let mut all: Vec<AdminApiToken> = self
+            .admin_api_tokens
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        all.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+        Ok(all)
+    }
+
+    async fn rotate_admin_token(
+        &self,
+        principal_id: &str,
+        new_token_digest: &str,
+    ) -> Result<AdminApiToken, StoreError> {
+        let mut tokens = self.admin_api_tokens.lock().unwrap();
+        let token = tokens.get_mut(principal_id).ok_or(StoreError::NotFound)?;
+        token.token_digest = new_token_digest.to_string();
+        token.rotated_at = Some(Utc::now());
+        token.revoked_at = None;
+        token.rotation_generation += 1;
+        Ok(token.clone())
+    }
+
+    async fn revoke_admin_token(&self, principal_id: &str) -> Result<bool, StoreError> {
+        let mut tokens = self.admin_api_tokens.lock().unwrap();
+        match tokens.get_mut(principal_id) {
+            Some(token) if token.revoked_at.is_none() => {
+                token.revoked_at = Some(Utc::now());
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     async fn upsert_worker_operational_credential(

@@ -379,6 +379,23 @@ pub enum PermissionKind {
     TokenList,
     #[serde(rename = "token:revoke")]
     TokenRevoke,
+    /// admin API bearer token(`admin_api_tokens` 테이블) 생성/rotate/revoke
+    /// (로드맵 #72).
+    ///
+    /// **주의**: 위 `Token*`(`TokenIssue`/`TokenList`/`TokenRevoke`)은 worker
+    /// join 전용 bootstrap token에 대한 권한이다. 이것은 admin이 스스로를
+    /// 인증하는 bearer credential(`admin_api_tokens`)에 대한 별개 권한이며,
+    /// `#66`에서 겪은 capability 이름 재사용으로 인한 권한 혼선을 반복하지
+    /// 않기 위해 의도적으로 분리했다. admin 전용 — Operator/Viewer 기본
+    /// 역할에는 부여하지 않는다.
+    #[serde(rename = "admin_token:manage")]
+    AdminTokenManage,
+    /// admin API bearer token 메타데이터 목록 조회(`GET /v1/admin/tokens`).
+    /// 응답에 digest는 포함되지 않는다 — 어떤 principal이 발급돼 있는지만
+    /// 노출한다. 생성/rotate/revoke는 [`PermissionKind::AdminTokenManage`]가
+    /// 따로 통제한다 (worker LLM credential의 read/manage 분리와 동일한 이유).
+    #[serde(rename = "admin_token:list")]
+    AdminTokenList,
     // 사용자/역할 (admin 전용)
     #[serde(rename = "user:create")]
     UserCreate,
@@ -425,6 +442,8 @@ impl PermissionKind {
             Self::TokenIssue => "token:issue",
             Self::TokenList => "token:list",
             Self::TokenRevoke => "token:revoke",
+            Self::AdminTokenManage => "admin_token:manage",
+            Self::AdminTokenList => "admin_token:list",
             Self::UserCreate => "user:create",
             Self::UserDelete => "user:delete",
             Self::UserRead => "user:read",
@@ -458,6 +477,8 @@ impl PermissionKind {
             Self::TokenIssue,
             Self::TokenList,
             Self::TokenRevoke,
+            Self::AdminTokenManage,
+            Self::AdminTokenList,
             Self::UserCreate,
             Self::UserDelete,
             Self::UserRead,

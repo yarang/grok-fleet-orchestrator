@@ -235,6 +235,13 @@ enum Command {
         action: WorkersAction,
     },
 
+    /// admin API bearer 토큰 관리 (로드맵 #72). `admin_token:manage`/`:list`
+    /// capability가 필요하다.
+    AdminTokens {
+        #[command(subcommand)]
+        action: AdminTokensAction,
+    },
+
     /// 작업 관련 조회/제어 명령 그룹.
     Tasks {
         #[command(subcommand)]
@@ -514,6 +521,73 @@ enum WorkerCredentialAction {
 
         /// 대상 워커 ID (UUID).
         worker_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminTokensAction {
+    /// 새 admin bearer 토큰 발급. 원문은 이 명령의 출력에서만 확인 가능하다 —
+    /// 다시 조회할 수 없다.
+    Create {
+        /// Orchestrator HTTP API URL.
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        /// 관리자 bearer 토큰(`admin_token:manage` capability).
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 새로 발급할 토큰의 principal 식별자.
+        principal_id: String,
+
+        /// 부여할 capability (쉼표 구분, 예: `worker:list,task:read`).
+        #[arg(long)]
+        capabilities: String,
+
+        /// JSON 형식으로 결과 출력.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// admin bearer 토큰을 새로 발급하고 이전 값을 즉시 무효화. 새 원문은 이
+    /// 명령의 출력에서만 확인 가능하다 — 다시 조회할 수 없다.
+    Rotate {
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 대상 principal 식별자.
+        principal_id: String,
+
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// admin bearer 토큰을 즉시 회수. 이후 이전 토큰으로는 어떤 요청도 인증되지
+    /// 않는다.
+    Revoke {
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        /// 대상 principal 식별자.
+        principal_id: String,
+    },
+
+    /// 발급된 admin bearer 토큰의 메타데이터 목록(원문·digest 미노출).
+    List {
+        #[arg(long, env = "FLEET_API_URL")]
+        api_url: String,
+
+        #[arg(long, env = "FLEET_API_TOKEN")]
+        api_token: String,
+
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -1079,6 +1153,7 @@ async fn main() -> Result<()> {
         }
         Command::Migrate => runtime::run_migrate().await,
         Command::Workers { action } => runtime::run_workers(action).await,
+        Command::AdminTokens { action } => runtime::run_admin_tokens(action).await,
         Command::Tasks { action } => runtime::run_tasks(action).await,
         Command::Token { action } => token::run_token(action).await,
         Command::Credentials { action } => credentials::run_credentials(action).await,

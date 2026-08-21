@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use fleet_core::{BootstrapToken, WorkerLivenessMode, WorkerStatus};
+use fleet_core::{BootstrapToken, PermissionKind, WorkerLivenessMode, WorkerStatus};
 
 /// `POST /v1/workers/register` 요청 바디.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -317,6 +317,70 @@ pub struct RotateWorkerCredentialResponse {
     pub rotation_generation: i64,
     pub issued_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+// ── Admin API tokens (로드맵 #72) ───────────────────────────────────────
+//
+// `FLEET_API_TOKENS` env var(부팅 시 1회 로드되는 정적 목록)를 보완하는 DB
+// 기반 admin bearer 토큰. `worker_operational_credentials`(로드맵 #60)와
+// 동일한 패턴 — 원문은 생성/rotate 응답에만 1회 노출되고, 저장소에는
+// SHA-256 digest만 남는다.
+
+/// `POST /v1/admin/tokens` 요청 바디.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAdminTokenRequest {
+    /// 신규 토큰의 principal 식별자. 이미 존재하면 409 Conflict.
+    pub principal_id: String,
+    /// 이 principal에 부여할 capability 목록. 비어 있으면 400 Bad Request.
+    pub capabilities: Vec<PermissionKind>,
+}
+
+/// `POST /v1/admin/tokens` 응답. `token`은 이 응답에서만 원문으로 반환된다.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateAdminTokenResponse {
+    pub principal_id: String,
+    pub token: String,
+    pub capabilities: Vec<PermissionKind>,
+    pub created_at: DateTime<Utc>,
+    pub rotation_generation: i64,
+}
+
+/// `POST /v1/admin/tokens/:principal_id/rotate` 응답. `token`은 이 응답에서만
+/// 원문으로 반환된다 — 이전 토큰은 이 호출 즉시 무효화되며 자동 fallback을
+/// 허용하지 않는다(self-rotate 직후에도 새 원문으로만 다음 요청이 인증됨).
+#[derive(Debug, Clone, Serialize)]
+pub struct RotateAdminTokenResponse {
+    pub principal_id: String,
+    pub token: String,
+    pub capabilities: Vec<PermissionKind>,
+    pub rotation_generation: i64,
+    pub rotated_at: DateTime<Utc>,
+}
+
+/// `GET /v1/admin/tokens` 응답의 개별 항목. `token_digest`는 절대 포함하지
+/// 않는다 — 어떤 principal이 어떤 capability로 발급돼 있는지, 회전/회수
+/// 이력만 노출한다.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdminTokenSummary {
+    pub principal_id: String,
+    pub capabilities: Vec<PermissionKind>,
+    pub created_at: DateTime<Utc>,
+    pub rotated_at: Option<DateTime<Utc>>,
+    pub revoked: bool,
+    pub rotation_generation: i64,
+}
+
+impl From<fleet_store::AdminApiToken> for AdminTokenSummary {
+    fn from(t: fleet_store::AdminApiToken) -> Self {
+        AdminTokenSummary {
+            principal_id: t.principal_id,
+            capabilities: t.capabilities,
+            created_at: t.created_at,
+            rotated_at: t.rotated_at,
+            revoked: t.revoked_at.is_some(),
+            rotation_generation: t.rotation_generation,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

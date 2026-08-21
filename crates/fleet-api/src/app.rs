@@ -247,11 +247,29 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             axum::routing::delete(handlers::revoke_bootstrap_token),
         );
 
+    // Admin API bearer token rotate/revoke (로드맵 #72). bootstrap token
+    // (worker join 전용)과는 별개 자원 — `admin_token:manage`/`admin_token:list`
+    // capability로 통제한다.
+    let admin_token_routes = Router::new()
+        .route(
+            "/",
+            post(handlers::create_admin_token).get(handlers::list_admin_tokens),
+        )
+        .route(
+            "/:principal_id/rotate",
+            post(handlers::rotate_admin_token),
+        )
+        .route(
+            "/:principal_id",
+            axum::routing::delete(handlers::revoke_admin_token),
+        );
+
     let v1 = Router::new()
         .route("/health", get(handlers::health))
         .route("/hosts/register", post(handlers::register_host))
         .nest("/workers", api_routes)
-        .nest("/bootstrap-tokens", token_routes);
+        .nest("/bootstrap-tokens", token_routes)
+        .nest("/admin/tokens", admin_token_routes);
 
     // 인증 미들웨어 순서 (로드맵 #58).
     //
@@ -475,6 +493,49 @@ async fn auth_middleware(
         }
     }
 
+    // Admin API bearer token 조회 — DB(`admin_api_tokens`)에 발급된 토큰인지
+    // 확인한다 (로드맵 #72). env `valid_tokens`(정적 목록)를 보완하는 두 번째
+    // 소스이며, `valid_tokens`/`cf_audience` 설정 여부와 무관하게 동작해야
+    // 하므로(DB 전용 배포도 지원) 아래 env allow-list 분기보다 앞서 검사한다.
+    // 매치되지 않으면 조용히 기존 로직으로 폴백한다.
+    if let Some(header) = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(token) = header
+            .strip_prefix("Bearer ")
+            .or_else(|| header.strip_prefix("bearer "))
+        {
+            let presented_digest = fleet_core::BootstrapToken::digest_for(token);
+            if let Ok(Some(admin_token)) = state
+                .store
+                .find_active_admin_token_by_digest(&presented_digest)
+                .await
+            {
+                // WHERE token_digest = $1로 이미 정확히 일치한 row지만,
+                // 상수시간 비교 관례(env allow-list의 `token_matches`와 동일한
+                // 방어 심도)를 유지하기 위해 반환된 digest를 다시 한 번 ct_eq로
+                // 확정한다. 두 값 모두 SHA-256 hex(고정 64자)라 길이 누출도 없다.
+                let matches = admin_token
+                    .token_digest
+                    .as_bytes()
+                    .ct_eq(presented_digest.as_bytes());
+                if bool::from(matches) {
+                    let mut req = req;
+                    req.extensions_mut().insert(AuthorizationContext {
+                        principal_id: admin_token.principal_id.clone(),
+                        authentication_method: AuthenticationMethod::ScopedBearer,
+                        capabilities: admin_token.capabilities.clone(),
+                        worker_id: None,
+                    });
+                    authorize_http_endpoint(&req)?;
+                    return Ok(next.run(req).await);
+                }
+            }
+        }
+    }
+
     let Some(tokens) = &state.valid_tokens else {
         // CF Access 전용 배포. 서명 검증 자체는 바깥의 CF middleware가 이미
         // 끝냈고, 여기서는 그 결과(VerifiedUser)를 principal로 승격시켜
@@ -682,6 +743,19 @@ fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
         (&Method::DELETE, path) if path.starts_with("/bootstrap-tokens/") => {
             PermissionKind::TokenRevoke
         }
+        // Admin API bearer token rotate/revoke (로드맵 #72). bootstrap token
+        // 전용인 `Token*`과 재사용하지 않는다 — `#66`에서 겪은 capability
+        // 이름 충돌 재발 방지.
+        (&Method::GET, "/admin/tokens") => PermissionKind::AdminTokenList,
+        (&Method::POST, "/admin/tokens") => PermissionKind::AdminTokenManage,
+        (&Method::POST, path)
+            if path.starts_with("/admin/tokens/") && path.ends_with("/rotate") =>
+        {
+            PermissionKind::AdminTokenManage
+        }
+        (&Method::DELETE, path) if path.starts_with("/admin/tokens/") => {
+            PermissionKind::AdminTokenManage
+        }
         _ => return None,
     };
     Some(capability)
@@ -732,6 +806,54 @@ fn token_matches<'a>(
         matched |= is_match;
     }
     bool::from(matched).then(|| &candidates[match_index.expect("matched token has index")])
+}
+
+/// env `valid_tokens`(`FLEET_API_TOKENS`)에 있는 각 토큰을 DB(`admin_api_tokens`)로
+/// 1회 자동 upsert한다 (로드맵 #72 무중단 전환).
+///
+/// 원문 토큰을 재노출하지 않고 digest만 계산해 넣는다 — `#59`의 017
+/// bootstrap token digest 마이그레이션과 같은 정신이다. 이미 해당
+/// `principal_id`의 행이 DB에 있으면(활성/회수 여부 무관) 건드리지 않으므로,
+/// 서버가 뜰 때마다(멱등하게) 호출해도 안전하다 — 두 번째 인스턴스가 동시에
+/// 같은 principal을 생성하려는 race는 `Conflict`로 조용히 무시한다.
+///
+/// `store`가 admin token 저장을 지원하지 않는 백엔드(mock 등)면
+/// `StoreError::Unsupported`를 그대로 반환한다 — 호출자는 이를 치명적 에러로
+/// 취급하지 않고 로그만 남기는 것을 권장한다(서버 기동을 막지 않기 위함).
+pub async fn sync_env_admin_tokens_to_store(
+    store: &dyn fleet_store::Store,
+    tokens: &[ApiTokenCredential],
+) -> Result<(), fleet_store::StoreError> {
+    let existing = store.list_admin_tokens().await?;
+    let existing_principals: std::collections::HashSet<&str> =
+        existing.iter().map(|t| t.principal_id.as_str()).collect();
+
+    for token in tokens {
+        if existing_principals.contains(token.principal_id.as_str()) {
+            continue;
+        }
+        let record = fleet_store::AdminApiToken {
+            principal_id: token.principal_id.clone(),
+            token_digest: fleet_core::BootstrapToken::digest_for(&token.token),
+            capabilities: token.capabilities.clone(),
+            created_at: chrono::Utc::now(),
+            rotated_at: None,
+            revoked_at: None,
+            rotation_generation: 1,
+        };
+        match store.create_admin_token(&record).await {
+            Ok(()) => {
+                info!(
+                    principal_id = %token.principal_id,
+                    "env admin API token auto-imported into DB (로드맵 #72)"
+                );
+            }
+            // 동시 기동한 다른 인스턴스가 이미 만들었다 — 조용히 넘어간다.
+            Err(fleet_store::StoreError::Conflict(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// 서버 바인딩 + serve. shutdown 시그널은 호출자가 처리.
@@ -997,6 +1119,38 @@ mod tests {
         // join은 bootstrap token 자체가 인증 수단.
         assert_eq!(required_capability(&Method::POST, "/workers/join"), None);
         assert_eq!(required_capability(&Method::GET, "/health"), None);
+    }
+
+    // ── Admin API token route capability (로드맵 #72) ────────────────────
+
+    #[test]
+    fn capability_matrix_covers_admin_token_routes() {
+        assert_eq!(
+            required_capability(&Method::POST, "/admin/tokens"),
+            Some(PermissionKind::AdminTokenManage)
+        );
+        assert_eq!(
+            required_capability(&Method::GET, "/admin/tokens"),
+            Some(PermissionKind::AdminTokenList)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/admin/tokens/svc-a/rotate"),
+            Some(PermissionKind::AdminTokenManage)
+        );
+        assert_eq!(
+            required_capability(&Method::DELETE, "/admin/tokens/svc-a"),
+            Some(PermissionKind::AdminTokenManage)
+        );
+        // bootstrap token 전용 capability(`Token*`)와 재사용되지 않는다.
+        assert_ne!(
+            required_capability(&Method::POST, "/admin/tokens"),
+            Some(PermissionKind::TokenIssue)
+        );
+        // mount 지점이 남아 있는 형태도 같은 결론이어야 한다.
+        assert_eq!(
+            required_capability(&Method::GET, normalized_v1_path("/v1/admin/tokens")),
+            Some(PermissionKind::AdminTokenList)
+        );
     }
 
     // ── LLM credential route capability (로드맵 #66) ─────────────────────

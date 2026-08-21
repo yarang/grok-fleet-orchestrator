@@ -28,13 +28,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use fleet_api::{run_http_server, ApiTokenCredential, AppState};
+use fleet_api::{run_http_server, sync_env_admin_tokens_to_store, ApiTokenCredential, AppState};
 use fleet_core::{
     CircuitBreakerConfig, TaskFilter, TaskId, TaskStatus, TaskStatusFilter, WorkerFilter,
     WorkerStatus,
 };
 // CLI 하위 명령 enum (main.rs).
-use crate::{EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
+use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig,
@@ -470,6 +470,16 @@ pub async fn run_serve(
         }
         if let Some(token_list) = scoped_tokens {
             if !token_list.is_empty() {
+                // 로드맵 #72 — env FLEET_API_TOKENS를 DB(admin_api_tokens)로 1회
+                // 자동 upsert(멱등, 원문 재노출 없음). 실패해도 기동은 계속한다 —
+                // env 목록은 with_tokens()로 여전히 인증에 쓰인다.
+                if let Err(e) = sync_env_admin_tokens_to_store(&*store, &token_list).await {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to sync FLEET_API_TOKENS into DB (로드맵 #72) — \
+                         continuing with env-only bearer auth"
+                    );
+                }
                 app_state = app_state.with_tokens(token_list);
                 tracing::info!(bind = %bind, "HTTP API server with bearer auth");
             } else if !has_cf_access {
@@ -702,6 +712,210 @@ async fn run_workers_credential_revoke(
         return Err(anyhow!("credential revoke failed: {status} — {text}"));
     }
     println!("revoked: worker {worker_id}");
+    Ok(())
+}
+
+/// `admin-tokens` 명령 그룹 디스패치 (로드맵 #72).
+pub async fn run_admin_tokens(action: AdminTokensAction) -> Result<()> {
+    match action {
+        AdminTokensAction::Create {
+            api_url,
+            api_token,
+            principal_id,
+            capabilities,
+            json,
+        } => run_admin_tokens_create(&api_url, &api_token, &principal_id, &capabilities, json).await,
+        AdminTokensAction::Rotate {
+            api_url,
+            api_token,
+            principal_id,
+            json,
+        } => run_admin_tokens_rotate(&api_url, &api_token, &principal_id, json).await,
+        AdminTokensAction::Revoke {
+            api_url,
+            api_token,
+            principal_id,
+        } => run_admin_tokens_revoke(&api_url, &api_token, &principal_id).await,
+        AdminTokensAction::List {
+            api_url,
+            api_token,
+            json,
+        } => run_admin_tokens_list(&api_url, &api_token, json).await,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CreateAdminTokenApiRequest {
+    principal_id: String,
+    capabilities: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct AdminTokenApiResponse {
+    principal_id: String,
+    #[serde(default)]
+    token: Option<String>,
+    capabilities: Vec<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    rotated_at: Option<String>,
+    #[serde(default)]
+    revoked: Option<bool>,
+    rotation_generation: i64,
+}
+
+fn print_admin_token_response(parsed: &AdminTokenApiResponse, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(parsed)?);
+        return Ok(());
+    }
+    println!("principal_id:        {}", parsed.principal_id);
+    println!("capabilities:        {}", parsed.capabilities.join(","));
+    println!("rotation_generation: {}", parsed.rotation_generation);
+    if let Some(created_at) = &parsed.created_at {
+        println!("created_at:          {created_at}");
+    }
+    if let Some(rotated_at) = &parsed.rotated_at {
+        println!("rotated_at:          {rotated_at}");
+    }
+    if let Some(token) = &parsed.token {
+        println!("token:               {token}");
+        println!("(store this token now — it will not be shown again)");
+    }
+    Ok(())
+}
+
+/// `admin-tokens create <principal_id> --capabilities a,b,c`.
+async fn run_admin_tokens_create(
+    api_url: &str,
+    api_token: &str,
+    principal_id: &str,
+    capabilities: &str,
+    json: bool,
+) -> Result<()> {
+    let caps: Vec<String> = capabilities
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if caps.is_empty() {
+        return Err(anyhow!("--capabilities must list at least one capability"));
+    }
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!("{}/v1/admin/tokens", api_url.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(api_token)
+        .json(&CreateAdminTokenApiRequest {
+            principal_id: principal_id.to_string(),
+            capabilities: caps,
+        })
+        .send()
+        .await
+        .context("admin token create request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("admin token create failed: {status} — {text}"));
+    }
+    let parsed: AdminTokenApiResponse = resp.json().await.context("parsing create response")?;
+    print_admin_token_response(&parsed, json)
+}
+
+/// `admin-tokens rotate <principal_id>`.
+async fn run_admin_tokens_rotate(
+    api_url: &str,
+    api_token: &str,
+    principal_id: &str,
+    json: bool,
+) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!(
+        "{}/v1/admin/tokens/{}/rotate",
+        api_url.trim_end_matches('/'),
+        principal_id
+    );
+    let resp = http
+        .post(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .context("admin token rotate request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("admin token rotate failed: {status} — {text}"));
+    }
+    let parsed: AdminTokenApiResponse = resp.json().await.context("parsing rotate response")?;
+    print_admin_token_response(&parsed, json)
+}
+
+/// `admin-tokens revoke <principal_id>`.
+async fn run_admin_tokens_revoke(api_url: &str, api_token: &str, principal_id: &str) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!(
+        "{}/v1/admin/tokens/{}",
+        api_url.trim_end_matches('/'),
+        principal_id
+    );
+    let resp = http
+        .delete(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .context("admin token revoke request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("admin token revoke failed: {status} — {text}"));
+    }
+    println!("revoked: principal {principal_id}");
+    Ok(())
+}
+
+/// `admin-tokens list`.
+async fn run_admin_tokens_list(api_url: &str, api_token: &str, json: bool) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let url = format!("{}/v1/admin/tokens", api_url.trim_end_matches('/'));
+    let resp = http
+        .get(&url)
+        .bearer_auth(api_token)
+        .send()
+        .await
+        .context("admin token list request failed")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("admin token list failed: {status} — {text}"));
+    }
+    let parsed: Vec<AdminTokenApiResponse> = resp.json().await.context("parsing list response")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&parsed)?);
+        return Ok(());
+    }
+    if parsed.is_empty() {
+        println!("(no admin tokens issued)");
+        return Ok(());
+    }
+    println!("{:<24} {:<10} {:<10} CAPABILITIES", "PRINCIPAL", "GEN", "REVOKED");
+    for t in &parsed {
+        println!(
+            "{:<24} {:<10} {:<10} {}",
+            t.principal_id,
+            t.rotation_generation,
+            t.revoked.unwrap_or(false),
+            t.capabilities.join(",")
+        );
+    }
     Ok(())
 }
 

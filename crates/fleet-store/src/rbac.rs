@@ -82,6 +82,8 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::TokenIssue => "Issue bootstrap tokens",
         PermissionKind::TokenList => "List bootstrap tokens",
         PermissionKind::TokenRevoke => "Revoke bootstrap tokens",
+        PermissionKind::AdminTokenManage => "Create, rotate, or revoke admin API bearer tokens",
+        PermissionKind::AdminTokenList => "List admin API bearer token metadata (no digest)",
         PermissionKind::UserCreate => "Create new users",
         PermissionKind::UserDelete => "Delete users",
         PermissionKind::UserRead => "List/read users",
