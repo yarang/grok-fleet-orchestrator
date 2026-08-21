@@ -15,16 +15,16 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use sha2::{Digest, Sha256};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use subtle::{Choice, ConstantTimeEq};
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-use fleet_credentials::MasterKey;
 use fleet_core::PermissionKind;
+use fleet_credentials::MasterKey;
 use fleet_store::Store;
 use fleet_transport::WorkerTransport;
 
@@ -270,10 +270,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
             "/",
             post(handlers::create_admin_token).get(handlers::list_admin_tokens),
         )
-        .route(
-            "/:principal_id/rotate",
-            post(handlers::rotate_admin_token),
-        )
+        .route("/:principal_id/rotate", post(handlers::rotate_admin_token))
         .route(
             "/:principal_id",
             axum::routing::delete(handlers::revoke_admin_token),
@@ -505,14 +502,19 @@ async fn auth_middleware(
             .or_else(|| header.strip_prefix("bearer "))
         {
             let digest = fleet_core::BootstrapToken::digest_for(token);
-            if let Ok(Some(credential)) =
-                state.store.find_active_worker_operational_credential(&digest).await
+            if let Ok(Some(credential)) = state
+                .store
+                .find_active_worker_operational_credential(&digest)
+                .await
             {
                 let mut req = req;
                 req.extensions_mut().insert(AuthorizationContext {
                     principal_id: format!("worker:{}", credential.worker_id),
                     authentication_method: AuthenticationMethod::WorkerOperational,
-                    capabilities: vec![PermissionKind::WorkerRegister, PermissionKind::WorkerDelete],
+                    capabilities: vec![
+                        PermissionKind::WorkerRegister,
+                        PermissionKind::WorkerDelete,
+                    ],
                     worker_id: Some(credential.worker_id),
                 });
                 authorize_http_endpoint(&req)?;
@@ -806,7 +808,11 @@ fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
     if authorized {
         Ok(())
     } else {
-        tracing::warn!(path, capability = required.as_str(), "HTTP capability denied");
+        tracing::warn!(
+            path,
+            capability = required.as_str(),
+            "HTTP capability denied"
+        );
         Err(StatusCode::FORBIDDEN)
     }
 }
@@ -896,8 +902,8 @@ pub async fn run_http_server(state: Arc<AppState>, bind: SocketAddr) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_store::mem::MemStore;
     use fleet_core::CircuitState;
+    use fleet_store::mem::MemStore;
     use std::sync::Arc;
 
     fn test_token(token: &str) -> ApiTokenCredential {
@@ -1393,9 +1399,7 @@ mod tests {
             Some("3.0.3"),
             "unexpected or missing openapi version field"
         );
-        let paths = doc["paths"]
-            .as_mapping()
-            .expect("paths must be a mapping");
+        let paths = doc["paths"].as_mapping().expect("paths must be a mapping");
         for expected in [
             "/health",
             "/workers/register",
