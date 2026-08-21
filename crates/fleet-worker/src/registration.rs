@@ -111,8 +111,17 @@ struct RegisterRequest {
 struct HeartbeatRequest {
     worker_id: String,
     active_tasks: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     load_avg: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     mem_available_mb: Option<u64>,
+    // 서버의 `disk_free_mb: u64`는 `#[serde(default)]`라 필드가 아예 빠져야
+    // 0으로 채워진다 — `null`을 명시적으로 보내면 non-Option 타입 역직렬화가
+    // 실패한다(422). disk_free_mb는 백그라운드 캐시가 첫 갱신을 마치기 전까지
+    // None일 수 있으므로(위 `disk_cache.get_or_schedule_refresh`), 이 필드를
+    // skip_serializing_if 없이 그대로 실으면 기동 직후 heartbeat가 매번 이
+    // 이유로 실패한다 — 실제로 worker-ajou-ec1 enrollment 중 재현됨.
+    #[serde(skip_serializing_if = "Option::is_none")]
     disk_free_mb: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cpu_usage: Option<f32>,
@@ -911,6 +920,44 @@ mod tests {
     }
 
     // ── DiskCache 단위 테스트 ──
+
+    /// `None`인 Option 필드는 JSON에서 아예 빠져야 한다 — 서버의
+    /// `HeartbeatRequest`(fleet-api/src/schema.rs)는 `disk_free_mb`/
+    /// `mem_available_mb`/`load_avg`가 non-Option `#[serde(default)]`라,
+    /// 필드가 아예 없으면 기본값(0/빈 벡터)으로 채워지지만 명시적 `null`은
+    /// 역직렬화 자체가 실패한다(422). disk_free_mb는 백그라운드 캐시가 첫
+    /// 갱신을 마치기 전까지 None일 수 있어, 기동 직후 첫 heartbeat가 이
+    /// 이유로 계속 실패하는 걸 worker-ajou-ec1 enrollment 중 재현했었다.
+    #[test]
+    fn heartbeat_request_omits_none_fields_instead_of_serializing_null() {
+        let req = HeartbeatRequest {
+            worker_id: "w1".into(),
+            active_tasks: 0,
+            load_avg: None,
+            mem_available_mb: None,
+            disk_free_mb: None,
+            cpu_usage: None,
+            ram_usage: None,
+            agent_healthy: true,
+            grok_version: None,
+            fleet_worker_version: None,
+            os_info: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            !obj.contains_key("load_avg"),
+            "load_avg must be omitted when None, not serialized as null"
+        );
+        assert!(
+            !obj.contains_key("mem_available_mb"),
+            "mem_available_mb must be omitted when None, not serialized as null"
+        );
+        assert!(
+            !obj.contains_key("disk_free_mb"),
+            "disk_free_mb must be omitted when None, not serialized as null"
+        );
+    }
 
     #[test]
     fn disk_cache_initial_get_returns_none() {
