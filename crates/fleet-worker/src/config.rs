@@ -264,6 +264,48 @@ impl WorkerConfig {
                 }
             }
         }
+        if let Some(llm_proxy) = &self.llm_proxy {
+            // gateway_url과 api_key는 함께 있거나 함께 없어야 한다 (로드맵 #53).
+            // 한쪽만 채워진 반쪽짜리 설정을 그대로 통과시키면
+            // `grok_process::apply_llm_proxy_envs`가 두 값을 독립적으로
+            // 다뤄서 다음 두 가지 사고로 이어진다:
+            //   - gateway_url만 있음: 하위 프로세스가 인증 없이 게이트웨이를
+            //     호출한다.
+            //   - api_key만 있음: BASE_URL은 오버라이드되지 않은 채 liteLLM
+            //     master key가 OPENAI_API_KEY/ANTHROPIC_API_KEY 등으로 진짜
+            //     provider(OpenAI, Anthropic 등) 엔드포인트에 그대로
+            //     전송된다 — 게이트웨이 master key가 제3자 서비스로 유출되는
+            //     것과 동일한 심각도의 오설정이다.
+            // 그래서 파싱 시점에 fail-closed로 거부한다.
+            match (&llm_proxy.gateway_url, &llm_proxy.api_key) {
+                (Some(_), None) => {
+                    return Err(WorkerError::Config(
+                        "llm_proxy.gateway_url is set but llm_proxy.api_key is missing — \
+                         a gateway URL without credentials sends unauthenticated requests \
+                         to the proxy. Set both fields, or remove the [llm_proxy] section."
+                            .into(),
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(WorkerError::Config(
+                        "llm_proxy.api_key is set but llm_proxy.gateway_url is missing — \
+                         the liteLLM master key would be sent to real provider endpoints \
+                         (OpenAI, Anthropic, etc.) instead of the gateway, leaking the \
+                         gateway credential to a third party. Set both fields, or remove \
+                         the [llm_proxy] section."
+                            .into(),
+                    ));
+                }
+                _ => {}
+            }
+            if let Some(url) = &llm_proxy.gateway_url {
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(WorkerError::Config(format!(
+                        "llm_proxy.gateway_url must start with http:// or https:// — got: {url}"
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -846,5 +888,132 @@ secret = "x"
             .build();
         assert_eq!(config.worker.name, "custom");
         assert_eq!(config.grok.bin, "/bin/echo");
+    }
+
+    // 로드맵 #53 — llm_proxy 설정 원자성. gateway_url과 api_key는 함께
+    // 있거나 함께 없어야 한다. 아래 테스트는 `validate()`를 직접 호출하지
+    // 않고 `WorkerConfig::from_str`(실제 worker.toml 파싱 경로) 전체를
+    // 거쳐서, 데몬 기동 시점에 실제로 막히는지 확인한다.
+
+    #[test]
+    fn llm_proxy_gateway_url_only_is_rejected() {
+        // gateway_url만 있으면 하위 프로세스가 인증 없이 게이트웨이를 호출한다.
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+
+[grok]
+bin = "/x"
+secret = "x"
+
+[llm_proxy]
+gateway_url = "https://fleet.agentthread.dev/api-gateway"
+"#;
+        let err = toml.parse::<WorkerConfig>().unwrap_err();
+        match err {
+            WorkerError::Config(msg) => {
+                assert!(
+                    msg.contains("gateway_url") && msg.contains("api_key"),
+                    "error should name both fields: {msg}"
+                );
+            }
+            other => panic!("expected WorkerError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_proxy_api_key_only_is_rejected() {
+        // api_key만 있으면 liteLLM master key가 BASE_URL 오버라이드 없이
+        // 진짜 provider 엔드포인트로 그대로 전송된다 — master key 유출.
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+
+[grok]
+bin = "/x"
+secret = "x"
+
+[llm_proxy]
+api_key = "sk-litellm-master-key"
+"#;
+        let err = toml.parse::<WorkerConfig>().unwrap_err();
+        match err {
+            WorkerError::Config(msg) => {
+                assert!(
+                    msg.contains("gateway_url") && msg.contains("api_key"),
+                    "error should name both fields: {msg}"
+                );
+            }
+            other => panic!("expected WorkerError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_proxy_gateway_url_without_scheme_is_rejected() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+
+[grok]
+bin = "/x"
+secret = "x"
+
+[llm_proxy]
+gateway_url = "fleet.agentthread.dev/api-gateway"
+api_key = "sk-litellm-master-key"
+"#;
+        let err = toml.parse::<WorkerConfig>().unwrap_err();
+        match err {
+            WorkerError::Config(msg) => {
+                assert!(
+                    msg.contains("gateway_url") && msg.contains("http"),
+                    "error should mention gateway_url and required scheme: {msg}"
+                );
+            }
+            other => panic!("expected WorkerError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_proxy_valid_combination_parses_ok() {
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+
+[grok]
+bin = "/x"
+secret = "x"
+
+[llm_proxy]
+gateway_url = "https://fleet.agentthread.dev/api-gateway"
+api_key = "sk-litellm-master-key"
+"#;
+        let config = toml.parse::<WorkerConfig>().unwrap();
+        let llm_proxy = config.llm_proxy.expect("llm_proxy section should parse");
+        assert_eq!(
+            llm_proxy.gateway_url.as_deref(),
+            Some("https://fleet.agentthread.dev/api-gateway")
+        );
+        assert_eq!(llm_proxy.api_key.as_deref(), Some("sk-litellm-master-key"));
+    }
+
+    #[test]
+    fn llm_proxy_section_absent_parses_ok() {
+        // llm_proxy 섹션 자체가 없는 기존 배포는 지금처럼 그대로 동작해야 한다.
+        let toml = r#"
+[worker]
+name = "w"
+orchestrator_url = "https://fleet.example.com"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config = toml.parse::<WorkerConfig>().unwrap();
+        assert!(config.llm_proxy.is_none());
     }
 }

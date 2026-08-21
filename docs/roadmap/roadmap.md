@@ -53,7 +53,7 @@ P1은 프로덕션 보안과 실행 신뢰성 게이트다. P2 기능 확장은 
 
 | ID | 항목 | 우선순위·상태 | 정본 | 완료 게이트 |
 |---|---|---|---|---|
-| #53 | Worker LLM proxy 설정 원자성 | P1 · 구현 대기 | [LLM Gateway](../architecture/llm-gateway.md) | URL-only, key-only, invalid URL, 정상 조합과 subprocess 환경변수 회귀 테스트 |
+| #53 | Worker LLM proxy 설정 원자성 | 완료 | [LLM Gateway](../architecture/llm-gateway.md) | `crates/fleet-worker/src/config.rs`의 `WorkerConfig::validate()`가 `[llm_proxy]`의 `gateway_url`/`api_key` 중 한쪽만 채워진 조합과 스킴 없는 `gateway_url`을 `WorkerError::Config`로 fail-closed 거부. `from_str` 통합 테스트 `llm_proxy_gateway_url_only_is_rejected`, `llm_proxy_api_key_only_is_rejected`, `llm_proxy_gateway_url_without_scheme_is_rejected`, `llm_proxy_valid_combination_parses_ok`, `llm_proxy_section_absent_parses_ok`로 검증 |
 | #54 | liteLLM 배포 hardening | P1 · 구현 대기 | [배포 Runbook](../deployment/litellm-gateway.md) | secret 외부 주입, 고정 image version, healthcheck, 비공개 기본 bind 검증 |
 | #55 | Worker-scoped gateway credential | P1 · 설계 필요 | [LLM Gateway](../architecture/llm-gateway.md), [보안 모델](../security/control-plane-security-model.md) | principal·scope·발급·전달·회수·회전·감사 계약과 격리 테스트 |
 | #56 | Provider·gateway·quota 실패 상태 분리 | P2 · 설계 필요 | [LLM Gateway](../architecture/llm-gateway.md), [Routing](../architecture/tasks/routing-policy.md) | 상태·telemetry·fallback 계약과 오분류 방지 테스트 |
