@@ -295,3 +295,47 @@
 - **후속 필요**: 2026-08-20에 기록된 "FLEET_API_TOKENS, FLEET_GMAIL_APP_PASS 미회전"
   항목 중 `FLEET_API_TOKENS`는 이번 조치로 사실상 해소됐다(완전히 새 값으로 교체).
   `FLEET_GMAIL_APP_PASS`는 여전히 미회전 상태로 남아 있다.
+
+### 2026-08-21 — `worker-ajou-ec1` enrollment, 코드 버그 3건 발견·수정, primary MCP 런처 추가
+
+- 사용자 요청("orchestrator를 거치고 MCP로만 제어")에 따라 `oci-ajou-ec1`을 정식 Fleet
+  Worker로 enrollment했다. 과정에서 fleet-worker join/register/heartbeat 경로의 실제
+  버그 3건을 이번 세션에서 처음 발견해 수정하고 각각 회귀 테스트를 추가했다
+  (전부 GitHub `origin`에 push, primary에 재빌드·배포 완료):
+  1. `POST /v1/workers/join`이 admin bearer 보호 모드에서 401로 막힘 — join CLI는
+     Authorization header를 안 보내고 bootstrap token은 body로 검증하는데, 미들웨어가
+     이를 몰라 핸들러 도달 전에 거부하고 있었다(`worker-enrollment.md`가 이미
+     "proposed-contract"로 문서화해둔 gap). 커밋 `5cd7c97`.
+  2. join 응답의 `worker.toml` 렌더링이 `orchestrator_url`을 항상 플레이스홀더로
+     남기고, `bind_addr`을 orchestrator가 워커에 도달하는 **공개** 주소(Cloudflare
+     Tunnel 도메인)에서 잘못 파생시켜, 워커가 자기 자신을 그 도메인에 bind하려다
+     실패하는 구성을 내려주고 있었다. `AppState::public_base_url`(`FLEET_BASE_URL`
+     env — registry에 이미 값은 있었지만 코드가 한 번도 실제로 읽지 않던 상태)을
+     추가해 실제 URL을 채우고, bind_addr는 기존 worker-ec1/ec2와 동일한 고정값
+     `0.0.0.0:2419`로 되돌렸다. 커밋 `3293b05`.
+  3. heartbeat 요청의 `disk_free_mb`/`mem_available_mb`/`load_avg`가 `None`일 때
+     `skip_serializing_if`가 없어 명시적 JSON `null`로 나가는데, 서버 스키마는
+     non-Option `#[serde(default)]`라 `null`을 역직렬화하지 못해(422) 기동 직후
+     heartbeat가 항상 실패했다(디스크 캐시가 첫 갱신을 마치기 전 구간). 커밋 `3cb4396`.
+- 부수적으로: `fleet-worker`의 graceful shutdown이 deregister를 호출한다는 걸
+  실제로 겪었다(재배포 중 `systemctl stop`이 곧바로 worker row를 지움) — 버그는
+  아니고 설계대로지만, 재배포 시 재-join이 필요하다는 걸 기록해둔다.
+- **primary 자체 리소스 부족 회피**: `ajou-ec1`(RAM 956Mi)에서 직접
+  `cargo build`했다가 OOM 직전까지 몰아넣어(load average 13+) 한동안 SSH 자체가
+  안 붙는 사고가 있었다 — 사용자가 콘솔로 `pkill -9`해서 복구. 이후 `fleet-worker`는
+  `oci-yarangdev-arm1`(RAM 11GB)에서 x86_64 크로스 컴파일(`rustup target add
+  x86_64-unknown-linux-gnu` + `gcc-x86-64-linux-gnu`)로 만들어 옮기는 방식으로
+  전환했다 — 소형 인스턴스에서 워크스페이스급 빌드를 직접 돌리지 않는다는 걸 이후
+  운영 원칙으로 남긴다.
+- **MCP 접속 대상 정정**: 직전 세션에서 만든 로컬 `.mcp.json`이 `fcoinfup-arm1`
+  (Cold Standby, 별개 DB — worker가 전혀 없음)을 가리키고 있었다. `worker-ajou-ec1`은
+  primary(`oci-yarangdev-arm1`)에 등록되므로 `.mcp.json`을 primary로 재설정했다.
+  이 과정에서 SSH 런처가 `/etc/fleet/fleet.env`를 순수 `bash source`로 읽다가
+  `FLEET_API_TOKENS`(JSON, 쉼표·중괄호 포함)와 `FLEET_GMAIL_APP_PASS`(공백 포함 Google
+  App Password)를 셸 토큰으로 잘못 쪼개는 걸 발견 — systemd `EnvironmentFile=`과
+  달리 bash `source`는 값을 셸 문법으로 재해석한다. `/usr/local/bin/fleet-mcp-launch.sh`
+  (라인 단위 `IFS='=' read` + `export`, 셸 재해석 없음)를 primary에 추가해 해결.
+- **검증**: `worker-ajou-ec1`이 `online`, heartbeat가 15초 간격으로 계속 성공(재확인
+  시점 `age < 6s`). MCP `initialize`/`tools/list`가 primary에 붙어 `fleet_dispatch_task`
+  등 9개 도구를 정상 반환하는 것까지 확인했다 — 아직 실제 task는 dispatch하지 않음
+  (Claude Code 세션 재시작 후 `.mcp.json` 로드가 필요, 다음 단계).
