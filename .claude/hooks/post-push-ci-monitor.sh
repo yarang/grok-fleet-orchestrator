@@ -1,7 +1,15 @@
 #!/bin/bash
 # PostToolUse hook — after a `git push` Bash command completes, verify the
-# pushed commit's GitHub Actions run goes green using the
-# github-actions-monitor skill (.agents/skills/github-actions-monitor).
+# pushed commit's GitHub Actions run goes green using the github-actions-monitor
+# skill from the grok-fleet-custom-plugins Claude Code plugin (user-global,
+# installed via ~/.claude/local-marketplaces/grok-fleet-custom-plugins — see
+# https://github.com/yarang/grok-fleet-orchestrator commit history for the
+# migration from this repo's now-removed .agents/skills/github-actions-monitor).
+# Deliberately global rather than project-local: this hook lives under
+# .claude/, and pointing it at a project-local skill directory (.agents/)
+# created a silent cross-directory dependency — a refactor of one broke the
+# other with no error, since this script no-ops quietly when the script is
+# missing. Depending on the global plugin instead removes that coupling.
 #
 # Activated per user request: "이 기능을 활성화하여 모든 github push에 적용하자"
 # (2026-08-21). Runs synchronously inside the hook (PostToolUse's own timeout
@@ -54,7 +62,8 @@ fi
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
-SKILL_SCRIPT="$PROJECT_DIR/.agents/skills/github-actions-monitor/scripts/monitor_ci.py"
+# Global plugin location, not project-local — see header comment above.
+SKILL_SCRIPT="$HOME/.claude/local-marketplaces/grok-fleet-custom-plugins/plugins/grok-fleet-custom-plugins/skills/github-actions-monitor/scripts/monitor_ci.py"
 [ -f "$SKILL_SCRIPT" ] || exit 0
 
 SHA=$(git rev-parse HEAD 2>/dev/null || true)
