@@ -1,6 +1,6 @@
     async function fetchTools() {
       try {
-        const resp = await fetch('/api/tools');
+        const resp = await fetch('api/tools');
         const data = await resp.json();
         render(data.tools || []);
       } catch(e) { console.error('fetch tools:', e); }
@@ -27,7 +27,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

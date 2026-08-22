@@ -12,7 +12,7 @@
     async function loadHost() {
       const hostname = getHostname();
       try {
-        const resp = await fetch('/api/hosts/' + encodeURIComponent(hostname));
+        const resp = await fetch('api/hosts/' + encodeURIComponent(hostname));
         if (!resp.ok) throw new Error('not found');
         const h = await resp.json();
 

@@ -29,7 +29,7 @@
     async function loadTask() {
       const id = getTaskId();
       try {
-        const resp = await fetch('/api/tasks/' + encodeURIComponent(id));
+        const resp = await fetch('api/tasks/' + encodeURIComponent(id));
         if (!resp.ok) throw new Error('not found');
         const data = await resp.json();
         const t = data.task;
@@ -90,7 +90,7 @@
     // 없음"을 보여주는 건 잡음이라 판단.
     async function loadThread(currentId) {
       try {
-        const resp = await fetch('/api/tasks/' + encodeURIComponent(currentId) + '/thread');
+        const resp = await fetch('api/tasks/' + encodeURIComponent(currentId) + '/thread');
         if (!resp.ok) return;
         const data = await resp.json();
         const thread = data.thread || [];
@@ -108,7 +108,7 @@
             + '<div class="value">'
             + (isCurrent
                 ? escapeHtml(promptPreview)
-                : '<a href="/tasks/' + encodeURIComponent(t.id) + '">' + escapeHtml(promptPreview) + '</a>')
+                : '<a href="tasks/' + encodeURIComponent(t.id) + '">' + escapeHtml(promptPreview) + '</a>')
             + ' <span style="opacity:0.6;">(' + escapeHtml(t.phase) + ')</span>'
             + '</div></div>';
         }).join('');
@@ -133,7 +133,7 @@
       submitBtn.disabled = true;
 
       try {
-        const resp = await fetch('/api/tasks', {
+        const resp = await fetch('api/tasks', {
           method: 'POST',
           body: data,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -151,7 +151,7 @@
         }
         status.textContent = 'Sent — redirecting…';
         status.style.color = 'var(--badge-online, #1a7f37)';
-        window.location.href = '/tasks/' + encodeURIComponent(body.task_id);
+        window.location.href = 'tasks/' + encodeURIComponent(body.task_id);
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
         status.style.color = 'var(--badge-failed, #c0392b)';

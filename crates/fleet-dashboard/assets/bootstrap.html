@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Orchestrator — Setup</title>
-  <link rel="stylesheet" href="/static/login.css" />
+  <link rel="stylesheet" href="static/login.css" />
 </head>
 <body class="bootstrap-page">
   <section class="bootstrap-hero">
@@ -18,7 +18,7 @@
       <h2>Bootstrap token</h2>
       <p class="section-desc">Full token from <code>fleet</code> startup output (starts with <code>fleet_boot_</code>)</p>
 
-      <form method="POST" action="/bootstrap" autocomplete="off">
+      <form method="POST" action="bootstrap" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{csrf_token}}" />
         <label style="margin-bottom: 12px;">
           <span>Bootstrap token</span>

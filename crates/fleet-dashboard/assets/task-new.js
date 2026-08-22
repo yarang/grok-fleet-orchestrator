@@ -9,7 +9,7 @@
     async function populateModelOptions() {
       const select = document.getElementById('model-select');
       try {
-        const resp = await fetch('/api/workers');
+        const resp = await fetch('api/workers');
         if (!resp.ok) return;
         const workers = await resp.json();
         const models = new Set();
@@ -49,7 +49,7 @@
       submitBtn.disabled = true;
 
       try {
-        const resp = await fetch('/api/tasks', {
+        const resp = await fetch('api/tasks', {
           method: 'POST',
           body: data,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -74,7 +74,7 @@
           status.textContent = 'Created (queued) — task ' + (body && body.task_id) + (body && body.warning ? ': ' + body.warning : '');
           status.style.color = 'var(--badge-degraded, #b08800)';
         }
-        setTimeout(() => { window.location.href = '/tasks/' + encodeURIComponent(body.task_id); }, 900);
+        setTimeout(() => { window.location.href = 'tasks/' + encodeURIComponent(body.task_id); }, 900);
       } catch (e) {
         status.textContent = 'Error: ' + e.message;
         status.style.color = 'var(--badge-failed, #c0392b)';
@@ -88,7 +88,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

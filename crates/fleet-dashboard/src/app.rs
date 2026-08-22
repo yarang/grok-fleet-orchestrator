@@ -3,8 +3,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
+use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware;
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::routing::{get, post, Router};
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -33,6 +37,33 @@ pub struct DashboardState {
     /// 동일 인스턴스를 주입한다 — None이면 태스크 제출 UI/API가 503을 반환한다(주로 이
     /// 기능을 다루지 않는 테스트 하네스용).
     pub dispatcher: Option<Arc<Dispatcher>>,
+    /// 이 대시보드가 리버스 프록시 뒤에서 마운트된 경로 prefix (예: `/dashboard`).
+    /// `FLEET_DASHBOARD_BASE_PATH` env로 설정. 빈 문자열이면 루트 마운트(기존 동작과
+    /// 동일). `normalize_base_path`로 정규화됨 — 앞에 `/`가 붙고 뒤에는 안 붙는다.
+    ///
+    /// 앱 내부 axum 라우터 자체는 이 prefix를 모른다(계속 `/login`, `/api/...`처럼
+    /// unprefixed로 등록) — nginx가 `location /dashboard/ { proxy_pass .../; }`로
+    /// prefix를 벗겨서 넘겨주기 때문이다. 이 필드는 오직 **브라우저로 내려가는
+    /// 응답**(redirect Location, HTML `<base href>`)에만 쓰인다. 그래야 브라우저가
+    /// 상대경로를 다시 prefix 포함해서 요청한다 — 이게 없으면 로그인 리다이렉트가
+    /// prefix 없는 절대경로(`/login`)로 나가 nginx에서 404가 난다(실제 프로덕션에서
+    /// 관측된 버그).
+    pub base_path: String,
+}
+
+/// `FLEET_DASHBOARD_BASE_PATH` 값을 정규화한다.
+///
+/// 빈 값/미설정 → `""`(루트 마운트). 그 외에는 앞에 `/`를 보장하고 뒤의 `/`는 제거한다
+/// (`"dashboard"`, `"/dashboard"`, `"/dashboard/"` 모두 `"/dashboard"`로 수렴).
+fn normalize_base_path(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    }
 }
 
 impl DashboardState {
@@ -48,6 +79,9 @@ impl DashboardState {
             smtp_config: crate::email::SmtpConfig::from_env(),
             master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
             dispatcher,
+            base_path: normalize_base_path(
+                &std::env::var("FLEET_DASHBOARD_BASE_PATH").unwrap_or_default(),
+            ),
         }
     }
 
@@ -64,8 +98,74 @@ impl DashboardState {
             smtp_config: crate::email::SmtpConfig::from_env(),
             master_key: fleet_credentials::MasterKey::load().ok().map(Arc::new),
             dispatcher,
+            base_path: normalize_base_path(
+                &std::env::var("FLEET_DASHBOARD_BASE_PATH").unwrap_or_default(),
+            ),
         }
     }
+
+    /// `path`(반드시 `/`로 시작) 앞에 `base_path`를 붙인 절대경로를 만든다.
+    /// redirect의 `Location` 헤더처럼, 브라우저가 다시 요청을 보낼 절대경로가
+    /// 필요한 자리에 쓴다. `base_path`가 빈 문자열이면 `path`를 그대로 반환한다
+    /// (기존 루트 마운트 동작과 100% 동일).
+    pub fn abs(&self, path: &str) -> String {
+        debug_assert!(
+            path.starts_with('/'),
+            "abs() expects a root-relative path, got {path:?}"
+        );
+        format!("{}{}", self.base_path, path)
+    }
+}
+
+/// `text/html` 응답의 `<head>` 바로 뒤에 `<base href="{base_path}/">`를 주입한다.
+///
+/// 이게 있어야 페이지 안의 모든 상대경로(`href="login"`, `fetch('api/workers')` 등 —
+/// 앞에 `/`가 없는 참조)가 이 대시보드가 리버스 프록시 뒤 어느 prefix에 마운트돼
+/// 있든 올바르게 그 prefix를 붙여 다시 요청된다. `base_path`가 빈 문자열(루트
+/// 마운트)이면 `<base href="/">`를 넣는다 — 상대경로 해석 기준을 항상 origin
+/// root로 고정해, 페이지가 어떤 하위 경로에서 서빙되는지와 무관하게 동일하게
+/// 동작한다(핸들러마다 반환하는 raw HTML 문자열/임베드 자산을 일일이 고치는 대신
+/// 이 미들웨어 하나로 모든 HTML 응답에 일괄 적용).
+///
+/// `<head>` 태그가 없는 응답(HTML이 아니거나 조각 HTML)은 그대로 통과시킨다.
+async fn inject_base_href(
+    State(state): State<Arc<DashboardState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let response = next.run(req).await;
+
+    let is_html = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"));
+    if !is_html {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        // 모을 수 없는 body(스트리밍 등) — 원본 그대로 재구성해 통과.
+        return Response::from_parts(parts, Body::empty());
+    };
+
+    let base_tag = format!("<base href=\"{}/\">", state.base_path);
+    let injected = match bytes.windows(6).position(|w| w == b"<head>") {
+        Some(idx) => {
+            let mut out = Vec::with_capacity(bytes.len() + base_tag.len());
+            out.extend_from_slice(&bytes[..idx + 6]);
+            out.extend_from_slice(base_tag.as_bytes());
+            out.extend_from_slice(&bytes[idx + 6..]);
+            out
+        }
+        None => bytes.to_vec(),
+    };
+
+    // body 길이가 바뀌었으므로 기존 Content-Length는 반드시 제거한다 — 안 지우면
+    // 브라우저가 새 body를 원래(더 짧은) 길이만큼만 읽고 나머지를 버린다.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(injected))
 }
 
 /// 전체 라우터 조립.
@@ -190,6 +290,14 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
     Router::new()
         .merge(public)
         .merge(protected)
+        // HTML 응답에 <base href>를 주입 — 리버스 프록시 prefix 무관 동작의 핵심.
+        // 보안 헤더보다 먼저(레이어는 바깥→안 순서로 적용되므로, 여기 등록 순서상
+        // body를 실제로 건드리는 이 레이어가 최종 응답 직전에 돈다) 둬서 body를
+        // 재작성한 뒤에도 아래 레이어들이 헤더를 마저 세팅하도록 한다.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            inject_base_href,
+        ))
         // 보안 헤더 — 모든 응답에 적용 (이미 설정되지 않은 경우만).
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("content-security-policy"),
@@ -246,5 +354,45 @@ mod tests {
         // dashboard_app 빌드만 검증 (실제 pool은 필요 없음).
         // pool은 SSE용이므로 stub. 실제 통합 테스트는 PgStore 기반.
         let _ = store;
+    }
+
+    #[test]
+    fn normalize_base_path_empty_stays_empty() {
+        assert_eq!(normalize_base_path(""), "");
+        assert_eq!(normalize_base_path("   "), "");
+    }
+
+    #[test]
+    fn normalize_base_path_adds_leading_slash() {
+        assert_eq!(normalize_base_path("dashboard"), "/dashboard");
+    }
+
+    #[test]
+    fn normalize_base_path_strips_trailing_slash() {
+        assert_eq!(normalize_base_path("/dashboard/"), "/dashboard");
+        assert_eq!(normalize_base_path("/dashboard"), "/dashboard");
+    }
+
+    #[tokio::test]
+    async fn abs_prefixes_with_base_path() {
+        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://__test_unused__@localhost/__none__")
+            .expect("connect_lazy must not perform I/O");
+        let mut state = DashboardState::new(store, pool, None);
+        state.base_path = "/dashboard".to_string();
+        assert_eq!(state.abs("/login"), "/dashboard/login");
+    }
+
+    #[tokio::test]
+    async fn abs_is_noop_for_root_mount() {
+        let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://__test_unused__@localhost/__none__")
+            .expect("connect_lazy must not perform I/O");
+        let state = DashboardState::new(store, pool, None);
+        assert_eq!(state.abs("/login"), "/login");
     }
 }

@@ -4,14 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Orchestrator — Login</title>
-  <link rel="stylesheet" href="/static/login.css" />
+  <link rel="stylesheet" href="static/login.css" />
 </head>
 <body class="auth-page">
   <div class="auth-card">
     <div class="auth-logo">F</div>
     <h1>Sign in to Fleet</h1>
     <p class="auth-subtitle">Use your administrator account</p>
-    <form method="POST" action="/login" autocomplete="on">
+    <form method="POST" action="login" autocomplete="on">
       <input type="hidden" name="csrf_token" value="{{csrf_token}}" />
       <label>
         <span>Email</span>
@@ -25,8 +25,8 @@
       </label>
       <button type="submit" class="auth-button">Sign in</button>
     </form>
-    <a href="/forgot-password" style="display:inline-block;margin-top:8px;color:#5b7fef;text-decoration:none;font-size:13px;">Forgot password?</a>
-    <a href="/resend-verification" style="display:inline-block;margin-top:4px;color:#5b7fef;text-decoration:none;font-size:13px;">Resend verification email</a>
+    <a href="forgot-password" style="display:inline-block;margin-top:8px;color:#5b7fef;text-decoration:none;font-size:13px;">Forgot password?</a>
+    <a href="resend-verification" style="display:inline-block;margin-top:4px;color:#5b7fef;text-decoration:none;font-size:13px;">Resend verification email</a>
     <p class="auth-footer">Fleet Orchestrator • RBAC + cookie session</p>
   </div>
 </body>

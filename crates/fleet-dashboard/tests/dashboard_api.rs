@@ -173,6 +173,34 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
     }
 }
 
+/// `spawn_authed_server`와 동일하지만 `base_path`(예: `"/dashboard"`)를 명시적으로
+/// 지정한다. `DashboardState::new`가 읽는 `FLEET_DASHBOARD_BASE_PATH` env를 테스트에서
+/// `set_var`로 흔들면 병렬 실행되는 다른 테스트와 경합한다 — 대신 필드를 직접 덮어써
+/// 완전히 격리한다.
+async fn spawn_authed_server_with_base_path(store: MemStore, base_path: &str) -> (TestServer, String) {
+    let (store, cookie) = seed_test_session(store).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let mut state = DashboardState::new(Arc::new(store) as Arc<dyn Store>, pool, None);
+    state.base_path = base_path.to_string();
+    let app = build_dashboard_app(Arc::new(state));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+    )
+}
+
 /// 실제 `Dispatcher`(+ `MockTransport`)를 연결한 서버 — `submit_task_api`가
 /// dispatcher 부재로 503을 내지 않고 실제 dispatch 경로까지 타야 하는
 /// (예: parent_task_id 상속) 테스트 전용. 반환된 `(TestServer, String)`의
@@ -265,6 +293,77 @@ async fn health_endpoint_returns_ok() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.text().await.unwrap(), "ok");
+}
+
+/// 대시보드가 리버스 프록시 prefix(`/dashboard`) 뒤에 마운트된 배포에서, HTML
+/// 응답의 `<head>` 바로 뒤에 `<base href="/dashboard/">`가 주입되는지 확인한다.
+/// 이게 있어야 페이지 안의 모든 상대경로(`href="login"` 등)가 브라우저에서
+/// prefix 포함해 다시 요청된다 — nginx가 `/dashboard/` 뒤에서 prefix 없는
+/// 절대경로로 리다이렉트를 받으면 404가 나는 걸 이 메커니즘으로 막는다.
+#[tokio::test]
+async fn html_response_gets_base_href_injected_for_configured_base_path() {
+    let (server, cookie) =
+        spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
+    let client = reqwest::Client::new();
+    let resp = authed_get(&client, &format!("http://{}/", server.addr), &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains(r#"<base href="/dashboard/">"#),
+        "expected injected <base> tag, got: {body}"
+    );
+    // 원본 <head> 태그 자체는 그대로 남아있어야 한다(치환이 아니라 삽입).
+    assert!(body.contains("<head>"));
+}
+
+/// base_path가 빈 문자열(루트 마운트)이면 `<base href="/">`가 들어간다 — 상대경로
+/// 해석 기준이 항상 origin root로 고정되어, 기존 루트 배포와 동일하게 동작한다.
+#[tokio::test]
+async fn html_response_gets_root_base_href_when_base_path_unset() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let resp = authed_get(&client, &format!("http://{}/", server.addr), &cookie)
+        .send()
+        .await
+        .unwrap();
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains(r#"<base href="/">"#),
+        "expected root <base> tag, got: {body}"
+    );
+}
+
+/// `POST /logout`의 redirect Location이 base_path를 포함해야, prefix 뒤에
+/// 마운트된 배포에서도 브라우저가 nginx가 실제로 라우팅하는 경로로 이동한다.
+#[tokio::test]
+async fn logout_redirect_includes_configured_base_path() {
+    let (server, cookie) =
+        spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("http://{}/logout", server.addr))
+        .header(
+            "cookie",
+            format!("fleet_session={cookie}; fleet_csrf={TEST_CSRF}"),
+        )
+        .header("x-csrf-token", TEST_CSRF)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 303);
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(location, "/dashboard/login");
 }
 
 #[tokio::test]

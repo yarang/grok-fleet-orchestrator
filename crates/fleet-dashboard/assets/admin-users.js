@@ -1,6 +1,6 @@
     async function fetchUsers() {
       try {
-        const resp = await fetch('/api/users');
+        const resp = await fetch('api/users');
         const users = await resp.json();
         render(users);
       } catch(e) { console.error('fetch users:', e); }
@@ -22,7 +22,7 @@
 
     async function checkPerms() {
       try {
-        const resp = await fetch('/api/me');
+        const resp = await fetch('api/me');
         const me = await resp.json();
         _canCreate = (me.permissions||[]).includes('user:create');
         _canDelete = (me.permissions||[]).includes('user:delete');
@@ -77,7 +77,7 @@
     async function toggleUser(id, currentEnabled) {
       const body = new URLSearchParams({ csrf_token: getCsrf() });
       try {
-        const resp = await fetch('/api/users/'+id+'/toggle', { method:'POST', body, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
+        const resp = await fetch('api/users/'+id+'/toggle', { method:'POST', body, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
         if (!resp.ok) { const t = await resp.text(); alert('Failed: ' + t); return; }
         fetchUsers();
       } catch(e) { alert('Error: ' + e.message); }
@@ -87,7 +87,7 @@
       if (!confirm('Delete user "' + username + '"? This cannot be undone.')) return;
       const body = new URLSearchParams({ csrf_token: getCsrf() });
       try {
-        const resp = await fetch('/api/users/'+id+'/delete', { method:'POST', body, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
+        const resp = await fetch('api/users/'+id+'/delete', { method:'POST', body, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
         if (!resp.ok) { const t = await resp.text(); alert('Failed: ' + t); return; }
         fetchUsers();
       } catch(e) { alert('Error: ' + e.message); }
@@ -101,7 +101,7 @@
       const msg = document.getElementById('create-msg');
       msg.style.display = 'none';
       try {
-        const resp = await fetch('/api/users', { method:'POST', body:data, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
+        const resp = await fetch('api/users', { method:'POST', body:data, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
         if (resp.ok) {
           form.reset();
           document.getElementById('create-panel').style.display = 'none';
@@ -131,7 +131,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

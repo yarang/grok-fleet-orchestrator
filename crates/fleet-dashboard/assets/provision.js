@@ -6,7 +6,7 @@
     async function loadSshKeys() {
       const select = document.getElementById('ssh-key-select');
       try {
-        const resp = await fetch('/api/ssh-keys');
+        const resp = await fetch('api/ssh-keys');
         if (!resp.ok) { select.innerHTML = '<option value="">No keys available</option>'; return; }
         const keys = await resp.json();
         if (!keys || keys.length === 0) {
@@ -58,7 +58,7 @@
       result.style.display = 'none';
 
       try {
-        const resp = await fetch('/api/hosts/provision', {
+        const resp = await fetch('api/hosts/provision', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf() },
           body: JSON.stringify(body)
@@ -98,7 +98,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

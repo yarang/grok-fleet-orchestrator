@@ -28,7 +28,7 @@
     async function loadWorker() {
       const id = getWorkerId();
       try {
-        const resp = await fetch('/api/workers/' + id);
+        const resp = await fetch('api/workers/' + id);
         if (!resp.ok) throw new Error('not found');
         const w = await resp.json();
 

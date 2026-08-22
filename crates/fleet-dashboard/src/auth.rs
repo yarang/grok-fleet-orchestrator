@@ -110,7 +110,7 @@ pub async fn require_session(
     let token = cookies
         .get(SESSION_COOKIE)
         .map(|c| c.value().to_string())
-        .ok_or_else(|| auth_redirect(is_api))?;
+        .ok_or_else(|| auth_redirect(is_api, &state.base_path))?;
 
     // 2. 해시 + DB 조회.
     let hash = crate::auth_util::sha256_hex(token.as_bytes());
@@ -119,12 +119,12 @@ pub async fn require_session(
         .get_session_by_token_hash(&hash)
         .await
         .map_err(|_| internal_server_error(is_api))?
-        .ok_or_else(|| auth_redirect(is_api))?;
+        .ok_or_else(|| auth_redirect(is_api, &state.base_path))?;
 
     // 3. 만료 확인.
     if session.is_expired() {
         state.store.delete_session(session.id).await.ok();
-        return Err(auth_redirect(is_api));
+        return Err(auth_redirect(is_api, &state.base_path));
     }
 
     // 4. 사용자 로드.
@@ -133,11 +133,11 @@ pub async fn require_session(
         .get_user_by_id(session.user_id)
         .await
         .map_err(|_| internal_server_error(is_api))?
-        .ok_or_else(|| auth_redirect(is_api))?;
+        .ok_or_else(|| auth_redirect(is_api, &state.base_path))?;
 
     // 5. 활성화 확인.
     if !user.enabled {
-        return Err(forbidden_response(is_api));
+        return Err(forbidden_response(is_api, &state.base_path));
     }
 
     // 6. 권한 로드.
@@ -331,21 +331,25 @@ fn is_api_request(req: &Request) -> bool {
 }
 
 /// 인증 실패: 브라우저면 /login 리다이렉트, API면 401 JSON.
-fn auth_redirect(is_api: bool) -> Response {
+///
+/// `base_path`는 리버스 프록시 마운트 prefix(`DashboardState::base_path`) — 리다이렉트
+/// 목적지와 JSON 바디 안의 `redirect` 필드 둘 다에 반영해야, prefix 뒤에 마운트된
+/// 배포에서도 프론트엔드가 올바른 절대경로로 다시 이동한다.
+fn auth_redirect(is_api: bool, base_path: &str) -> Response {
     if is_api {
         (
             StatusCode::UNAUTHORIZED,
             [("content-type", "application/json")],
-            r#"{"error":"unauthorized","redirect":"/login"}"#,
+            format!(r#"{{"error":"unauthorized","redirect":"{base_path}/login"}}"#),
         )
             .into_response()
     } else {
-        Redirect::to("/login").into_response()
+        Redirect::to(&format!("{base_path}/login")).into_response()
     }
 }
 
 /// 403: 브라우저면 /login 리다이렉트 (메시지 포함), API면 403 JSON.
-fn forbidden_response(is_api: bool) -> Response {
+fn forbidden_response(is_api: bool, base_path: &str) -> Response {
     if is_api {
         (
             StatusCode::FORBIDDEN,
@@ -354,7 +358,7 @@ fn forbidden_response(is_api: bool) -> Response {
         )
             .into_response()
     } else {
-        Redirect::to("/login?reason=disabled").into_response()
+        Redirect::to(&format!("{base_path}/login?reason=disabled")).into_response()
     }
 }
 

@@ -4,7 +4,7 @@
     async function fetchActivity() {
       try {
         // 작업·워커 생명주기 이벤트. 인증/권한 감사 로그는 별개이며 /api/audit이 담당한다.
-        const resp = await fetch('/api/events?limit=200');
+        const resp = await fetch('api/events?limit=200');
         const data = await resp.json();
         // /api/events는 { events, count } 형태로 감싸서 반환한다.
         allEvents = data.events ?? [];
@@ -107,7 +107,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
       es.onmessage = () => fetchActivity();

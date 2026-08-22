@@ -4,12 +4,12 @@
 // 명시적 선호만 localStorage에 저장 — 인증/세션과는 무관).
 
 const API = {
-  overview: '/api/overview',
-  workers: '/api/workers?limit=50',
-  tasks: '/api/tasks?limit=20',
-  events: '/api/events?limit=50',
-  eventsStream: '/api/events/stream',
-  me: '/api/me',
+  overview: 'api/overview',
+  workers: 'api/workers?limit=50',
+  tasks: 'api/tasks?limit=20',
+  events: 'api/events?limit=50',
+  eventsStream: 'api/events/stream',
+  me: 'api/me',
 };
 
 // ── 다크 모드: 저장된 명시적 선호를 즉시 적용 (로드맵 #14) ───────────────
@@ -52,7 +52,7 @@ async function loadCurrentUser() {
   try {
     const r = await fetch(API.me);
     if (r.status === 401) {
-      window.location.href = '/login';
+      window.location.href = 'login';
       return null;
     }
     if (!r.ok) return null;
@@ -82,11 +82,11 @@ function renderUserMenu() {
   `;
 
   document.getElementById('logout-btn').addEventListener('click', async () => {
-    await fetch('/logout', {
+    await fetch('logout', {
       method: 'POST',
       headers: { 'X-CSRF-Token': getCsrfToken() },
     });
-    window.location.href = '/login';
+    window.location.href = 'login';
   });
 }
 
@@ -179,7 +179,7 @@ async function fetchJSON(url) {
   const r = await fetch(url);
   if (r.status === 401) {
     // 세션 만료 — 로그인으로.
-    window.location.href = '/login';
+    window.location.href = 'login';
     throw new Error('session expired');
   }
   if (!r.ok) throw new Error(`${url}: ${r.status}`);

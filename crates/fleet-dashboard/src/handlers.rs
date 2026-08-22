@@ -1411,7 +1411,7 @@ pub async fn login(
         .build();
     let new_jar = new_jar.add(csrf_cookie);
 
-    Ok((new_jar, Redirect::to("/")))
+    Ok((new_jar, Redirect::to(&state.abs("/"))))
 }
 
 /// POST /logout — 세션 삭제 + 쿠키 제거.
@@ -1454,7 +1454,7 @@ pub async fn logout(
     .await;
     let removed = Cookie::from(SESSION_COOKIE);
     let new_jar = jar.remove(removed);
-    Ok((new_jar, Redirect::to("/login")))
+    Ok((new_jar, Redirect::to(&state.abs("/login"))))
 }
 
 /// GET /api/me — 현재 사용자 정보 (프론트엔드 헤더 표시용).
@@ -1614,12 +1614,12 @@ fn verification_result_page(success: bool, message: &str) -> Response {
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Email Verification — Fleet</title>
-<link rel="stylesheet" href="/static/login.css"></head>
+<link rel="stylesheet" href="static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">
     <h1 style="color:{color};margin:0 0 12px;">{title}</h1>
     <p style="font-size:15px;line-height:1.6;">{message}</p>
-    <a href="/login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
+    <a href="login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
   </div>
 </body>
 </html>"#
@@ -1664,13 +1664,13 @@ pub async fn resend_verification_page(
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Resend Verification — Fleet</title>
-<link rel="stylesheet" href="/static/login.css"></head>
+<link rel="stylesheet" href="static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">
     <div class="auth-logo">F</div>
     <h1>Resend Verification</h1>
     <p class="auth-subtitle">Enter your email to receive a new verification link</p>
-    <form method="POST" action="/resend-verification">
+    <form method="POST" action="resend-verification">
       <input type="hidden" name="csrf_token" value="{csrf_token}" />
       <label>
         <span>Email</span>
@@ -1678,7 +1678,7 @@ pub async fn resend_verification_page(
       </label>
       <button type="submit" class="auth-button">Send Verification Link</button>
     </form>
-    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+    <a href="login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
   </div>
 </body>
 </html>"#
@@ -1816,13 +1816,13 @@ pub async fn forgot_password_page(
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Forgot Password — Fleet</title>
-<link rel="stylesheet" href="/static/login.css"></head>
+<link rel="stylesheet" href="static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">
     <div class="auth-logo">F</div>
     <h1>Reset Password</h1>
     <p class="auth-subtitle">Enter your email to receive a reset link</p>
-    <form method="POST" action="/forgot-password">
+    <form method="POST" action="forgot-password">
       <input type="hidden" name="csrf_token" value="{csrf_token}" />
       <label>
         <span>Email</span>
@@ -1830,7 +1830,7 @@ pub async fn forgot_password_page(
       </label>
       <button type="submit" class="auth-button">Send Reset Link</button>
     </form>
-    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+    <a href="login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
   </div>
 </body>
 </html>"#
@@ -1945,13 +1945,13 @@ pub async fn reset_password_page(Query(params): Query<ResetPasswordParams>) -> R
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Reset Password — Fleet</title>
-<link rel="stylesheet" href="/static/login.css"></head>
+<link rel="stylesheet" href="static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">
     <div class="auth-logo">F</div>
     <h1>Set New Password</h1>
     <p class="auth-subtitle">Choose a strong password (min 8 characters)</p>
-    <form method="POST" action="/reset-password">
+    <form method="POST" action="reset-password">
       <input type="hidden" name="token" value="{token}" />
       <label>
         <span>New Password</span>
@@ -1963,7 +1963,7 @@ pub async fn reset_password_page(Query(params): Query<ResetPasswordParams>) -> R
       </label>
       <button type="submit" class="auth-button">Reset Password</button>
     </form>
-    <a href="/login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
+    <a href="login" style="display:inline-block;margin-top:12px;color:#5b7fef;text-decoration:none;">← Back to Sign In</a>
   </div>
 </body>
 </html>"#
@@ -2125,12 +2125,12 @@ fn info_page(kind: &str, message: &str) -> Response {
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Password Reset — Fleet</title>
-<link rel="stylesheet" href="/static/login.css"></head>
+<link rel="stylesheet" href="static/login.css"></head>
 <body class="auth-page">
   <div class="auth-card">
     <h1 style="color:{color};margin:0 0 12px;">{title}</h1>
     <p style="font-size:15px;line-height:1.6;">{message}</p>
-    <a href="/login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
+    <a href="login" class="auth-button" style="display:inline-block;text-decoration:none;margin-top:16px;">Go to Sign In</a>
   </div>
 </body>
 </html>"#
@@ -2194,7 +2194,7 @@ fn login_failed_page_csrf(msg: &str, csrf_token: &str) -> Response {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Orchestrator — Login</title>
-  <link rel="stylesheet" href="/static/login.css" />
+  <link rel="stylesheet" href="static/login.css" />
 </head>
 <body class="auth-page">
   <div class="auth-card">
@@ -2202,7 +2202,7 @@ fn login_failed_page_csrf(msg: &str, csrf_token: &str) -> Response {
     <h1>Sign in to Fleet</h1>
     <p class="auth-subtitle">Use your administrator account</p>
     <div class="auth-error">{msg}</div>
-    <form method="POST" action="/login" autocomplete="on">
+    <form method="POST" action="login" autocomplete="on">
       <input type="hidden" name="csrf_token" value="{csrf_token}" />
       <label>
         <span>Email</span>
@@ -2260,7 +2260,7 @@ pub async fn bootstrap_page(
         .await
         .map_err(|_| Err(StatusCode::INTERNAL_SERVER_ERROR))?;
     if count > 0 {
-        return Err(Ok(Redirect::to("/login")));
+        return Err(Ok(Redirect::to(&state.abs("/login"))));
     }
 
     // CSRF 토큰 설정.
@@ -2487,7 +2487,7 @@ pub async fn bootstrap(
         .build();
     let new_jar = jar.add(cookie);
 
-    Ok((new_jar, Redirect::to("/")))
+    Ok((new_jar, Redirect::to(&state.abs("/"))))
 }
 
 fn bootstrap_failed_page(msg: &str) -> Response {
@@ -2498,7 +2498,7 @@ fn bootstrap_failed_page(msg: &str) -> Response {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Fleet Orchestrator — Setup</title>
-  <link rel="stylesheet" href="/static/login.css" />
+  <link rel="stylesheet" href="static/login.css" />
 </head>
 <body class="bootstrap-page">
   <section class="bootstrap-hero">
@@ -2510,7 +2510,7 @@ fn bootstrap_failed_page(msg: &str) -> Response {
     <div class="bootstrap-card">
       <div class="auth-error">{msg}</div>
       <p style="text-align:center; margin: 24px 0;">
-        <a href="/bootstrap" style="color: var(--primary); font-weight: 500;">Try again</a>
+        <a href="bootstrap" style="color: var(--primary); font-weight: 500;">Try again</a>
       </p>
     </div>
   </main>

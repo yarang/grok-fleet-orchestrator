@@ -5,7 +5,7 @@
 
     async function fetchKeys() {
       try {
-        const resp = await fetch('/api/ssh-keys');
+        const resp = await fetch('api/ssh-keys');
         if (!resp.ok) { console.error('fetch keys:', resp.status); return; }
         const keys = await resp.json();
         render(keys);
@@ -54,7 +54,7 @@
     async function deleteKey(name) {
       if (!confirm('Delete SSH key "' + name + '"? This cannot be undone.')) return;
       try {
-        const resp = await fetch('/api/ssh-keys/' + encodeURIComponent(name), {
+        const resp = await fetch('api/ssh-keys/' + encodeURIComponent(name), {
           method: 'DELETE',
           headers: { 'X-CSRF-Token': getCsrf() }
         });
@@ -71,7 +71,7 @@
       const msg = document.getElementById('upload-msg');
       msg.style.display = 'none';
       try {
-        const resp = await fetch('/api/ssh-keys', {
+        const resp = await fetch('api/ssh-keys', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf() },
           body: JSON.stringify(body)
@@ -95,7 +95,7 @@
     document.getElementById('show-upload-btn').style.display = 'none';
 
     // 권한 확인 (사용자 메뉴는 app.js의 renderUserMenu()가 #sidebar-user-menu에 렌더링).
-    fetch('/api/me').then(r => r.json()).then(me => {
+    fetch('api/me').then(r => r.json()).then(me => {
       if (!(me.permissions||[]).includes('host:provision')) {
         document.getElementById('show-upload-btn').style.display = 'none';
       } else {
@@ -108,7 +108,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

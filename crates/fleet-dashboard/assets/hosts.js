@@ -5,7 +5,7 @@
 
     async function fetchHosts() {
       try {
-        const resp = await fetch('/api/hosts');
+        const resp = await fetch('api/hosts');
         allHosts = await resp.json();
         render();
       } catch(e) { console.error('fetch hosts:', e); }
@@ -84,7 +84,7 @@
         const row = document.createElement('div');
         row.className = 'row';
         row.style.cursor = 'pointer';
-        row.onclick = () => window.location.href = '/hosts/' + encodeURIComponent(h.hostname);
+        row.onclick = () => window.location.href = 'hosts/' + encodeURIComponent(h.hostname);
         row.innerHTML = `
           <div style="font-weight:600;">${escapeHtml(h.hostname)}</div>
           <div><span class="badge badge-${h.status}">${h.status}</span></div>
@@ -111,7 +111,7 @@
     // SSE
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
     } catch(e) {}

@@ -20,7 +20,7 @@
 
     async function fetchTasks() {
       try {
-        const resp = await fetch('/api/tasks?limit=' + (pageSize + 1) + '&offset=0');
+        const resp = await fetch('api/tasks?limit=' + (pageSize + 1) + '&offset=0');
         const data = await resp.json();
         hasMore = data.length > pageSize;
         allTasks = hasMore ? data.slice(0, pageSize) : data;
@@ -206,7 +206,7 @@
         const row = document.createElement('div');
         row.className = 'row';
         row.style.cursor = 'pointer';
-        row.onclick = () => window.location.href = '/tasks/' + encodeURIComponent(t.id);
+        row.onclick = () => window.location.href = 'tasks/' + encodeURIComponent(t.id);
         const prompt = t.prompt.length > 60 ? t.prompt.substring(0,60)+'…' : t.prompt;
         row.innerHTML = `
           <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${t.id.substring(0,8)}</div>
@@ -242,7 +242,7 @@
     // 403을 반환하겠지만, 애초에 할 수 없는 액션을 보여주지 않는 편이 낫다.
     async function hideNewTaskIfNoPermission() {
       try {
-        const resp = await fetch('/api/me');
+        const resp = await fetch('api/me');
         const me = await resp.json();
         if (!(me.permissions || []).includes('task:create')) {
           const btn = document.getElementById('new-task-link');
@@ -259,7 +259,7 @@
     // SSE 연결 상태
     const pill = document.getElementById('status-pill');
     try {
-      const es = new EventSource('/api/events/stream');
+      const es = new EventSource('api/events/stream');
       es.onopen = () => { pill.textContent = 'live'; pill.classList.add('online'); };
       es.onerror = () => { pill.textContent = 'offline'; pill.classList.remove('online'); };
       es.addEventListener('task_created', () => fetchTasks());
