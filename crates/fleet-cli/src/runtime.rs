@@ -37,10 +37,9 @@ use fleet_core::{
 use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
-    append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig,
-    HostKeyPolicy, Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext,
-    PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
-    StepContext,
+    append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig, HostKeyPolicy,
+    Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookReport,
+    PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo, StepContext,
 };
 use fleet_scheduler::{
     CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, MultiAdminSync,
@@ -294,8 +293,7 @@ pub async fn run_serve(
     // (`reconcile_max_dispatch_retries`)을 공유해야 `submit()`이 남겨둔
     // `Pending` 작업을 Reconciler가 일관되게 재시도/소진 판단할 수 있다.
     let dispatcher = Arc::new(
-        Dispatcher::new(state.clone())
-            .with_max_dispatch_retries(reconcile_max_dispatch_retries),
+        Dispatcher::new(state.clone()).with_max_dispatch_retries(reconcile_max_dispatch_retries),
     );
     dispatcher.attach_event_receiver(event_rx).await;
 
@@ -364,9 +362,7 @@ pub async fn run_serve(
             dispatched_worker_check_after: Duration::from_secs(
                 reconcile_dispatched_check_secs.max(1),
             ),
-            offline_worker_grace: Duration::from_secs(
-                reconcile_offline_worker_grace_secs.max(1),
-            ),
+            offline_worker_grace: Duration::from_secs(reconcile_offline_worker_grace_secs.max(1)),
             max_dispatch_retries: reconcile_max_dispatch_retries,
         };
         tracing::info!(
@@ -409,10 +405,10 @@ pub async fn run_serve(
             .parse()
             .with_context(|| format!("invalid --http-bind address: {bind_str}"))?;
 
-        let scoped_tokens = api_tokens
-            .map(parse_scoped_api_tokens)
-            .transpose()?;
-        let has_bearer_tokens = scoped_tokens.as_ref().is_some_and(|tokens| !tokens.is_empty());
+        let scoped_tokens = api_tokens.map(parse_scoped_api_tokens).transpose()?;
+        let has_bearer_tokens = scoped_tokens
+            .as_ref()
+            .is_some_and(|tokens| !tokens.is_empty());
         let has_cf_access = cf_audience.is_some_and(|aud| !aud.trim().is_empty());
         if !bind.ip().is_loopback() && !has_bearer_tokens && !has_cf_access {
             return Err(anyhow!(
@@ -583,9 +579,8 @@ pub async fn run_serve(
 /// JSON token manifest을 엄격하게 검증한다. 평면 쉼표 bearer 목록은 권한을 표현하지
 /// 못하므로 더 이상 허용하지 않는다.
 fn parse_scoped_api_tokens(raw: &str) -> Result<Vec<ApiTokenCredential>> {
-    let tokens: Vec<ApiTokenCredential> = serde_json::from_str(raw).context(
-        "FLEET_API_TOKENS must be a JSON array of {principal_id, token, capabilities}",
-    )?;
+    let tokens: Vec<ApiTokenCredential> = serde_json::from_str(raw)
+        .context("FLEET_API_TOKENS must be a JSON array of {principal_id, token, capabilities}")?;
     if tokens.is_empty()
         || tokens.iter().any(|token| {
             token.principal_id.trim().is_empty()
@@ -625,7 +620,10 @@ async fn run_workers_credential(action: WorkerCredentialAction) -> Result<()> {
             worker_id,
             expires_in_secs,
             json,
-        } => run_workers_credential_rotate(&api_url, &api_token, &worker_id, expires_in_secs, json).await,
+        } => {
+            run_workers_credential_rotate(&api_url, &api_token, &worker_id, expires_in_secs, json)
+                .await
+        }
         WorkerCredentialAction::Revoke {
             api_url,
             api_token,
@@ -734,7 +732,9 @@ pub async fn run_admin_tokens(action: AdminTokensAction) -> Result<()> {
             principal_id,
             capabilities,
             json,
-        } => run_admin_tokens_create(&api_url, &api_token, &principal_id, &capabilities, json).await,
+        } => {
+            run_admin_tokens_create(&api_url, &api_token, &principal_id, &capabilities, json).await
+        }
         AdminTokensAction::Rotate {
             api_url,
             api_token,
@@ -916,7 +916,10 @@ async fn run_admin_tokens_list(api_url: &str, api_token: &str, json: bool) -> Re
         println!("(no admin tokens issued)");
         return Ok(());
     }
-    println!("{:<24} {:<10} {:<10} CAPABILITIES", "PRINCIPAL", "GEN", "REVOKED");
+    println!(
+        "{:<24} {:<10} {:<10} CAPABILITIES",
+        "PRINCIPAL", "GEN", "REVOKED"
+    );
     for t in &parsed {
         println!(
             "{:<24} {:<10} {:<10} {}",

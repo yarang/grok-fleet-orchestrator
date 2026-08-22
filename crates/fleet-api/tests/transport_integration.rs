@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fleet_api::{build_app, ApiTokenCredential, AppState};
-use fleet_core::{
-    TaskId, WorkerId,
-};
+use fleet_core::{TaskId, WorkerId};
 use fleet_store::Store;
 use fleet_transport::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
 

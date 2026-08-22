@@ -20,7 +20,7 @@ use agent_client_protocol_http::HttpClient;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fleet의 fleet-cli main()과 동일 — rustls는 프로세스 단위 CryptoProvider가
     // 필요하다(자동 감지 안 됨, 명시적 설치 필수).
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _install_result = rustls::crypto::ring::default_provider().install_default();
 
     let url = std::env::var("FLEET_WORKER_WS_URL")
         .expect("set FLEET_WORKER_WS_URL to a real wss://.../ws/<worker>?server-key=... endpoint");

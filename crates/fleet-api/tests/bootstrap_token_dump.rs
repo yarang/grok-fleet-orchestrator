@@ -160,7 +160,10 @@ async fn issued_bootstrap_token_never_appears_in_a_database_dump() {
     )
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
-    let raw_token = issued["token"].as_str().expect("token in response").to_string();
+    let raw_token = issued["token"]
+        .as_str()
+        .expect("token in response")
+        .to_string();
     let token_id = issued["token_id"]
         .as_str()
         .expect("token_id in response")
@@ -245,7 +248,10 @@ fn with_database_replaces_only_the_database_segment() {
         "postgres://me@localhost/tmp"
     );
     assert_eq!(
-        with_database("postgres://u:p@127.0.0.1:5432/fleet_test?sslmode=disable", "tmp"),
+        with_database(
+            "postgres://u:p@127.0.0.1:5432/fleet_test?sslmode=disable",
+            "tmp"
+        ),
         "postgres://u:p@127.0.0.1:5432/tmp?sslmode=disable"
     );
 }

@@ -241,7 +241,10 @@ impl RegistrationClient {
 
     /// 하트비트 1회 전송.
     #[tracing::instrument(skip(self))]
-    pub async fn heartbeat_once(&self, agent_healthy: bool) -> Result<HeartbeatResponse, WorkerError> {
+    pub async fn heartbeat_once(
+        &self,
+        agent_healthy: bool,
+    ) -> Result<HeartbeatResponse, WorkerError> {
         let worker_id = self
             .worker_id
             .lock()
@@ -250,7 +253,13 @@ impl RegistrationClient {
             .ok_or_else(|| WorkerError::OrchestratorApi("not registered yet".into()))?;
 
         // 빠른 시스템 메트릭 수집 (load_avg, mem, cpu, ram).
-        let (load_avg, mem_available_mb, active_tasks, cpu_usage, ram_usage) = collect_fast_metrics();
+        let FastMetrics {
+            load_avg,
+            mem_available_mb,
+            active_tasks,
+            cpu_usage,
+            ram_usage,
+        } = collect_fast_metrics();
 
         // 디스크 여유 공간: 캐시된 값을 사용하고, 필요하면 백그라운드 새로고침 트리거.
         // blocking syscall을 heartbeat 루프에서 분리하여 런타임 블로킹 방지.
@@ -407,6 +416,16 @@ impl RegistrationClient {
     }
 }
 
+/// [`collect_fast_metrics`]의 반환값 — 5-tuple 대신 필드 이름으로 구분해
+/// clippy::type_complexity와, 호출부에서 위치만으로 값을 오독할 위험 둘 다 없앤다.
+struct FastMetrics {
+    load_avg: Option<Vec<f32>>,
+    mem_available_mb: Option<u64>,
+    active_tasks: u32,
+    cpu_usage: Option<f32>,
+    ram_usage: Option<f32>,
+}
+
 /// 시스템 메트릭 수집 (sysinfo 사용).
 ///
 /// `load_avg`, `mem_available_mb`는 매 호출마다 수집 (마이크로초 단위로 빠름).
@@ -414,7 +433,7 @@ impl RegistrationClient {
 /// `DiskCache`를 통해 백그라운드에서 비동기 수집 및 캐싱.
 ///
 /// active_tasks는 fleet-worker가 관리하는 실행 중인 세션 카운터를 반환.
-fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32, Option<f32>, Option<f32>) {
+fn collect_fast_metrics() -> FastMetrics {
     use sysinfo::System;
 
     let mut sys = System::new();
@@ -448,7 +467,13 @@ fn collect_fast_metrics() -> (Option<Vec<f32>>, Option<u64>, u32, Option<f32>, O
     // active_tasks: 전역 세션 카운터에서 가져옴.
     let active_tasks = crate::ACTIVE_SESSIONS.load(std::sync::atomic::Ordering::Relaxed);
 
-    (Some(load_vec), Some(mem_available_mb), active_tasks, Some(cpu_usage), ram_usage)
+    FastMetrics {
+        load_avg: Some(load_vec),
+        mem_available_mb: Some(mem_available_mb),
+        active_tasks,
+        cpu_usage: Some(cpu_usage),
+        ram_usage,
+    }
 }
 
 /// grok CLI 버전 감지. `grok --version` 출력에서 추출.
@@ -1035,8 +1060,8 @@ mod tests {
             .with_simple_exporter(exporter.clone())
             .build();
         let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "test");
-        let subscriber =
-            tracing_subscriber::Registry::default().with(tracing_opentelemetry::layer().with_tracer(tracer));
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer));
 
         // 활성 스팬이 있을 때 — traceparent 헤더가 그 스팬의 trace-id를
         // 담아 나가야 한다.

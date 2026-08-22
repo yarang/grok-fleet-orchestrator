@@ -91,8 +91,7 @@ impl WorkerRunner {
         //    않는 것이 계약이므로 루프 자체를 시작하지 않는다. shutdown 채널은
         //    두 모드 모두 필요 없으므로 periodic 분기 안에서만 만든다.
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let hb_handle = if config.worker.liveness_mode == fleet_core::WorkerLivenessMode::Periodic
-        {
+        let hb_handle = if config.worker.liveness_mode == fleet_core::WorkerLivenessMode::Periodic {
             let hb_client = client.clone();
             let hb_grok_bind = config.grok.bind_addr.clone();
             let hb_interval = register_resp

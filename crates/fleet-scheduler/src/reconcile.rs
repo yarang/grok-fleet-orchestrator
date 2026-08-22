@@ -343,7 +343,8 @@ impl Reconciler {
 
         self.reap_stale_dispatched(&mut summary).await;
 
-        if summary.stale_found > 0 || summary.orphaned_found > 0 || summary.offline_worker_found > 0 {
+        if summary.stale_found > 0 || summary.orphaned_found > 0 || summary.offline_worker_found > 0
+        {
             info!(
                 stale_found = summary.stale_found,
                 redispatched = summary.redispatched,
@@ -484,8 +485,7 @@ mod tests {
     use crate::dispatcher::Dispatcher;
     use crate::state::FleetState;
     use fleet_core::{
-        CircuitBreakerConfig, Task, TaskId, TaskRequest, TaskStatus, Worker, WorkerId,
-        WorkerStatus,
+        CircuitBreakerConfig, Task, TaskId, TaskRequest, TaskStatus, Worker, WorkerId, WorkerStatus,
     };
     use fleet_store::mem::MemStore;
     use fleet_store::Store;
@@ -953,7 +953,10 @@ mod tests {
         let summary = reconciler.reconcile_once().await;
         assert_eq!(summary.offline_worker_found, 1);
         assert_eq!(summary.offline_worker_failed, 1);
-        assert_eq!(summary.orphaned_found, 0, "worker still exists — not the orphan path");
+        assert_eq!(
+            summary.orphaned_found, 0,
+            "worker still exists — not the orphan path"
+        );
 
         let failed = state.store.get_task(task_id).await.unwrap().unwrap();
         match failed.status {
@@ -974,7 +977,11 @@ mod tests {
         let store = Arc::new(MemStore::new());
         store.upsert_worker(&worker).await.unwrap();
 
-        let task = make_dispatched_task("still maybe running", worker_id, chrono::Duration::seconds(120));
+        let task = make_dispatched_task(
+            "still maybe running",
+            worker_id,
+            chrono::Duration::seconds(120),
+        );
         let task_id = task.id;
         store.insert_task(&task).await.unwrap();
 
@@ -1014,7 +1021,11 @@ mod tests {
         let store = Arc::new(MemStore::new());
         store.upsert_worker(&worker).await.unwrap();
 
-        let task = make_dispatched_task("degraded but alive", worker_id, chrono::Duration::seconds(120));
+        let task = make_dispatched_task(
+            "degraded but alive",
+            worker_id,
+            chrono::Duration::seconds(120),
+        );
         let task_id = task.id;
         store.insert_task(&task).await.unwrap();
 

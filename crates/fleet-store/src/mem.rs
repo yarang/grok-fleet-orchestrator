@@ -137,7 +137,10 @@ impl Store for MemStore {
     async fn insert_task(&self, t: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.lock().unwrap();
         if tasks.contains_key(&t.id) {
-            return Err(StoreError::Conflict(format!("task already exists: {}", t.id)));
+            return Err(StoreError::Conflict(format!(
+                "task already exists: {}",
+                t.id
+            )));
         }
         tasks.insert(t.id, t.clone());
         Ok(())
@@ -168,7 +171,11 @@ impl Store for MemStore {
         Ok(task.retry_count)
     }
 
-    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError> {
+    async fn update_task_checkpoint(
+        &self,
+        id: TaskId,
+        checkpoint_branch: Option<&str>,
+    ) -> Result<(), StoreError> {
         let mut tasks = self.tasks.lock().unwrap();
         let Some(task) = tasks.get_mut(&id) else {
             return Err(StoreError::NotFound);
@@ -189,16 +196,18 @@ impl Store for MemStore {
                 None => true,
             })
             .filter(|t| match filter.worker_id {
-                Some(wid) => matches!(
-                    &t.status,
-                    TaskStatus::Dispatched { worker_id, .. } if *worker_id == wid
-                ) || matches!(
-                    &t.status,
-                    TaskStatus::Completed(r) if r.worker_id == wid
-                ) || matches!(
-                    &t.status,
-                    TaskStatus::Failed(f) if f.worker_id == Some(wid)
-                ),
+                Some(wid) => {
+                    matches!(
+                        &t.status,
+                        TaskStatus::Dispatched { worker_id, .. } if *worker_id == wid
+                    ) || matches!(
+                        &t.status,
+                        TaskStatus::Completed(r) if r.worker_id == wid
+                    ) || matches!(
+                        &t.status,
+                        TaskStatus::Failed(f) if f.worker_id == Some(wid)
+                    )
+                }
                 None => true,
             })
             .filter(|t| match &filter.status {
@@ -250,7 +259,12 @@ impl Store for MemStore {
         let mut out: Vec<Worker> = workers
             .values()
             .filter(|w| filter.status.is_none_or(|s| w.status == s))
-            .filter(|w| filter.labels.iter().all(|(k, v)| w.labels.get(k) == Some(v)))
+            .filter(|w| {
+                filter
+                    .labels
+                    .iter()
+                    .all(|(k, v)| w.labels.get(k) == Some(v))
+            })
             .cloned()
             .collect();
         // 실제 PgStore와 동일하게 최신 등록순(내림차순)으로 정렬 후 offset/limit 적용.
@@ -390,7 +404,12 @@ impl Store for MemStore {
     }
 
     async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
-        Ok(self.bootstrap_tokens.lock().unwrap().remove(token_digest).is_some())
+        Ok(self
+            .bootstrap_tokens
+            .lock()
+            .unwrap()
+            .remove(token_digest)
+            .is_some())
     }
 
     // ── Admin API tokens (로드맵 #72) ────────────────────────────────
@@ -403,7 +422,10 @@ impl Store for MemStore {
                 token.principal_id
             )));
         }
-        if tokens.values().any(|t| t.token_digest == token.token_digest) {
+        if tokens
+            .values()
+            .any(|t| t.token_digest == token.token_digest)
+        {
             return Err(StoreError::Conflict(
                 "admin token digest already exists".into(),
             ));
@@ -484,7 +506,9 @@ impl Store for MemStore {
             .get(credential_digest)
             .filter(|credential| {
                 credential.revoked_at.is_none()
-                    && credential.expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+                    && credential
+                        .expires_at
+                        .is_none_or(|expires_at| expires_at > Utc::now())
             })
             .cloned())
     }
@@ -646,7 +670,11 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn update_user_last_login(&self, id: UserId, at: DateTime<Utc>) -> Result<(), StoreError> {
+    async fn update_user_last_login(
+        &self,
+        id: UserId,
+        at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
         let mut users = self.users.lock().unwrap();
         let Some(u) = users.get_mut(&id) else {
             return Err(StoreError::NotFound);
@@ -677,14 +705,23 @@ impl Store for MemStore {
     async fn create_role(&self, role: &Role) -> Result<(), StoreError> {
         let mut roles = self.roles.lock().unwrap();
         if roles.values().any(|r| r.name == role.name) {
-            return Err(StoreError::Conflict(format!("role already exists: {}", role.name)));
+            return Err(StoreError::Conflict(format!(
+                "role already exists: {}",
+                role.name
+            )));
         }
         roles.insert(role.id, role.clone());
         Ok(())
     }
 
     async fn get_role_by_name(&self, name: &str) -> Result<Option<Role>, StoreError> {
-        Ok(self.roles.lock().unwrap().values().find(|r| r.name == name).cloned())
+        Ok(self
+            .roles
+            .lock()
+            .unwrap()
+            .values()
+            .find(|r| r.name == name)
+            .cloned())
     }
 
     async fn list_roles(&self) -> Result<Vec<Role>, StoreError> {
@@ -744,7 +781,10 @@ impl Store for MemStore {
             .cloned()
             .unwrap_or_default();
         let roles = self.roles.lock().unwrap();
-        Ok(role_ids.iter().filter_map(|id| roles.get(id).cloned()).collect())
+        Ok(role_ids
+            .iter()
+            .filter_map(|id| roles.get(id).cloned())
+            .collect())
     }
 
     async fn list_user_permissions(&self, user_id: UserId) -> Result<Vec<Permission>, StoreError> {
@@ -884,7 +924,11 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn set_user_email_verified(&self, user_id: UserId, verified: bool) -> Result<(), StoreError> {
+    async fn set_user_email_verified(
+        &self,
+        user_id: UserId,
+        verified: bool,
+    ) -> Result<(), StoreError> {
         let mut users = self.users.lock().unwrap();
         let Some(u) = users.get_mut(&user_id) else {
             return Err(StoreError::NotFound);
@@ -958,7 +1002,11 @@ impl Store for MemStore {
             .count() as u64)
     }
 
-    async fn count_recent_ip_failures(&self, ip: &str, window_secs: i64) -> Result<u64, StoreError> {
+    async fn count_recent_ip_failures(
+        &self,
+        ip: &str,
+        window_secs: i64,
+    ) -> Result<u64, StoreError> {
         let cutoff = Utc::now() - chrono::Duration::seconds(window_secs);
         let attempts = self.login_attempts.lock().unwrap();
         Ok(attempts
@@ -969,7 +1017,11 @@ impl Store for MemStore {
             .count() as u64)
     }
 
-    async fn clear_login_attempts(&self, identifier: &str, ip: Option<&str>) -> Result<u64, StoreError> {
+    async fn clear_login_attempts(
+        &self,
+        identifier: &str,
+        ip: Option<&str>,
+    ) -> Result<u64, StoreError> {
         let mut attempts = self.login_attempts.lock().unwrap();
         let before = attempts.len();
         attempts.retain(|a| {
@@ -1068,7 +1120,10 @@ impl Store for MemStore {
             .cloned())
     }
 
-    async fn list_worker_credentials(&self, worker_name: &str) -> Result<Vec<StoredCredential>, StoreError> {
+    async fn list_worker_credentials(
+        &self,
+        worker_name: &str,
+    ) -> Result<Vec<StoredCredential>, StoreError> {
         Ok(self
             .credentials
             .lock()
@@ -1079,7 +1134,11 @@ impl Store for MemStore {
             .collect())
     }
 
-    async fn delete_worker_credential(&self, worker_name: &str, model_id: &str) -> Result<bool, StoreError> {
+    async fn delete_worker_credential(
+        &self,
+        worker_name: &str,
+        model_id: &str,
+    ) -> Result<bool, StoreError> {
         Ok(self
             .credentials
             .lock()
@@ -1131,9 +1190,17 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn list_host_events(&self, host_id: Uuid, limit: u32) -> Result<Vec<HostEvent>, StoreError> {
+    async fn list_host_events(
+        &self,
+        host_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<HostEvent>, StoreError> {
         let events = self.host_events.lock().unwrap();
-        let mut out: Vec<HostEvent> = events.iter().filter(|e| e.host_id == host_id).cloned().collect();
+        let mut out: Vec<HostEvent> = events
+            .iter()
+            .filter(|e| e.host_id == host_id)
+            .cloned()
+            .collect();
         out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
         out.truncate(limit as usize);
         Ok(out)
@@ -1144,7 +1211,10 @@ impl Store for MemStore {
     async fn create_ssh_key(&self, key: &SshKey) -> Result<(), StoreError> {
         let mut keys = self.ssh_keys.lock().unwrap();
         if keys.contains_key(&key.name) {
-            return Err(StoreError::Conflict(format!("ssh key already exists: {}", key.name)));
+            return Err(StoreError::Conflict(format!(
+                "ssh key already exists: {}",
+                key.name
+            )));
         }
         keys.insert(key.name.clone(), key.clone());
         Ok(())
@@ -1210,7 +1280,10 @@ mod enroll_worker_tests {
             .await
             .unwrap();
 
-        store.create_bootstrap_token(&token("join-token", 1)).await.unwrap();
+        store
+            .create_bootstrap_token(&token("join-token", 1))
+            .await
+            .unwrap();
 
         let new_worker = worker("new-worker");
         let new_credential = WorkerOperationalCredential {
@@ -1238,11 +1311,18 @@ mod enroll_worker_tests {
             .iter()
             .find(|t| t.token_digest == BootstrapToken::digest_for("join-token"))
             .expect("token still exists");
-        assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+        assert_eq!(
+            stored.use_count, 0,
+            "token must remain unconsumed after rollback"
+        );
         assert!(stored.last_used_by.is_none());
 
         // (c) worker는 생성되지 않음.
-        assert!(store.get_worker_by_name("new-worker").await.unwrap().is_none());
+        assert!(store
+            .get_worker_by_name("new-worker")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1251,7 +1331,10 @@ mod enroll_worker_tests {
 
         let existing_worker = worker("taken-name");
         store.upsert_worker(&existing_worker).await.unwrap();
-        store.create_bootstrap_token(&token("join-token-2", 1)).await.unwrap();
+        store
+            .create_bootstrap_token(&token("join-token-2", 1))
+            .await
+            .unwrap();
 
         // 동일 이름이지만 다른 id를 가진 worker로 enroll을 시도.
         let mut colliding_worker = worker("taken-name");
@@ -1278,7 +1361,10 @@ mod enroll_worker_tests {
             .iter()
             .find(|t| t.token_digest == BootstrapToken::digest_for("join-token-2"))
             .unwrap();
-        assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+        assert_eq!(
+            stored.use_count, 0,
+            "token must remain unconsumed after rollback"
+        );
 
         // credential도 저장되지 않아야 한다.
         assert!(store
@@ -1291,7 +1377,10 @@ mod enroll_worker_tests {
     #[tokio::test]
     async fn enroll_worker_commits_all_three_on_success() {
         let store = MemStore::new();
-        store.create_bootstrap_token(&token("join-token-3", 1)).await.unwrap();
+        store
+            .create_bootstrap_token(&token("join-token-3", 1))
+            .await
+            .unwrap();
 
         let new_worker = worker("success-worker");
         let credential = WorkerOperationalCredential {
@@ -1316,7 +1405,11 @@ mod enroll_worker_tests {
         assert_eq!(stored.use_count, 1);
         assert_eq!(stored.last_used_by.as_deref(), Some("success-worker"));
 
-        assert!(store.get_worker_by_name("success-worker").await.unwrap().is_some());
+        assert!(store
+            .get_worker_by_name("success-worker")
+            .await
+            .unwrap()
+            .is_some());
         assert!(store
             .find_active_worker_operational_credential("success-digest")
             .await

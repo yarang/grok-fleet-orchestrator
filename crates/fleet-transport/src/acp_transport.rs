@@ -473,10 +473,10 @@ impl WorkerTransport for AcpTransport {
             let output_buf = Arc::new(Mutex::new(String::new()));
             let seq = Arc::new(AtomicU64::new(0));
             let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionMsg>();
-            sessions_map.lock().await.insert(
-                session_id.clone(),
-                InFlightSession { task_id, notify_tx },
-            );
+            sessions_map
+                .lock()
+                .await
+                .insert(session_id.clone(), InFlightSession { task_id, notify_tx });
 
             // 로드맵 #41 — 이 세션 전용 워커. FIFO 단일 컨슈머라 세션 내부
             // 순서는 보존되고, 세션마다 독립된 태스크로 돌기 때문에 한

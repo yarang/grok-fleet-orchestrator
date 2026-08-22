@@ -354,7 +354,8 @@ mod tests {
 
     #[test]
     fn resolve_token_reads_from_file() {
-        let dir = std::env::temp_dir().join(format!("fleet-worker-token-file-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fleet-worker-token-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "fleet_from_file\n").unwrap();
@@ -427,8 +428,8 @@ mod tests {
         const SECRET: &str = "fwo_super-secret-do-not-leak-1234567890";
         let writer = CapturingWriter::default();
         let buffer = writer.0.clone();
-        let subscriber =
-            tracing_subscriber::Registry::default().with(tracing_subscriber::fmt::layer().with_writer(writer));
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::fmt::layer().with_writer(writer));
 
         let mut stdin = std::io::empty();
         let result = tracing::subscriber::with_default(subscriber, || {

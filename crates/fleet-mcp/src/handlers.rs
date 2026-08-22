@@ -1188,11 +1188,9 @@ mod tests {
     #[tokio::test]
     async fn reset_worker_breaker_requires_exactly_one_identifier() {
         let ctx = test_ctx(fleet_store::mem::MemStore::new());
-        assert!(
-            dispatch_tool(&ctx, TOOL_RESET_WORKER_BREAKER, &json!({}))
-                .await
-                .is_err()
-        );
+        assert!(dispatch_tool(&ctx, TOOL_RESET_WORKER_BREAKER, &json!({}))
+            .await
+            .is_err());
         assert!(dispatch_tool(
             &ctx,
             TOOL_RESET_WORKER_BREAKER,
@@ -1216,7 +1214,11 @@ mod tests {
             last_used_by: None,
             last_used_at: None,
         };
-        ctx.state.store.create_bootstrap_token(&token).await.unwrap();
+        ctx.state
+            .store
+            .create_bootstrap_token(&token)
+            .await
+            .unwrap();
 
         let listed = dispatch_tool(&ctx, TOOL_LIST_BOOTSTRAP_TOKENS, &json!({}))
             .await
@@ -1224,7 +1226,10 @@ mod tests {
         let body: Value = parse_tool_json(&listed);
         assert_eq!(body["count"], 1);
         let token_id = body["tokens"][0]["token_id"].as_str().unwrap();
-        assert_eq!(token_id, fleet_core::BootstrapToken::public_id_for("fbt_test123"));
+        assert_eq!(
+            token_id,
+            fleet_core::BootstrapToken::public_id_for("fbt_test123")
+        );
         assert!(body["tokens"][0].get("token").is_none());
 
         let revoked = dispatch_tool(

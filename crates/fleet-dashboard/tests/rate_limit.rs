@@ -162,7 +162,11 @@ impl Store for AttemptStore {
     async fn increment_task_retry_count(&self, _id: TaskId) -> Result<u32, StoreError> {
         unimplemented!()
     }
-    async fn update_task_checkpoint(&self, _id: TaskId, _checkpoint_branch: Option<&str>) -> Result<(), StoreError> {
+    async fn update_task_checkpoint(
+        &self,
+        _id: TaskId,
+        _checkpoint_branch: Option<&str>,
+    ) -> Result<(), StoreError> {
         unimplemented!()
     }
     async fn upsert_worker(&self, _worker: &Worker) -> Result<(), StoreError> {

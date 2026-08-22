@@ -126,7 +126,9 @@ async fn list_tokens_returns_all() {
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 2);
     assert!(arr.iter().all(|entry| entry.get("token").is_none()));
-    assert!(arr.iter().all(|entry| entry["token_id"].as_str().unwrap().starts_with("bt_")));
+    assert!(arr
+        .iter()
+        .all(|entry| entry["token_id"].as_str().unwrap().starts_with("bt_")));
 }
 
 #[tokio::test]
@@ -137,7 +139,10 @@ async fn revoke_token_removes_it() {
     let (status, _) = api_call(
         store.clone(),
         axum::http::Method::DELETE,
-        &format!("/v1/bootstrap-tokens/{}", BootstrapToken::public_id_for("doomed")),
+        &format!(
+            "/v1/bootstrap-tokens/{}",
+            BootstrapToken::public_id_for("doomed")
+        ),
         None,
     )
     .await;
@@ -353,7 +358,8 @@ async fn join_response_uses_configured_public_base_url() {
     let store = make_store();
     seed_token(&store, "tok", 1).await;
 
-    let state = Arc::new(AppState::new(store).with_public_base_url("https://fleet.agentthread.dev"));
+    let state =
+        Arc::new(AppState::new(store).with_public_base_url("https://fleet.agentthread.dev"));
     let app = build_app(state);
 
     let body = json!({
@@ -581,13 +587,8 @@ async fn issued_token_joins_and_public_id_is_stable_after_use() {
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
 
-    let (_, list_json) = api_call(
-        store,
-        axum::http::Method::GET,
-        "/v1/bootstrap-tokens",
-        None,
-    )
-    .await;
+    let (_, list_json) =
+        api_call(store, axum::http::Method::GET, "/v1/bootstrap-tokens", None).await;
     let items: Vec<CliTokenListItem> = serde_json::from_value(list_json).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].token_id, issued.token_id);

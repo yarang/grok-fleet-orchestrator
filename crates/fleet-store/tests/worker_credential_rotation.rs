@@ -42,9 +42,10 @@ macro_rules! require_db {
             Some(s) => s,
             None => return,
         };
-        let _ = sqlx::query("TRUNCATE task_outputs, events, tasks, workers, bootstrap_tokens CASCADE")
-            .execute($store.pool())
-            .await;
+        let _ =
+            sqlx::query("TRUNCATE task_outputs, events, tasks, workers, bootstrap_tokens CASCADE")
+                .execute($store.pool())
+                .await;
     };
 }
 
@@ -99,9 +100,16 @@ async fn rotate_replaces_digest_and_increments_generation() {
 async fn rotate_unknown_worker_returns_not_found() {
     require_db!(store);
     let result = store
-        .rotate_worker_operational_credential(fleet_core::WorkerId::new(), "irrelevant-digest", None)
+        .rotate_worker_operational_credential(
+            fleet_core::WorkerId::new(),
+            "irrelevant-digest",
+            None,
+        )
         .await;
-    assert!(matches!(result, Err(StoreError::NotFound)), "got {result:?}");
+    assert!(
+        matches!(result, Err(StoreError::NotFound)),
+        "got {result:?}"
+    );
 }
 
 #[tokio::test]

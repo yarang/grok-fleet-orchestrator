@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use fleet_core::{
-    FleetEvent, Task, TaskFilter, TaskId, TaskRequest, TaskResult, TaskStatus,
-    TaskStatusFilter, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    FleetEvent, Task, TaskFilter, TaskId, TaskRequest, TaskResult, TaskStatus, TaskStatusFilter,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
@@ -134,7 +134,10 @@ async fn task_increment_retry_count_persists_and_accumulates() {
     assert_eq!(second, 2);
 
     let fetched = store.get_task(task_id).await.unwrap().unwrap();
-    assert_eq!(fetched.retry_count, 2, "increment must persist across reads");
+    assert_eq!(
+        fetched.retry_count, 2,
+        "increment must persist across reads"
+    );
 }
 
 #[tokio::test]
@@ -278,7 +281,11 @@ async fn task_list_respects_limit_and_offset() {
         })
         .await
         .unwrap();
-    assert_eq!(almost_all.len(), 4, "limit < total must not include the last row");
+    assert_eq!(
+        almost_all.len(),
+        4,
+        "limit < total must not include the last row"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -347,15 +354,15 @@ async fn worker_upsert_persists_on_demand_liveness_mode() {
     );
 
     // list_workers 경로도 동일하게 반영되는지 확인.
-    let listed = store
-        .list_workers(&WorkerFilter::default())
-        .await
-        .unwrap();
+    let listed = store.list_workers(&WorkerFilter::default()).await.unwrap();
     let found = listed
         .iter()
         .find(|w| w.id == worker.id)
         .expect("worker should be listed");
-    assert_eq!(found.liveness_mode, fleet_core::WorkerLivenessMode::OnDemand);
+    assert_eq!(
+        found.liveness_mode,
+        fleet_core::WorkerLivenessMode::OnDemand
+    );
 }
 
 /// 로드맵 #61 1단계 마이그레이션 회귀 테스트 — 마이그레이션 019 적용 전에

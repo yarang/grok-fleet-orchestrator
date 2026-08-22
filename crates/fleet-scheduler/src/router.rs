@@ -120,9 +120,21 @@ impl HeuristicTaskRouter {
 
         // 1. 단순/경량 키워드 (Economy)
         let economy_keywords = [
-            "typo", "formatting", "indent", "rename variable", "fix spelling",
-            "add comment", "license header", "cargo fmt", "clippy", "simple edit",
-            "오타", "들여쓰기", "변수명 변경", "주석 추가", "린트",
+            "typo",
+            "formatting",
+            "indent",
+            "rename variable",
+            "fix spelling",
+            "add comment",
+            "license header",
+            "cargo fmt",
+            "clippy",
+            "simple edit",
+            "오타",
+            "들여쓰기",
+            "변수명 변경",
+            "주석 추가",
+            "린트",
         ];
         for kw in economy_keywords {
             if text.contains(kw) {
@@ -132,8 +144,18 @@ impl HeuristicTaskRouter {
 
         // 2. 일반 기능/수정 키워드 (Balanced)
         let balanced_keywords = [
-            "implement", "add endpoint", "fix bug", "unit test", "api",
-            "crud", "handler", "endpoint", "구현", "버그 수정", "엔드포인트", "테스트 작성",
+            "implement",
+            "add endpoint",
+            "fix bug",
+            "unit test",
+            "api",
+            "crud",
+            "handler",
+            "endpoint",
+            "구현",
+            "버그 수정",
+            "엔드포인트",
+            "테스트 작성",
         ];
         for kw in balanced_keywords {
             if text.contains(kw) {
@@ -143,9 +165,21 @@ impl HeuristicTaskRouter {
 
         // 3. 복합/리팩토링 키워드 (Complex)
         let complex_keywords = [
-            "refactor", "architecture", "redesign", "migrate", "scale",
-            "database schema", "multi-threading", "async stream", "performance optimization",
-            "리팩토링", "아키텍처", "설계", "마이그레이션", "성능 최적화", "스키마 변경",
+            "refactor",
+            "architecture",
+            "redesign",
+            "migrate",
+            "scale",
+            "database schema",
+            "multi-threading",
+            "async stream",
+            "performance optimization",
+            "리팩토링",
+            "아키텍처",
+            "설계",
+            "마이그레이션",
+            "성능 최적화",
+            "스키마 변경",
         ];
         for kw in complex_keywords {
             if text.contains(kw) {
@@ -155,9 +189,21 @@ impl HeuristicTaskRouter {
 
         // 4. 심층 추론/정형검증 키워드 (Reasoning)
         let reasoning_keywords = [
-            "proof", "prove", "formal verification", "invariant", "deadlock analysis",
-            "concurrency proof", "sat solver", "theorem", "deep trace", "algorithm analysis",
-            "수학적 증명", "불변식", "교착상태 분석", "동시성 검증", "정형 검증",
+            "proof",
+            "prove",
+            "formal verification",
+            "invariant",
+            "deadlock analysis",
+            "concurrency proof",
+            "sat solver",
+            "theorem",
+            "deep trace",
+            "algorithm analysis",
+            "수학적 증명",
+            "불변식",
+            "교착상태 분석",
+            "동시성 검증",
+            "정형 검증",
         ];
         for kw in reasoning_keywords {
             if text.contains(kw) {
@@ -173,7 +219,12 @@ impl HeuristicTaskRouter {
             complex_score += 3;
         }
 
-        (economy_score, balanced_score, complex_score, reasoning_score)
+        (
+            economy_score,
+            balanced_score,
+            complex_score,
+            reasoning_score,
+        )
     }
 
     /// 스킬 요구사항을 분석하여 프로파일 가중치 도출
@@ -208,7 +259,9 @@ impl TaskRouter for HeuristicTaskRouter {
                     .model
                     .clone()
                     .unwrap_or_else(|| prof.default_model().to_string());
-                let budget = task.token_budget.unwrap_or_else(|| prof.default_token_budget());
+                let budget = task
+                    .token_budget
+                    .unwrap_or_else(|| prof.default_token_budget());
                 return RoutingDecision {
                     profile: prof,
                     resolved_model: model,
@@ -222,23 +275,36 @@ impl TaskRouter for HeuristicTaskRouter {
         // 2. 모델만 명시적으로 지정된 경우 역추론
         if let Some(ref model) = task.model {
             let m_low = model.to_lowercase();
-            let prof = if m_low.contains("fast") || m_low.contains("mini") || m_low.contains("small") {
+            let prof = if m_low.contains("fast")
+                || m_low.contains("mini")
+                || m_low.contains("small")
+            {
                 RoutingProfile::Economy
-            } else if m_low.contains("r1") || m_low.contains("reason") || m_low.contains("o1") || m_low.contains("o3") {
+            } else if m_low.contains("r1")
+                || m_low.contains("reason")
+                || m_low.contains("o1")
+                || m_low.contains("o3")
+            {
                 RoutingProfile::Reasoning
-            } else if m_low.contains("grok-4") || m_low.contains("opus") || m_low.contains("sonnet") {
+            } else if m_low.contains("grok-4") || m_low.contains("opus") || m_low.contains("sonnet")
+            {
                 RoutingProfile::Complex
             } else {
                 RoutingProfile::Balanced
             };
 
-            let budget = task.token_budget.unwrap_or_else(|| prof.default_token_budget());
+            let budget = task
+                .token_budget
+                .unwrap_or_else(|| prof.default_token_budget());
             return RoutingDecision {
                 profile: prof,
                 resolved_model: model.clone(),
                 token_budget: budget,
                 preferred_vendor: prof.default_vendor().to_string(),
-                reasoning: format!("Inferred profile {:?} from explicit model '{}'", prof, model),
+                reasoning: format!(
+                    "Inferred profile {:?} from explicit model '{}'",
+                    prof, model
+                ),
             };
         }
 
@@ -254,7 +320,9 @@ impl TaskRouter for HeuristicTaskRouter {
         let (chosen_prof, reason) = if total_r >= 4 && total_r > total_c {
             (
                 RoutingProfile::Reasoning,
-                format!("High formal reasoning score ({total_r}) from mathematical/invariant keywords"),
+                format!(
+                    "High formal reasoning score ({total_r}) from mathematical/invariant keywords"
+                ),
             )
         } else if total_c >= 4 && total_c >= total_b {
             (
@@ -313,7 +381,9 @@ mod tests {
     fn test_reasoning_prompt_classification() {
         let router = HeuristicTaskRouter::new();
         let task = Task::from_request(TaskRequest {
-            prompt: "Please provide formal verification proof for deadlock analysis in async channels".into(),
+            prompt:
+                "Please provide formal verification proof for deadlock analysis in async channels"
+                    .into(),
             ..Default::default()
         });
 
@@ -327,7 +397,9 @@ mod tests {
     fn test_complex_refactor_classification() {
         let router = HeuristicTaskRouter::new();
         let task = Task::from_request(TaskRequest {
-            prompt: "Refactor architecture and redesign database schema for performance optimization".into(),
+            prompt:
+                "Refactor architecture and redesign database schema for performance optimization"
+                    .into(),
             skills_required: vec!["rust-expert".into()],
             ..Default::default()
         });

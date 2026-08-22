@@ -1189,13 +1189,14 @@ async fn run_ws(client: HttpClient, channel: Channel) -> Result<(), AcpError> {
     // 호출자에게는 아무 영향이 없다 — `async_tungstenite::tokio::rustls`의
     // `Connector`는 `tokio_rustls::TlsConnector`의 타입 별칭(alias)이라
     // 그대로 전달 가능하다.
-    let (ws_stream, response) = async_tungstenite::tokio::connect_async_with_tls_connector_and_config(
-        endpoint.as_str(),
-        tls_connector,
-        None,
-    )
-    .await
-    .map_err(|e| AcpError::internal_error().data(format!("WebSocket connect failed: {e}")))?;
+    let (ws_stream, response) =
+        async_tungstenite::tokio::connect_async_with_tls_connector_and_config(
+            endpoint.as_str(),
+            tls_connector,
+            None,
+        )
+        .await
+        .map_err(|e| AcpError::internal_error().data(format!("WebSocket connect failed: {e}")))?;
     trace!(
         status = %response.status(),
         "WebSocket connection established"
@@ -1728,13 +1729,12 @@ mod tests {
         // 최소한의 유효 rustls ClientConfig로 실제 TlsConnector 구성 —
         // Fleet의 crates/fleet-transport/src/tls.rs::ClientTlsConfig와 동일한 패턴.
         let provider = rustls::crypto::ring::default_provider();
-        let client_config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-            provider,
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
+        let client_config =
+            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
 
         let client = client.with_tls_connector(connector);

@@ -54,7 +54,10 @@ fn strip_frontmatter(content: &str) -> &str {
 fn load_skill(skills_dir: &Path, name: &str) -> Option<String> {
     // `name`에 경로 구분자가 들어오면 무시 (path-traversal 방어)
     if name.contains('/') || name.contains('\\') || name.contains("..") {
-        warn!(skill = name, "skill name contains path traversal characters; skipping");
+        warn!(
+            skill = name,
+            "skill name contains path traversal characters; skipping"
+        );
         return None;
     }
     let path = skills_dir.join(format!("{name}.md"));
@@ -144,11 +147,7 @@ mod tests {
     fn missing_skill_file_returns_original_prompt() {
         let tmp = TempDir::new().unwrap();
         let prompt = "audit the code";
-        let result = inject_skills_from_dir(
-            prompt,
-            &["nonexistent-skill".to_string()],
-            tmp.path(),
-        );
+        let result = inject_skills_from_dir(prompt, &["nonexistent-skill".to_string()], tmp.path());
         assert_eq!(result, prompt);
     }
 
@@ -158,11 +157,7 @@ mod tests {
         setup_skill(&tmp, "rust-expert", "You are a Rust expert.");
 
         let prompt = "refactor this code";
-        let result = inject_skills_from_dir(
-            prompt,
-            &["rust-expert".to_string()],
-            tmp.path(),
-        );
+        let result = inject_skills_from_dir(prompt, &["rust-expert".to_string()], tmp.path());
 
         assert!(result.contains("<SKILL: rust-expert>"));
         assert!(result.contains("You are a Rust expert."));
@@ -174,16 +169,19 @@ mod tests {
     #[test]
     fn frontmatter_is_stripped() {
         let tmp = TempDir::new().unwrap();
-        setup_skill(&tmp, "sec-audit", "---\nname: sec-audit\n---\nYou are a security auditor.");
-
-        let prompt = "check vulnerabilities";
-        let result = inject_skills_from_dir(
-            prompt,
-            &["sec-audit".to_string()],
-            tmp.path(),
+        setup_skill(
+            &tmp,
+            "sec-audit",
+            "---\nname: sec-audit\n---\nYou are a security auditor.",
         );
 
-        assert!(!result.contains("name: sec-audit"), "frontmatter should be stripped");
+        let prompt = "check vulnerabilities";
+        let result = inject_skills_from_dir(prompt, &["sec-audit".to_string()], tmp.path());
+
+        assert!(
+            !result.contains("name: sec-audit"),
+            "frontmatter should be stripped"
+        );
         assert!(result.contains("You are a security auditor."));
     }
 
@@ -191,11 +189,7 @@ mod tests {
     fn path_traversal_is_rejected() {
         let tmp = TempDir::new().unwrap();
         let prompt = "do something";
-        let result = inject_skills_from_dir(
-            prompt,
-            &["../etc/passwd".to_string()],
-            tmp.path(),
-        );
+        let result = inject_skills_from_dir(prompt, &["../etc/passwd".to_string()], tmp.path());
         assert_eq!(result, prompt);
     }
 

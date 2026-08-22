@@ -346,7 +346,10 @@ async fn dispatch_accumulates_multiple_chunks_in_order() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while result_output.is_none() && std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), events.recv()).await {
-            Ok(Some(WorkerEvent::Completed { task_id: tid, result })) if tid == task_id => {
+            Ok(Some(WorkerEvent::Completed {
+                task_id: tid,
+                result,
+            })) if tid == task_id => {
                 result_output = Some(result.output);
             }
             _ => continue,
@@ -354,9 +357,7 @@ async fn dispatch_accumulates_multiple_chunks_in_order() {
     }
 
     let output = result_output.expect("task should have completed with a result");
-    let expected: String = (0..8)
-        .map(|i| format!("echo:session-0:{i};"))
-        .collect();
+    let expected: String = (0..8).map(|i| format!("echo:session-0:{i};")).collect();
     assert_eq!(
         output, expected,
         "final output must contain all chunks, in order, with none dropped or reordered"
@@ -419,9 +420,7 @@ async fn concurrent_sessions_streaming_multiple_chunks_do_not_cross_contaminate(
             seen_sessions.insert(session_id.to_string()),
             "session {session_id} appeared in more than one task's output"
         );
-        let expected: String = (0..5)
-            .map(|i| format!("echo:{session_id}:{i};"))
-            .collect();
+        let expected: String = (0..5).map(|i| format!("echo:{session_id}:{i};")).collect();
         assert_eq!(
             out, &expected,
             "task {tid}'s output must be exactly its own 5 chunks in order, no cross-contamination"

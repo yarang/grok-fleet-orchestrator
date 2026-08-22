@@ -271,7 +271,11 @@ impl Store for PgStore {
         Ok(retry_count as u32)
     }
 
-    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError> {
+    async fn update_task_checkpoint(
+        &self,
+        id: TaskId,
+        checkpoint_branch: Option<&str>,
+    ) -> Result<(), StoreError> {
         let result = sqlx::query("UPDATE tasks SET checkpoint_branch = $2 WHERE id = $1")
             .bind(id.as_uuid())
             .bind(checkpoint_branch)
@@ -834,14 +838,17 @@ impl Store for PgStore {
             .bind(credential_digest)
             .fetch_optional(&self.pool)
             .await?;
-        row.map(|row| Ok(WorkerOperationalCredential {
-            worker_id: WorkerId(row.try_get("worker_id")?),
-            credential_digest: row.try_get("credential_digest")?,
-            issued_at: row.try_get("issued_at")?,
-            expires_at: row.try_get("expires_at")?,
-            revoked_at: row.try_get("revoked_at")?,
-            rotation_generation: row.try_get("rotation_generation")?,
-        })).transpose()
+        row.map(|row| {
+            Ok(WorkerOperationalCredential {
+                worker_id: WorkerId(row.try_get("worker_id")?),
+                credential_digest: row.try_get("credential_digest")?,
+                issued_at: row.try_get("issued_at")?,
+                expires_at: row.try_get("expires_at")?,
+                revoked_at: row.try_get("revoked_at")?,
+                rotation_generation: row.try_get("rotation_generation")?,
+            })
+        })
+        .transpose()
     }
 
     async fn revoke_worker_operational_credential(

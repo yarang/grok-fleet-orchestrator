@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-
 use fleet_api::{build_app, AppState};
 use fleet_core::PermissionKind;
 use fleet_store::Store;
@@ -299,7 +298,12 @@ async fn cf_access_session_is_subject_to_endpoint_capability_check() {
         )],
     )
     .await;
-    let jwt = make_jwt(iss, "cap-aud", unix_now() + 3600, Some("reader@example.com"));
+    let jwt = make_jwt(
+        iss,
+        "cap-aud",
+        unix_now() + 3600,
+        Some("reader@example.com"),
+    );
 
     // 허용된 capability는 통과.
     assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 200);
@@ -383,7 +387,12 @@ async fn cf_access_without_capability_mapping_keeps_full_access() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let jwt = make_jwt(iss, "legacy-aud", unix_now() + 3600, Some("any@example.com"));
+    let jwt = make_jwt(
+        iss,
+        "legacy-aud",
+        unix_now() + 3600,
+        Some("any@example.com"),
+    );
     assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 200);
     assert_eq!(
         cf_post(

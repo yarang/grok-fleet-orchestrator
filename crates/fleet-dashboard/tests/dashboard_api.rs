@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use fleet_core::{
-    auth::PermissionKind, Permission, PermissionId, Session, SessionId, Task, TaskId, User,
-    UserId, Worker, WorkerId, WorkerStatus,
+    auth::PermissionKind, Permission, PermissionId, Session, SessionId, Task, TaskId, User, UserId,
+    Worker, WorkerId, WorkerStatus,
 };
 use fleet_dashboard::{build_dashboard_app, DashboardState, SESSION_DURATION_SECS};
 use fleet_store::mem::MemStore;
@@ -77,7 +77,10 @@ async fn seed_test_session(store: MemStore) -> (MemStore, String) {
 
 /// `seed_test_session`과 동일하되 권한을 직접 지정한다 — 권한 부족(403) 경로를
 /// 테스트할 때 사용.
-async fn seed_test_session_with_perms(store: MemStore, perm_kinds: &[PermissionKind]) -> (MemStore, String) {
+async fn seed_test_session_with_perms(
+    store: MemStore,
+    perm_kinds: &[PermissionKind],
+) -> (MemStore, String) {
     let user = User {
         id: UserId::new(),
         username: "test_limited".into(),
@@ -125,7 +128,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════
 //  테스트 헬퍼
@@ -177,7 +179,10 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
 /// 지정한다. `DashboardState::new`가 읽는 `FLEET_DASHBOARD_BASE_PATH` env를 테스트에서
 /// `set_var`로 흔들면 병렬 실행되는 다른 테스트와 경합한다 — 대신 필드를 직접 덮어써
 /// 완전히 격리한다.
-async fn spawn_authed_server_with_base_path(store: MemStore, base_path: &str) -> (TestServer, String) {
+async fn spawn_authed_server_with_base_path(
+    store: MemStore,
+    base_path: &str,
+) -> (TestServer, String) {
     let (store, cookie) = seed_test_session(store).await;
     let pool = PgPoolOptions::new()
         .max_connections(1)
@@ -302,8 +307,7 @@ async fn health_endpoint_returns_ok() {
 /// 절대경로로 리다이렉트를 받으면 404가 나는 걸 이 메커니즘으로 막는다.
 #[tokio::test]
 async fn html_response_gets_base_href_injected_for_configured_base_path() {
-    let (server, cookie) =
-        spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
+    let (server, cookie) = spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
     let client = reqwest::Client::new();
     let resp = authed_get(&client, &format!("http://{}/", server.addr), &cookie)
         .send()
@@ -340,8 +344,7 @@ async fn html_response_gets_root_base_href_when_base_path_unset() {
 /// 마운트된 배포에서도 브라우저가 nginx가 실제로 라우팅하는 경로로 이동한다.
 #[tokio::test]
 async fn logout_redirect_includes_configured_base_path() {
-    let (server, cookie) =
-        spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
+    let (server, cookie) = spawn_authed_server_with_base_path(MemStore::new(), "/dashboard").await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -795,7 +798,8 @@ fn authed_post_form(
 #[tokio::test]
 async fn submit_task_denies_without_task_create_permission() {
     // task:create가 없는 세션(TaskList만 보유) — 403이어야 함.
-    let (store, cookie) = seed_test_session_with_perms(MemStore::new(), &[PermissionKind::TaskList]).await;
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::TaskList]).await;
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 

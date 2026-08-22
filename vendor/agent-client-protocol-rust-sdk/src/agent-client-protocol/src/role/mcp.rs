@@ -24,15 +24,20 @@ impl Role for Client {
         Server
     }
 
-    async fn default_handle_dispatch_from(
+    // 트레이트 정의(`Role::default_handle_dispatch_from`, role.rs)는 `async fn`이
+    // 아니라 `-> impl Future<...> + Send`라, 이 구현도 실제로 await하는 게 없으면
+    // async fn 대신 `std::future::ready`로 바로 완료된 Future를 반환하는 편이
+    // 더 정확하다 (clippy::unused_async_trait_impl).
+    fn default_handle_dispatch_from(
         &self,
         message: crate::Dispatch,
         _connection: crate::ConnectionTo<Self>,
-    ) -> Result<crate::Handled<crate::Dispatch>, crate::Error> {
-        Ok(Handled::No {
+    ) -> impl std::future::Future<Output = Result<crate::Handled<crate::Dispatch>, crate::Error>> + Send
+    {
+        std::future::ready(Ok(Handled::No {
             message,
             retry: false,
-        })
+        }))
     }
 }
 
@@ -64,15 +69,20 @@ impl Role for Server {
         Client
     }
 
-    async fn default_handle_dispatch_from(
+    // 트레이트 정의(`Role::default_handle_dispatch_from`, role.rs)는 `async fn`이
+    // 아니라 `-> impl Future<...> + Send`라, 이 구현도 실제로 await하는 게 없으면
+    // async fn 대신 `std::future::ready`로 바로 완료된 Future를 반환하는 편이
+    // 더 정확하다 (clippy::unused_async_trait_impl).
+    fn default_handle_dispatch_from(
         &self,
         message: crate::Dispatch,
         _connection: crate::ConnectionTo<Self>,
-    ) -> Result<crate::Handled<crate::Dispatch>, crate::Error> {
-        Ok(Handled::No {
+    ) -> impl std::future::Future<Output = Result<crate::Handled<crate::Dispatch>, crate::Error>> + Send
+    {
+        std::future::ready(Ok(Handled::No {
             message,
             retry: false,
-        })
+        }))
     }
 }
 

@@ -154,7 +154,11 @@ async fn revoke_denies_subsequent_authentication() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "revoking an already-revoked credential is a 404");
+    assert_eq!(
+        resp.status(),
+        404,
+        "revoking an already-revoked credential is a 404"
+    );
 }
 
 #[tokio::test]

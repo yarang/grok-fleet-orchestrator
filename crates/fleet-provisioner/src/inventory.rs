@@ -203,8 +203,7 @@ impl InventoryWorker {
 
     /// 광고 포트 — 개별값 우선, 그 다음 defaults.
     pub fn effective_mtls_advertised_port(&self, defaults: &InventoryDefaults) -> Option<u16> {
-        self.mtls_advertised_port
-            .or(defaults.mtls_advertised_port)
+        self.mtls_advertised_port.or(defaults.mtls_advertised_port)
     }
 
     /// 광고 호스트명 — 개별값 우선, 미지정 시 워커 `name`으로 폴백
@@ -505,12 +504,21 @@ workers:
             Some("/etc/fleet/ca.pem")
         );
         assert_eq!(w1.effective_mtls_advertised_port(&inv.defaults), Some(2420));
-        assert_eq!(w1.mtls_server_cert.as_deref(), Some("/etc/fleet/worker-1.pem"));
-        assert_eq!(w1.mtls_server_key.as_deref(), Some("/etc/fleet/worker-1.key"));
+        assert_eq!(
+            w1.mtls_server_cert.as_deref(),
+            Some("/etc/fleet/worker-1.pem")
+        );
+        assert_eq!(
+            w1.mtls_server_key.as_deref(),
+            Some("/etc/fleet/worker-1.key")
+        );
 
         // 워커별 cert/key는 공유되지 않는다 — 각자 고유.
         let w2 = &inv.workers[1];
-        assert_eq!(w2.mtls_server_cert.as_deref(), Some("/etc/fleet/worker-2.pem"));
+        assert_eq!(
+            w2.mtls_server_cert.as_deref(),
+            Some("/etc/fleet/worker-2.pem")
+        );
         assert_ne!(w1.mtls_server_cert, w2.mtls_server_cert);
     }
 

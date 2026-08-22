@@ -8,10 +8,12 @@ use agent_client_protocol::{
         PromptResponse, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
     },
 };
-use futures::{
-    StreamExt as _,
-    channel::{mpsc, oneshot},
-};
+use futures::{StreamExt as _, channel::oneshot};
+// `mpsc`는 `unstable_protocol_v2` feature 하의 테스트에서만 쓰인다 — 그 feature가
+// 꺼진 빌드(CI의 no-default-features 잡 등)에서 unused-import로 걸리는 걸 피하려고
+// import 자체를 그 feature로 게이팅한다(업스트림 코드 자체는 건드리지 않음).
+#[cfg(feature = "unstable_protocol_v2")]
+use futures::channel::mpsc;
 
 #[cfg(feature = "unstable_protocol_v2")]
 use agent_client_protocol::{

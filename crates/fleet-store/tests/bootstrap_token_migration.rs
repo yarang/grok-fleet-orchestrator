@@ -31,7 +31,10 @@ use sqlx::{PgPool, Row};
 
 /// 마이그레이션 순서를 지키기 위해 파일 이름 앞의 숫자를 파싱한다.
 fn migration_number(file_name: &str) -> Option<u32> {
-    let digits: String = file_name.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = file_name
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -250,7 +253,10 @@ fn with_database_replaces_only_the_database_segment() {
         "postgres://me@localhost/tmp"
     );
     assert_eq!(
-        with_database("postgres://u:p@127.0.0.1:5432/fleet_test?sslmode=disable", "tmp"),
+        with_database(
+            "postgres://u:p@127.0.0.1:5432/fleet_test?sslmode=disable",
+            "tmp"
+        ),
         "postgres://u:p@127.0.0.1:5432/tmp?sslmode=disable"
     );
 }

@@ -984,7 +984,10 @@ mod tests {
         append_known_hosts_line("host-b ssh-ed25519 BBBB", &path).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n");
+        assert_eq!(
+            content,
+            "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1000,7 +1003,10 @@ mod tests {
         append_known_hosts_line("host-b ssh-ed25519 BBBB", &path).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n");
+        assert_eq!(
+            content,
+            "host-a ssh-ed25519 AAAA\nhost-b ssh-ed25519 BBBB\n"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

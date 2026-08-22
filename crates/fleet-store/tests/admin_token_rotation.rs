@@ -165,7 +165,10 @@ async fn revoke_marks_inactive_and_reports_not_found_on_second_call() {
         .is_none());
 
     let second = store.revoke_admin_token("svc-revoke").await.unwrap();
-    assert!(!second, "revoking an already-revoked principal returns false, not an error");
+    assert!(
+        !second,
+        "revoking an already-revoked principal returns false, not an error"
+    );
 }
 
 #[tokio::test]

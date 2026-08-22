@@ -488,8 +488,8 @@ struct TokenCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fleet_store::mem::MemStore;
     use fleet_core::{Task, TaskRequest, TaskResult, TokenUsage, Worker};
+    use fleet_store::mem::MemStore;
 
     #[tokio::test]
     async fn empty_store_renders_skeleton() {

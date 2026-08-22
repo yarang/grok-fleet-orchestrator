@@ -284,15 +284,18 @@ impl Role for UntypedRole {
         RoleId::from_singleton(self)
     }
 
-    async fn default_handle_dispatch_from(
+    // mcp.rs의 동일 패턴 참고 — 트레이트 정의(위 `Role::default_handle_dispatch_from`)가
+    // async fn이 아니라 `-> impl Future<...> + Send`이므로, await하는 게 없는 이
+    // 구현은 std::future::ready로 바로 완료된 Future를 반환한다.
+    fn default_handle_dispatch_from(
         &self,
         message: Dispatch,
         _connection: ConnectionTo<Self>,
-    ) -> Result<Handled<Dispatch>, crate::Error> {
-        Ok(Handled::No {
+    ) -> impl Future<Output = Result<Handled<Dispatch>, crate::Error>> + Send {
+        std::future::ready(Ok(Handled::No {
             message,
             retry: false,
-        })
+        }))
     }
 
     fn counterpart(&self) -> Self::Counterpart {

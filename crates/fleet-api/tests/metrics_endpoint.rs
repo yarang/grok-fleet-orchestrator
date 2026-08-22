@@ -6,9 +6,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use fleet_api::{ApiTokenCredential, AppState};
-use fleet_core::{
-    Task, TaskRequest, Worker,
-};
+use fleet_core::{Task, TaskRequest, Worker};
 use fleet_store::Store;
 
 use fleet_store::mem::MemStore;

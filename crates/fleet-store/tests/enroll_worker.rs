@@ -106,7 +106,12 @@ async fn enroll_worker_rolls_back_on_credential_digest_conflict() {
     };
 
     let result = store
-        .enroll_worker("pg-join-token", "new-worker-pg", &new_worker, &new_credential)
+        .enroll_worker(
+            "pg-join-token",
+            "new-worker-pg",
+            &new_worker,
+            &new_credential,
+        )
         .await;
 
     assert!(
@@ -121,7 +126,10 @@ async fn enroll_worker_rolls_back_on_credential_digest_conflict() {
         .iter()
         .find(|t| t.token_digest == BootstrapToken::digest_for("pg-join-token"))
         .expect("token still exists");
-    assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+    assert_eq!(
+        stored.use_count, 0,
+        "token must remain unconsumed after rollback"
+    );
     assert!(stored.last_used_by.is_none());
 
     // (c) worker는 생성되지 않음.
@@ -157,7 +165,12 @@ async fn enroll_worker_rolls_back_on_name_conflict() {
     };
 
     let result = store
-        .enroll_worker("pg-join-token-2", "taken-name-pg", &colliding_worker, &credential)
+        .enroll_worker(
+            "pg-join-token-2",
+            "taken-name-pg",
+            &colliding_worker,
+            &credential,
+        )
         .await;
     assert!(
         matches!(result, Err(StoreError::Conflict(_))),
@@ -169,7 +182,10 @@ async fn enroll_worker_rolls_back_on_name_conflict() {
         .iter()
         .find(|t| t.token_digest == BootstrapToken::digest_for("pg-join-token-2"))
         .unwrap();
-    assert_eq!(stored.use_count, 0, "token must remain unconsumed after rollback");
+    assert_eq!(
+        stored.use_count, 0,
+        "token must remain unconsumed after rollback"
+    );
 
     assert!(store
         .find_active_worker_operational_credential("unique-digest-pg")
@@ -200,7 +216,12 @@ async fn enroll_worker_commits_all_three_on_success() {
     };
 
     store
-        .enroll_worker("pg-success-token", "success-worker-pg", &new_worker, &credential)
+        .enroll_worker(
+            "pg-success-token",
+            "success-worker-pg",
+            &new_worker,
+            &credential,
+        )
         .await
         .expect("enroll should succeed");
 

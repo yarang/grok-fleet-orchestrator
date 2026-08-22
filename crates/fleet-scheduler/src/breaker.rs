@@ -242,7 +242,10 @@ impl CircuitBreaker {
 /// 후자는 `remaining`이 `Duration::ZERO`로 설정됩니다(고정된 쿨다운이 아니라
 /// "지금 당장은 프로브 슬롯이 없다"는 의미).
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("circuit breaker is not accepting requests (remaining: {:?})", remaining)]
+#[error(
+    "circuit breaker is not accepting requests (remaining: {:?})",
+    remaining
+)]
 pub struct BreakerOpen {
     pub remaining: Duration,
 }

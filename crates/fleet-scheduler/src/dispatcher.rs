@@ -665,13 +665,13 @@ impl Dispatcher {
     async fn dispatch_ready_tasks(&self) {
         use fleet_core::TaskFilter;
         use fleet_core::TaskStatusFilter;
-        
+
         let filter = TaskFilter {
             status: Some(TaskStatusFilter::Pending),
             limit: 1000,
             ..Default::default()
         };
-        
+
         if let Ok(pending_tasks) = self.state.store.list_tasks(&filter).await {
             for task in pending_tasks {
                 let mut ready = true;
@@ -774,7 +774,11 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(MemStore::new());
         let transport: Arc<dyn fleet_transport::WorkerTransport> =
             Arc::new(fleet_transport::MockTransport::new());
-        let state = Arc::new(FleetState::new(store, transport, CircuitBreakerConfig::default()));
+        let state = Arc::new(FleetState::new(
+            store,
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
         let dispatcher =
             Dispatcher::new(state.clone()).with_max_dispatch_retries(max_dispatch_retries);
         (state, dispatcher)

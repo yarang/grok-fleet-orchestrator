@@ -224,7 +224,8 @@ mod tests {
     async fn sweep_once_is_resilient_to_store_errors() {
         // 하나(또는 둘 다) 실패해도 panic하지 않고 0으로 보고해야 한다 — 백그라운드
         // 루프가 죽지 않고 다음 사이클에 재시도할 수 있어야 하므로.
-        let store = MemStore::new().with_failing(&["delete_expired_sessions", "delete_old_login_attempts"]);
+        let store =
+            MemStore::new().with_failing(&["delete_expired_sessions", "delete_old_login_attempts"]);
         // 실패 주입이 정말 걸러지는지(사이드이펙트가 아니라) 확인하기 위해
         // 지울 데이터도 함께 넣어둔다 — 그래도 0이 나와야 한다.
         seed_expired_sessions(&store, 2).await;

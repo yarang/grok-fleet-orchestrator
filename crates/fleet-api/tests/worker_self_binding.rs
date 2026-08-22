@@ -13,7 +13,10 @@ use fleet_store::mem::MemStore;
 use fleet_store::{Store, WorkerOperationalCredential};
 
 /// 워커를 store에 직접 심고, 평문 operational token을 반환한다.
-async fn seed_worker_with_credential(store: &Arc<dyn Store>, name: &str) -> (fleet_core::WorkerId, String) {
+async fn seed_worker_with_credential(
+    store: &Arc<dyn Store>,
+    name: &str,
+) -> (fleet_core::WorkerId, String) {
     let worker = Worker::new(name, format!("ws://{name}.local/ws"));
     let worker_id = worker.id;
     store.upsert_worker(&worker).await.unwrap();
@@ -76,7 +79,11 @@ async fn heartbeat_for_self_succeeds_but_for_other_worker_is_forbidden() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "cross-worker heartbeat must be forbidden");
+    assert_eq!(
+        resp.status(),
+        403,
+        "cross-worker heartbeat must be forbidden"
+    );
 }
 
 #[tokio::test]
@@ -135,7 +142,11 @@ async fn deregister_self_succeeds_but_deregistering_other_worker_is_forbidden() 
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "cross-worker deregister must be forbidden");
+    assert_eq!(
+        resp.status(),
+        403,
+        "cross-worker deregister must be forbidden"
+    );
 
     // A가 자기 자신을 등록 해제하면 성공.
     let resp = client
@@ -191,7 +202,11 @@ async fn worker_credential_cannot_reach_control_plane_endpoints() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 403, "worker credential must not list workers");
+    assert_eq!(
+        resp.status(),
+        403,
+        "worker credential must not list workers"
+    );
 
     // 다른 워커의 credential rotate — WorkerCredentialManage capability 없음.
     let resp = client

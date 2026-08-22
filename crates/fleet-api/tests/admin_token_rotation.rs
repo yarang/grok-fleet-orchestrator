@@ -16,7 +16,10 @@ async fn spawn_server_with_admin(store: Arc<dyn Store>, admin_token: &str) -> St
     let state = AppState::new(store).with_tokens(vec![ApiTokenCredential {
         principal_id: "root".into(),
         token: admin_token.into(),
-        capabilities: vec![PermissionKind::AdminTokenManage, PermissionKind::AdminTokenList],
+        capabilities: vec![
+            PermissionKind::AdminTokenManage,
+            PermissionKind::AdminTokenList,
+        ],
     }]);
     let state = Arc::new(state);
 

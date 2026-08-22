@@ -113,7 +113,10 @@ impl GrokRunner {
 }
 
 /// grok / agy(Antigravity) 등 에이전트 CLI 서브프로세스에 LLM 프록시 환경변수 주입.
-pub(crate) fn apply_llm_proxy_envs(cmd: &mut Command, proxy_opt: &Option<crate::config::LlmProxySection>) {
+pub(crate) fn apply_llm_proxy_envs(
+    cmd: &mut Command,
+    proxy_opt: &Option<crate::config::LlmProxySection>,
+) {
     if let Some(proxy) = proxy_opt {
         if let Some(url) = &proxy.gateway_url {
             let url_trimmed = url.trim_end_matches('/');
@@ -305,7 +308,12 @@ mod tests {
         let std_cmd = cmd.as_std();
         let envs: std::collections::HashMap<_, _> = std_cmd
             .get_envs()
-            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string())))
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
             .collect();
 
         // OpenAI/grok 엔드포인트 검증

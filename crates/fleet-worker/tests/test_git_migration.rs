@@ -42,7 +42,10 @@ fn test_e2e_git_migration_flow() {
     run_git(&worker_a_dir, &["init", "--initial-branch=main"]);
     run_git(&worker_a_dir, &["config", "user.name", "Test User"]);
     run_git(&worker_a_dir, &["config", "user.email", "test@example.com"]);
-    run_git(&worker_a_dir, &["remote", "add", "origin", remote_dir.to_str().unwrap()]);
+    run_git(
+        &worker_a_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
 
     let readme_path = worker_a_dir.join("README.md");
     let mut f = File::create(&readme_path).unwrap();
@@ -57,7 +60,10 @@ fn test_e2e_git_migration_flow() {
     run_git(&worker_b_dir, &["init", "--initial-branch=main"]);
     run_git(&worker_b_dir, &["config", "user.name", "Test User"]);
     run_git(&worker_b_dir, &["config", "user.email", "test@example.com"]);
-    run_git(&worker_b_dir, &["remote", "add", "origin", remote_dir.to_str().unwrap()]);
+    run_git(
+        &worker_b_dir,
+        &["remote", "add", "origin", remote_dir.to_str().unwrap()],
+    );
     run_git(&worker_b_dir, &["fetch", "origin"]);
     run_git(&worker_b_dir, &["checkout", "main"]);
 
@@ -76,19 +82,36 @@ fn test_e2e_git_migration_flow() {
 
     run_git(&worker_a_dir, &["checkout", "-b", &branch_name]);
     run_git(&worker_a_dir, &["add", "."]);
-    run_git(&worker_a_dir, &["commit", "-m", "checkpoint: task-1234 migration"]);
+    run_git(
+        &worker_a_dir,
+        &["commit", "-m", "checkpoint: task-1234 migration"],
+    );
     run_git(&worker_a_dir, &["push", "origin", &branch_name]);
 
     // 6. Worker B에서 해당 태스크를 수령하여 workspace 이관 & 복구 진행
     // fetch, checkout, reset --hard, clean -fdx
     run_git(&worker_b_dir, &["fetch", "origin"]);
-    run_git(&worker_b_dir, &["checkout", "-B", &branch_name, &format!("origin/{}", branch_name)]);
-    run_git(&worker_b_dir, &["reset", "--hard", &format!("origin/{}", branch_name)]);
+    run_git(
+        &worker_b_dir,
+        &[
+            "checkout",
+            "-B",
+            &branch_name,
+            &format!("origin/{}", branch_name),
+        ],
+    );
+    run_git(
+        &worker_b_dir,
+        &["reset", "--hard", &format!("origin/{}", branch_name)],
+    );
     run_git(&worker_b_dir, &["clean", "-fdx"]);
 
     // 7. Worker B의 이관 복구 결과 검증
     let main_rs_b = worker_b_dir.join("src/main.rs");
-    assert!(main_rs_b.exists(), "src/main.rs must exist in Worker B after migration");
+    assert!(
+        main_rs_b.exists(),
+        "src/main.rs must exist in Worker B after migration"
+    );
     let content = fs::read_to_string(main_rs_b).unwrap();
     assert!(content.contains("hello from worker a"));
 }

@@ -17,8 +17,8 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
-use fleet_scheduler::{Dispatcher, FleetState};
 use fleet_core::PermissionKind;
+use fleet_scheduler::{Dispatcher, FleetState};
 
 use crate::handlers::ToolContext;
 use crate::schema::{
@@ -51,7 +51,11 @@ impl McpAuthorization {
             )
         })?;
         let mut capabilities = Vec::new();
-        for value in raw.split(',').map(str::trim).filter(|value| !value.is_empty()) {
+        for value in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             let permission = PermissionKind::all()
                 .iter()
                 .copied()
@@ -209,9 +213,7 @@ impl McpServer {
                     .filter(|tool| self.authorization.permits_tool(tool.name))
                     .collect::<Vec<_>>(),
             )
-            .map_err(|e| {
-                JsonRpcError::internal(format!("failed to serialize tool list: {e}"))
-            })?),
+            .map_err(|e| JsonRpcError::internal(format!("failed to serialize tool list: {e}")))?),
 
             "tools/call" => self.handle_tools_call(&req.params).await,
 
@@ -239,7 +241,9 @@ impl McpServer {
         let arguments = obj.get("arguments").cloned().unwrap_or(Value::Null);
 
         if !self.authorization.permits_tool(name) {
-            return Err(JsonRpcError::invalid_request("tool is not permitted for this MCP launcher"));
+            return Err(JsonRpcError::invalid_request(
+                "tool is not permitted for this MCP launcher",
+            ));
         }
 
         crate::handlers::dispatch_tool(&self.ctx, name, &arguments).await

@@ -95,7 +95,11 @@ pub trait Store: Send + Sync {
     async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError>;
 
     /// 작업 마이그레이션 이관용 Git 임시 브랜치명을 업데이트합니다.
-    async fn update_task_checkpoint(&self, id: TaskId, checkpoint_branch: Option<&str>) -> Result<(), StoreError>;
+    async fn update_task_checkpoint(
+        &self,
+        id: TaskId,
+        checkpoint_branch: Option<&str>,
+    ) -> Result<(), StoreError>;
 
     /// 스레드(연속 대화) 전체를 시간순(오름차순)으로 조회 — 대화를 읽는 순서.
     ///
@@ -217,7 +221,9 @@ pub trait Store: Send + Sync {
         worker_id: WorkerId,
     ) -> Result<bool, StoreError> {
         let _ = worker_id;
-        Err(StoreError::Unsupported("revoke_worker_operational_credential"))
+        Err(StoreError::Unsupported(
+            "revoke_worker_operational_credential",
+        ))
     }
 
     /// worker의 operational credential을 새 digest로 회전한다 (로드맵 #60 6단계).
@@ -255,7 +261,8 @@ pub trait Store: Send + Sync {
         worker: &fleet_core::Worker,
         credential: &WorkerOperationalCredential,
     ) -> Result<(), StoreError> {
-        self.consume_bootstrap_token(bootstrap_token, used_by).await?;
+        self.consume_bootstrap_token(bootstrap_token, used_by)
+            .await?;
         self.upsert_worker(worker).await?;
         self.upsert_worker_operational_credential(credential).await
     }

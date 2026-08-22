@@ -799,7 +799,10 @@ bin = "/x"
 secret = "x"
 "#;
         let config: WorkerConfig = toml.parse().unwrap();
-        assert_eq!(config.worker.operational_token.as_deref(), Some("fwo_abc123"));
+        assert_eq!(
+            config.worker.operational_token.as_deref(),
+            Some("fwo_abc123")
+        );
     }
 
     #[test]
