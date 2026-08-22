@@ -1,13 +1,18 @@
     let allEvents = [];
     let currentFilter = 'all';
+    let workerNames = {};
 
     async function fetchActivity() {
       try {
         // 작업·워커 생명주기 이벤트. 인증/권한 감사 로그는 별개이며 /api/audit이 담당한다.
-        const resp = await fetch('api/events?limit=200');
+        const [resp, names] = await Promise.all([
+          fetch('api/events?limit=200'),
+          getWorkerNameMap(),
+        ]);
         const data = await resp.json();
         // /api/events는 { events, count } 형태로 감싸서 반환한다.
         allEvents = data.events ?? [];
+        workerNames = names;
         render();
       } catch(e) { console.error('fetch activity:', e); }
     }
@@ -31,7 +36,7 @@
     }
 
     function getWorkerId(ev) {
-      return ev.event?.worker_id ? String(ev.event.worker_id).substring(0,8) : '—';
+      return workerLabel(ev.event?.worker_id, workerNames);
     }
 
     function getDetails(ev) {

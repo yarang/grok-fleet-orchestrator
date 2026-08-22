@@ -29,7 +29,10 @@
     async function loadTask() {
       const id = getTaskId();
       try {
-        const resp = await fetch('api/tasks/' + encodeURIComponent(id));
+        const [resp, workerNames] = await Promise.all([
+          fetch('api/tasks/' + encodeURIComponent(id)),
+          getWorkerNameMap(),
+        ]);
         if (!resp.ok) throw new Error('not found');
         const data = await resp.json();
         const t = data.task;
@@ -42,7 +45,7 @@
         const details = [
           ['Status', t.phase],
           ['Created By', t.created_by],
-          ['Worker', t.worker_id ? t.worker_id.substring(0,8) : '—'],
+          ['Worker', workerLabel(t.worker_id, workerNames)],
           ['Model', t.model || '—'],
           ['Duration', fmtDuration(t.duration_secs)],
           ['Exit Code', t.exit_code !== null && t.exit_code !== undefined ? t.exit_code : '—'],

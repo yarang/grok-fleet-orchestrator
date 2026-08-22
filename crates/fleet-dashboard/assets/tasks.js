@@ -1,4 +1,7 @@
     let allTasks = [];
+    // worker_id(UUID) → name. app.js의 getWorkerNameMap()이 /api/workers를
+    // 캐싱하며 채워준다 — 필터 드롭다운과 테이블 Worker 열 둘 다 여기서 읽는다.
+    let workerNames = {};
     let currentFilter = 'all';
     // 로드맵 #14 — 고급 필터 상태(상태 필터 pill과 별개로 함께 적용된다).
     let currentSearch = '';
@@ -20,8 +23,12 @@
 
     async function fetchTasks() {
       try {
-        const resp = await fetch('api/tasks?limit=' + (pageSize + 1) + '&offset=0');
+        const [resp, names] = await Promise.all([
+          fetch('api/tasks?limit=' + (pageSize + 1) + '&offset=0'),
+          getWorkerNameMap(),
+        ]);
         const data = await resp.json();
+        workerNames = names;
         hasMore = data.length > pageSize;
         allTasks = hasMore ? data.slice(0, pageSize) : data;
         populateFilterOptions();
@@ -46,16 +53,20 @@
       const workers = [...new Set(allTasks.map(t => t.worker_id).filter(Boolean))].sort();
       const models = [...new Set(allTasks.map(t => t.model).filter(Boolean))].sort();
 
-      const buildOptions = (label, values) =>
+      // displayFn이 있으면 그걸로 보여줄 텍스트를 결정하고(예: worker_id → name),
+      // 없으면 기존처럼 값 자체를 잘라서 보여준다(model처럼 이미 사람이 읽을 수
+      // 있는 짧은 문자열). 어느 쪽이든 <option value>는 항상 원본 값(필터링 키)
+      // 그대로 유지한다.
+      const buildOptions = (label, values, displayFn) =>
         `<option value="">${label}</option>` +
         values.map(v => {
-          const display = v.length > 12 ? v.slice(0, 8) + '…' : v;
+          const display = displayFn ? displayFn(v) : (v.length > 12 ? v.slice(0, 8) + '…' : v);
           return `<option value="${escapeHtml(v)}">${escapeHtml(display)}</option>`;
         }).join('');
 
       const prevWorker = workerSel.value;
       const prevModel = modelSel.value;
-      workerSel.innerHTML = buildOptions('All workers', workers);
+      workerSel.innerHTML = buildOptions('All workers', workers, w => workerLabel(w, workerNames));
       modelSel.innerHTML = buildOptions('All models', models);
       if (workers.includes(prevWorker)) workerSel.value = prevWorker;
       if (models.includes(prevModel)) modelSel.value = prevModel;
@@ -213,7 +224,7 @@
           <div><span class="badge badge-${t.phase}">${t.phase}</span></div>
           <div style="font-size:14px;">${escapeHtml(prompt)}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${t.model||'—'}</div>
-          <div style="font-family:var(--font-mono);font-size:12px;">${t.worker_id?t.worker_id.substring(0,8):'—'}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;" title="${escapeHtml(t.worker_id||'')}">${escapeHtml(workerLabel(t.worker_id, workerNames))}</div>
           <div style="font-size:13px;">${fmtTokens(t.token_usage)}</div>
           <div style="font-size:13px;">${fmtDuration(t.duration_secs)}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(t.created_at)}</div>

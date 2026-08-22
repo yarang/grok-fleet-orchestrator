@@ -12,6 +12,34 @@ const API = {
   me: 'api/me',
 };
 
+// ── worker_id → name 매핑 (모든 페이지 공용) ────────────────────────────
+//
+// Task/Event는 worker_id(UUID)만 갖고 있어 그대로 찍으면 가독성이 떨어진다.
+// /api/workers가 이미 id·name을 함께 주므로, 한 번 fetch해서 페이지 생명주기
+// 동안 캐싱하고 각 페이지 렌더링에서 UUID 대신 name을 보여주는 데 쓴다.
+// 워커가 삭제/미등록이라 맵에 없으면(또는 fetch 자체가 실패하면) 기존처럼
+// UUID 앞 8자로 조용히 폴백 — 이 매핑은 표시용 개선이지 필수 데이터가 아니다.
+let _workerNameCache = null;
+async function getWorkerNameMap() {
+  if (_workerNameCache) return _workerNameCache;
+  try {
+    const workers = await fetchJSON(API.workers);
+    const map = {};
+    for (const w of workers) map[w.id] = w.name;
+    _workerNameCache = map;
+    return map;
+  } catch (e) {
+    console.error('getWorkerNameMap', e);
+    return {};
+  }
+}
+
+// workerId가 매핑에 있으면 name, 없으면 UUID 앞 8자(기존 폴백)를 반환.
+function workerLabel(workerId, nameMap) {
+  if (!workerId) return '—';
+  return (nameMap && nameMap[workerId]) || String(workerId).slice(0, 8);
+}
+
 // ── 다크 모드: 저장된 명시적 선호를 즉시 적용 (로드맵 #14) ───────────────
 //
 // 이 파일은 매 페이지의 </body> 바로 앞에서 로드되므로, 여기서 최대한
@@ -234,7 +262,7 @@ async function refreshWorkers() {
 
 async function refreshTasks() {
   try {
-    const tasks = await fetchJSON(API.tasks);
+    const [tasks, workerNames] = await Promise.all([fetchJSON(API.tasks), getWorkerNameMap()]);
     const list = document.getElementById('task-list');
     if (!list) return;
     const header = list.querySelector('.row.header');
@@ -250,7 +278,7 @@ async function refreshTasks() {
         <div><span class="phase ${t.phase}">${t.phase}</span></div>
         <div>${escapeHtml((t.prompt || '').slice(0, 60))}</div>
         <div>${escapeHtml(t.model || '—')}</div>
-        <div>${t.worker_id ? String(t.worker_id).slice(0, 8) : '—'}</div>
+        <div title="${escapeHtml(t.worker_id || '')}">${escapeHtml(workerLabel(t.worker_id, workerNames))}</div>
         <div>${tokenStr}</div>
         <div>${fmtTime(t.created_at)}</div>
       `;
