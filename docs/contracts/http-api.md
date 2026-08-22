@@ -27,8 +27,18 @@ owners: ["fleet-api"]
 | `GET·PUT /v1/workers/{name}/credentials` | Worker credential 목록·저장 | OpenAPI |
 | `GET /v1/workers/{name}/credentials/{model_id}/export` | credential 원문 export | OpenAPI |
 | `DELETE /v1/workers/{name}/credentials/{model_id}` | credential 삭제 | OpenAPI |
+| `POST /v1/workers/{id}/credential/rotate`, `DELETE /v1/workers/{id}/credential` | Worker **operational** credential 회전·회수 | `fleet-api` router (OpenAPI 미반영 — 결함) |
 | `POST /v1/hosts/register` | provisioned host 등록 | OpenAPI |
 | `/v1/bootstrap-tokens/*` | 발급·목록·회수 | OpenAPI 및 worker enrollment 계약 |
+| `POST·GET /v1/admin/tokens`, `POST /v1/admin/tokens/{principal_id}/rotate`, `DELETE /v1/admin/tokens/{principal_id}` | admin bearer token 생성·목록·회전·회수 | `fleet-api` router (OpenAPI 미반영 — 결함) |
+
+단수형 `/workers/{id}/credential`과 복수형 `/workers/{name}/credentials`는 **다른 자원**이다.
+전자는 Worker 자신의 operational identity(`worker:credential:manage`), 후자는 그 워커가 사용하는
+LLM 프로바이더 API 키(`worker:llm_credential:*`)다. capability도 분리되어 있으므로 혼동하면
+과대 권한 부여로 이어진다.
+
+`/v1/workers/{id}/credential/*`과 `/v1/admin/tokens*`는 router에 존재하지만 `openapi.yaml`에
+없다. 이 문서 서두의 규칙(OpenAPI 우선)에 따라 이는 정본의 공백이며 결함으로 기록한다.
 
 ## 인증 경계
 
@@ -48,10 +58,18 @@ reverse proxy 배포에서는 별도의 네트워크·gateway ACL을 검증해�
 `/v1/workers/join`의 현재·목표 인증 차이와 Worker credential 전환은
 [worker enrollment](worker-enrollment.md)에 둔다.
 
-현재 bearer 검사는 endpoint별 principal·capability를 구분하지 않는다. 따라서 bootstrap token 발급·
-회수와 Worker credential 원문 export도 같은 bearer 평면에 놓인다. 재인증·break-glass·감사와 secret
-관리 권한 분리는 [보안 모델](../security/control-plane-security-model.md)의 목표이며 현재 보장으로
+현재 bearer 검사는 route별 capability 행렬(`required_capability`)을 거친다. 다만 **행렬에 등록되지
+않은 route는 검사 없이 통과한다** — 현재 누락은 `GET /v1/workers/{id}`와 `POST /v1/hosts/register`이며,
+전자는 secret을 담은 `endpoint` 필드를 노출하고 후자는 기존 Host 레코드를 덮어쓴다. 또한 Cloudflare
+Access 전용 배포에서 principal→capability 매핑이 없으면 인증을 통과한 모든 주체가 전체 capability를
+받는다(운영 배포에는 이 매핑을 설정할 경로가 아직 없다).
+
+재인증·break-glass·감사와 secret 관리 권한 분리, 그리고 위 두 fail-open의 불변식은
+[Authorization·Project Scope·감사](../security/authorization-and-audit.md)의 목표이며 현재 보장으로
 해석하면 안 된다.
+
+목표 principal, capability, Project scope와 Worker self binding은
+[Authorization·Project Scope·감사](../security/authorization-and-audit.md)가 정본이다.
 
 ## 호환성과 오류
 

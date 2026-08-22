@@ -221,7 +221,7 @@ last_verified: "2026-08-15"
   - 마크다운 기술 문서 작성 시 Mermaid 다이어그램 및 벡터 SVG 적극 활용 지침 수립.
   - 대형/재사용 시각 에셋을 `docs/assets/diagrams/<domain>/` 디렉토리에 체계적으로 저장 및 상대경로로 참조하는 규약 반영.
   - `~/.config/grok-fleet/skills/markdown-visual-expert.md` 및 `.agents/skills/markdown-visual-expert/SKILL.md` 생성.
-  - Gemini/Antigravity 에이전트 지침 진입점 [`GEMINI.md`](file:///Users/yarang/working/tools/grok-fleet-orchestrator/GEMINI.md) 신설 및 `docs/index.md` 색인 등록.
+  - Gemini/Antigravity 에이전트 지침 진입점 [`GEMINI.md`](../GEMINI.md) 신설 및 `docs/index.md` 색인 등록.
 
 - **`fleet-scheduler` 지능형 TaskRouter 및 HeuristicTaskClassifier 구현 (Step 3)**:
   - `crates/fleet-scheduler/src/router.rs` 신설: `TaskRouter` 트레잇 및 14차원 결정론적 휴리스틱 분류기(`HeuristicTaskRouter`) 구현 (비용 $0, 레이턴시 0ms).
@@ -687,3 +687,44 @@ last_verified: "2026-08-15"
 - `apply_llm_proxy_envs`(`grok_process.rs`) 자체는 변경하지 않았다 — `validate()`가 이미 반쪽짜리 조합을 막아준 뒤에만 호출된다는 전제가 성립하므로, subprocess env 주입 로직은 그대로 두고 상위 검증만 추가하는 편이 변경 범위를 좁히고 기존 회귀 테스트(`apply_llm_proxy_envs_sets_grok_and_agy_envs`)를 그대로 재사용할 수 있어 더 안전하다고 판단했다.
 - `WorkerConfig::from_str` 통합 테스트 5건(`llm_proxy_gateway_url_only_is_rejected`, `llm_proxy_api_key_only_is_rejected`, `llm_proxy_gateway_url_without_scheme_is_rejected`, `llm_proxy_valid_combination_parses_ok`, `llm_proxy_section_absent_parses_ok`)을 `config.rs`에 추가 — `validate()`를 직접 호출하지 않고 실제 `worker.toml` 파싱 경로 전체를 거치게 해서, 로드맵 `#53` 완료 게이트(URL-only, key-only, invalid URL, 정상 조합, subprocess 환경변수 회귀 테스트)를 실제 기동 경로 기준으로 충족시켰다.
 - `cargo check --workspace`(`--all-features`, `--no-default-features`), `cargo clippy --all-targets --all-features`(변경 파일 기준 신규 경고 0 — 기존 경고는 `fleet-scheduler`/`fleet-mcp`/`fleet-worker`의 다른 파일에 이미 있던 것과 동일), `cargo test --workspace`(신규 5건 포함 전부 통과) 모두 통과를 확인했다.
+
+## 2026-08-22 — 멀티 에이전트 설계 검토와 로드맵 상태 회귀 3차 복구
+
+- 유형: `lint` + `ingest`
+- 커밋되지 않은 워킹트리(문서 31건 수정 + 신규 4건)를 3인 병렬 감사(코드 대조·적대적 보안·규약)로 검토하고 결과를 [멀티 에이전트 설계 검토 보고서](reviews/multi-agent-design-review-2026-08-22.md)에 남겼다.
+- **회귀 3차 재발 확인·복구**: 워킹트리의 `docs/log.md`·`docs/roadmap/roadmap.md`가 커밋 `df0be43`과 바이트 단위로 동일했다(`git show df0be43:… | diff -`). 즉 `1053160`·`cae6492`·`f31eaee` 세 커밋이 통째로 되돌려진 상태였고, `#53`·`#57`·`#58`·`#59`·`#61`·`#66`·`#71` 일곱 행이 후퇴하고 `#72` 행이 소실됐으며 append-only log 항목 4건(그중 2건이 1·2차 회귀 정정 기록)이 삭제될 상황이었다. `docs/deployment/README.md`도 `af23538` 스냅샷으로 되돌아가 `mcp-clients.md`를 고아화하고 있었다. 세 파일을 HEAD로 복원했다.
+- HEAD에 선재하던 결함도 정리했다: `roadmap.md`의 `#72` 중복 행(완료/대기 2행) 병합, `roadmap/README.md`의 `worker-credential-migration.md` 중복 행 제거, 섹션 헤더 범위 동기화.
+- **신규 영구 ID 4건 등록**: `#73`(capability 행렬 기본 deny 전환 — 미등록 route가 검사 없이 통과하며 현재 `GET /v1/workers/{id}`·`POST /v1/hosts/register`가 누락), `#74`(Cloudflare principal 매핑 fail-closed — 매핑 부재 시 `PermissionKind::all()`을 부여하는데 `fleet-cli`에 매핑 설정 경로가 없어 운영 배포에서 끌 수 없음), `#75`(worker `endpoint`의 `server-key` 평문 전파 차단), `#76`(감사 범위 확장과 상관관계 필드 — 현재 `AuditEvent`는 LLM credential 3개 route에만 존재).
+- 설계 공백 보완: `CancelUnconfirmed`에 출구 전이(`Cancelled`/`PartiallyApplied`/`OutcomeUnknown`)와 재조정 규칙을 정의해 Attempt가 영구 비terminal로 남아 Project archive가 정지하는 경로를 닫았다. external idempotency key 파생식의 "정책 revision"을 제출 시 snapshot 값으로 못 박아 같은 문서 완료 게이트와의 모순을 해소하고 HMAC 키 회전 규칙을 추가했다. `worker-liveness-policy.md`에 "3단계 완료 전까지 `on_demand` 등록을 API가 거절한다"는 중간 상태 fail-closed 규칙을 명문화했다.
+- 코드 대조 정정: `worker-enrollment.md`의 "현재 구현" 절에서 이미 해소된 3개 항목(원문 token 재기록, 오류 문자열의 원문 포함, token 선소비)을 해소 표시로 옮기되 여전히 사실인 `server-key` 평문 전파는 "남은 노출 경계"로 강조했다. `control-plane-security-model.md`의 상태 표, `http-api.md`의 route 표(누락 6건 추가, 단수 `/credential`과 복수 `/credentials` 구분 명시), `mcp-tools.md`의 보안 상태 절을 코드 기준으로 갱신했다.
+- 남은 사실 확인: `config/inventory-from-ssh.yaml`도 같은 되돌림에 포함되어 arm2 호스트 6대를 제거하고 삭제된 `oci-ajou-arm1`을 되살린다. 실제 인스턴스 상태는 저장소 밖 사실이라 판정하지 않고 스테이징에서 보류했다.
+
+## 2026-08-22 — 무인 부트스트랩 가능성 검토와 transport 정본 결정
+
+- 유형: `design` + `ingest`
+- orchestrator·seed worker·추가 호스트가 사용자 간섭 없이 bootstrap될 수 있는지를 3인 병렬 감사(부트스트랩 체인·프로토콜/절차·운영 현실)와 교차검증 1라운드로 검토하고 [무인 부트스트랩 검토](reviews/bootstrap-automation-review-2026-08-22.md)에 정리했다. **결론: 현재 무인 부트스트랩은 불가능하며, 무인화 이전에 이미 운영 중인 fleet을 망가뜨리는 결함이 있다.**
+- **C1(최우선)**: `runner.rs`가 SIGTERM에서 `client.deregister()`를 호출해 `DELETE FROM workers`가 실행되고, `018`의 operational credential과 `005`의 암호화된 LLM 키가 CASCADE로 함께 삭제된다. 재기동 시 영구 401(5초 고정 간격 무한 재시도, 영구 실패 미구분)이며 인증이 필요한 모든 배포가 해당된다 — `runtime.rs`가 무인증 비-loopback bind를 거부하므로 원격 워커가 존재할 수 있는 구성은 전부 인증 모드다. 직관과 반대로 SIGKILL·전원 상실은 무사하고 `systemctl stop`이 파괴적이다. `mem.rs`는 cascade하지 않아 인메모리 테스트가 이 결함을 영원히 통과시킨다.
+- 그 밖의 합의된 차단 지점: `fleet provision`이 만든 worker.toml을 데몬이 fail-closed 거부(프로비저너에 `join` 참조 0건), 인벤토리 모드의 `fleet_worker_bin: None` 하드코딩, `check_prereqs`의 arch 결과 폐기(커밋된 25대 중 7~8대가 arm64), `ssh.rs`의 원격 exit code 무시와 광범위한 `let _ =`/`|| true`, `examples/fleet.env`의 `FLEET_API_TOKENS` 형식이 현재 파서에 거부됨, 최초 admin 토큰의 닭-달걀.
+- **Transport 실태**: 실운영은 리버스 SSH 터널 + orchestrator측 nginx 워커별 라우팅에 의존하는데(`config.rs` 주석이 2026-08-11 24시간 장애까지 기록) 저장소에 터널 자산이 0건이고 `fleet-api`에 `/ws` 라우트도 없으며, 정본 `topology.md`는 오히려 그 방식을 배제하고 있었다. 반면 mTLS 직접 다이얼은 런타임(`MtlsProxy` 배선, 인증서 무중단 회전, 발급 CLI)이 이미 완성되어 있고 PEM 업로드 스텝과 SAN 일관성 규칙만 빠져 있다.
+- **결정 4건**: (1) transport를 mTLS 직접 다이얼로 확정하고 Cloudflare Tunnel·reverse SSH를 지원 토폴로지에서 제외, (2) C1은 자기 deregister 제거로 수정, (3) `fleet provision`이 join을 대행(완전 무인), (4) 이기종 fleet 지원. `topology.md`와 `worker-provisioning.md`를 결정에 맞게 갱신하고 `#77`~`#85`를 순서 근거와 함께 등록했다.
+- 미결로 남긴 것: SSH host-key 정책(`tofu` 기본값 vs runbook의 `strict` 요구), Worker 신뢰 등급(`User=root` 배포본 vs `execution-isolation.md` 정본, LLM 키 평문 배포 vs gateway 경유), 릴리스 태그 정책.
+
+## 2026-08-22 — `#78` graceful shutdown hard-delete 중단, `#77` 배포 예시 정합
+
+- 유형: `implementation` + `verification`
+- **`#78`**: `crates/fleet-worker/src/runner.rs`의 shutdown 경로에서 `client.deregister()` 호출을 제거했다. 이 한 줄이 `DELETE /v1/workers/{id}` → `DELETE FROM workers`를 유발했고, `worker_operational_credentials`(018 CASCADE)와 `worker_credentials`(005 CASCADE, 암호화된 LLM 프로바이더 키)가 함께 삭제됐다. 인증이 구성된 모든 배포에서 `systemctl restart`나 재부팅 한 번으로 워커가 신원과 LLM credential을 영구히 잃고 register가 영구 401(5초 고정 간격 무한 재시도)이 됐다. 역설적으로 SIGKILL·전원 상실은 deregister에 도달하지 않아 무사했다.
+- 대체 수단을 새로 만들지 않았다 — "이 워커는 이제 없다"는 신호는 `fleet-scheduler`의 HealthChecker가 heartbeat timeout으로 Offline 전이와 `WorkerLeft` 이벤트를 내며 비파괴적으로 이미 담당한다. 영구 제거는 관리자의 `DELETE /v1/workers/{id}`만 수행하며, `WorkerClient::deregister` 메서드는 그 관리 경로용으로 유지했다(`delete_worker`의 프로덕션 호출부는 `handlers.rs`의 핸들러 하나뿐).
+- `MemStore::delete_worker`를 PgStore와 동작 일치시켰다: 두 credential 테이블을 함께 제거하고 존재하지 않는 id에 `NotFound`를 반환한다. 이 divergence 때문에 결함이 모든 인메모리 테스트를 통과했으므로, 파리티 자체를 테스트로 고정했다. `config.rs`의 legacy `bootstrap_token` 거부 에러가 안내하던 복구 절차(`fleet workers credential rotate`)는 join을 거치지 않은 워커에 404를 반환하는 막다른 길이어서, 재-join을 안내하도록 문구를 정정했다.
+- **`#77`**: `examples/fleet.env`의 `FLEET_API_TOKENS`가 평면 문자열이라 `parse_scoped_api_tokens`가 거부했다 — 저장소 예시를 그대로 따르면 `fleet serve`가 기동조차 하지 못했다. JSON manifest 형식으로 교체하고 capability 최소권한 안내를 붙였다(`worker:llm_credential:export`는 기본 예시에서 제외). `examples/fleet.service` 주석과, `examples/fleet-worker.service`의 "`fleet provision`이 자동 배포한다"는 잘못된 서술도 정정했다(실제 배포본은 `templates.rs`의 `User=root` 유닛이며 두 형상 일치는 별도 항목).
+- 신규 테스트: `crates/fleet-store/src/mem.rs`의 `delete_worker_cascade_tests`(CASCADE 2종·무관 워커 자산 보존·`NotFound`), `crates/fleet-store/tests/worker_delete_cascade.rs`(동일 계약을 실제 PostgreSQL에서 검증), `crates/fleet-api/tests/verify_env_example.rs`(예시 manifest가 파서와 동일 조건으로 파싱되는지, export capability 미부여).
+- 검증: `DATABASE_URL=postgres://$(whoami)@localhost/fleet_test`로 `worker_delete_cascade` 통과, `cargo check --no-default-features` 통과, `cargo clippy -p fleet-store -p fleet-worker -p fleet-api --all-targets --all-features` 경고 0.
+- 부수 발견(미해결): `worker_operational_credentials.rotation_generation`은 PostgreSQL에 `CHECK (>= 1)`이 있으나 MemStore는 강제하지 않는다. 이번 테스트 작성 중 실제 DB에서만 제약 위반이 나 발견했다 — `#78` 행에 후속으로 기록했다.
+
+## 2026-08-22 — 프로비저닝 인벤토리 사실 확인과 정정
+
+- 유형: `lint` + `ingest`
+- 앞선 항목("멀티 에이전트 설계 검토와 로드맵 상태 회귀 3차 복구")에서 `config/inventory-from-ssh.yaml`이 로드맵·log와 같은 스냅샷 되돌림에 포함된 것으로 보고 보류했으나, `df0be43`과 대조한 결과 **다른 파일이었다** — 되돌림이 아니라 별개 편집이었고 그 내용이 옳았다. 사용자 확인으로 두 사실을 확정했다.
+- **arm2 6대(`oci-yarang-arm2`·`oci-ajou-arm2`·`oci-fcoinfup-arm2`·`oci-cyrus-arm2`·`oci-boom-arm2`·`oci-bok-arm2`)는 리소스 사유로 영구 삭제**됐다. 재생성 계획이 없으므로 인벤토리에서 제거하고 파일 상단 이력에 남겼다. HEAD 주석의 "arm2는 swuniv-chatbot을 서비스 중이라 유지"는 더 이상 유효하지 않다.
+- **`oci-ajou-arm1`은 운영 중**이다. 커밋 `50ce018`("remove terminated oci-ajou-arm1")의 terminate 판단이 사실과 달랐으므로 항목을 되돌리고 주석을 정정했다.
+- **`oci-yarang-arm1`은 현재 중지 상태이며 2026-09에 복구 예정**이다. 인벤토리에 남기되 복구 전에는 프로비저닝이 SSH 연결 실패로 끝난다는 주석을 달았다. `#79`(원격 실패 관측)와 `#81`(arch 감지) 이전에는 이런 호스트의 실패가 원인 불명으로만 남는다.
+- 결과: 워커 30대 → 25대, arm64 7대(`oci-*-arm1` 계열). `#81`의 arm64 수치를 "7~8대"에서 실측 7대로 정정했다. `docs/credentials/registry.md`의 2026-08-20 `oci-yarangdev-arm2` terminate 기록은 이번 6대와 무관한 별개 사건이라 그대로 둔다.

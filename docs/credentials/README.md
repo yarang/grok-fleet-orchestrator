@@ -18,28 +18,48 @@ last_verified: "2026-08-15"
 1. **평문 시크릿은 절대 git에 커밋하지 않는다.** 이 저장소(`docs/credentials/`)에는
    시크릿의 **메타데이터만** 기록한다 — 이름, 목적, 저장 위치, 형식, 생성일, 회전 주기,
    소비자(어떤 서비스가 쓰는가). 값 자체는 절대 여기 적지 않는다.
-2. **저장 위치는 호스트의 `/etc/fleet/`(또는 하위 `secrets/`) 아래로 통일한다.**
+2. **Fleet runtime credential의 authority는 Security Manager다.** Project·Agent·TaskAttempt가
+   쓰는 credential은 설정 파일이나 Git이 아니라 Security Manager의 encrypted backend에만 둔다.
+   Orchestrator는 credential reference와 policy만 다루며 원문을 복호화·export하지 않는다.
+3. **호스트 전용 bootstrap/부속 서비스 설정은 `/etc/fleet/` 아래로 통일한다.**
    이미 존재하던 관례(`arm2:/etc/fleet/master.key`, `arm2:/etc/fleet/fleet.env`,
    `ec1:/etc/fleet/worker.toml`)를 그대로 따르고, fleet 자체 크레이트가 관리하지 않는
    부속 서비스(wiki-mcp, 향후 추가될 도구)의 시크릿은 `/etc/fleet/secrets/<서비스명>.env`에
    둔다.
-3. **권한은 최소화한다.** `root:root 600`을 기본으로 한다. systemd `EnvironmentFile=`은
+4. **권한은 최소화한다.** `root:root 600`을 기본으로 한다. systemd `EnvironmentFile=`은
    PID 1(root)이 읽어서 자식 프로세스에 주입하므로, 서비스가 어떤 사용자로 도는지와
    무관하게 파일 자체는 root 전용으로 잠글 수 있다 — 서비스 계정에 read 권한을 별도로
    줄 필요가 없다.
-4. **새 시크릿을 만들면 `registry.md`에 append한다.** 사람이든 에이전트든 예외 없음.
+5. **새 시크릿을 만들면 `registry.md`에 append한다.** 사람이든 에이전트든 예외 없음.
    기록 없이 만들어진 시크릿은 다음 사람(혹은 다음 세션의 나 자신)이 존재를 모른 채
    방치되거나 중복 생성된다 — 이번에 wiki-mcp 키를 즉흥적으로 만들었다가 이 문제를
    지적받은 것이 이 문서의 계기.
-5. **워커 LLM API 키(grok-build 모델 등)는 예외 — 이미 전용 시스템이 있다.**
+6. **워커 LLM API 키(grok-build 모델 등)는 Security Manager로 이관 대상이다.**
    [`fleet-credentials`](../../crates/fleet-credentials/src/lib.rs) 크레이트가
    AES-256-GCM으로 암호화해 Postgres `worker_credentials` 테이블에 저장하고, 마스터 키로만
    복호화한다. 이 문서의 파일 기반 규칙은 **fleet-credentials가 다루지 않는** 시크릿
    (제3자 API 토큰, 부속 서비스 bearer 키, SSH 키 등)에 적용된다.
-6. **세션 중 사용자가 채팅으로 붙여준 토큰은 기본적으로 무저장(ephemeral)이다.**
+7. **세션 중 사용자가 채팅으로 붙여준 토큰은 기본적으로 무저장(ephemeral)이다.**
    작업에 필요한 순간에만 임시 파일(스크래치패드, 권한 600)에 두고 작업 종료 즉시 삭제한다.
    반복적으로 필요한 시크릿이라면 사용자에게 영구 저장 여부를 먼저 확인하고,
    동의하면 위 2번 규칙에 따라 호스트에 배치한 뒤 `registry.md`에 기록한다.
+
+## Fleet Security Manager 계약
+
+Security Manager는 credential metadata·scope·revision·감사를 관리하고, 암호문 backend를
+교체 가능하게 캡슐화한다. 초기 backend가 Postgres여도 Fleet DB를 직접 읽는 API는 만들지 않는다.
+
+- credential 목록에는 `credential_id`, 종류, Project scope, revision, 상태, fingerprint/last4만
+  표시한다.
+- Project → Agent/Tool → Attempt의 grant는 상위 scope의 부분집합만 허용한다.
+- Worker는 mTLS identity와 Attempt-bound one-time grant로만 전달을 요청한다.
+- 전달 원문은 Agent process의 `tmpfs` mount 또는 file descriptor에서만 잠시 존재하며, process·lease
+  종료 때 제거한다.
+- backend 교체 또는 외부 provider 연동 시 Security Manager가 Fleet revision과 backend version을
+  reconcile한다. 불일치면 `Unavailable`으로 fail-closed한다.
+
+상세 권한·전달 규칙은 [Control Plane 보안 모델](../security/control-plane-security-model.md)의
+`시크릿 전달` 절이 정본이다.
 
 ## 회전(rotation)
 

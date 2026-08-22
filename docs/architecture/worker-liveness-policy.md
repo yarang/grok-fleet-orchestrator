@@ -4,12 +4,16 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/worker-liveness-policy.md"
-last_verified: "2026-08-16"
+last_verified: "2026-08-17"
 ---
 
 # Worker Liveness와 선택적 Heartbeat 정책
 
 ## 결정
+
+Worker는 Host에서 지속 실행되는 Fleet daemon이며, 기본 운영 모델은 Host당 하나다. Task 완료나 Agent process 종료가 Worker daemon
+종료를 뜻하지 않는다. Agent process의 ephemeral/WarmIdle lifecycle과 durable context는
+[Entity placement & context](entity-placement-and-context.md)가 소유한다.
 
 정기 heartbeat는 필수가 아니다. Worker별 `liveness_mode`를 명시하고, 기본값은
 기존 호환성을 위한 `periodic`으로 둔다. 대규모·저활성 Fleet는 `on_demand`를
@@ -43,6 +47,10 @@ polling으로 전달된다. 따라서 별도 control stream 또는 bounded comma
 전에는 Agent를 호스팅하는 Worker에 `on_demand`를 적용할 수 없다. 이는 heartbeat를
 단순히 끄는 기능이 아니라 control plane 전달 방식을 함께 바꾸는 작업이다.
 
+WarmIdle의 execution lease 갱신과 self-fencing은 Worker liveness heartbeat와 다른 control channel
+계약이다. `on_demand`를 허용하려면 Worker가 idle이어도 lease 만료·revoke·drain 명령을 받을 수 있는
+bounded control stream 또는 poll이 필요하다.
+
 ## 설정 및 상태 모델
 
 `[worker]`에 아래 값을 추가한다.
@@ -50,7 +58,7 @@ polling으로 전달된다. 따라서 별도 control stream 또는 bounded comma
 ```toml
 # 기존 배포와 호환되는 기본값
 liveness_mode = "periodic" # "periodic" | "on_demand"
-heartbeat_interval_secs = 60 # periodic일 때만 사용
+heartbeat_interval_secs = 15 # 현재 기본값; periodic일 때만 사용
 ```
 
 등록 요청, `Worker` 도메인 모델, DB에는 `liveness_mode`를 저장한다. Worker가 재등록할
@@ -66,10 +74,26 @@ register, 성공한 probe, command ack, task result를 기록한다.
 - monitoring은 on-demand Worker를 `Unknown/Unchecked`로 표시할 수 있지만, 근거 없이 `Online`으로 표시하지 않는다.
 - 고가용성 판단은 지금의 Single Active Primary + Cold Standby 모델에 종속된다. probe session을 두 Orchestrator가 동시에 소유하지 않는다.
 
+## 중간 상태의 fail-closed 규칙
+
+구현 순서는 1→5이지만, **2단계까지만 구현된 상태에서 `on_demand`를 실제로 허용하면 안 된다.**
+현재 코드는 HealthChecker가 `on_demand` Worker를 skip하지만(2단계) DB `status`는 join 시점의
+`Online`으로 남고, selector는 `Online`만 후보로 뽑는다. 3단계 probe가 없으므로 **죽은 Worker에
+task가 계속 배정되고 UI는 이를 `Online`으로 표시한다** — 위 불변식 "근거 없이 `Online`으로
+표시하지 않는다"를 코드가 정면으로 위반하는 상태다.
+
+따라서 3단계가 완료되기 전까지 API는 `liveness_mode = "on_demand"` 등록 요청을 거절한다
+(`422`). worker.toml 주석이나 문서 경고는 게이트가 아니다. 아울러 `WorkerStatus`에는 현재
+`Unchecked`/`Unknown` 값이 없어 이 설계가 요구하는 상태를 표현할 타입 자체가 없으므로,
+`Unchecked` 도입과 selector 제외가 3단계의 선행 조건이다.
+
 ## 구현 순서와 완료 기준
 
 1. `WorkerLivenessMode` enum, migration, register/API/OpenAPI/worker.toml을 추가한다.
+   **동시에 3단계 완료 전까지 `on_demand` 등록을 API에서 거절한다.**
 2. periodic loop를 mode 조건으로 시작하고 HealthChecker가 on-demand Worker를 skip한다.
-3. transport에 bounded ACP probe를 추가하고 dispatcher가 on-demand dispatch 전에 호출한다.
+3. `WorkerStatus::Unchecked`를 추가해 selector에서 제외하고, transport에 bounded ACP probe를
+   추가해 dispatcher가 on-demand dispatch 전에 호출한다. 이 단계 완료 시점에 1단계의 등록 거절을
+   해제한다.
 4. 상태·이벤트·대시보드에 `last_activity_at`과 probe 결과를 기록한다.
 5. 1,000 idle on-demand Worker가 heartbeat 요청 0건을 보내는 테스트와, 죽은 Worker가 probe 실패 뒤 dispatch되지 않는 테스트를 통과한다.

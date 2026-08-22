@@ -91,6 +91,7 @@ last_verified: "2026-08-17"
 |---|---|---|---|
 | [`governance/documentation-policy.md`](./governance/documentation-policy.md) | 문서 도메인·정본 관계·메타데이터·링크·부기 원칙 | 🟢 정본 | 2026-08-17 |
 | [`governance/documentation-rewrite-guide.md`](./governance/documentation-rewrite-guide.md) | 대규모 문서 재작성·이동·폐기 절차와 완료 게이트 | 🟢 정본 | 2026-08-17 |
+| [`governance/design-document-reading-and-judgment.md`](./governance/design-document-reading-and-judgment.md) | 설계 문서의 권위·현재 구현·실패 경로를 구분해 판단하는 공통 방법 | 🟢 정본 | 2026-08-18 |
 | [`governance/skills.md`](./governance/skills.md) | Fleet Skill 시스템 사용 및 작성 가이드 | 🟢 정본 | 2026-08-16 |
 | [`reviews/README.md`](./reviews/README.md) | 비교·감사·대안·논의 부기 문서의 별도 진입점 | 🔵 사본 — 정본 근거 보관 | 2026-08-17 |
 

@@ -21,7 +21,8 @@ last_verified: "2026-08-17"
 조회 시점과 실제 revision/hash를 attempt에 기록한다. Project constitution과 사용자 입력은 출처를
 구분해 포함하며, 사용자 입력이 시스템 규칙·권한·tool allow-list를 바꿀 수 없다.
 
-Tool binding은 [도구 카탈로그](tool-catalog.md)의 허용된 식별자와 capability만 참조한다. prompt,
+Tool/Skill의 catalog → Project grant → Agent binding → Task request → Attempt snapshot 우선순위는
+[배치·맥락 계약](../entity-placement-and-context.md)이 정본이다. Tool binding은 [도구 카탈로그](tool-catalog.md)의 허용된 식별자와 capability만 참조한다. prompt,
 Skill, tool, runtime revision 중 하나가 바뀌면 기존 attempt를 변형하지 않고 새 attempt를 만든다.
 
 ## 구현 게이트

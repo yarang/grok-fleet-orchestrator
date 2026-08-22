@@ -18,7 +18,8 @@ owners: ["planning"]
 
 | 문서 | 책임 | Authority | 구현·검증 상태 |
 |---|---|---|---|
-| [구현 로드맵](roadmap.md) | 영구 작업 ID, 활성 구현 순서, 상태, 정본 링크와 완료 게이트 | canonical | partial · code-checked |
+| [구현 로드맵](roadmap.md) | 영구 작업 ID, 단계별 increment, 상태, 정본 링크와 완료 게이트 | canonical | partial · code-checked |
+| [Worker credential 전환](worker-credential-migration.md) | Worker enrollment·credential의 10단계 점진 전환과 legacy 제거 gate | canonical | in-progress |
 
 Architecture는 “어떻게 동작해야 하는가”, Roadmap은 “무엇을 언제 구현하고 언제 완료로
 판정하는가”에 답한다. 상세 설계, 비교 분석, 회고, 테스트 개수와 운영 명령은 Roadmap에 복제하지

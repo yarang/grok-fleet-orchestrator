@@ -25,6 +25,8 @@ owners: ["documentation-governance"]
 | [`system-entities-critique.md`](./system-entities-critique.md) | 엔티티 매핑의 동시성·격리·비용 대안 검토 |
 | [`entity-lifecycle-consistency-review.md`](./entity-lifecycle-consistency-review.md) | Project·Task·Agent lifecycle 정합성 검토 기록 |
 | [`feature-feasibility-testing.md`](./feature-feasibility-testing.md) | 드레인·이관·Skill·다중 Agent 기능의 feasibility 검토 |
+| [`multi-agent-design-review-2026-08-22.md`](./multi-agent-design-review-2026-08-22.md) | 워킹트리 설계 변경의 코드 대조·적대적 감사·규약 검토와 `#73`~`#76` 도출 |
+| [`bootstrap-automation-review-2026-08-22.md`](./bootstrap-automation-review-2026-08-22.md) | orchestrator·seed worker·추가 호스트의 무인 부트스트랩 가능성 감사, transport 결정과 `#77`~`#85` 도출 |
 
 새 review는 대상 정본, 비교 근거, 결정 결과, 정본 반영 링크를 적는다. 설계 규칙이나 운영
 절차를 여기서 새로 정의하지 않는다.

@@ -29,6 +29,8 @@ owners: ["operations"]
 
 health checker, stale-task reconciliation, CircuitBreaker 동기화는 기본 활성화 경로다. 서비스 재시작은
 진행 중 TaskAttempt의 결과를 보장하지 않으므로, 중단 전 실행 중인 작업과 부작용을 확인한다.
+desired/observed 상태, reconciliation의 자동 범위, alert와 운영자 action은
+[관측성·재조정·장애 복구 계약](../architecture/observability-and-reconciliation.md)이 정본이다.
 
 ## 중단과 장애 초기 대응
 
@@ -50,6 +52,9 @@ health checker, stale-task reconciliation, CircuitBreaker 동기화는 기본 �
 4. Standby를 기동해 새 epoch의 lease를 얻었는지 확인한다.
 5. readiness와 인증된 API를 확인한 뒤 gateway 트래픽을 전환한다.
 6. Worker 재연결, pending/stale dispatched reconciliation, 무해 Task dispatch를 확인한다.
+
+신규 dispatch보다 Worker inventory·Agent lease·delivery grant·effect ledger 관측을 먼저 수행한다.
+`OutcomeUnknown`, `PartiallyApplied`, `ArchiveBlocked`는 해소 증거 없이 재시작·redrive하지 않는다.
 
 실패하면 gateway를 되돌리고, lease 소유자와 fencing 증거를 다시 확인한다. 승격 중에는 두
 인스턴스가 동시에 제어 명령을 내지 않게 한다.

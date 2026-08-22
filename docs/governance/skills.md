@@ -9,6 +9,11 @@ last_verified: "2026-08-16"
 
 # Skills System Guide
 
+> **현재 CLI 범위:** 이 문서는 현재 `fleet tasks submit --skill`의 로컬 파일 주입 동작을
+> 설명한다. Project·Agent 기반 Skill catalog, Project grant, required/optional binding, revision/hash
+> snapshot은 아직 구현 전 목표 계약이며 [Agent 하네스](../architecture/agents/harness-composition.md)와
+> [배치·맥락 계약](../architecture/entity-placement-and-context.md)이 우선한다.
+
 Skills are plain-text prompt files that inject role-specific expertise into a fleet task agent at submission time. By selecting the right skill you get a specialist — not a generalist — focused on your problem.
 
 ---

@@ -39,6 +39,41 @@ flowchart LR
 4. 모든 dispatch attempt와 control command에는 승격마다 증가하는 epoch를 남긴다.
 5. 이전 epoch의 늦은 이벤트는 상태를 변경하지 못한다.
 
+## Agent execution lease와 fencing
+
+Orchestrator lease만으로는 Worker 안의 이전 Agent process를 막지 못한다. 따라서 Agent activation은
+별도의 `worker_execution_lease`를 획득한 뒤에만 가능하다. 이 레코드는 `agent_id`, `worker_id`,
+`attempt_id`, `worker_incarnation`, `lease_generation`, 단조 증가 `fencing_token`, `control_epoch`,
+`state`, `acquired_at`, `renewed_at`, `expires_at`를 가진다.
+
+```mermaid
+sequenceDiagram
+    participant O as "Active Orchestrator"
+    participant D as "Lease store"
+    participant W as "Worker"
+    participant P as "Agent process"
+
+    O->>D: "CAS acquire(agent, worker slot)"
+    D-->>O: "generation + fencing token"
+    O->>W: "StartAgent(token, epoch, incarnation)"
+    W->>W: "reject stale token / epoch"
+    W->>P: "start"
+    W-->>O: "ACK(token, observed process)"
+    O->>D: "CAS Activating → Active"
+```
+
+- Agent당 `Activating|Active|Releasing` lease는 하나뿐이고, Worker slot도 하나의 활성 lease만 가진다.
+- lease 획득·갱신·release는 DB 시간 기준 조건부 갱신이다. slot 수는 Worker의 보고값이 아니라
+  lease row를 기준으로 산정한다.
+- Worker는 마지막으로 수락한 `fencing_token`보다 작은 start/stop/renew, 다른
+  `worker_incarnation`, 더 오래된 control epoch를 거절한다.
+- Worker는 control plane 연결 또는 lease 갱신을 잃으면 새 Task를 시작하지 않고 grace 뒤 해당
+  process를 self-fence/drain한다. 이 동작은 heartbeat 옵션과 독립인 control channel lease다.
+- Start/stop ACK가 유실되면 `OutcomeUnknown`으로 남겨 Worker의 process inventory와 token을
+  관측할 때까지 새 lease·중복 start를 금지한다.
+- Worker 재기동은 새 incarnation을 발급한다. 재기동 뒤 남은 process는 최신 token lease와 일치하지
+  않으면 cleanup하며, 이전 incarnation의 늦은 ACK는 감사만 남기고 상태를 바꾸지 않는다.
+
 ## Lease와 상태 전이
 
 영속 lease는 최소 `cluster_id`, `active_instance_id`, `epoch`, `acquired_at`, `expires_at`,
@@ -71,3 +106,5 @@ stateDiagram-v2
 3. 이전 epoch completion이 최신 상태를 덮지 못하는 테스트
 4. Primary 종료 뒤 수동 승격, Worker 재연결, pending reconciliation E2E 테스트
 5. schema 또는 binary compatibility가 맞지 않는 Standby 기동 거부 테스트
+6. partition 중 Worker self-fencing과 회복 뒤 stale process cleanup E2E 테스트
+7. 동시 slot claim, ACK 유실, Worker reincarnation에서 Agent 중복 process가 생기지 않는 테스트

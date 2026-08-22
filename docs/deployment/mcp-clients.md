@@ -2,7 +2,7 @@
 type: runbook
 authority: canonical
 implementation: partial
-verification: manually-verified
+verification: code-checked
 source: "docs/deployment/mcp-clients.md"
 last_verified: "2026-08-21"
 last_verified_commit: "working-tree"

@@ -59,5 +59,5 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 이유만으로 모든 mutation의 CSRF 검증이나 멱등성을 가정하면 안 된다. 외부 공개 전에는 versioning,
 schema 생성, pagination, CSRF와 idempotency를 별도 호환성 결정으로 확정한다.
 
-인증·세션·RBAC의 목표 정책은 [control-plane security model](../security/control-plane-security-model.md)이
+인증·세션·RBAC의 목표 정책은 [Authorization·Project Scope·감사](../security/authorization-and-audit.md)가
 정본이다. API 표면을 바꿀 때는 이 표, route, schema, handler 테스트를 함께 갱신한다.

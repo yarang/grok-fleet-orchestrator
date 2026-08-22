@@ -2,7 +2,7 @@
 type: implementation-roadmap
 authority: canonical
 implementation: partial
-verification: test-checked
+verification: integration-tested
 source: "docs/roadmap/worker-credential-migration.md"
 last_verified: "2026-08-19"
 owners: ["fleet-api", "fleet-worker", "security"]

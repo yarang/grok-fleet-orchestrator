@@ -54,11 +54,18 @@ Project와 Agent 관리 도구는 제안 계약일 뿐 현재 `tools/list`에 �
 
 ## 보안 상태
 
-현재 stdio MCP `ToolContext`에는 호출 principal, capability, Project scope, 요청 감사 주체가 없다.
-따라서 task 취소, breaker reset, bootstrap token 회수 같은 변경 도구도 도구별 권한 검사를 하지
-않는다. destructive 도구의 `request_id`, 멱등성, precondition도 계약되어 있지 않다.
+현재 launcher는 `FLEET_MCP_CAPABILITIES` allow-list로 노출 도구 자체를 제한하며, 값이 없거나
+비어 있거나 알 수 없으면 stdio 서버가 기동하지 않는다. 이것이 첫 경계다.
+
+그러나 stdio MCP `ToolContext`에는 여전히 호출 principal, Project scope, 요청 감사 주체가 없다.
+따라서 도구 노출 여부는 통제되지만 **호출자별 권한 판정과 감사는 없다**. destructive 도구의
+`request_id`, 멱등성, precondition도 계약되어 있지 않다.
+
+또한 capability 이름이 transport마다 같은 의미를 갖지 않는다. `fleet_reset_worker_breaker`는
+`worker:delete`를 요구하는데, 같은 capability는 HTTP에서 워커 삭제 권한이다. breaker reset만
+허용하려 해도 삭제 권한이 딸려오므로 `worker:operate` 신설이 필요하다.
 
 목표 capability, Project scope, fail-closed 정책은
-[control-plane security model](../security/control-plane-security-model.md)을 따르며, 구현 전에는
+[Authorization·Project Scope·감사](../security/authorization-and-audit.md)를 따른다. 구현 전에는
 도구가 그 정책을 보장한다고 서술하지 않는다. `fleet_list_tasks`의 offset 기반 조회는 snapshot
 consistency, `has_more` 또는 next cursor를 보장하지 않는다.

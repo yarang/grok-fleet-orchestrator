@@ -2,7 +2,7 @@
 type: review
 authority: derived
 implementation: not-applicable
-verification: multi-agent-reviewed
+verification: design-reviewed
 source: "docs/reviews/agent-rewrite-review-2026-08-17.md"
 last_verified: "2026-08-17"
 ---

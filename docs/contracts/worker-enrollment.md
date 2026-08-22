@@ -4,8 +4,8 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/worker-enrollment.md"
-last_verified: "2026-08-17"
-last_verified_commit: "working-tree"
+last_verified: "2026-08-22"
+last_verified_commit: "574feb4"
 owners: ["fleet-api", "fleet-worker"]
 ---
 
@@ -17,25 +17,44 @@ owners: ["fleet-api", "fleet-worker"]
 ## 현재 구현
 
 1. `fleet-worker join`은 bootstrap token을 요청 본문에 넣어 `/v1/workers/join`을 호출한다.
-2. 서버는 token 사용량을 원자적으로 소비하고, 응답으로 생성한 `worker.toml`에 같은 원문 token을
-   다시 기록한다.
-3. Worker daemon은 그 값을 register와 heartbeat의 Bearer 값으로 계속 사용한다.
+   token 원문은 `--token-file <path>`(`-`이면 stdin)로 전달하며, argv/env를 쓰는 `--token`은
+   deprecated다.
+2. 서버는 bootstrap 소비·Worker 생성·operational credential 발급을 **하나의 transaction**으로
+   처리한다(`enroll_worker`; PgStore는 `pool.begin()`, MemStore는 단일 lock 스코프).
+3. 서버는 join 성공 시 `fwo_` operational token을 새로 발급해 응답 `worker.toml`에만 1회 싣고,
+   저장소에는 SHA-256 digest·worker_id·lifecycle metadata만 남긴다. bootstrap token 원문은
+   재기록하지 않는다.
+4. Worker daemon은 `operational_token`을 register/heartbeat/deregister의 Bearer로 사용한다.
+   `worker.toml`의 legacy `[worker] bootstrap_token` 키는 파싱 단계에서 명시적으로 거절한다
+   (자동 마이그레이션 없음).
+5. register/heartbeat/deregister는 credential binding과 요청 대상 worker_id가 다르면 `403`을
+   반환한다(`worker:self` binding).
 
-또한 server는 `agent_endpoint` query의 `server-key` 값을 읽어 join 응답의
-`worker.toml` `[grok].secret`에 평문으로 다시 기록한다. bootstrap token과 이 secret은 현재
-DB·응답·로컬 파일 노출 경계를 만족하지 않는다.
+### 해소된 제한
 
-유효하지 않거나 소진된 bootstrap token을 판별하는 현재 저장소 오류에는 원문 token이 포함되며,
-handler가 그 오류 문자열을 HTTP 응답에 포함할 수 있다. 따라서 현재 노출 경계에는 DB·응답·설정
-파일뿐 아니라 HTTP 오류 응답도 포함한다.
+다음은 `#60`의 1~8단계에서 닫혔다. 상세 근거는 [Worker credential 전환](../roadmap/worker-credential-migration.md).
 
-이 흐름에는 다음 제한이 있다.
+- ~~join 응답에 bootstrap 원문 token을 재기록하고 Bearer로 재사용~~ → operational credential로 대체
+- ~~저장소 오류 문자열에 원문 token 포함~~ → 고정 문자열(`token is exhausted or expired` /
+  `token not found`)만 반환
+- ~~token을 먼저 소비하고 name 존재를 나중에 확인해 중복 name이 유효 token을 소진~~ →
+  단일 transaction rollback
 
-- token 사용량은 join 시 소비될 수 있으나 이후 Bearer 인증은 별도 정적 API token 목록을 사용한다.
+### 남은 노출 경계
+
+- **`agent_endpoint`의 `server-key`가 secret-bearing 정규 필드다.** server는 이 query 값을 읽어
+  join 응답 `worker.toml`의 `[grok].secret`에 평문으로 기록하며, 같은 값이 `workers.endpoint`
+  컬럼에 저장되어 `GET /v1/workers/{id}`, Dashboard `/api/workers`·`/api/events`,
+  MCP `fleet_list_workers` 응답으로 전파된다. `GET /v1/workers/{id}`는 현재 capability 행렬에
+  등록되어 있지 않아 인증만 통과하면 호출되므로(→ [Authorization 계약](../security/authorization-and-audit.md)),
+  워커 A의 operational token 보유자가 워커 B의 ACP secret을 얻어 orchestrator를 우회할 수 있다.
+  이 필드는 redaction 대상이자 목표 계약 6번의 대상이다.
 - join CLI는 Authorization header를 보내지 않으므로 API token 보호 모드에서는 middleware가 join을
-  handler 이전에 거절할 수 있다.
-- server는 token을 먼저 소비하고 같은 Worker name의 존재 여부를 나중에 확인한다. 중복 name
-  요청은 등록 실패와 별개로 유효 token을 소진할 수 있다.
+  handler 이전에 거절할 수 있다(join route는 bootstrap body를 자체 인증 수단으로 처리한다).
+- `fleet provision`(SSH 자동 프로비저닝)은 아직 `/v1/workers/join`과 배선되어 있지 않아
+  legacy `bootstrap_token` 키를 기록한다. 5번의 fail-closed 거절 덕분에 조용히 동작하지는 않지만,
+  프로비저닝된 워커는 `fleet-worker join` 재실행 또는 credential rotate 결과의 수동 반영이 필요하다.
+- mTLS(9단계)와 staging rehearsal(10단계)은 착수 전이다.
 
 | API 인증 설정 | 현재 join CLI | 결과 |
 |---|---|---|
@@ -44,8 +63,8 @@ handler가 그 오류 문자열을 HTTP 응답에 포함할 수 있다. 따라�
 | Cloudflare만 설정 | Cloudflare assertion 미전송 | edge middleware에서 거절 |
 | 둘 다 설정 | 두 header 모두 미전송 | join 불가 |
 
-따라서 현재 흐름은 `partial`이며, 원문 token의 DB·파일 저장과 scoped Worker identity를 해결하지
-않은 상태다.
+따라서 현재 흐름은 `partial`이다. bootstrap 원문 저장과 scoped Worker identity는 해결됐고,
+`server-key` 평문 전파와 provision 배선, mTLS가 남아 있다.
 
 ## 목표 계약
 
@@ -58,6 +77,36 @@ handler가 그 오류 문자열을 HTTP 응답에 포함할 수 있다. 따라�
    전달·보관한다.
 7. Worker name 검증·예약과 bootstrap token 소비를 하나의 transaction으로 처리해 실패 요청이
    token 사용량을 소진하지 않게 한다.
+
+## 확정된 operational credential 전환
+
+bootstrap token은 join 요청에서만 허용한다. join이 성공하면 Orchestrator는 새 `worker_id`에 결합된
+고엔트로피 operational credential을 생성하고, **그 원문을 join 응답에서만 1회** 반환한다. 저장소에는
+`credential_digest`, `worker_id`, `issued_at`, `expires_at`, `revoked_at`, `rotation_generation`만 남긴다.
+
+```mermaid
+sequenceDiagram
+    participant W as "fleet-worker join"
+    participant O as Orchestrator
+    participant S as Credential Store
+
+    W->>O: "bootstrap token + enrollment request"
+    O->>S: "validate name + consume bootstrap + create worker + digest operational credential (transaction)"
+    O-->>W: "worker_id + operational credential (one-time)"
+    W->>W: "0600 worker.toml: operational_token only"
+    W->>O: "register/heartbeat/deregister + Bearer operational credential"
+    O->>S: "digest lookup; worker_id self-binding + revocation/expiry check"
+```
+
+Worker credential principal은 `worker:<worker_id>`이며 `worker:self`만 가진다. register에는
+`existing_worker_id`가 반드시 credential의 worker ID와 같아야 하고, heartbeat/deregister의 path/body
+worker ID도 같아야 한다. 이름·endpoint·labels·capability 변경은 별도 관리 command로 전환하기 전까지
+기존 등록을 덮어쓸 수 없다.
+
+`worker.toml`의 `bootstrap_token`은 제거 대상이다. 호환 기간에도 join 응답은 bootstrap 원문을 쓰지
+않으며, old config는 명시 migration 없이는 operational API 호출에 사용할 수 없다. credential 회전은
+새 token 발급 후 Worker inventory ACK를 확인하고 이전 token을 revoke한다. 재발급/삭제/만료는
+audit event를 남기며 raw value는 어떤 log·event·DB export에도 기록하지 않는다.
 
 token 보관·redaction·mTLS·권한의 정본은
 [control-plane security model](../security/control-plane-security-model.md)이다.
