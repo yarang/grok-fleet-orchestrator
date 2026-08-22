@@ -27,6 +27,7 @@ owners: ["documentation-governance"]
 | [`feature-feasibility-testing.md`](./feature-feasibility-testing.md) | 드레인·이관·Skill·다중 Agent 기능의 feasibility 검토 |
 | [`multi-agent-design-review-2026-08-22.md`](./multi-agent-design-review-2026-08-22.md) | 워킹트리 설계 변경의 코드 대조·적대적 감사·규약 검토와 `#73`~`#76` 도출 |
 | [`bootstrap-automation-review-2026-08-22.md`](./bootstrap-automation-review-2026-08-22.md) | orchestrator·seed worker·추가 호스트의 무인 부트스트랩 가능성 감사, transport 결정과 `#77`~`#85` 도출 |
+| [`ui-management-and-issue-spec-2026-08-22.md`](./ui-management-and-issue-spec-2026-08-22.md) | UI 관리 대상 재해석, AgentTemplate 정본화와 Issue 추적 명세, `#86`~`#92` 도출 |
 
 새 review는 대상 정본, 비교 근거, 결정 결과, 정본 반영 링크를 적는다. 설계 규칙이나 운영
 절차를 여기서 새로 정의하지 않는다.

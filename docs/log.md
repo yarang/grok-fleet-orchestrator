@@ -728,3 +728,27 @@ last_verified: "2026-08-15"
 - **`oci-ajou-arm1`은 운영 중**이다. 커밋 `50ce018`("remove terminated oci-ajou-arm1")의 terminate 판단이 사실과 달랐으므로 항목을 되돌리고 주석을 정정했다.
 - **`oci-yarang-arm1`은 현재 중지 상태이며 2026-09에 복구 예정**이다. 인벤토리에 남기되 복구 전에는 프로비저닝이 SSH 연결 실패로 끝난다는 주석을 달았다. `#79`(원격 실패 관측)와 `#81`(arch 감지) 이전에는 이런 호스트의 실패가 원인 불명으로만 남는다.
 - 결과: 워커 30대 → 25대, arm64 7대(`oci-*-arm1` 계열). `#81`의 arm64 수치를 "7~8대"에서 실측 7대로 정정했다. `docs/credentials/registry.md`의 2026-08-20 `oci-yarangdev-arm2` terminate 기록은 이번 6대와 무관한 별개 사건이라 그대로 둔다.
+
+## 2026-08-22 — UI 관리 대상 재해석과 Issue 추적 명세 설계
+
+- 유형: `design` + `ingest`
+- multi-agent-spec-designer 스킬로 Main Architect + Protocol Specialist + Workflow Specialist 체계를 구성해 UI 관리 대상과 Issue 기능을 설계하고 [명세 검토](reviews/ui-management-and-issue-spec-2026-08-22.md)에 정리했다.
+- **목표 재해석**: 사용자가 제시한 목록(host·project·task·agent·agent_template·issue)이 균질하지 않았다. host/worker/task UI는 이미 구현됐고 project/agent는 `#48`/`#49`가 소유한다. 실제 신규는 둘이다 — `agent_template`은 UI 라우트(`/admin/agent-templates`)·필드(`default_agent_template_id`)·capability(`AgentTemplateManage`)가 여러 문서에 흩어져 있으면서 **소유하는 정본도 로드맵 ID도 없었고**, `issue`는 저장소 전체에 개념이 없었다.
+- 두 전문가 모두 초안을 비준하지 않고 정정했다. 핵심 정정 5건: (1) Agent는 control plane principal이 아니므로 Issue를 직접 열 수 없다 — Worker control stream 보고 → control plane 대리 생성, `project_id`는 저장된 Attempt 행에서 유도(요청 본문 불신), (2) 템플릿을 정체성/불변 revision 2계층으로 분리, (3) Attempt는 revision을 참조하지 않고 본문·hash를 materialize(참조만 두면 retention purge가 `#65` 재현성을 깨뜨림), (4) tool 상승 차단의 판정 시점은 저장이 아니라 Attempt admission(저장 후 Project grant가 좁아지는 경우), (5) 열린 Issue는 archive를 막지 않음(막으면 Agent 생성 Issue 하나로 Project archive 무기한 교착).
+- Issue/Task 경계를 확정했다: 부모-자식이 아닌 join 테이블 연관이며 `tasks`에 `issue_id`를 두지 않는다. `InProgress` Issue 상태를 두지 않는다(비터미널 연관 Task에서 유도 가능하며, 상태로 승격하면 Task 상태를 복제해 두 상태 머신이 경쟁한다). 교착 없음은 불변식 두 개로 강제한다 — Task/Attempt 전이 조건이 `issue.status`를 읽지 않고, Issue close에 Task 상태 선행 조건이 없다. **Task/Attempt 상태 머신은 한 글자도 바뀌지 않는다.**
+- Agent 폭주 방지는 부분 유니크 인덱스(`(project_id, dedup_key) WHERE status IN ('open','triaged')`)를 주 방어선으로 5층을 둔다 — 같은 blocker 10,000회 보고가 Issue 1건 + `occurrence_count`가 된다. dead-letter 자동 생성은 Task당 1건이 아니라 원인별 집계로 "노이즈 대 유실" 딜레마를 해소한다.
+- **신규 결함 3건 발견**(코드로 재확인): `crates/fleet-dashboard`에 중앙 capability 행렬이 없고 핸들러에 `PermissionKind` 검사가 29곳 산재한다 — `#73`은 `/v1`만 고치는데 신규 관리 화면은 대부분 Dashboard 표면에 놓이므로 `#73` 범위에 반영했다. MCP 표면도 동형이다. `ApiError`에 422/428/429가 없어 낙관적 동시성과 rate limit을 표현할 수 없다(`#92` 선행 조건).
+- 신규 정본 2건([AgentTemplate](architecture/agents/agent-template.md), [Issue 추적](architecture/issues.md))을 추가하고 `#86`~`#92`를 순서 근거와 함께 등록했다. 기존 정본 6건에 필요한 변경은 각 항목 착수 시점에 반영하도록 검토 문서에 목록으로 남겼다.
+- 사람 결정 8건(H1~H8)은 추측하지 않고 권고와 함께 남겼다. 가장 시급한 것은 H1 — 템플릿 편집이 사실상 tool 부여이므로 `project-feature-design.md`가 이미 `AgentCreate` 우회 우려로 걸어둔 차단 조건과 같은 질문이다.
+
+## 2026-08-22 — AgentTemplate 편집 권한 결정 (H1)
+
+- 유형: `design`
+- `#86` 착수를 막고 있던 H1(템플릿 편집 권한을 `#48`의 구현 차단 조건 아래 둘 것인가)을 자료 확인 후 결정했다. 확인 과정에서 문제의 성격이 처음 제기됐을 때와 달랐다.
+- **사실 1**: tool 권한 상승은 이미 정본상 불가능하다. `entity-placement-and-context.md`의 우선순위 사슬(`catalog → Project grant → Agent template(subset only) → Task request → snapshot`)과 "Project deny 또는 capability 부족은 Agent template으로 다시 허용할 수 없다"가 이미 canonical이다. Protocol Specialist가 "핵심 보안 불변식"으로 제시한 상승 차단 정리는 새 제안이 아니라 기존 정본의 재확인이었다.
+- **사실 2**: 그러나 `tool-catalog.md`가 "tool binding 변경은 `AgentManage` 권한과 Project 범위 검사를 요구한다"고 이미 정한다. 템플릿의 tool 집합이 Agent tool binding의 출처이므로 무시할 수 없다.
+- **사실 3**: `#48`의 차단 조건은 "자동 Agent provisioning을 통한 `AgentCreate` 우회"를 겨냥한다. 템플릿 편집은 Agent를 만들지 않으므로 다른 메커니즘이며, 같은 차단을 적용하면 과잉이고 `#86`이 무기한 지연된다.
+- **사실 4**: 남는 위험은 prompt authorship인데, `TaskCreate` 보유자가 이미 같은 종류의 힘을 갖는다(Operator 역할이 기본 보유). 다만 템플릿은 지속적이고 다른 사람의 Task에도 적용된다는 비대칭이 있다.
+- **결정 1 — 필드별 게이팅**: `role_prompt`·메타데이터 편집은 `agent_template:update`, `tools`/`skills`/`isolation_class` 편집은 거기에 Agent tool-binding 권한을 추가 요구한다. 정본 충돌 없이 `#86`을 `#48` 승인 없이 진행할 수 있다.
+- **결정 2 — Operator는 `read` + `update`**: tool-binding 권한을 주지 않으므로 실질적으로 prompt 편집만 가능하다. `BuiltinRole::Operator`의 고정 목록에 두 항목을 추가해야 하며, 추가하지 않으면 operator는 아무것도 받지 못한다. admin은 `PermissionKind::all()`로 자동 보유하고 `builtin_roles_cover_all_permissions` 테스트가 이를 강제한다.
+- `agent-template.md`에 "편집 권한의 필드별 게이팅"과 "기본 역할 배정" 절을 추가하고, `#86`·`#92` 완료 게이트와 검토 문서 §8에 반영했다.
