@@ -872,9 +872,7 @@ async fn handle_revoke_bootstrap_token(
             "revoked": true,
         })))
     } else {
-        Ok(schema::tool_error(format!(
-            "bootstrap token not found"
-        )))
+        Ok(schema::tool_error("bootstrap token not found".to_string()))
     }
 }
 

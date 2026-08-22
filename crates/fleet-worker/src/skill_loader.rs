@@ -23,7 +23,7 @@
 //! </TASK>
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::{debug, warn};
 
@@ -42,10 +42,10 @@ fn default_skills_dir() -> PathBuf {
 
 /// 스킬 파일 본문을 반환합니다. YAML frontmatter(`---`)가 있으면 제거합니다.
 fn strip_frontmatter(content: &str) -> &str {
-    if content.starts_with("---") {
+    if let Some(rest) = content.strip_prefix("---") {
         // 두 번째 `---` 이후부터 반환
-        if let Some(end) = content[3..].find("\n---") {
-            return content[3 + end + 4..].trim_start();
+        if let Some(end) = rest.find("\n---") {
+            return rest[end + 4..].trim_start();
         }
     }
     content
@@ -53,7 +53,7 @@ fn strip_frontmatter(content: &str) -> &str {
 
 /// 단일 스킬 파일을 로드합니다.
 /// 파일이 없거나 읽기 오류 시 `None`을 반환합니다 (soft-fail).
-fn load_skill(skills_dir: &PathBuf, name: &str) -> Option<String> {
+fn load_skill(skills_dir: &Path, name: &str) -> Option<String> {
     // `name`에 경로 구분자가 들어오면 무시 (보안)
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         warn!(skill = name, "skill name contains path traversal characters; skipping");
@@ -93,7 +93,7 @@ fn load_skill(skills_dir: &PathBuf, name: &str) -> Option<String> {
 pub fn inject_skills_from_dir(
     prompt: &str,
     skills_required: &[String],
-    skills_dir: &PathBuf,
+    skills_dir: &Path,
 ) -> String {
     if skills_required.is_empty() {
         return prompt.to_string();
@@ -138,7 +138,7 @@ mod tests {
     fn no_skills_returns_original_prompt() {
         let tmp = TempDir::new().unwrap();
         let prompt = "build the project";
-        let result = inject_skills_from_dir(prompt, &[], &tmp.path().to_path_buf());
+        let result = inject_skills_from_dir(prompt, &[], tmp.path());
         assert_eq!(result, prompt);
     }
 
@@ -149,7 +149,7 @@ mod tests {
         let result = inject_skills_from_dir(
             prompt,
             &["nonexistent-skill".to_string()],
-            &tmp.path().to_path_buf(),
+            tmp.path(),
         );
         assert_eq!(result, prompt);
     }
@@ -163,7 +163,7 @@ mod tests {
         let result = inject_skills_from_dir(
             prompt,
             &["rust-expert".to_string()],
-            &tmp.path().to_path_buf(),
+            tmp.path(),
         );
 
         assert!(result.contains("<SKILL: rust-expert>"));
@@ -183,7 +183,7 @@ mod tests {
         let result = inject_skills_from_dir(
             prompt,
             &["sec-audit".to_string()],
-            &tmp.path().to_path_buf(),
+            tmp.path(),
         );
 
         assert!(!result.contains("name: sec-audit"), "frontmatter should be stripped");
@@ -197,7 +197,7 @@ mod tests {
         let result = inject_skills_from_dir(
             prompt,
             &["../etc/passwd".to_string()],
-            &tmp.path().to_path_buf(),
+            tmp.path(),
         );
         // 경로 우회 시도는 soft-fail → 원래 프롬프트 그대로
         assert_eq!(result, prompt);
@@ -213,7 +213,7 @@ mod tests {
         let result = inject_skills_from_dir(
             prompt,
             &["skill-a".to_string(), "skill-b".to_string()],
-            &tmp.path().to_path_buf(),
+            tmp.path(),
         );
 
         assert!(result.contains("<SKILL: skill-a>"));

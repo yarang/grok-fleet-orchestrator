@@ -206,7 +206,7 @@ impl McpServer {
             "tools/list" => Ok(serde_json::to_value(
                 all_tools()
                     .into_iter()
-                    .filter(|tool| self.authorization.permits_tool(&tool.name))
+                    .filter(|tool| self.authorization.permits_tool(tool.name))
                     .collect::<Vec<_>>(),
             )
             .map_err(|e| {

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use fleet_core::{
-    FleetEvent, Task, TaskFilter, TaskId, TaskPriority, TaskRequest, TaskResult, TaskStatus,
+    FleetEvent, Task, TaskFilter, TaskId, TaskRequest, TaskResult, TaskStatus,
     TaskStatusFilter, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 use fleet_store::{PgStore, Store, StoreError};
