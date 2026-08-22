@@ -1,8 +1,11 @@
 # examples/fleet-worker.service
 #
-# fleet-worker 데몬용 systemd 유닛.
-# 이 파일은 `fleet provision` 이 원격 서버에 자동으로 배포하지만,
-# 수동 설치 시 아래와 같이 설정한다.
+# fleet-worker 데몬용 systemd 유닛 (수동 설치용 권장 형상).
+#
+# 주의: `fleet provision` 은 이 파일을 배포하지 **않는다**. 프로비저너는
+# `crates/fleet-provisioner/src/templates.rs` 의 `FLEET_WORKER_UNIT`(User=root,
+# 하드닝 지시자 없음)을 원격에 쓴다. 두 형상을 일치시키는 작업은 로드맵에
+# 등록되어 있다. 아래는 수동 설치 절차다.
 #
 # 사용:
 #   sudo cp examples/fleet-worker.service /etc/systemd/system/fleet-worker.service

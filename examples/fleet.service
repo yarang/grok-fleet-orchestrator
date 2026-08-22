@@ -28,7 +28,7 @@ WorkingDirectory=/var/lib/fleet
 
 # /etc/fleet/fleet.env 파일에서 아래 환경변수를 덮어쓸 수 있다:
 #   DATABASE_URL=postgres://fleet:secret@db.example.com/fleet
-#   FLEET_API_TOKENS=token1,token2
+#   FLEET_API_TOKENS=[{"principal_id":"ops-cli","token":"...","capabilities":["worker:list"]}]
 #   FLEET_HTTP_BIND=0.0.0.0:8081
 #   FLEET_DASHBOARD_BIND=0.0.0.0:8082
 #   RUST_LOG=fleet=info,sqlx=warn
