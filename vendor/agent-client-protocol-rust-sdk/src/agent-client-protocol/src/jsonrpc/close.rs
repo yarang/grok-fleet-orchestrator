@@ -29,11 +29,15 @@ pub trait HandleConnectionClose<Counterpart: Role>: Send {
 pub struct NullClose;
 
 impl<Counterpart: Role> HandleConnectionClose<Counterpart> for NullClose {
-    async fn handle_connection_close(
+    // 트레이트 정의(`HandleConnectionClose::handle_connection_close`)는 `async fn`이
+    // 아니라 `-> impl Future<...> + Send`라, await하는 게 없는 이 구현은 async fn
+    // 대신 std::future::ready로 바로 완료된 Future를 반환하는 편이 더 정확하다
+    // (clippy::unused_async).
+    fn handle_connection_close(
         self,
         _connection: ConnectionTo<Counterpart>,
-    ) -> Result<(), crate::Error> {
-        Ok(())
+    ) -> impl Future<Output = Result<(), crate::Error>> + Send {
+        std::future::ready(Ok(()))
     }
 }
 

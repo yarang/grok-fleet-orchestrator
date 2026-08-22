@@ -25,15 +25,19 @@ impl<Counterpart: Role> HandleDispatchFrom<Counterpart> for NullHandler {
         "(null)"
     }
 
-    async fn handle_dispatch_from(
+    // 트레이트 정의(`HandleDispatchFrom::handle_dispatch_from`, jsonrpc.rs)는
+    // `async fn`이 아니라 `-> impl Future<...> + Send`라, await하는 게 없는 이
+    // 구현은 async fn 대신 std::future::ready로 바로 완료된 Future를 반환하는
+    // 편이 더 정확하다 (clippy::unused_async).
+    fn handle_dispatch_from(
         &mut self,
         message: Dispatch,
         _cx: ConnectionTo<Counterpart>,
-    ) -> Result<Handled<Dispatch>, crate::Error> {
-        Ok(Handled::No {
+    ) -> impl std::future::Future<Output = Result<Handled<Dispatch>, crate::Error>> + Send {
+        std::future::ready(Ok(Handled::No {
             message,
             retry: false,
-        })
+        }))
     }
 }
 
