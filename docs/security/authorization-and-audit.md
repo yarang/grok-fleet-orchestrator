@@ -116,15 +116,22 @@ LLM credential 삭제를 흡수한 사고의 재발 방지).
 "권한 검사 불필요"가 아니라 "아직 판정되지 않음"이며, 판정되지 않은 요청을 통과시키면 인증만
 통과한 임의 principal이 그 경로를 호출한다.
 
-현재 HTTP 구현은 이 불변식과 **반대로** 동작한다. `crates/fleet-api/src/app.rs`의
-`authorize_http_endpoint`는 `required_capability`가 `None`을 반환하면 `Ok(())`로 통과시킨다.
-그 결과 행렬에 등록되지 않은 `GET /v1/workers/{id}`와 `POST /v1/hosts/register`가 capability 검사
-없이 호출된다 — 전자는 secret을 담은 `endpoint` 필드를 노출하고(아래 참조), 후자는 기존 Host의
-`ssh_host`/`ssh_user`/`status`/`worker_id`를 덮어쓴다. 같은 부류의 누락이 `#58`·`#66`에서 이미
-두 번 발생했으므로, 개별 route 추가가 아니라 기본값 자체를 deny로 뒤집어야 한다.
+**`#73`(2026-08-23)로 해소됐다.** `authorize_http_endpoint`는 이제 `required_capability`가
+`None`을 반환하면 `403`을 반환한다. `/health`와 `POST /workers/join`(body의 bootstrap token이
+자체 인증 수단)만 함수 안에서 명시적으로 허용한다. 과거 누락이었던 `GET /v1/workers/{id}`
+(`worker:list`)와 `POST /v1/hosts/register`(`host:provision`)는 이 전환과 함께 행렬에 등록됐다.
 
-전환 순서: (1) 기본 deny로 전환, (2) capability 없이 호출 가능한 route를 명시 allow-list
-(`/health` 등)로 열거, (3) 행렬 커버리지 테스트를 route 등록의 완료 게이트로 고정.
+`crates/fleet-api/src/app.rs`의 `capability_matrix_covers_router_routes`(router에 실제 등록된
+모든 (method, path) 조합이 capability를 가짐을 확인)와
+`authorize_http_endpoint_denies_by_default_for_any_unmatched_route`(임의의 미등록 조합이 항상
+403임을 함수 수준에서 고정)가 같은 결함의 세 번째 재발을 막는다. 다만 두 테스트 모두 `build_app`의
+route 목록을 손으로 병행 유지한다 — 새 route를 추가하면서 이 목록에 반영하지 않으면 커버리지
+테스트는 통과하지만 실제로는 놓친다. axum Router의 런타임 route 열거로 이 목록 자체를 도출하는
+것은 이 항목의 범위 밖으로 남긴다.
+
+Dashboard `/api`와 MCP 표면에는 같은 불변식이 아직 없다 — `crates/fleet-dashboard`에는 중앙
+capability 행렬이 없고 핸들러에 `PermissionKind` 검사가 산재해 있다. `#86`~`#93`의 관리 화면이
+그 표면에 놓이므로 `#92`가 이를 다룬다.
 
 ### 매핑되지 않은 principal의 capability
 

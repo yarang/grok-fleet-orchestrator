@@ -775,3 +775,15 @@ last_verified: "2026-08-15"
 - **권고: 단계적 Model C** (트래커가 상태를 소유하고 roadmap.md는 생성물). 결정적 논거는 **정책이 이미 Model C를 요구한다**는 것이다 — 갱신 규약이 roadmap 행의 역할을 "포인터와 게이트"로 정한 순간 2,506자 행과 `이 행` 정본 7건은 형식이 정책을 강제하지 못해 생긴 드리프트이며, 정본 링크를 필수 필드로 만들면 구조적으로 막힌다. 생성 파일을 git에 커밋하므로 오프라인 가시성과 diff 리뷰도 유지된다.
 - 4단계 이행 순서를 정했다: (1) `#88`·`#93`을 Model B 형태로 먼저 구현해 부트스트랩 공백을 정직하게 인정, (2) 스키마 안정 후 roadmap 행 스키마의 표현 가능성 검증(특히 정본 링크 필수화로 `이 행` 관행 차단), (3) 렌더러 도입과 생성물 전환, (4) 보존 레지스트리(`#1`~`#47`)는 스키마가 다르고 변경되지 않으므로 이주하지 않는다.
 - `issues.md`의 미결 절을 결론으로 교체했다 — `#88`·`#93` 범위에서 트래커는 roadmap을 대체하지 않고 실무 단위만 다룬다.
+
+## 2026-08-23 — `#73` HTTP capability 행렬 기본 deny 전환
+
+- 유형: `implementation` + `verification`
+- `crates/fleet-api/src/app.rs`의 `authorize_http_endpoint`가 `required_capability`의 `None`을 통과가 아니라 `403`으로 처리하도록 기본값을 뒤집었다. `/health`와 `POST /workers/join`(body의 bootstrap token이 자체 인증 수단)만 함수 안에서 명시적으로 허용한다. `#58`·`#66`에서 두 번 반복된 "행렬 미등록 = 허용" 결함의 근본 원인을 개별 route 추가가 아니라 기본값 전환으로 닫았다.
+- 누락돼 있던 두 route를 행렬에 등록했다. `GET /v1/workers/{id}`는 신설 `is_worker_by_id_route` 헬퍼(단일 세그먼트만 매칭, LLM credential 하위 경로와 혼동 없음)로 `worker:list`를 요구하게 했다 — 이전에는 응답 `endpoint` 필드에 담긴 워커의 ACP `server-key`가 인증만 통과하면(워커 자신의 operational credential 포함) 무권한 노출됐다. `POST /hosts/register`는 기존 `host:provision` capability를 그대로 매핑했다 — 이전에는 `upsert_host`의 `ON CONFLICT DO UPDATE`가 기존 Host의 `ssh_host`/`ssh_user`/`status`/`worker_id`를 무권한으로 덮어썼다.
+- **구현 중 발견한 회귀**: 기본값을 뒤집자 `allow_no_auth`(개발/테스트 기본값) 경로에서 join 테스트 10건이 403으로 실패했다. `auth_middleware`의 join 우회는 `allow_no_auth == false`일 때만 도달하는 별도 분기라 `allow_no_auth == true`에서는 `authorize_http_endpoint`를 그대로 타는데, 그 안에는 join 예외가 없었다. `POST /workers/join`을 `authorize_http_endpoint` 안에도 명시 허용해 해소했다.
+- **테스트 작성 중 발견한 axum 동작**: 완전히 존재하지 않는 경로(`nest()` 트리에 매칭되는 route가 하나도 없는 경우)는 미들웨어 자체를 타지 않고 axum이 직접 404를 반환한다 — `eprintln` 계측으로 `authorize_http_endpoint`가 호출조차 되지 않음을 확인했다. 보안 문제는 아니다(404든 403이든 막힌 것은 막힌 것). 회귀 가드는 실제로 등록된 route가 행렬에서 빠지는 경우를 잡아야 하므로, 통합 테스트를 "존재하지 않는 깊은 경로"에서 "등록된 경로의 잘못된 메서드"(`PUT /workers`)로 교체했다.
+- 신규 테스트: `crates/fleet-api/src/app.rs`의 `capability_matrix_covers_router_routes`(router에 실제 등록된 모든 (method, path)가 capability를 가짐을 확인하는 병행 유지 목록 — `openapi_yaml_is_valid_and_covers_known_paths`와 같은 관례), `authorize_http_endpoint_denies_by_default_for_any_unmatched_route`(임의의 미등록 조합이 함수 수준에서 항상 403임을 고정), `get_worker_by_id_and_host_register_now_require_capability`, `is_worker_by_id_route_matches_single_segment_only`. `crates/fleet-api/tests/capability_matrix_default_deny.rs`(8건, 실제 HTTP 스택) — 두 route의 403/200 정확성, 워커 자신의 operational credential로 다른 워커·Host를 건드릴 수 없음, `allow_no_auth` 모드에서도 join이 여전히 동작함.
+- 병행 유지 목록의 한계를 문서에 명시했다: `capability_matrix_covers_router_routes`는 `build_app`의 route 목록을 손으로 병행 유지하므로, 새 route를 추가하면서 이 목록에 반영하지 않으면 테스트는 통과하지만 실제로는 놓친다. 진짜 안전장치는 기본값 deny 전환 자체다 — 목록 갱신을 잊어도 새 route는 자동으로 403이지 열려 있지 않다.
+- `http-api.md`와 `authorization-and-audit.md`의 "현재 구현" 서술을 코드 기준으로 갱신하고, Dashboard `/api`(중앙 행렬 부재, 핸들러에 29곳 산재)에는 같은 불변식이 아직 없다는 점과 `#92`가 그 범위를 다룬다는 점을 명시했다.
+- 검증: `cargo test --workspace`(진행 중, 현재까지 실패 0), `cargo check --no-default-features` 통과, `cargo clippy -p fleet-api --all-targets --all-features` 경고 0.

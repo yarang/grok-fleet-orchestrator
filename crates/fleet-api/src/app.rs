@@ -731,15 +731,30 @@ fn llm_credential_route(path: &str) -> Option<LlmCredentialRoute> {
     }
 }
 
+/// `/workers/{id}` 단일 세그먼트 경로인지 판정한다 (`/workers/{id}/credential`,
+/// `/workers/{name}/credentials/...`는 제외). `GET /workers/{id}`의 capability를
+/// LLM credential 하위 자원과 혼동 없이 매칭하기 위한 헬퍼다.
+fn is_worker_by_id_route(path: &str) -> bool {
+    match path.strip_prefix("/workers/") {
+        Some(rest) => !rest.is_empty() && !rest.contains('/'),
+        None => false,
+    }
+}
+
 /// route별 최소 capability 행렬. 경로는 [`normalized_v1_path`] 기준
 /// (`/workers`, `/bootstrap-tokens` …)이다.
 ///
-/// `None`이면 capability 요구가 없는 route다. Worker join은 bootstrap token
-/// 자체가 인증 수단이라 여기서 걸지 않는다.
+/// `None`이면 이 route에 대한 판정이 없다는 뜻이며, **`authorize_http_endpoint`는
+/// 이를 허용이 아니라 거부로 취급한다**(로드맵 `#73`). `/health`와
+/// `POST /workers/join`만 이 함수 밖에서 명시적으로 허용된다 — 전자는 LB
+/// 프로브용, 후자는 bootstrap token 자체가 인증 수단이라 `auth_middleware`가
+/// capability 검사 이전에 우회시킨다.
 ///
-/// **행렬에서 빠진 route는 인증만 통과하면 누구나 호출할 수 있다**(로드맵 #58,
-/// #66에서 두 번 발생한 결함). 새 route를 추가할 때는 반드시 여기에 함께
-/// 등록하고, 아래 `capability_matrix_covers_protected_routes` 테스트를 늘린다.
+/// **행렬에서 빠진 route는 이제 인증만 통과해도 거부된다.** 새 route를 추가할
+/// 때는 반드시 여기에 함께 등록하고, 아래 `capability_matrix_covers_router`
+/// 테스트 목록을 늘린다 — 그러지 않으면 그 route는 항상 403을 반환한다(과거
+/// `#58`/`#66`처럼 조용히 열려 있는 대신, 조용히 막혀 있는 쪽으로 안전하게
+/// 실패한다).
 fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
     let capability = match (method, path) {
         (&Method::GET, "/workers") => PermissionKind::WorkerList,
@@ -767,6 +782,13 @@ fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
         (&Method::PUT, path) | (&Method::DELETE, path) if llm_credential_route(path).is_some() => {
             PermissionKind::WorkerLlmCredentialManage
         }
+        // `GET /workers/{id}` (로드맵 `#73`). 이전에는 행렬에 없어 인증만
+        // 통과하면 누구나 조회할 수 있었고, 응답 `endpoint` 필드에 워커의
+        // ACP `server-key`가 실려 있어 워커 간 시크릿 노출 경로였다
+        // (근본 해결은 `#75`가 그 필드 자체를 없앤다). LLM credential 하위
+        // 경로와 겹치지 않도록 `is_worker_by_id_route`로 단일 세그먼트만
+        // 매칭한다.
+        (&Method::GET, path) if is_worker_by_id_route(path) => PermissionKind::WorkerList,
         (&Method::DELETE, path) if path.starts_with("/workers/") => PermissionKind::WorkerDelete,
         (&Method::POST, "/bootstrap-tokens") => PermissionKind::TokenIssue,
         (&Method::GET, "/bootstrap-tokens") => PermissionKind::TokenList,
@@ -786,6 +808,11 @@ fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
         (&Method::DELETE, path) if path.starts_with("/admin/tokens/") => {
             PermissionKind::AdminTokenManage
         }
+        // `POST /hosts/register` (로드맵 `#73`). 이전에는 행렬에 없어 인증만
+        // 통과하면(워커 자신의 operational credential 포함) 누구나 호출할 수
+        // 있었고, `upsert_host`의 `ON CONFLICT DO UPDATE`가 기존 Host의
+        // `ssh_host`/`ssh_user`/`status`/`worker_id`를 무조건 덮어썼다.
+        (&Method::POST, "/hosts/register") => PermissionKind::HostProvision,
         _ => return None,
     };
     Some(capability)
@@ -793,13 +820,32 @@ fn required_capability(method: &Method, path: &str) -> Option<PermissionKind> {
 
 /// 현재 `/v1` route 표면의 최소 capability 행렬을 강제한다. Worker self
 /// identity와 Project scope는 후속 identity 단계에서 추가한다.
+///
+/// **기본값은 deny다** (로드맵 `#73`). `required_capability`가 `None`을
+/// 반환하는 route — 즉 행렬에 등록되지 않은 route — 는 더 이상 통과시키지
+/// 않는다. `/health`와 `POST /workers/join`만 이 함수 안에서 명시적으로
+/// 허용한다.
+///
+/// join을 여기서도 예외 처리하는 이유: `auth_middleware`는 `allow_no_auth`가
+/// 아닐 때만 join을 이 함수 호출 전에 미리 우회시킨다(join_worker가 body의
+/// bootstrap token으로 자체 인증하므로). `allow_no_auth == true`(개발 기본값)
+/// 경로는 그 우회를 거치지 않고 이 함수를 그대로 호출하므로, 여기서도 명시
+/// 허용하지 않으면 join이 개발 모드에서만 항상 403이 된다.
 fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
     let path = normalized_v1_path(req.uri().path());
     if path == "/health" {
         return Ok(());
     }
-    let Some(required) = required_capability(req.method(), path) else {
+    if req.method() == axum::http::Method::POST && path == "/workers/join" {
         return Ok(());
+    }
+    let Some(required) = required_capability(req.method(), path) else {
+        tracing::warn!(
+            path,
+            method = %req.method(),
+            "HTTP route has no capability-matrix entry — denying by default (#73)"
+        );
+        return Err(StatusCode::FORBIDDEN);
     };
     let authorized = req
         .extensions()
@@ -1185,6 +1231,139 @@ mod tests {
         // join은 bootstrap token 자체가 인증 수단.
         assert_eq!(required_capability(&Method::POST, "/workers/join"), None);
         assert_eq!(required_capability(&Method::GET, "/health"), None);
+    }
+
+    // ── 기본값 deny 전환 (로드맵 #73) ────────────────────────────────────
+
+    #[test]
+    fn get_worker_by_id_and_host_register_now_require_capability() {
+        // 이전에는 행렬에 없어 `authorize_http_endpoint`가 통과시켰다 — 전자는
+        // 워커의 ACP `server-key`를 담은 `endpoint` 필드를 무권한 노출했고,
+        // 후자는 기존 Host 레코드를 무권한으로 덮어썼다.
+        assert_eq!(
+            required_capability(&Method::GET, "/workers/abc-123"),
+            Some(PermissionKind::WorkerList)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/hosts/register"),
+            Some(PermissionKind::HostProvision)
+        );
+        // LLM credential 하위 경로와 혼동되지 않는다.
+        assert_eq!(
+            required_capability(&Method::GET, "/workers/abc-123/credentials"),
+            Some(PermissionKind::WorkerLlmCredentialRead)
+        );
+        assert_ne!(
+            required_capability(&Method::GET, "/workers/abc-123"),
+            required_capability(&Method::GET, "/workers/abc-123/credentials")
+        );
+    }
+
+    #[test]
+    fn is_worker_by_id_route_matches_single_segment_only() {
+        assert!(is_worker_by_id_route("/workers/abc-123"));
+        assert!(!is_worker_by_id_route("/workers/"));
+        assert!(!is_worker_by_id_route("/workers"));
+        assert!(!is_worker_by_id_route("/workers/abc/credential"));
+        assert!(!is_worker_by_id_route("/workers/abc/credentials"));
+        assert!(!is_worker_by_id_route("/workers/abc/credentials/model/export"));
+    }
+
+    /// 함수 수준의 기본값 회귀 가드. `#58`/`#66`이 두 번 반복한 "행렬 미등록 =
+    /// 허용"이 세 번째로 되살아나지 않았음을, 실제 axum 라우팅과 무관하게
+    /// 고정한다 — `authorize_http_endpoint`는 `required_capability`가 `None`을
+    /// 반환하는 어떤 (method, path) 조합에 대해서도 `Err(FORBIDDEN)`을 반환해야
+    /// 한다. `/health`와 `POST /workers/join`만 예외다.
+    #[test]
+    fn authorize_http_endpoint_denies_by_default_for_any_unmatched_route() {
+        for (method, path) in [
+            (Method::GET, "/this-route-does-not-exist"),
+            (Method::POST, "/this-route-does-not-exist"),
+            (Method::PUT, "/workers"),
+            (Method::PATCH, "/workers/abc-123"),
+            // 등록됐지만 이 메서드로는 존재하지 않는 조합.
+            (Method::GET, "/bootstrap-tokens/bt_x"),
+        ] {
+            assert_eq!(
+                required_capability(&method, path),
+                None,
+                "test setup assumption broken: {method} {path} unexpectedly has a capability"
+            );
+            let req = axum::http::Request::builder()
+                .method(method.clone())
+                .uri(format!("/v1{path}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            assert_eq!(
+                authorize_http_endpoint(&req),
+                Err(StatusCode::FORBIDDEN),
+                "{method} {path} must deny by default when unregistered"
+            );
+        }
+
+        // 명시적 예외 둘은 허용된다.
+        let health = axum::http::Request::builder()
+            .method(Method::GET)
+            .uri("/v1/health")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(authorize_http_endpoint(&health), Ok(()));
+
+        let join = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/join")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(authorize_http_endpoint(&join), Ok(()));
+    }
+
+    /// 커버리지 목록. `build_app`의 route 표면과 병행 유지한다(로드맵 #21의
+    /// `openapi_yaml_is_valid_and_covers_known_paths`와 같은 관례) — 새 route를
+    /// `build_app`에 추가할 때 이 목록도 함께 늘린다. 여기 없는 (method, path)
+    /// 조합은 기본값 deny 시험(위)이 잡아내므로, 이 목록의 실질적 목적은
+    /// "router에 실제로 있는 모든 route가 의도적으로 capability를 갖고
+    /// 있다"는 긍정 확인이다.
+    #[test]
+    fn capability_matrix_covers_router_routes() {
+        const ALLOW_LISTED_WITHOUT_CAPABILITY: &[(Method, &str)] =
+            &[(Method::GET, "/health"), (Method::POST, "/workers/join")];
+
+        let routes: &[(Method, &str)] = &[
+            (Method::POST, "/workers/register"),
+            (Method::POST, "/workers/heartbeat"),
+            (Method::GET, "/workers"),
+            (Method::GET, "/workers/w1"),
+            (Method::DELETE, "/workers/w1"),
+            (Method::POST, "/workers/w1/credential/rotate"),
+            (Method::DELETE, "/workers/w1/credential"),
+            (Method::PUT, "/workers/w1/credentials"),
+            (Method::GET, "/workers/w1/credentials"),
+            (Method::GET, "/workers/w1/credentials/model-a/export"),
+            (Method::DELETE, "/workers/w1/credentials/model-a"),
+            (Method::POST, "/bootstrap-tokens"),
+            (Method::GET, "/bootstrap-tokens"),
+            (Method::DELETE, "/bootstrap-tokens/bt_x"),
+            (Method::POST, "/admin/tokens"),
+            (Method::GET, "/admin/tokens"),
+            (Method::POST, "/admin/tokens/svc-a/rotate"),
+            (Method::DELETE, "/admin/tokens/svc-a"),
+            (Method::POST, "/hosts/register"),
+        ];
+
+        for (method, path) in routes {
+            assert!(
+                required_capability(method, path).is_some(),
+                "{method} {path} is a registered route with no capability-matrix entry"
+            );
+        }
+
+        for (method, path) in ALLOW_LISTED_WITHOUT_CAPABILITY {
+            assert_eq!(
+                required_capability(method, path),
+                None,
+                "{method} {path} was expected to be capability-free (allow-listed),                  but the matrix now has an entry — update ALLOW_LISTED_WITHOUT_CAPABILITY                  or this test if that's intentional"
+            );
+        }
     }
 
     // ── Admin API token route capability (로드맵 #72) ────────────────────

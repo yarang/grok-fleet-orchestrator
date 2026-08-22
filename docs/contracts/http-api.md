@@ -58,11 +58,17 @@ reverse proxy 배포에서는 별도의 네트워크·gateway ACL을 검증해�
 `/v1/workers/join`의 현재·목표 인증 차이와 Worker credential 전환은
 [worker enrollment](worker-enrollment.md)에 둔다.
 
-현재 bearer 검사는 route별 capability 행렬(`required_capability`)을 거친다. 다만 **행렬에 등록되지
-않은 route는 검사 없이 통과한다** — 현재 누락은 `GET /v1/workers/{id}`와 `POST /v1/hosts/register`이며,
-전자는 secret을 담은 `endpoint` 필드를 노출하고 후자는 기존 Host 레코드를 덮어쓴다. 또한 Cloudflare
-Access 전용 배포에서 principal→capability 매핑이 없으면 인증을 통과한 모든 주체가 전체 capability를
-받는다(운영 배포에는 이 매핑을 설정할 경로가 아직 없다).
+현재 bearer 검사는 route별 capability 행렬(`required_capability`)을 거친다. **`#73`(2026-08-23)
+이후 행렬에 등록되지 않은 route는 검사 없이 통과하지 않고 기본값이 deny다** — `crates/fleet-api/src/app.rs`의
+`authorize_http_endpoint`가 `required_capability`의 `None`을 `403`으로 처리하며, `/health`와
+`POST /workers/join`(body의 bootstrap token이 자체 인증 수단)만 명시적으로 예외다. 과거 누락이었던
+`GET /v1/workers/{id}`(`worker:list`)와 `POST /v1/hosts/register`(`host:provision`)는 이 전환과 함께
+행렬에 등록됐다. `crates/fleet-api/src/app.rs`의 `capability_matrix_covers_router_routes`와
+`authorize_http_endpoint_denies_by_default_for_any_unmatched_route`가 회귀를 막는다.
+
+Cloudflare Access 전용 배포에서 principal→capability 매핑이 없으면 인증을 통과한 모든 주체가 전체
+capability를 받는 fail-open은 아직 남아 있다(운영 배포에는 이 매핑을 설정할 경로가 아직 없다,
+`#74` 대상).
 
 재인증·break-glass·감사와 secret 관리 권한 분리, 그리고 위 두 fail-open의 불변식은
 [Authorization·Project Scope·감사](../security/authorization-and-audit.md)의 목표이며 현재 보장으로
