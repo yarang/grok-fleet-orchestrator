@@ -28,6 +28,7 @@ owners: ["documentation-governance"]
 | [`multi-agent-design-review-2026-08-22.md`](./multi-agent-design-review-2026-08-22.md) | 워킹트리 설계 변경의 코드 대조·적대적 감사·규약 검토와 `#73`~`#76` 도출 |
 | [`bootstrap-automation-review-2026-08-22.md`](./bootstrap-automation-review-2026-08-22.md) | orchestrator·seed worker·추가 호스트의 무인 부트스트랩 가능성 감사, transport 결정과 `#77`~`#85` 도출 |
 | [`ui-management-and-issue-spec-2026-08-22.md`](./ui-management-and-issue-spec-2026-08-22.md) | UI 관리 대상 재해석, AgentTemplate 정본화와 Issue 추적 명세, `#86`~`#92` 도출 |
+| [`roadmap-vs-issue-tracker-2026-08-23.md`](./roadmap-vs-issue-tracker-2026-08-23.md) | 영구 ID 원장의 소유권 비교 — roadmap.md 유지·대체·생성물 전환 세 모델 |
 
 새 review는 대상 정본, 비교 근거, 결정 결과, 정본 반영 링크를 적는다. 설계 규칙이나 운영
 절차를 여기서 새로 정의하지 않는다.

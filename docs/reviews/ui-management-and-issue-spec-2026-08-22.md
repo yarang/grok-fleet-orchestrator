@@ -145,3 +145,67 @@ control stream 경유", Workflow는 "`worker:self` + `attempt_id` + fencing toke
 
 상세는 [AgentTemplate 계약](../architecture/agents/agent-template.md)의 "편집 권한의 필드별
 게이팅"과 "기본 역할 배정"이 소유한다.
+
+## 9. 프레임 정정과 H2 (2026-08-23)
+
+### 정정 — Issue는 이슈 트래커다
+
+§1~§8은 Issue를 **orchestrator의 인프라 장애 추적**으로 다뤘다. 사용자 의도는
+**프로젝트가 해결해야 할 일감을 관리하는 이슈 트래커**였다. 조정자가 목표를 잘못 해석한 채
+서브 에이전트에게 위임했고, 두 전문가는 주어진 프레임 안에서 정확히 작업했다.
+
+정정이 바꾸지 않는 것 — 두 전문가가 도출한 핵심 경계는 이슈 트래커에도 그대로 유효하다.
+Issue/Task는 부모-자식이 아닌 연관, Task 성공이 Issue를 닫지 않음, `InProgress` 부재,
+교착 없음 불변식 I1·I2, Task/Attempt 상태 머신 불변.
+
+정정이 바꾸는 것:
+
+| 요소 | 조치 |
+|---|---|
+| `#90` dead-letter → Issue 자동 생성 | **취소.** 인프라 장애는 alert이지 프로젝트 일감이 아니다 |
+| kind별 관측 요구 | `#70`이 흡수 |
+| Agent 보고 경로(`#89`) | 유지하되 의미 변경 — "조용한 실패 방지"에서 "발견한 일감 등록"으로 |
+| Agent 착수 | **신규 `#93`** — 아래 참조 |
+
+### H2 조사에서 나온 사실
+
+명세가 제시한 kind별 기본값 표는 실제 코드와 어긋나 있었다.
+
+- `reconcile.rs`의 dead-letter 경로는 `CredentialMissing`과 `WorkerUnavailable` 두 kind만 붙인다.
+  `WorkerError`·`CircuitOpen`은 실행·디스패치 시점 실패라 이 경로를 거치지 않는다.
+- `FailureKind`의 **`Timeout`·`AuthFailed`·`Cancelled` 세 variant는 저장소 어디서도 생성되지
+  않는다** — 죽은 코드다. 명세는 유령 범주에 정책을 붙이고 있었다.
+- 명세가 제안한 "15분 hysteresis"는 대부분 중복이다. `interval=30s`, `stale_after=60s`,
+  `max_dispatch_retries=20`이라 dead-letter까지 최소 약 11분이 걸린다.
+- `/metrics`에는 `phase=failed` 집계만 있고 kind별 분해가 없다.
+
+`#90`이 취소되면서 kind별 기본값 결정은 소멸했고, 위 관측 결함과 죽은 variant 정리는 `#70`으로
+옮겼다.
+
+### 결정 (2026-08-23)
+
+**결정 3 — Agent는 Issue를 읽고 착수한다.** 백로그에서 자동 선택한다. 이것이 설계에 새로 들여오는
+문제는 인가, 동시성, 예산이다.
+
+- **인가는 상태가 소유한다.** `Triaged → ReadyForAgent` 전이는 사람만 하며 신설
+  `issue:approve_agent_work` capability를 요구한다. Agent가 스스로 연 Issue를 스스로 착수하려면
+  반드시 사람의 승인 전이를 거친다. "누가 이 일을 승인했는가"가 Issue 이력에 남는다.
+  [Project 기능 설계](../architecture/project-feature-design.md)가 자동 provisioning의
+  `AgentCreate` 우회를 이유로 건 차단 조건과 같은 종류의 위험이므로 같은 방식으로 명시적 승인
+  지점을 둔다.
+- **claim은 CAS + 만료 lease**다. `#62`의 lease 관례를 재사용하고 새 기구를 만들지 않는다. claim은
+  Issue 상태를 바꾸지 않는다 — 상태를 하나 더 만들면 `InProgress`를 금지한 것과 같은 문제가 된다.
+- **Project는 claim 예산을 갖는다.** 예산이 없으면 무한 생성-소비 루프가 성립한다.
+
+**결정 4 — `#90` 취소.** 위 참조.
+
+### 미결 — roadmap과의 소유권 관계
+
+`docs/roadmap/roadmap.md`가 영구 ID `#1`~`#93`을 마크다운으로 관리하고 있고, 이번 세션에서 그
+파일이 동시 편집으로 **세 번 회귀**했다(`docs/log.md`의 2026-08-20 항목 두 건과 08-22 항목).
+이슈 트래커가 그 원장을 대체하는 물건인지, 아니면 roadmap이 계획 정본으로 남고 트래커는 더 작은
+실무 단위를 다루는지는 **양쪽을 설계해 비교한 뒤 결정**하기로 했다.
+
+비교해야 할 축: 이주 비용, 마이그레이션 경로, 설계 문서와 ID의 결합(roadmap 행이 정본 링크와 완료
+게이트를 담는 현재 구조), DB 장애 시 계획 가시성, 그리고 동시 편집 회귀가 실제로 해소되는지.
+비교 설계는 [Roadmap 원장과 Issue Tracker의 소유권 비교](roadmap-vs-issue-tracker-2026-08-23.md)에서 수행했다 — 권고는 단계적 Model C이며 1단계는 분리 운영이다.

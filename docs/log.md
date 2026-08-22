@@ -752,3 +752,26 @@ last_verified: "2026-08-15"
 - **결정 1 — 필드별 게이팅**: `role_prompt`·메타데이터 편집은 `agent_template:update`, `tools`/`skills`/`isolation_class` 편집은 거기에 Agent tool-binding 권한을 추가 요구한다. 정본 충돌 없이 `#86`을 `#48` 승인 없이 진행할 수 있다.
 - **결정 2 — Operator는 `read` + `update`**: tool-binding 권한을 주지 않으므로 실질적으로 prompt 편집만 가능하다. `BuiltinRole::Operator`의 고정 목록에 두 항목을 추가해야 하며, 추가하지 않으면 operator는 아무것도 받지 못한다. admin은 `PermissionKind::all()`로 자동 보유하고 `builtin_roles_cover_all_permissions` 테스트가 이를 강제한다.
 - `agent-template.md`에 "편집 권한의 필드별 게이팅"과 "기본 역할 배정" 절을 추가하고, `#86`·`#92` 완료 게이트와 검토 문서 §8에 반영했다.
+
+## 2026-08-23 — Issue 기능 프레임 정정과 Agent 착수 경로 결정
+
+- 유형: `design` + `lint`
+- H2(dead-letter 자동 Issue 생성의 kind별 기본값)를 검토하다 **더 근본적인 오해**가 드러났다. 조정자가 Issue를 orchestrator의 인프라 장애 추적으로 해석해 서브 에이전트에게 위임했으나, 사용자 의도는 **프로젝트가 해결해야 할 일감을 관리하는 이슈 트래커**였다. 두 전문가는 주어진 프레임 안에서 정확히 작업했고, 프레임 자체가 틀렸다.
+- 정정이 바꾸지 않은 것: Issue/Task가 부모-자식이 아닌 연관, Task 성공이 Issue를 닫지 않음, `InProgress` 부재, 교착 없음 불변식 I1·I2, Task/Attempt 상태 머신 불변. 이 경계들은 이슈 트래커에도 그대로 유효하다.
+- **H2 조사에서 나온 사실**: 명세의 kind별 기본값 표가 실제 코드와 어긋나 있었다. `reconcile.rs`의 dead-letter 경로는 `CredentialMissing`과 `WorkerUnavailable` 두 kind만 붙이며, `FailureKind`의 `Timeout`·`AuthFailed`·`Cancelled` 세 variant는 **저장소 어디서도 생성되지 않는 죽은 코드**다. 제안된 "15분 hysteresis"도 대부분 중복이었다 — `interval=30s`·`stale_after=60s`·`max_dispatch_retries=20`이라 dead-letter까지 최소 약 11분이 걸린다.
+- **`#90`(dead-letter → Issue 자동 생성) 취소**. 인프라 장애는 alert이지 프로젝트 일감이 아니다. 관측 요구(`/metrics`에 kind별 분해 부재)와 죽은 variant 정리는 `#70`이 흡수했다. ID는 참조 안정성을 위해 재사용하지 않는다.
+- **`#93`(Agent backlog claim) 신설**. Agent가 Issue를 읽고 착수한다는 결정에 따라 인가·동시성·예산 문제가 새로 들어왔다. **인가는 상태가 소유한다** — `Triaged → ReadyForAgent` 전이는 사람만 하며 신설 `issue:approve_agent_work` capability를 요구하므로, Agent가 스스로 연 Issue를 스스로 착수하려면 반드시 사람의 승인을 거친다. `project-feature-design.md`가 자동 provisioning의 `AgentCreate` 우회를 이유로 건 차단 조건과 같은 종류의 위험이라 같은 방식으로 명시적 승인 지점을 뒀다. claim은 `#62`의 lease 관례를 재사용한 CAS + 만료 lease이며 Issue 상태를 바꾸지 않는다(상태를 더 만들면 `InProgress`를 금지한 것과 같은 문제). Project는 claim 예산을 가지며, 없으면 무한 생성-소비 루프가 성립한다.
+- `issues.md`를 이슈 트래커 프레임으로 다시 썼다 — 범위 절 신설, `ReadyForAgent` 상태 추가, Agent 착수 절 신설, `Draining` 중 claim 거절, capability에 `issue:approve_agent_work` 추가.
+- **미결**: `docs/roadmap/roadmap.md`와의 소유권 관계. 영구 ID 원장을 트래커가 대체할지, roadmap이 계획 정본으로 남을지는 양쪽을 설계해 비교한 뒤 결정하기로 했다. roadmap.md가 이번 세션에서 동시 편집으로 세 번 회귀한 이력이 있어 실질적 동기가 있으나, 이주 비용과 DB 장애 시 계획 가시성을 함께 봐야 한다.
+
+## 2026-08-23 — Roadmap 원장과 Issue Tracker의 소유권 비교
+
+- 유형: `design`
+- [Issue 추적](architecture/issues.md)이 미결로 남긴 "영구 ID 원장을 트래커가 대체하는가"를 [비교 설계](reviews/roadmap-vs-issue-tracker-2026-08-23.md)로 다뤘다.
+- **실측**: `roadmap.md`는 194행/41KB에 93개 행(활성 46, 보존 레지스트리 47), 이 파일을 건드린 커밋 73개, 기록된 상태 회귀 3회. 행 길이 중앙값 104자에 **최대 2,506자**이고, 41개 행이 정본을 링크하는 반면 **7개 행은 `이 행`을 정본으로 선언**한다.
+- **관측된 문제 3가지**: (1) 동시 편집 회귀 — 세 번 모두 파일 전체를 다시 쓰는 편집 단위가 원인이며 행 단위 갱신이었다면 발생하지 않았다, (2) 감사 부재 — roadmap을 고치는 데 필요한 권한이 파일 쓰기뿐이고 capability 검사도 구조화된 기록도 없다, (3) 행이 설계 문서가 되어간다 — 정책은 "설계 정본을 먼저 수정한 뒤 순서·게이트만 동기화"라고 이미 옳게 정하는데 형식이 그것을 강제하지 못한다.
+- **현재 형식의 강점도 기록했다**: 오프라인·git에서 읽히고, diff로 리뷰되며, 절 산문이 순서 근거를 담고, 부트스트랩 문제가 없다.
+- 세 모델을 비교했다. **Model A(전면 대체)의 치명적 약점은 DB 장애 시 계획 상실**이다 — Cold Standby 승격이 수동이고(`#63` 미구현) 이번 세션에 "DB를 잃으면 워커 fleet 전체를 수동 재발급해야 한다"는 결함을 발견한 시스템에서, 복구 순서를 담은 계획이 같은 DB에 있으면 안 된다. **Model B(분리)는 관측된 문제를 하나도 풀지 않는다** — 회귀 3회의 원인인 파일 편집이 그대로 남는다.
+- **권고: 단계적 Model C** (트래커가 상태를 소유하고 roadmap.md는 생성물). 결정적 논거는 **정책이 이미 Model C를 요구한다**는 것이다 — 갱신 규약이 roadmap 행의 역할을 "포인터와 게이트"로 정한 순간 2,506자 행과 `이 행` 정본 7건은 형식이 정책을 강제하지 못해 생긴 드리프트이며, 정본 링크를 필수 필드로 만들면 구조적으로 막힌다. 생성 파일을 git에 커밋하므로 오프라인 가시성과 diff 리뷰도 유지된다.
+- 4단계 이행 순서를 정했다: (1) `#88`·`#93`을 Model B 형태로 먼저 구현해 부트스트랩 공백을 정직하게 인정, (2) 스키마 안정 후 roadmap 행 스키마의 표현 가능성 검증(특히 정본 링크 필수화로 `이 행` 관행 차단), (3) 렌더러 도입과 생성물 전환, (4) 보존 레지스트리(`#1`~`#47`)는 스키마가 다르고 변경되지 않으므로 이주하지 않는다.
+- `issues.md`의 미결 절을 결론으로 교체했다 — `#88`·`#93` 범위에서 트래커는 roadmap을 대체하지 않고 실무 단위만 다룬다.
