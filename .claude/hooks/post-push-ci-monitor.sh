@@ -1,7 +1,7 @@
 #!/bin/bash
 # PostToolUse hook — after a `git push` Bash command completes, verify the
 # pushed commit's GitHub Actions run goes green using the
-# github-actions-monitor skill (.gemini/skills/github-actions-monitor).
+# github-actions-monitor skill (.agents/skills/github-actions-monitor).
 #
 # Activated per user request: "이 기능을 활성화하여 모든 github push에 적용하자"
 # (2026-08-21). Runs synchronously inside the hook (PostToolUse's own timeout
@@ -54,7 +54,7 @@ fi
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
-SKILL_SCRIPT="$PROJECT_DIR/.gemini/skills/github-actions-monitor/scripts/monitor_ci.py"
+SKILL_SCRIPT="$PROJECT_DIR/.agents/skills/github-actions-monitor/scripts/monitor_ci.py"
 [ -f "$SKILL_SCRIPT" ] || exit 0
 
 SHA=$(git rev-parse HEAD 2>/dev/null || true)
