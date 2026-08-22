@@ -11,6 +11,13 @@
 #
 #   # 특정 호스트만 프로비저닝 (예: arm1)
 #   fleet provision --inventory config/inventory-from-ssh.yaml --only oci-yarangdev-arm1
+#
+# 인벤토리 이력:
+#   * 2026-08-22 — 모든 계정의 arm2 인스턴스(yarang / ajou / fcoinfup / cyrus /
+#     boom / bok 6대)를 리소스 사유로 **영구 삭제**하고 인벤토리에서 제거했다.
+#     재생성 계획 없음. arm2 이름을 다시 쓰려면 새 인스턴스를 만들어야 한다.
+#   * 2026-08-22 — `oci-ajou-arm1`이 운영 중임을 확인하고 되돌렸다. 커밋
+#     50ce018의 "terminated" 판단은 사실이 아니었다.
 
 defaults:
   user: ubuntu
@@ -59,16 +66,10 @@ workers:
   # ═══════════════════════════════════════════════════════════════════════
   # 2. OCI - yarang 계정
   # ═══════════════════════════════════════════════════════════════════════
+  # oci-yarang-arm1은 현재 중지 상태이며 2026-09에 복구 예정이다. 인벤토리에는
+  # 남겨두되, 복구 전에는 프로비저닝이 SSH 연결 실패로 끝난다.
   - host: oci-yarang-arm1.fcoinfup.com
     name: oci-yarang-arm1
-    ssh_key: ~/CERT/login_oci3
-    labels:
-      arch: arm64
-      group: yarang
-      cloud: oci
-
-  - host: oci-yarang-arm2.fcoinfup.com
-    name: oci-yarang-arm2
     ssh_key: ~/CERT/login_oci3
     labels:
       arch: arm64
@@ -94,10 +95,9 @@ workers:
   # ═══════════════════════════════════════════════════════════════════════
   # 3. OCI - ajou 계정
   # ═══════════════════════════════════════════════════════════════════════
-  # oci-ajou-arm1은 2026-08-19 인스턴스 삭제(중지 아님 — 검토 후 종료 결정)로
-  # 제거됨. arm2는 swuniv-chatbot(RAG+Gemini, nginx 80/443 공개)을 서비스 중이라 유지.
-  - host: oci-ajou-arm2.fcoinfup.com
-    name: oci-ajou-arm2
+  # oci-ajou-arm1은 운영 중이다.
+  - host: oci-ajou-arm1.fcoinfup.com
+    name: oci-ajou-arm1
     ssh_key: ~/CERT/login_oci3
     labels:
       arch: arm64
@@ -131,14 +131,6 @@ workers:
       group: fcoinfup
       cloud: oci
 
-  - host: oci-fcoinfup-arm2.fcoinfup.com
-    name: oci-fcoinfup-arm2
-    ssh_key: ~/CERT/login_oci3
-    labels:
-      arch: arm64
-      group: fcoinfup
-      cloud: oci
-
   - host: oci-fcoinfup-ec1.fcoinfup.com
     name: oci-fcoinfup-ec1
     ssh_key: ~/CERT/login_oci3
@@ -160,14 +152,6 @@ workers:
   # ═══════════════════════════════════════════════════════════════════════
   - host: oci-cyrus-arm1.fcoinfup.com
     name: oci-cyrus-arm1
-    ssh_key: ~/CERT/login_oci3
-    labels:
-      arch: arm64
-      group: cyrus
-      cloud: oci
-
-  - host: oci-cyrus-arm2.fcoinfup.com
-    name: oci-cyrus-arm2
     ssh_key: ~/CERT/login_oci3
     labels:
       arch: arm64
@@ -201,14 +185,6 @@ workers:
       group: booming
       cloud: oci
 
-  - host: oci-boom-arm2.fcoinfup.com
-    name: oci-boom-arm2
-    ssh_key: ~/CERT/login_oci4
-    labels:
-      arch: arm64
-      group: booming
-      cloud: oci
-
   - host: oci-boom-ec1.fcoinfup.com
     name: oci-boom-ec1
     ssh_key: ~/CERT/login_oci4
@@ -230,14 +206,6 @@ workers:
   # ═══════════════════════════════════════════════════════════════════════
   - host: oci-bok-arm1.fcoinfup.com
     name: oci-bok-arm1
-    ssh_key: ~/CERT/login_bok
-    labels:
-      arch: arm64
-      group: bok
-      cloud: oci
-
-  - host: oci-bok-arm2.fcoinfup.com
-    name: oci-bok-arm2
     ssh_key: ~/CERT/login_bok
     labels:
       arch: arm64
