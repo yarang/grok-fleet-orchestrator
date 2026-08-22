@@ -150,7 +150,7 @@ impl Playbook {
                     .map_err(|e| PlaybookError::StepFailed {
                         step: name.into(),
                         host: host.clone(),
-                        source: e,
+                        source: Box::new(e),
                     })?;
 
             if already_applied {
@@ -185,7 +185,7 @@ impl Playbook {
                     return Err(PlaybookError::StepFailed {
                         step: name.into(),
                         host: host.clone(),
-                        source: e,
+                        source: Box::new(e),
                     });
                 }
             }
@@ -304,7 +304,7 @@ mod tests {
                 source,
             } => {
                 assert_eq!(step, "failing");
-                assert!(matches!(source, StepError::UnsupportedOs(_)));
+                assert!(matches!(*source, StepError::UnsupportedOs(_)));
             }
             _ => panic!("unexpected error variant"),
         }

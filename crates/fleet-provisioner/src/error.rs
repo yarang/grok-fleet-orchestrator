@@ -61,6 +61,12 @@ pub enum InventoryError {
 }
 
 /// Playbook orchestration 실패 (여러 스텝/호스트 실패 집계).
+///
+/// `StepFailed`의 `source: StepError`를 Box로 감싼 이유: StepError가 SshError를
+/// 포함하므로(특히 `ssh` 피처의 russh 관련 variant) PlaybookError 자체 크기가 커져
+/// clippy::result_large_err(Err variant가 크면 Result를 값으로 전달할 때 스택 복사
+/// 비용이 커진다는 경고)를 유발한다. Box로 힙에 두면 PlaybookError 크기가
+/// 포인터 하나로 줄어든다.
 #[derive(Debug, Error)]
 pub enum PlaybookError {
     #[error("step '{step}' failed on '{host}': {source}")]
@@ -68,7 +74,7 @@ pub enum PlaybookError {
         step: String,
         host: String,
         #[source]
-        source: StepError,
+        source: Box<StepError>,
     },
     #[error("all retries exhausted for step '{step}' on '{host}'")]
     RetriesExhausted { step: String, host: String },
