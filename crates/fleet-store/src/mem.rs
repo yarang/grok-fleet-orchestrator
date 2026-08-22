@@ -274,8 +274,33 @@ impl Store for MemStore {
         Ok(out[start..end].to_vec())
     }
 
+    /// PgStore와 동작을 일치시킨다 (로드맵 #78).
+    ///
+    /// PostgreSQL에서는 `DELETE FROM workers`가 두 개의 `ON DELETE CASCADE`를
+    /// 함께 발동시킨다 — `worker_operational_credentials`(018, `worker_id` 기준)와
+    /// `worker_credentials`(005, `worker_name` 기준, 암호화된 LLM 키). MemStore가
+    /// worker row만 지우면 두 저장소의 관측 가능한 동작이 갈라지고, 실제로 그
+    /// 차이 때문에 "정상 종료가 워커 신원과 LLM credential을 파괴한다"는 결함이
+    /// 인메모리 테스트를 전부 통과했다. 존재하지 않는 id에 대한 `NotFound`도
+    /// PgStore(`rows_affected() == 0`)와 맞춘다.
     async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().remove(&id);
+        let removed = self.workers.lock().unwrap().remove(&id);
+        let Some(worker) = removed else {
+            return Err(StoreError::NotFound);
+        };
+
+        // CASCADE 1: worker_operational_credentials (worker_id 기준).
+        self.worker_operational_credentials
+            .lock()
+            .unwrap()
+            .retain(|_digest, cred| cred.worker_id != id);
+
+        // CASCADE 2: worker_credentials (worker_name 기준).
+        self.credentials
+            .lock()
+            .unwrap()
+            .retain(|(name, _model), _| name != &worker.name);
+
         Ok(())
     }
 
@@ -1415,5 +1440,121 @@ mod enroll_worker_tests {
             .await
             .unwrap()
             .is_some());
+    }
+}
+
+#[cfg(test)]
+mod delete_worker_cascade_tests {
+    use super::*;
+
+    fn worker(name: &str) -> Worker {
+        Worker::new(name, format!("wss://{name}.local/ws"))
+    }
+
+    async fn put_credential(store: &MemStore, worker_name: &str, model_id: &str) {
+        store
+            .upsert_worker_credential(
+                worker_name,
+                model_id,
+                "encrypted",
+                "https://api.example.test",
+                "chat_completions",
+                200_000,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// 로드맵 #78 — MemStore가 PgStore의 두 CASCADE를 재현하는지 확인한다.
+    ///
+    /// PostgreSQL에서 `DELETE FROM workers`는
+    /// `worker_operational_credentials`(018, worker_id)와
+    /// `worker_credentials`(005, worker_name)를 함께 지운다. MemStore가 worker
+    /// row만 지우면 이 계열 결함이 인메모리 테스트를 그대로 통과한다.
+    #[tokio::test]
+    async fn delete_worker_cascades_operational_and_llm_credentials() {
+        let store = MemStore::new();
+        let target = worker("doomed-worker");
+        let bystander = worker("other-worker");
+        store.upsert_worker(&target).await.unwrap();
+        store.upsert_worker(&bystander).await.unwrap();
+
+        store
+            .upsert_worker_operational_credential(&WorkerOperationalCredential {
+                worker_id: target.id,
+                credential_digest: "target-digest".to_string(),
+                issued_at: Utc::now(),
+                expires_at: None,
+                revoked_at: None,
+                rotation_generation: 1,
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_worker_operational_credential(&WorkerOperationalCredential {
+                worker_id: bystander.id,
+                credential_digest: "bystander-digest".to_string(),
+                issued_at: Utc::now(),
+                expires_at: None,
+                revoked_at: None,
+                rotation_generation: 1,
+            })
+            .await
+            .unwrap();
+
+        put_credential(&store, "doomed-worker", "grok-4").await;
+        put_credential(&store, "doomed-worker", "claude-opus").await;
+        put_credential(&store, "other-worker", "grok-4").await;
+
+        store.delete_worker(target.id).await.unwrap();
+
+        // CASCADE 1 — operational credential이 사라져 더 이상 인증되지 않는다.
+        assert!(
+            store
+                .find_active_worker_operational_credential("target-digest")
+                .await
+                .unwrap()
+                .is_none(),
+            "deleted worker's operational credential must not authenticate"
+        );
+
+        // CASCADE 2 — 암호화된 LLM credential도 함께 사라진다.
+        assert!(
+            store
+                .list_worker_credentials("doomed-worker")
+                .await
+                .unwrap()
+                .is_empty(),
+            "deleted worker's LLM credentials must be removed"
+        );
+
+        // 다른 워커의 자산은 건드리지 않는다.
+        assert!(
+            store
+                .find_active_worker_operational_credential("bystander-digest")
+                .await
+                .unwrap()
+                .is_some(),
+            "unrelated worker's operational credential must survive"
+        );
+        assert_eq!(
+            store
+                .list_worker_credentials("other-worker")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "unrelated worker's LLM credentials must survive"
+        );
+    }
+
+    /// PgStore는 `rows_affected() == 0`일 때 `NotFound`를 반환한다. MemStore도 같아야
+    /// 두 저장소를 바꿔 끼워도 호출부 동작이 달라지지 않는다.
+    #[tokio::test]
+    async fn delete_worker_returns_not_found_for_unknown_id() {
+        let store = MemStore::new();
+        let result = store.delete_worker(WorkerId::new()).await;
+        assert!(matches!(result, Err(StoreError::NotFound)));
     }
 }

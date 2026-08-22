@@ -410,8 +410,10 @@ fn reject_legacy_bootstrap_token_field(contents: &str) -> Result<(), WorkerError
         return Err(WorkerError::Config(
             "worker.toml uses the legacy '[worker] bootstrap_token' field, which is no longer \
              used for register/heartbeat/deregister authentication. Re-run `fleet-worker join` \
-             to obtain a config with 'operational_token', or if the worker is already enrolled, \
-             set 'operational_token' from `fleet workers credential rotate <worker_id>` output."
+             with a fresh bootstrap token to obtain a config containing 'operational_token'. \
+             (`fleet workers credential rotate <worker_id>` only works for a worker that is \
+             still enrolled and already has an operational credential; it returns 404 for a \
+             worker that was never joined through /v1/workers/join.)"
                 .into(),
         ));
     }

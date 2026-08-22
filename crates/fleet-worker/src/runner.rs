@@ -19,7 +19,8 @@
 //!         → grok 종료
 //!         → heartbeat 루프 종료
 //!         → mtls proxy 종료
-//!         → deregister (best-effort)
+//!         (deregister 하지 않음 — 로드맵 #78. control plane의 heartbeat
+//!          timeout이 Offline 전이를 담당하고, 영구 제거는 관리자 명령만.)
 //! ```
 
 use std::sync::Arc;
@@ -147,10 +148,26 @@ impl WorkerRunner {
             }
         }
 
-        // 7. deregister (best-effort).
-        client.deregister(&shutdown_reason).await;
-
-        info!("fleet-worker shutdown complete");
+        // 7. 의도적으로 deregister 하지 않는다 (로드맵 #78).
+        //
+        // 예전에는 여기서 `client.deregister()`를 호출했다. 그 요청은
+        // `DELETE /v1/workers/{id}` → `DELETE FROM workers`로 이어지고,
+        // `worker_operational_credentials`(018, ON DELETE CASCADE)와
+        // `worker_credentials`(005, ON DELETE CASCADE — 암호화된 LLM 키)가
+        // 함께 삭제된다. 그 결과 `systemctl restart`나 호스트 재부팅 한 번으로
+        // 워커가 자기 신원과 LLM credential을 영구히 잃고, 재기동 뒤에는
+        // worker.toml의 `operational_token`이 어떤 digest와도 매치되지 않아
+        // register가 영구 401이 된다(복구 경로는 새 bootstrap token으로
+        // 재-join뿐). 인증이 구성된 모든 배포가 해당됐다.
+        //
+        // "이 워커는 이제 없다"는 신호는 control plane이 비파괴적으로 이미
+        // 만든다 — `fleet-scheduler`의 HealthChecker가 heartbeat timeout으로
+        // Offline 전이와 `WorkerLeft` 이벤트를 낸다. 영구 제거는 관리자가
+        // `DELETE /v1/workers/{id}`(= `fleet workers delete`)를 명시적으로
+        // 호출할 때만 일어나야 한다.
+        //
+        // `WorkerClient::deregister`는 그 관리 경로용으로 남겨둔다.
+        info!(reason = %shutdown_reason, "fleet-worker shutdown complete");
         Ok(())
     }
 }
