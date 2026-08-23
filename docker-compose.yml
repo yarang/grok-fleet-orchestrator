@@ -36,8 +36,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      # service_started(컨테이너 기동)가 아니라 service_healthy(healthcheck
+      # 통과)를 기다린다 — 그러지 않으면 오케스트레이터가 liteLLM이 실제로
+      # 요청을 받을 준비가 되기 전에 기동해 초기 dispatch가 gateway
+      # connection-refused로 실패할 수 있다 (로드맵 #54).
       litellm:
-        condition: service_started
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
       # `mock` transport — no real grok agent connections; sufficient for
@@ -66,18 +70,35 @@ services:
       start_period: 20s
 
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # `main-latest`(floating) 대신 실제 발급된 stable release에 고정한다
+    # (로드맵 #54) — floating tag는 재기동할 때마다 다른 이미지를 당겨올 수
+    # 있어 재현성이 없고, 업스트림이 어느 날 깨진 빌드를 `main-latest`로
+    # 밀어 넣으면 그대로 전파된다. 버전을 올릴 때는 changelog를 확인하고
+    # 이 태그를 명시적으로 바꾼다.
+    image: ghcr.io/berriai/litellm:v1.98.0
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://fleet:fleet@postgres:5432/fleet_dev
-      LITELLM_MASTER_KEY: sk-litellm-master-key
+      # 로컬 dev에서는 기본값으로 바로 뜨지만(zero-config), 값을 파일에
+      # 하드코딩하지 않고 env var로 외부 주입한다(로드맵 #54) — 배포 전에는
+      # 반드시 `LITELLM_MASTER_KEY`를 실제 secret으로 덮어써야 한다.
+      # `examples/litellm-config.yaml`의 `general_settings.master_key`가
+      # `os.environ/LITELLM_MASTER_KEY`로 이 값을 그대로 참조하므로, 두 곳에
+      # 값을 따로 유지할 필요가 없다.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-litellm-master-key-change-me}
       PORT: 4000
       # 무료 티어 공급자 키 (선택). 미설정이면 해당 model_list 항목만 실패한다.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
     ports:
-      - "4000:4000"
+      # 기본은 비공개 bind(로드맵 #54) — 호스트의 모든 인터페이스가 아니라
+      # loopback에만 publish한다. liteLLM master key가 유출되면 등록된 모든
+      # LLM 공급자 API 키를 대신 소비할 수 있으므로, 외부에 실제로 노출해야
+      # 하면 reverse proxy(TLS·ACL·rate limit)를 앞에 둬야 한다 — 포트를
+      # 직접 여는 방식은 지원 경로가 아니다(docs/deployment/litellm-gateway.md
+      # "시작 전" 6번).
+      - "127.0.0.1:4000:4000"
     volumes:
       - ./examples/litellm-config.yaml:/app/config.yaml:ro
       # groq-compat 훅. liteLLM 은 `callbacks:` 문자열을 config.yaml 디렉토리
@@ -85,6 +106,23 @@ services:
       # 상세: examples/groq-compat/README.md
       - ./examples/groq-compat:/app/groq_compat:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      # 이 이미지(Chainguard wolfi-base 기반)에는 curl/wget이 없다 — 대신
+      # 이미지에 이미 있는 python3 stdlib(urllib)로 확인한다. `/health/readiness`는
+      # 인증이 필요 없고 DB 연결까지 확인한다(단순 liveliness보다 강한
+      # 신호 — 로드맵 #54, orchestrator의 `depends_on: condition:
+      # service_healthy`가 이 healthcheck에 의존한다).
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:4000/health/readiness', timeout=3).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   worker:
     build:

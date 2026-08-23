@@ -26,7 +26,11 @@ model_list:
       api_key: "os.environ/GROQ_API_KEY"
 
 general_settings:
-  master_key: sk-litellm-master-key
+  # 파일에 원문을 하드코딩하지 않고 컨테이너 env var를 그대로 참조한다
+  # (로드맵 #54) — 위의 provider key들과 같은 `os.environ/...` 관례.
+  # 값은 docker-compose.yml의 `litellm.environment.LITELLM_MASTER_KEY`가
+  # 채운다(기본은 로컬 dev용 placeholder, 배포 전 반드시 덮어쓴다).
+  master_key: os.environ/LITELLM_MASTER_KEY
   database_url: postgres://fleet:fleet@postgres:5432/fleet_dev
 
 litellm_settings:
