@@ -15,8 +15,8 @@ use crate::error::PlaybookError;
 use crate::ssh::RemoteExecutor;
 use crate::steps::StepContext;
 use crate::steps::{
-    CheckPrereqs, InstallCloudflared, InstallDeps, InstallFleetWorker, InstallGrok, JoinWorker,
-    PrereqReport, PushCredentials, StartServices, Step,
+    CheckPrereqs, ConfigureMtls, InstallDeps, InstallFleetWorker, InstallGrok, IssueMtlsAssets,
+    JoinWorker, PrereqReport, PushCredentials, StartServices, Step,
 };
 
 // `detect_prereq`/`assumed_prereq_from_labels`는 `steps::check_prereqs`가
@@ -82,18 +82,29 @@ impl Playbook {
         Self { steps }
     }
 
-    /// 표준 Playbook (8개 스텝). `prereq`는 check_prereqs 이후 스텝들이 사용.
+    /// 표준 Playbook (9개 스텝). `prereq`는 check_prereqs 이후 스텝들이 사용.
     ///
     /// 스텝 순서:
     /// 1. CheckPrereqs — 사전 검증
     /// 2. InstallDeps — rust, cloudflared 바이너리
     /// 3. InstallGrok — grok CLI
-    /// 4. InstallCloudflared — 터널 설정
-    /// 5. InstallFleetWorker — worker 바이너리 + systemd 유닛
+    /// 4. InstallFleetWorker — worker 바이너리 + systemd 유닛
+    /// 5. IssueMtlsAssets — mTLS 서버 인증서/키/CA 업로드 (mtls_enabled일 때만,
+    ///    로드맵 `#85`)
     /// 6. JoinWorker — bootstrap token 발급 + 원격 `fleet-worker join` 실행 →
     ///    worker.toml에 operational_token 기록 (로드맵 `#82`)
-    /// 7. PushCredentials — orchestrator credentials → `/root/.grok/config.toml` 병합
-    /// 8. StartServices — systemd enable/start
+    /// 7. ConfigureMtls — worker.toml에 `[mtls]` 섹션 추가 (mtls_enabled일
+    ///    때만, 로드맵 `#85`)
+    /// 8. PushCredentials — orchestrator credentials → `/root/.grok/config.toml` 병합
+    /// 9. StartServices — systemd enable/start
+    ///
+    /// `InstallCloudflared`는 표준 playbook에서 제거했다(로드맵 `#85`) —
+    /// [Topology](../docs/deployment/topology.md)가 Cloudflare Tunnel을
+    /// 지원 대상에서 제외하고 mTLS 직접 다이얼을 canonical transport로
+    /// 확정했고, 이 스텝은 `|| true`로 설치 실패를 조용히 삼키는 결함도
+    /// 있었다(구현 중 발견, 로드맵 `#85` 조사에서 재확인). 스텝 자체는
+    /// 삭제하지 않고 남겨 뒀다 — `Playbook::new(vec![...])`으로 필요하면
+    /// 여전히 구성할 수 있다.
     pub fn standard(prereq: &PrereqReport) -> Self {
         let steps: Vec<Arc<dyn Step>> = vec![
             Arc::new(CheckPrereqs::default()),
@@ -101,15 +112,13 @@ impl Playbook {
                 prereq: prereq.clone(),
             }),
             Arc::new(InstallGrok::default()),
-            Arc::new(InstallCloudflared {
-                target_arch: Some(prereq.arch.clone()),
-                ..InstallCloudflared::default()
-            }),
             Arc::new(InstallFleetWorker {
                 target_arch: Some(prereq.arch.clone()),
                 ..InstallFleetWorker::default()
             }),
+            Arc::new(IssueMtlsAssets),
             Arc::new(JoinWorker::default()),
+            Arc::new(ConfigureMtls),
             Arc::new(PushCredentials::default()),
             Arc::new(StartServices::default()),
         ];
@@ -398,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standard_playbook_has_eight_steps() {
+    async fn standard_playbook_has_nine_steps() {
         let prereq = PrereqReport {
             os: "ubuntu".into(),
             arch: "x86_64".into(),
@@ -408,21 +417,23 @@ mod tests {
             has_systemd: true,
         };
         let pb = Playbook::standard(&prereq);
-        assert_eq!(pb.len(), 8);
-        // JoinWorker가 InstallFleetWorker 다음, PushCredentials 이전에 온다
-        // (로드맵 #82). step.name()은 trait 메서드라 내부 벡터 접근이
-        // 필요하지만 Playbook::steps는 private 이므로 len()으로 대신 검증.
+        assert_eq!(pb.len(), 9);
+        // 순서: CheckPrereqs, InstallDeps, InstallGrok, InstallFleetWorker,
+        // IssueMtlsAssets, JoinWorker, ConfigureMtls, PushCredentials,
+        // StartServices (로드맵 #85 — InstallCloudflared 제거, mTLS 스텝 2개
+        // 추가). step.name()은 trait 메서드라 내부 벡터 접근이 필요하지만
+        // Playbook::steps는 private 이므로 len()으로 대신 검증.
     }
 
     // detect_prereq / assumed_prereq_from_labels 단위 테스트는
     // check_prereqs.rs로 이동했다(로드맵 #81).
 
     #[test]
-    fn standard_playbook_propagates_arch_to_fleet_worker_and_cloudflared_steps() {
-        // Playbook::standard가 InstallFleetWorker/InstallCloudflared에 감지된
-        // arch를 실제로 넘기는지 — 두 스텝의 내부 상태는 private이므로,
-        // 다음 단위 테스트(steps 모듈)들이 그 소비 쪽을 검증한다. 여기서는
-        // 최소한 7개 스텝 구성 자체가 arch 값과 무관하게 안정적임을 확인한다.
+    fn standard_playbook_propagates_arch_to_fleet_worker_step() {
+        // Playbook::standard가 InstallFleetWorker에 감지된 arch를 실제로
+        // 넘기는지 — 스텝의 내부 상태는 private이므로, 다음 단위 테스트
+        // (steps 모듈)들이 그 소비 쪽을 검증한다. 여기서는 최소한 9개 스텝
+        // 구성 자체가 arch 값과 무관하게 안정적임을 확인한다.
         let arm_prereq = PrereqReport {
             os: "ubuntu".into(),
             arch: "aarch64".into(),
@@ -432,6 +443,6 @@ mod tests {
             has_systemd: true,
         };
         let pb = Playbook::standard(&arm_prereq);
-        assert_eq!(pb.len(), 8);
+        assert_eq!(pb.len(), 9);
     }
 }

@@ -82,6 +82,40 @@ sequenceDiagram
 신뢰 채널에서 확인한다. `tofu`는 최초 연결 공격을 방지하지 못하고 `accept-all`은 운영에 사용하지
 않는다.
 
+## mTLS 프로비저닝 (선택, 로드맵 `#85`)
+
+`--mtls-enabled`(단일 호스트)/`mtls_enabled`(인벤토리)를 켠 워커는 표준 playbook에 두 스텝이
+추가로 실행된다 — `InstallFleetWorker` 뒤·`JoinWorker` 앞의 `IssueMtlsAssets`, `JoinWorker`
+뒤의 `ConfigureMtls`.
+
+- **사전 조건**: `fleet mtls init-ca --out <dir>`로 fleet 전체가 공유할 로컬 CA를 한 번
+  발급해 둔다(비밀키 `ca.key`는 이 CA를 관리하는 운영자 머신에만 둔다 — 원격에 절대 업로드되지
+  않는다). 그 디렉토리를 `--mtls-ca-dir`(단일 호스트) 또는 `options.mtls_ca_dir`(인벤토리)로
+  가리킨다. `fleet mtls issue-server`를 미리 실행해 둘 필요는 없다 — `IssueMtlsAssets`가 매
+  실행마다 자동으로 발급한다.
+- **`IssueMtlsAssets`**: `fleet-cli`(같은 프로세스, `fleet mtls issue-server`와 동일한
+  `mtls::run_issue_server` 함수)가 워커 전용 서버 인증서를 로컬 임시 디렉토리에 발급한다 —
+  SAN은 항상 `mtls_advertised_host`(미지정 시 워커 이름)다. 발급된 `server.pem`/`server.key`와
+  CA의 `ca.pem`을 `/tmp` 스테이징 후 `sudo mv`로 원격 `/etc/fleet/mtls/{server.pem,server.key,ca.pem}`에
+  옮기고 권한을 보정한다(cert/ca `0644`, key `0600`, `root:root`). 로컬 임시 디렉토리는 업로드가
+  끝나면(성공이든 실패든 함수 스코프를 벗어나면) 자동으로 삭제된다.
+- **`JoinWorker`(mTLS 확장)**: `grok_secret`이 지정돼 있지 않으면 여기서 32바이트 무작위
+  hex를 생성해 `--grok-secret`과 `--agent-endpoint wss://{advertised_host}:{advertised_port}/ws?server-key={secret}`
+  양쪽에 동일하게 넘긴다 — `fleet-worker join`의 기본 유도 로직(`derive_agent_endpoint`)에
+  맡기면 리버스 SSH 터널 시절의 엔드포인트 형태가 나와 지금 토폴로지와 맞지 않는다.
+- **`ConfigureMtls`**: `JoinWorker`가 만든 `/etc/fleet/worker.toml`을 읽어(`[worker]` 섹션이
+  없으면 — 예: `--tags mtls`로 `JoinWorker` 없이 단독 실행된 경우 — 명확히 실패한다)
+  `[mtls]` 섹션을 덧붙인다. `server_cert_path`/`server_key_path`/`client_ca_path`는 항상
+  `IssueMtlsAssets`가 쓴 고정 경로이고, `advertised_host`/`advertised_port`는 `IssueMtlsAssets`가
+  SAN으로 쓴 값과 같은 출처(`ctx.mtls_advertised_host`)라 구조적으로 어긋날 수 없다.
+- **인증서 없이 활성화**: `mtls_enabled`인데 `mtls_ca_dir`이 없으면(단일 호스트는
+  `IssueMtlsAssets` 단계에서, 인벤토리 모드는 SSH 연결을 하나도 시도하기 전에) 명확한 에러로
+  즉시 실패한다.
+- 표준 playbook에서 `InstallCloudflared`가 제거됐다(로드맵 `#85`) — [Topology](topology.md)가
+  mTLS 직접 다이얼을 canonical transport로 확정했고, 그 스텝은 설치 실패를 `|| true`로 조용히
+  삼키는 결함도 있었다. 스텝 자체는 삭제되지 않았으므로 필요하면 커스텀 playbook 구성으로
+  여전히 쓸 수 있다.
+
 ## 단일 Host 실행
 
 다음 예시는 playbook이 요구하는 비밀이 아닌 입력을 나타낸다. 실행 전 `FLEET_GROK_SECRET`,
@@ -108,7 +142,10 @@ fleet provision \
 1. `/usr/local/bin/fleet-worker`가 기대 version과 checksum을 가지는지 확인한다.
 2. `/etc/fleet/worker.toml`과 systemd unit의 소유권·mode(`0600`)를 확인한다 — `existing_worker_id`와
    `operational_token`이 채워져 있어야 한다.
-3. 설정의 Orchestrator URL, Worker name, grok secret과 선택적 mTLS 경로를 검토한다.
+3. 설정의 Orchestrator URL, Worker name, grok secret을 검토한다. mTLS가 켜져 있으면 `[mtls]`
+   섹션이 있는지, `server_cert_path`/`server_key_path`/`client_ca_path`가 모두
+   `/etc/fleet/mtls/`를 가리키는지, `advertised_host`가 실제로 그 인증서의 SAN과 일치하는지
+   확인한다(`openssl x509 -in /etc/fleet/mtls/server.pem -noout -text`로 SAN을 직접 볼 수 있다).
 4. 서비스를 명시적으로 시작하고 register·heartbeat 결과를 확인한다.
 5. host inventory 등록은 best-effort이므로 CLI 성공만으로 API 등록 성공을 단정하지 않는다.
 
@@ -123,6 +160,11 @@ fleet provision \
   상태를 직접 확인한다.
 - 이전 정상 binary와 설정을 보존했다면 서비스를 중단한 뒤 명시적으로 복원한다. 자동 rollback은
   구현되지 않았다.
+- `IssueMtlsAssets`/`ConfigureMtls`가 실패해도 재실행은 안전하다 — `IssueMtlsAssets`는 원격
+  파일 3개가 모두 있으면, `ConfigureMtls`는 `[mtls]` 섹션이 있으면 각각 건너뛴다. 재실행마다
+  인증서를 새로 발급하지는 않는다(로컬 임시 파일이라 재실행 전에는 이미 사라진 상태) — 회전이
+  필요하면 원격 `/etc/fleet/mtls/*` 파일을 지우고 재실행하거나, 이미 구현된 무중단 회전
+  런타임(`cert_reload_interval_secs`)을 쓴다.
 
 ## 관련 정본
 
@@ -130,3 +172,4 @@ fleet provision \
 - [Worker enrollment](../contracts/worker-enrollment.md)
 - [구성과 비밀 관리](configuration.md)
 - [설치 Runbook](install.md)
+- [운영 토폴로지](topology.md) — mTLS 직접 다이얼 결정과 신뢰 경계

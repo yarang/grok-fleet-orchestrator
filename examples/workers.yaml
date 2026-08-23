@@ -43,14 +43,11 @@ defaults:
   #   x86_64: ./target/release/fleet-worker
   #   aarch64: ./target/aarch64-unknown-linux-gnu/release/fleet-worker
   #
-  # mTLS 종단 proxy (선택, Phase 8.5 / 로드맵 #37). 여러 워커가 공유하는 값만
-  # defaults에 둔다 — 서버 인증서/키는 워커마다 고유해야 하므로 아래 workers:
-  # 항목에서만 지정한다(`mtls_server_cert`/`mtls_server_key`).
-  # 각 워커의 인증서는 사전에 `fleet mtls issue-server`로 발급해 두어야 하며,
-  # 프로비저너는 파일을 업로드하지 않고 worker.toml의 경로만 채운다.
+  # mTLS 종단 proxy (선택, 로드맵 #85). 서버 인증서는 워커마다 IssueMtlsAssets가
+  # 자동으로 발급·업로드한다 — 경로를 지정할 필요가 없다. CA 위치는
+  # options.mtls_ca_dir 하나로 fleet 전체가 공유한다(아래 options: 참고).
   # mtls_enabled: true
   # mtls_listen_addr: "0.0.0.0:2420"
-  # mtls_client_ca: /etc/fleet/ca.pem
   # mtls_advertised_port: 2420
 
 # ─── 프로비저닝 동작 옵션 ──────────────────────────────────────────────
@@ -70,6 +67,10 @@ options:
   # 이 토큰을 쓴다(로드맵 #82, #83). 운영 환경에서는 환경변수 FLEET_API_TOKEN
   # 으로 주입 권장(여기 원문을 남기지 않는다).
   # api_token: fat_xxxxxxxxxxxxxxxxxxxxxxxx
+  # mtls_enabled인 워커가 하나라도 있으면 필수. `fleet mtls init-ca`가 만든
+  # 로컬 CA 디렉토리(`ca.pem` + `ca.key`) — fleet 전체가 공유하는 단일 신뢰
+  # 앵커다(로드맵 #85). CA 비밀키는 절대 원격에 업로드되지 않는다.
+  # mtls_ca_dir: /secure/path/fleet-mtls-ca
 
 # ─── 워커 목록 ─────────────────────────────────────────────────────────
 # 각 엔트리의 최소 필수 필드는 host, name.
@@ -106,7 +107,6 @@ workers:
     region: us-west-2
     grok_secret: "REPLACE_WITH_RANDOM_32_BYTE_HEX"
     # mTLS 예시 — defaults.mtls_enabled가 꺼져 있어도 워커별로 켤 수 있다.
+    # 서버 인증서는 options.mtls_ca_dir로 자동 발급되므로 경로 지정 불필요.
     # mtls_enabled: true
-    # mtls_server_cert: /etc/fleet/gpu-x86-01.pem   # fleet mtls issue-server로 사전 발급
-    # mtls_server_key: /etc/fleet/gpu-x86-01.key
     # mtls_advertised_host: gpu-x86-01.fleet.internal  # 미지정 시 name(gpu-x86-01)으로 폴백

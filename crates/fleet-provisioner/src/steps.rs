@@ -8,20 +8,24 @@ use crate::error::StepError;
 use crate::ssh::RemoteExecutor;
 
 pub mod check_prereqs;
+pub mod configure_mtls;
 pub mod install_cloudflared;
 pub mod install_deps;
 pub mod install_fleet_worker;
 pub mod install_grok;
+pub mod issue_mtls_assets;
 pub mod join_worker;
 pub mod push_credentials;
 pub mod start_services;
 
 // 하위 모듈의 공개 타입을 steps:: 직접 노출.
 pub use check_prereqs::CheckPrereqs;
+pub use configure_mtls::ConfigureMtls;
 pub use install_cloudflared::InstallCloudflared;
 pub use install_deps::InstallDeps;
 pub use install_fleet_worker::InstallFleetWorker;
 pub use install_grok::InstallGrok;
+pub use issue_mtls_assets::IssueMtlsAssets;
 pub use join_worker::JoinWorker;
 pub use push_credentials::PushCredentials;
 pub use start_services::StartServices;
@@ -135,18 +139,30 @@ pub struct StepContext {
     pub orchestrator_api_token: Option<String>,
     /// Dry-run 모드: 실제 변경 없이 무엇을 할지 로깅만.
     pub dry_run: bool,
-    // ── mTLS (Phase 8.5; 선택) ───────────────────────────────────────────
-    /// mTLS 종단 proxy 활성화.
+    // ── mTLS (로드맵 `#37` 런타임, `#85` 배포 배선) ─────────────────────
+    /// mTLS 종단 proxy 활성화. `IssueMtlsAssets`/`ConfigureMtls` 스텝은
+    /// 이 값이 false면 아무 것도 하지 않고 즉시 반환한다.
     pub mtls_enabled: bool,
-    /// mTLS 리스닝 주소.
+    /// 워커 쪽 mTLS 리스너 주소 (원격 값 — worker.toml `[mtls] listen_addr`에
+    /// 그대로 들어간다). 미설정 시 `0.0.0.0:2420`.
     pub mtls_listen_addr: Option<String>,
-    /// 서버 인증서 PEM 절대경로.
+    /// **로컬** 서버 인증서 PEM 경로 — `fleet provision`을 실행하는 머신에서
+    /// `IssueMtlsAssets`가 `fleet mtls issue-server`로 갓 발급한 파일(또는
+    /// 호출자가 사전 발급해 지정한 파일)의 경로다(로드맵 `#85`). 원격
+    /// 목적지는 항상 `/etc/fleet/mtls/server.pem`으로 고정 — 이 필드가
+    /// "업로드할 로컬 원본"이지 "워커에 이미 있는 원격 경로"가 아니다(이전
+    /// 설계와의 가장 큰 차이).
     pub mtls_server_cert_path: Option<String>,
-    /// 서버 비밀키 PEM 절대경로.
+    /// **로컬** 서버 비밀키 PEM 경로. 위와 동일 — 원격 목적지는
+    /// `/etc/fleet/mtls/server.key`로 고정.
     pub mtls_server_key_path: Option<String>,
-    /// 클라이언트 CA PEM 절대경로.
+    /// **로컬** 클라이언트 CA PEM 경로(`fleet mtls init-ca`가 만든
+    /// `<ca_dir>/ca.pem`). 원격 목적지는 `/etc/fleet/mtls/ca.pem`으로 고정.
     pub mtls_client_ca_path: Option<String>,
-    /// orchestrator 에 광고할 호스트명.
+    /// orchestrator 에 광고할 호스트명. `IssueMtlsAssets`가 서버 인증서를
+    /// 발급할 때 쓰는 SAN과 항상 동일해야 한다 — 이 필드가 SAN의 유일한
+    /// 출처이므로(로드맵 `#85`가 요구하는 "advertised_host를 SAN과 같은
+    /// 값으로 강제") 구조적으로 어긋날 수 없다.
     pub mtls_advertised_host: Option<String>,
     /// orchestrator 에 광고할 포트.
     pub mtls_advertised_port: Option<u16>,

@@ -22,6 +22,8 @@
 //! ```
 
 use std::net::SocketAddr;
+#[cfg(feature = "mtls")]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1484,13 +1486,16 @@ pub struct ProvisionArgs {
     /// known_hosts 파일 경로 (CLI 명시값). None 이면 inventory defaults,
     /// 그것도 없으면 `~/.ssh/known_hosts`.
     pub known_hosts: Option<PathBuf>,
-    // ── mTLS (Phase 8.5) ────────────────────────────────────────────────
+    // ── mTLS (로드맵 `#37` 런타임, `#85` 배포 배선) ─────────────────────
     /// mTLS 종단 proxy 활성화. 다른 mtls_* 필드는 이 값이 true 인 경우에만 사용됨.
     pub mtls_enabled: bool,
     pub mtls_listen_addr: Option<String>,
-    pub mtls_server_cert_path: Option<String>,
-    pub mtls_server_key_path: Option<String>,
-    pub mtls_client_ca_path: Option<String>,
+    /// `fleet mtls init-ca`가 만든 로컬 CA 디렉토리 — `mtls_enabled`이면 필수.
+    /// 서버 인증서는 더 이상 미리 발급해 경로만 넘기지 않는다 — 이 CA로
+    /// `run_provision_single`/`run_provision_inventory`가 매 실행마다 자동
+    /// 발급한다(로드맵 `#85`, 옛 `mtls_server_cert`/`mtls_server_key`/
+    /// `mtls_client_ca` 경로 플래그를 완전히 대체).
+    pub mtls_ca_dir: Option<String>,
     pub mtls_advertised_host: Option<String>,
     pub mtls_advertised_port: Option<u16>,
 }
@@ -1551,6 +1556,55 @@ fn resolve_host_key_config(
     }
 }
 
+/// mTLS 워커 하나에 업로드할 로컬 파일 경로 3개(로드맵 `#85`) —
+/// `IssueMtlsAssets`가 원격으로 업로드할 원본이다.
+struct LocalMtlsPaths {
+    cert: String,
+    key: String,
+    ca: String,
+}
+
+/// `ca_dir`(`fleet mtls init-ca` 결과물)로 워커 전용 서버 인증서를 로컬
+/// 임시 디렉토리에 발급한다(로드맵 `#85`). SAN은 항상 `advertised_host` —
+/// `IssueMtlsAssets`가 이 파일들을 업로드하고 `ConfigureMtls`가 worker.toml에
+/// 적는 `advertised_host`와 출처가 하나이므로 구조적으로 어긋날 수 없다.
+///
+/// 반환하는 `TempDir`은 호출자가 SSH 업로드가 끝날 때까지 살려둬야 한다 —
+/// drop되면 발급된 개인키가 그 즉시 지워진다(의도된 정리 동작).
+fn issue_local_mtls_assets(
+    ca_dir: &str,
+    worker_name: &str,
+    advertised_host: &str,
+) -> Result<(tempfile::TempDir, LocalMtlsPaths)> {
+    #[cfg(feature = "mtls")]
+    {
+        let tmp = tempfile::tempdir()
+            .context("creating temp dir for mTLS server cert issuance")?;
+        crate::mtls::run_issue_server(
+            Path::new(ca_dir),
+            tmp.path(),
+            worker_name,
+            &[advertised_host.to_string()],
+            365,
+        )
+        .with_context(|| format!("issuing mTLS server cert for worker '{worker_name}'"))?;
+        let paths = LocalMtlsPaths {
+            cert: tmp.path().join("server.pem").to_string_lossy().into_owned(),
+            key: tmp.path().join("server.key").to_string_lossy().into_owned(),
+            ca: Path::new(ca_dir).join("ca.pem").to_string_lossy().into_owned(),
+        };
+        Ok((tmp, paths))
+    }
+    #[cfg(not(feature = "mtls"))]
+    {
+        let _ = (ca_dir, worker_name, advertised_host);
+        Err(anyhow!(
+            "mtls_enabled requires building fleet-cli with --features mtls (fleet mtls \
+             issue-server is not compiled in)"
+        ))
+    }
+}
+
 /// 단일 호스트 프로비저닝.
 async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
     let name = args
@@ -1564,6 +1618,24 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
 
     tracing::info!(%host, %name, %args.user, "single-host provisioning");
 
+    // mTLS 활성화 시 로컬에서 서버 인증서를 미리 발급한다(로드맵 #85).
+    // dry-run은 실제 발급 없이 건너뛴다 — IssueMtlsAssets/ConfigureMtls 둘 다
+    // dry_run이면 이 경로들을 아예 읽지 않는다. `_mtls_tmp`는 drop되면 발급된
+    // 개인키가 지워지므로 SSH 업로드가 끝나는 함수 끝까지 살려 둔다.
+    let advertised_host = args
+        .mtls_advertised_host
+        .clone()
+        .unwrap_or_else(|| name.clone());
+    let (_mtls_tmp, local_mtls) = if args.mtls_enabled && !args.dry_run {
+        let ca_dir = args.mtls_ca_dir.as_deref().ok_or_else(|| {
+            anyhow!("--mtls-ca-dir is required when --mtls-enabled is set")
+        })?;
+        let (tmp, paths) = issue_local_mtls_assets(ca_dir, &name, &advertised_host)?;
+        (Some(tmp), Some(paths))
+    } else {
+        (None, None)
+    };
+
     let labels = parse_labels(&args.labels)?;
     let ctx = build_step_context(
         &name,
@@ -1574,6 +1646,7 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         args.grok_secret.as_deref(),
         args.dry_run,
         args,
+        local_mtls.as_ref(),
     );
 
     let report = if args.dry_run {
@@ -1697,6 +1770,12 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
             options.api_token = Some(tok.to_string());
         }
     }
+    // CLI --mtls-ca-dir 이 있으면 inventory options 보다 우선 (로드맵 #85).
+    if let Some(dir) = args.mtls_ca_dir.as_deref() {
+        if !dir.is_empty() {
+            options.mtls_ca_dir = Some(dir.to_string());
+        }
+    }
 
     // 로드맵 #83 — 실 프로비저닝(dry-run 아님)에서 api_token 누락은 이전에는
     // CheckPrereqs/InstallDeps/InstallGrok/InstallCloudflared/InstallFleetWorker
@@ -1719,13 +1798,27 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
         return Ok(());
     }
 
+    // 로드맵 #85 — 인증서 없이 mTLS 활성화 시 명확한 실패(완료 게이트).
+    // 대상 워커 중 하나라도 mtls_enabled인데 mtls_ca_dir이 없으면, 다른
+    // 워커들의 SSH 작업까지 낭비하기 전에 여기서 즉시 막는다.
+    let any_mtls = workers.iter().any(|w| w.effective_mtls_enabled(&inv.defaults));
+    if !options.dry_run && any_mtls && options.mtls_ca_dir.as_deref().is_none_or(str::is_empty) {
+        return Err(anyhow!(
+            "options.mtls_ca_dir (or --mtls-ca-dir) is required — at least one matched worker \
+             has mtls enabled, and IssueMtlsAssets needs a local CA (from `fleet mtls init-ca`) \
+             to issue server certificates"
+        ));
+    }
+
     tracing::info!(matched = workers.len(), "workers to provision");
 
     let mut reports = Vec::new();
     if options.dry_run {
-        // dry-run은 MockExecutor로 모든 워커 순차 시뮬레이션.
+        // dry-run은 MockExecutor로 모든 워커 순차 시뮬레이션. mTLS 인증서는
+        // 실제로 발급하지 않는다 — IssueMtlsAssets/ConfigureMtls 둘 다
+        // dry_run이면 로컬 경로를 아예 보지 않으므로 필요 없다.
         for w in &workers {
-            let ctx = build_inventory_step_context(w, &inv.defaults, &options);
+            let ctx = build_inventory_step_context(w, &inv.defaults, &options, None);
             let mock = MockExecutor::new();
             match run_playbook(&mock, &ctx, &options.tags).await {
                 Ok(r) => reports.push(r),
@@ -1746,7 +1839,27 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
         let mut handles = Vec::new();
         for w in workers {
             let sem = sem.clone();
-            let ctx = build_inventory_step_context(&w, &inv.defaults, &options);
+
+            // mTLS 활성화 시 로컬에서 서버 인증서를 미리 발급한다(로드맵 #85).
+            // 위에서 이미 mtls_ca_dir 존재를 검증했으므로 여기서는 발급
+            // 자체의 실패(디스크 오류 등)만 전파한다. 인증서 발급은 CPU 바운드
+            // 작업이 아니라 순식간에 끝나므로 spawn 전에 순차 처리해도
+            // 무시할 만한 비용이다 — 실제 병렬화 대상은 느린 SSH 작업이다.
+            let mtls_enabled = w.effective_mtls_enabled(&inv.defaults);
+            let (mtls_tmp, local_mtls) = if mtls_enabled {
+                let ca_dir = options
+                    .mtls_ca_dir
+                    .as_deref()
+                    .expect("checked non-empty above");
+                let advertised_host = w.effective_mtls_advertised_host();
+                let (tmp, paths) = issue_local_mtls_assets(ca_dir, &w.name, &advertised_host)?;
+                (Some(tmp), Some(paths))
+            } else {
+                (None, None)
+            };
+
+            let ctx =
+                build_inventory_step_context(&w, &inv.defaults, &options, local_mtls.as_ref());
             let tags = options.tags.clone();
             let worker_name = w.name.clone();
             let ssh_key = w.effective_ssh_key(&inv.defaults)?.clone();
@@ -1756,6 +1869,11 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
             let host_key = resolve_host_key_config(args, Some(&inv.defaults));
 
             let handle = tokio::spawn(async move {
+                // mtls_tmp를 이 태스크 안으로 옮겨 SSH 업로드가 끝날 때까지
+                // 살려 둔다 — drop되면 발급된 개인키가 즉시 지워진다. 몸체에서
+                // 값을 쓰지 않으므로 바인딩만 해 두지 않으면 캡처되지 않고
+                // 스폰 직후(업로드 시작 전에) 지워질 수 있다.
+                let _mtls_tmp_guard = mtls_tmp;
                 let _permit = sem.acquire().await.expect("semaphore closed");
                 tracing::info!(%worker_name, %host, "starting provisioning");
                 let connect_info =
@@ -1916,6 +2034,7 @@ fn build_step_context(
     grok_secret: Option<&str>,
     dry_run: bool,
     args: &ProvisionArgs,
+    local_mtls: Option<&LocalMtlsPaths>,
 ) -> PlaybookContext {
     let base = StepContext {
         worker_name: name.to_string(),
@@ -1928,9 +2047,9 @@ fn build_step_context(
         dry_run,
         mtls_enabled: args.mtls_enabled,
         mtls_listen_addr: args.mtls_listen_addr.clone(),
-        mtls_server_cert_path: args.mtls_server_cert_path.clone(),
-        mtls_server_key_path: args.mtls_server_key_path.clone(),
-        mtls_client_ca_path: args.mtls_client_ca_path.clone(),
+        mtls_server_cert_path: local_mtls.map(|m| m.cert.clone()),
+        mtls_server_key_path: local_mtls.map(|m| m.key.clone()),
+        mtls_client_ca_path: local_mtls.map(|m| m.ca.clone()),
         mtls_advertised_host: args.mtls_advertised_host.clone(),
         mtls_advertised_port: args.mtls_advertised_port,
         ..Default::default()
@@ -1942,6 +2061,7 @@ fn build_inventory_step_context(
     w: &InventoryWorker,
     defaults: &fleet_provisioner::InventoryDefaults,
     options: &ProvisionOptions,
+    local_mtls: Option<&LocalMtlsPaths>,
 ) -> PlaybookContext {
     let cf_token = defaults.cf_token.clone();
     let mtls_enabled = w.effective_mtls_enabled(defaults);
@@ -1955,34 +2075,22 @@ fn build_inventory_step_context(
         grok_secret: w.grok_secret.clone(),
         orchestrator_api_token: options.api_token.clone(),
         dry_run: options.dry_run,
-        // 로드맵 #37 — 인벤토리 모드 mTLS 설정 주입. cert/key는 워커별 필드에서만
-        // 오고(defaults에는 없음), listen_addr/client_ca/advertised_port는
-        // defaults와 워커별 오버라이드를 함께 본다. `#82`가 로컬 worker.toml
-        // 렌더링(`templates.rs::render_worker_config`)을 완전히 제거했으므로,
-        // 이 필드들을 실제로 소비하는 검증·배선은 현재 존재하지 않는다 —
-        // `fleet-worker join` CLI에 mTLS 플래그가 없다. 자산 배포와 SAN 일관성
-        // 확보는 로드맵 `#85`가 소유한다.
+        // 로드맵 #85 — 인벤토리 모드 mTLS 설정 주입. listen_addr/advertised_port는
+        // defaults와 워커별 오버라이드를 함께 본다. cert/key/ca는 더 이상
+        // 인벤토리 필드가 아니다 — 호출자(`run_provision_inventory`)가
+        // `options.mtls_ca_dir`로 미리 발급한 로컬 경로(`local_mtls`)를 그대로
+        // 받는다. `dry_run` 없이 `local_mtls`가 `None`인데 `mtls_enabled`이면
+        // `IssueMtlsAssets`가 그 사실 자체로 명확히 실패한다(인증서 없이
+        // mTLS 활성화 — 완료 게이트가 요구하는 "명확한 실패").
         mtls_enabled,
         mtls_listen_addr: if mtls_enabled {
             w.effective_mtls_listen_addr(defaults)
         } else {
             None
         },
-        mtls_server_cert_path: if mtls_enabled {
-            w.mtls_server_cert.clone()
-        } else {
-            None
-        },
-        mtls_server_key_path: if mtls_enabled {
-            w.mtls_server_key.clone()
-        } else {
-            None
-        },
-        mtls_client_ca_path: if mtls_enabled {
-            w.effective_mtls_client_ca(defaults)
-        } else {
-            None
-        },
+        mtls_server_cert_path: local_mtls.map(|m| m.cert.clone()),
+        mtls_server_key_path: local_mtls.map(|m| m.key.clone()),
+        mtls_client_ca_path: local_mtls.map(|m| m.ca.clone()),
         mtls_advertised_host: if mtls_enabled {
             Some(w.effective_mtls_advertised_host())
         } else {

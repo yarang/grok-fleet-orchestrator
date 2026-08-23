@@ -4,7 +4,7 @@ authority: derived
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-23"
 last_verified_commit: "working-tree"
 owners: ["deployment"]
 ---
@@ -32,10 +32,11 @@ flowchart LR
 
 이 결정 이전의 실제 운영은 reverse SSH tunnel + orchestrator측 nginx 워커별 라우팅에 의존했으나,
 그 인프라는 이 저장소에 존재하지 않고(`autossh`/`ssh -R`/nginx 설정 0건) `fleet-api`에는 `/ws`
-라우트도 없다. mTLS 경로는 런타임이 이미 완성되어 있어(`crates/fleet-worker/src/runner.rs`의
-`MtlsProxy` 배선, 인증서 무중단 회전, `fleet mtls` 발급 CLI) 인증서 배포 스텝만 추가하면 저장소
-안에서 닫힌다. 근거와 비교는 [무인 부트스트랩 검토](../reviews/bootstrap-automation-review-2026-08-22.md),
-구현 항목은 Roadmap `#84`가 소유한다.
+라우트도 없다. mTLS 경로는 런타임이 이미 완성되어 있었고(`crates/fleet-worker/src/runner.rs`의
+`MtlsProxy` 배선, 인증서 무중단 회전, `fleet mtls` 발급 CLI), 인증서 배포 스텝은 Roadmap `#85`가
+`IssueMtlsAssets`/`ConfigureMtls` 프로비저닝 스텝으로 닫았다 — `fleet provision`이 워커별 서버
+인증서를 자동 발급·업로드하고 worker.toml의 `[mtls]` 섹션까지 채운다. 근거와 비교는
+[무인 부트스트랩 검토](../reviews/bootstrap-automation-review-2026-08-22.md)에서 확인한다.
 
 **제약**: 이 모델은 Worker 호스트가 control plane에서 인바운드로 도달 가능해야 한다. 사설 IP
 뒤에 있어 도달 불가능한 호스트는 이 토폴로지의 Worker가 될 수 없으며, 별도 네트워크 설계

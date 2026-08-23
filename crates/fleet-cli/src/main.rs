@@ -378,8 +378,9 @@ enum Command {
         #[arg(long, env = "FLEET_KNOWN_HOSTS", value_name = "PATH")]
         known_hosts: Option<String>,
 
-        /// mTLS: 프로비저닝하는 워커의 worker.toml 에 `[mtls]` 섹션을 포함.
-        /// `--mtls-server-cert`/`--mtls-server-key`/`--mtls-client-ca` 도 함께 필요.
+        /// mTLS: 프로비저닝하는 워커에 자동 발급한 서버 인증서를 업로드하고
+        /// worker.toml 에 `[mtls]` 섹션을 포함(로드맵 `#85`). `--mtls-ca-dir`도
+        /// 함께 필요.
         #[arg(long, default_value_t = false)]
         mtls_enabled: bool,
 
@@ -387,19 +388,14 @@ enum Command {
         #[arg(long)]
         mtls_listen_addr: Option<String>,
 
-        /// 워커 측 서버 인증서 PEM 의 원격 절대경로 (예: `/etc/fleet/worker-1.pem`).
-        /// 프로비저너는 파일 자체를 업로드하지 않고 worker.toml 의 경로만 채운다 —
-        /// 인증서 발급은 `fleet mtls issue-server` 로 사전에 수행해 두어야 함.
+        /// `fleet mtls init-ca`가 만든 로컬 CA 디렉토리(`ca.pem` + `ca.key`).
+        /// `--mtls-enabled`이면 필수 — 이 CA로 워커 전용 서버 인증서를
+        /// SAN=advertised_host로 자동 발급해 업로드한다(로드맵 `#85`). 인증서
+        /// 파일 자체를 미리 준비해 원격 경로만 알려주던 옛 방식
+        /// (`--mtls-server-cert`/`--mtls-server-key`/`--mtls-client-ca`)은
+        /// 제거됐다.
         #[arg(long)]
-        mtls_server_cert: Option<String>,
-
-        /// 워커 측 서버 비밀키 PEM 의 원격 절대경로.
-        #[arg(long)]
-        mtls_server_key: Option<String>,
-
-        /// 워커가 orchestrator 클라이언트 인증서 검증에 사용할 CA PEM 원격 경로.
-        #[arg(long)]
-        mtls_client_ca: Option<String>,
+        mtls_ca_dir: Option<String>,
 
         /// orchestrator 에게 광고할 워커 호스트명. 미지정 시 `--name` 사용.
         #[arg(long)]
@@ -1210,9 +1206,7 @@ async fn main() -> Result<()> {
             known_hosts,
             mtls_enabled,
             mtls_listen_addr,
-            mtls_server_cert,
-            mtls_server_key,
-            mtls_client_ca,
+            mtls_ca_dir,
             mtls_advertised_host,
             mtls_advertised_port,
         } => {
@@ -1241,9 +1235,7 @@ async fn main() -> Result<()> {
                 known_hosts: known_hosts.map(PathBuf::from),
                 mtls_enabled,
                 mtls_listen_addr,
-                mtls_server_cert_path: mtls_server_cert,
-                mtls_server_key_path: mtls_server_key,
-                mtls_client_ca_path: mtls_client_ca,
+                mtls_ca_dir,
                 mtls_advertised_host,
                 mtls_advertised_port,
             })

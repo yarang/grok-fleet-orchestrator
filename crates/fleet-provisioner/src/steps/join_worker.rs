@@ -51,7 +51,10 @@ use crate::steps::{Step, StepContext, StepOutput};
 
 /// 원격 worker.toml 기본 경로. `InstallFleetWorker`가 준비한 `/etc/fleet`
 /// 디렉토리와 동일 경로를 공유한다.
-const REMOTE_CONFIG_PATH: &str = "/etc/fleet/worker.toml";
+/// `ConfigureMtls`(로드맵 `#85`)가 join 뒤에 이 경로에 `[mtls]` 섹션을
+/// 덧붙이므로 `pub(crate)`로 공유한다 — 두 스텝이 서로 다른 경로 상수를
+/// 들고 있다가 어긋나는 사고를 구조적으로 막는다.
+pub(crate) const REMOTE_CONFIG_PATH: &str = "/etc/fleet/worker.toml";
 /// 원격 fleet-worker 바이너리 경로. `InstallFleetWorker`가 이 경로에 배포.
 const REMOTE_BIN_PATH: &str = "/usr/local/bin/fleet-worker";
 /// 발급 bootstrap token의 기본 TTL(초). exec 직후 곧바로 소비되므로 짧게
@@ -125,9 +128,49 @@ impl Step for JoinWorker {
         )
         .await?;
 
+        // mTLS 워커는 --agent-endpoint의 server-key와 --grok-secret이 항상
+        // 일치해야 하므로(로드맵 #85), 미지정이면 fleet-worker join의 자체
+        // 무작위 생성에 맡기지 않고 여기서 먼저 확정한다.
+        let grok_secret = resolve_grok_secret(ctx);
+
         // 2~3. 원격에서 join 실행 + 권한 보정.
-        perform_join(exec, ctx, &token).await
+        perform_join(exec, ctx, &token, grok_secret.as_deref()).await
     }
+}
+
+/// `ctx.grok_secret`이 있으면 그대로, 없고 mTLS가 켜져 있으면 새로 생성한다.
+/// mTLS가 꺼져 있으면 `None`을 유지해 `fleet-worker join`이 스스로 무작위
+/// 생성하도록 맡긴다(로드맵 `#82`부터의 기존 동작, 변경 없음).
+fn resolve_grok_secret(ctx: &StepContext) -> Option<String> {
+    if let Some(s) = ctx.grok_secret.as_deref().filter(|s| !s.is_empty()) {
+        return Some(s.to_string());
+    }
+    if ctx.mtls_enabled {
+        let bytes: [u8; 32] = rand::random();
+        return Some(hex::encode(bytes));
+    }
+    None
+}
+
+/// mTLS 활성화 시 워커가 광고할 `wss://` agent endpoint를 구성한다.
+/// SAN은 `IssueMtlsAssets`가 인증서를 발급할 때 쓰는 값과 항상 같은
+/// `ctx.mtls_advertised_host`에서 나온다 — 로드맵 `#85`가 요구하는
+/// "advertised_host를 SAN과 같은 값으로 강제"가 이 한 곳에서 자연히
+/// 성립한다(두 값의 출처가 애초에 하나이므로 어긋날 수 없다).
+fn mtls_agent_endpoint(ctx: &StepContext, grok_secret: &str) -> String {
+    let host = ctx
+        .mtls_advertised_host
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&ctx.worker_name);
+    let port = ctx.mtls_advertised_port.unwrap_or_else(|| {
+        ctx.mtls_listen_addr
+            .as_deref()
+            .and_then(|addr| addr.rsplit(':').next())
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(2420)
+    });
+    format!("wss://{host}:{port}/ws?server-key={grok_secret}")
 }
 
 fn validate_prereqs(ctx: &StepContext) -> Result<(), StepError> {
@@ -147,12 +190,16 @@ fn validate_prereqs(ctx: &StepContext) -> Result<(), StepError> {
 /// 이미 발급된 `token`으로 원격 `fleet-worker join`을 실행하고 결과를 처리한다.
 /// `apply()`의 HTTP 발급 단계와 분리해 두어, 발급된 토큰이 주어졌다는
 /// 전제하의 exec/에러 분류 로직을 HTTP 서버 없이 단위 테스트할 수 있다.
+/// `grok_secret`은 `apply()`가 `resolve_grok_secret`으로 미리 확정한 값 —
+/// mTLS 활성화 시 `--agent-endpoint`의 `server-key`와 반드시 일치해야
+/// 하므로 이 함수 내부에서 새로 만들지 않는다.
 async fn perform_join(
     exec: &dyn RemoteExecutor,
     ctx: &StepContext,
     token: &str,
+    grok_secret: Option<&str>,
 ) -> Result<StepOutput, StepError> {
-    let join_cmd = build_join_command(ctx);
+    let join_cmd = build_join_command(ctx, grok_secret);
     let (output, code) = exec
         .exec_with_stdin(&join_cmd, token.as_bytes())
         .await
@@ -194,7 +241,15 @@ async fn perform_join(
 /// `worker_name`/`orchestrator_url`/`labels`/`grok_secret`은 신뢰할 수
 /// 없는 입력(인벤토리 YAML)일 수 있으므로 셸 인젝션 방지를 위해 항상
 /// 작은따옴표로 quote한다.
-fn build_join_command(ctx: &StepContext) -> String {
+///
+/// `grok_secret`은 `resolve_grok_secret`이 미리 확정한 값(호출자가 지정했거나
+/// mTLS용으로 새로 생성됨)을 그대로 받는다 — `None`이면 `fleet-worker join`이
+/// 스스로 무작위 생성하도록 `--grok-secret`을 아예 생략한다. `ctx.mtls_enabled`면
+/// `--agent-endpoint`를 명시적으로 계산해 넘긴다 — 그러지 않으면
+/// `fleet-worker join`이 리버스 SSH 터널 시절의 `{scheme}://{host}/ws/{name}`
+/// 형태로 자동 유도해(`derive_agent_endpoint`), 지금은 지원하지 않는
+/// 토폴로지를 보고하게 된다(`docs/deployment/topology.md`).
+fn build_join_command(ctx: &StepContext, grok_secret: Option<&str>) -> String {
     let mut cmd = format!(
         "sudo {REMOTE_BIN_PATH} join --token-file - --orchestrator-url {} --name {} \
          --config-out {}",
@@ -202,8 +257,13 @@ fn build_join_command(ctx: &StepContext) -> String {
         shell_quote(&ctx.worker_name),
         shell_quote(REMOTE_CONFIG_PATH),
     );
-    if let Some(secret) = ctx.grok_secret.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(secret) = grok_secret.filter(|s| !s.is_empty()) {
         cmd.push_str(&format!(" --grok-secret {}", shell_quote(secret)));
+    }
+    if ctx.mtls_enabled {
+        let secret = grok_secret.unwrap_or_default();
+        let endpoint = mtls_agent_endpoint(ctx, secret);
+        cmd.push_str(&format!(" --agent-endpoint {}", shell_quote(&endpoint)));
     }
     if let Some(max) = ctx.max_concurrent_tasks {
         cmd.push_str(&format!(" --max-concurrent-tasks {max}"));
@@ -384,7 +444,7 @@ mod tests {
     #[test]
     fn join_command_never_contains_the_token() {
         let ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
-        let cmd = build_join_command(&ctx);
+        let cmd = build_join_command(&ctx, None);
         assert!(!cmd.contains("s3cr3t-token"));
         assert!(cmd.contains("--token-file -"));
         assert!(cmd.contains("--config-out"));
@@ -394,7 +454,7 @@ mod tests {
     #[test]
     fn join_command_quotes_untrusted_worker_name() {
         let ctx = ctx_with("w1; rm -rf /", "https://orch.example.com", Some("tok"));
-        let cmd = build_join_command(&ctx);
+        let cmd = build_join_command(&ctx, None);
         // 위험한 이름이 quote 없이 그대로 셸에 들어가면 안 된다.
         assert!(cmd.contains(&shell_quote("w1; rm -rf /")));
     }
@@ -402,11 +462,10 @@ mod tests {
     #[test]
     fn join_command_includes_optional_fields() {
         let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
-        ctx.grok_secret = Some("s3cr3t".into());
         ctx.max_concurrent_tasks = Some(8);
         ctx.labels.insert("arch".into(), "arm64".into());
         ctx.labels.insert("region".into(), "us-east".into());
-        let cmd = build_join_command(&ctx);
+        let cmd = build_join_command(&ctx, Some("s3cr3t"));
         assert!(cmd.contains("--grok-secret"));
         assert!(cmd.contains("s3cr3t"));
         assert!(cmd.contains("--max-concurrent-tasks 8"));
@@ -415,9 +474,71 @@ mod tests {
     }
 
     #[test]
+    fn join_command_without_secret_omits_grok_secret_flag() {
+        let ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        let cmd = build_join_command(&ctx, None);
+        assert!(!cmd.contains("--grok-secret"));
+    }
+
+    #[test]
     fn shell_quote_escapes_embedded_single_quotes() {
         assert_eq!(shell_quote("it's"), r#"'it'\''s'"#);
         assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    // ── mTLS agent-endpoint (로드맵 #85) ──────────────────────────────
+
+    #[test]
+    fn mtls_disabled_never_adds_agent_endpoint_flag() {
+        let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        ctx.mtls_enabled = false;
+        let cmd = build_join_command(&ctx, Some("secret"));
+        assert!(!cmd.contains("--agent-endpoint"));
+    }
+
+    #[test]
+    fn mtls_enabled_adds_wss_agent_endpoint_matching_advertised_host() {
+        let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        ctx.mtls_enabled = true;
+        ctx.mtls_advertised_host = Some("w1.fleet.internal".into());
+        ctx.mtls_advertised_port = Some(2420);
+        let cmd = build_join_command(&ctx, Some("s3cr3t"));
+        assert!(cmd.contains("--agent-endpoint"));
+        assert!(cmd.contains(&shell_quote(
+            "wss://w1.fleet.internal:2420/ws?server-key=s3cr3t"
+        )));
+    }
+
+    #[test]
+    fn mtls_agent_endpoint_falls_back_to_worker_name_and_listen_addr_port() {
+        let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        ctx.mtls_enabled = true;
+        ctx.mtls_listen_addr = Some("0.0.0.0:9999".into());
+        // advertised_host/port 미설정 — worker_name과 listen_addr 포트로 폴백.
+        let endpoint = mtls_agent_endpoint(&ctx, "sec");
+        assert_eq!(endpoint, "wss://w1:9999/ws?server-key=sec");
+    }
+
+    #[test]
+    fn resolve_grok_secret_generates_when_mtls_enabled_and_unset() {
+        let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        ctx.mtls_enabled = true;
+        let secret = resolve_grok_secret(&ctx).expect("mtls should generate a secret");
+        assert_eq!(secret.len(), 64); // 32바이트 hex.
+    }
+
+    #[test]
+    fn resolve_grok_secret_stays_none_when_mtls_disabled_and_unset() {
+        let ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        assert!(resolve_grok_secret(&ctx).is_none());
+    }
+
+    #[test]
+    fn resolve_grok_secret_prefers_explicit_value_even_with_mtls() {
+        let mut ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
+        ctx.mtls_enabled = true;
+        ctx.grok_secret = Some("explicit".into());
+        assert_eq!(resolve_grok_secret(&ctx).as_deref(), Some("explicit"));
     }
 
     // ── is_name_conflict ───────────────────────────────────────────────
@@ -443,7 +564,7 @@ mod tests {
     async fn perform_join_sends_token_only_via_stdin_and_chmods_on_success() {
         let exec = MockExecutor::new();
         let ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
-        let out = perform_join(&exec, &ctx, "bt_supersecret").await.unwrap();
+        let out = perform_join(&exec, &ctx, "bt_supersecret", None).await.unwrap();
         assert!(out.message.contains("joined"));
 
         let calls = exec.recorded_calls();
@@ -466,7 +587,7 @@ mod tests {
              already exists — use POST /v1/workers/register to re-register",
         );
         exec.expect_exit("sudo /usr/local/bin/fleet-worker join", 1);
-        let err = perform_join(&exec, &ctx, "bt_x").await.unwrap_err();
+        let err = perform_join(&exec, &ctx, "bt_x", None).await.unwrap_err();
         assert!(matches!(err, StepError::RemoteExit { code: 1, .. }));
         let msg = format!("{err}");
         assert!(msg.contains("already exists"));
@@ -482,7 +603,7 @@ mod tests {
             "error: fleet-worker join failed: join request failed: connection refused",
         );
         exec.expect_exit("sudo /usr/local/bin/fleet-worker join", 1);
-        let err = perform_join(&exec, &ctx, "bt_x").await.unwrap_err();
+        let err = perform_join(&exec, &ctx, "bt_x", None).await.unwrap_err();
         assert!(matches!(err, StepError::RemoteExit { code: 1, .. }));
         assert!(format!("{err}").contains("connection refused"));
     }

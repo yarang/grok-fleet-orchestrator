@@ -25,6 +25,11 @@ serde_yaml = { workspace = true }
 russh = { workspace = true, optional = true }
 russh-keys = { workspace = true, optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# JoinWorker의 mTLS 워커용 grok_secret 생성 (로드맵 #85) — --agent-endpoint의
+# server-key와 --grok-secret이 항상 일치해야 하므로 fleet-worker join의
+# 자체 무작위 생성에 맡길 수 없다.
+rand = { workspace = true }
+hex = { workspace = true }
 
 [lib]
 name = "fleet_provisioner"

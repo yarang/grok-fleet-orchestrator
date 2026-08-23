@@ -46,12 +46,13 @@ async fn dry_run_playbook_completes_without_network_calls() {
     });
     let report = pb.run(exec.as_ref(), &ctx).await.expect("playbook failed");
     // dry-run에서 check_prereqs는 항상 실행되므로 실제 exec 호출이 있음.
-    // 하지만 deps, cloudflared, fleet_worker는 dry_run 분기로 호출 없음.
+    // 하지만 deps, fleet_worker, mtls, join 등 나머지 스텝은 dry_run 분기로
+    // 호출 없음(로드맵 #85 — InstallCloudflared는 표준 playbook에서 제거됨).
     assert!(report.succeeded);
 }
 
 #[tokio::test]
-async fn standard_playbook_has_eight_steps_in_order() {
+async fn standard_playbook_has_nine_steps_in_order() {
     let exec: Arc<dyn RemoteExecutor> = Arc::new(healthy_executor());
     let pb = Playbook::standard(&ubuntu_prereq());
     let ctx = PlaybookContext::new(StepContext {
@@ -70,9 +71,10 @@ async fn standard_playbook_has_eight_steps_in_order() {
             "check_prereqs",
             "install_deps",
             "install_grok",
-            "install_cloudflared",
             "install_fleet_worker",
+            "issue_mtls_assets",
             "join_worker",
+            "configure_mtls",
             "push_credentials",
             "start_services",
         ]

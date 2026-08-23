@@ -73,9 +73,12 @@ time = "0.3"
 # main()에서 CryptoProvider::install_default()를 명시 호출하기 위한 직접 의존성
 # (acp/mtls 피처에서만 활성 — dep:rustls 참조).
 rustls = { workspace = true, optional = true }
+# mTLS 워커 프로비저닝(로드맵 #85)에서 issue-server 결과물을 담을 임시
+# 디렉토리 — Drop에서 자동 정리되어 발급된 개인키가 /tmp에 남지 않는다.
+# mtls.rs 테스트도 이미 썼던 크레이트라 dev-dependencies에서 승격.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 # rustls-pemfile 단위 테스트용 (mtls feature 켜진 빌드에서만 사용).
 rustls-pemfile = { workspace = true }
 rustls = { workspace = true }

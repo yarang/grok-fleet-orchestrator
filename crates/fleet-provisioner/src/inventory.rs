@@ -5,10 +5,12 @@
 //!   user: ubuntu
 //!   ssh_key: ~/.ssh/fleet_workers_ed25519
 //!   ssh_port: 22
-//!   # mTLS(선택) — 여러 워커가 공유하는 값만 defaults에 둔다.
+//!   # mTLS(선택, 로드맵 #85) — 여러 워커가 공유하는 값만 defaults에 둔다.
+//!   # 서버 인증서는 워커마다 IssueMtlsAssets가 자동으로 발급·업로드하므로
+//!   # 경로를 직접 지정할 필요가 없다 — CA 위치는 options.mtls_ca_dir 하나로
+//!   # fleet 전체가 공유한다.
 //!   # mtls_enabled: true
 //!   # mtls_listen_addr: "0.0.0.0:2420"
-//!   # mtls_client_ca: /etc/fleet/ca.pem
 //!
 //! workers:
 //!   - host: 203.0.113.10
@@ -17,14 +19,12 @@
 //!       arch: arm64
 //!       gpu: "false"
 //!     region: us-east-1
-//!     # mTLS 서버 인증서/키는 워커마다 고유하므로 defaults가 아닌 여기서만 지정.
-//!     # mtls_server_cert: /etc/fleet/build-farm-1.pem
-//!     # mtls_server_key: /etc/fleet/build-farm-1.key
 //!
 //! options:
 //!   orchestrator_url: https://orch.fleet.example.com
 //!   parallel: 3
 //!   tags: [setup, tunnel]
+//!   # mtls_ca_dir: /secure/path/fleet-mtls-ca   # mtls_enabled인 워커가 있으면 필수
 //! ```
 
 use std::collections::HashMap;
@@ -66,18 +66,20 @@ pub struct InventoryDefaults {
     /// `known_hosts` 파일 경로. 미지정 시 `~/.ssh/known_hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_hosts: Option<String>,
-    // ── mTLS (로드맵 #37) — 여러 워커에 공유될 만한 값만 defaults에 둔다.
-    // 서버 인증서/키(mtls_server_cert/mtls_server_key)는 워커마다 고유해야
-    // 하므로 defaults가 아니라 InventoryWorker 전용 필드다.
+    // ── mTLS (로드맵 `#37` 런타임, `#85` 배포 배선) ─────────────────────
+    // 서버 인증서/키는 워커마다 고유하므로 발급은 워커별로 이뤄지지만,
+    // 서명에 쓰는 CA는 `ProvisionOptions.mtls_ca_dir` 하나를 fleet 전체가
+    // 공유한다(단일 신뢰 앵커 — `fleet-transport`가 오케스트레이터 쪽에
+    // CA 하나로 모든 워커를 검증하는 것과 대칭). 이전에는 여기 있던
+    // `mtls_client_ca`(원격 CA 경로)가 `IssueMtlsAssets`의 자동 발급·업로드
+    // 도입으로 완전히 대체됐다 — 원격 목적지는 이제 고정 경로
+    // (`/etc/fleet/mtls/ca.pem`)라 설정할 필요가 없다.
     /// mTLS 종단 proxy 활성화 (기본값 false). 개별 워커가 `mtls_enabled`로 오버라이드 가능.
     #[serde(default)]
     pub mtls_enabled: bool,
     /// mTLS 리스닝 주소. 보통 모든 워커가 동일 값(예: `0.0.0.0:2420`)을 공유.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_listen_addr: Option<String>,
-    /// 클라이언트 CA PEM 원격 경로. 보통 모든 워커가 동일 CA를 공유.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mtls_client_ca: Option<String>,
     /// orchestrator 에 광고할 포트. 보통 모든 워커가 동일 값을 공유.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_advertised_port: Option<u16>,
@@ -113,7 +115,6 @@ impl Default for InventoryDefaults {
             known_hosts: None,
             mtls_enabled: false,
             mtls_listen_addr: None,
-            mtls_client_ca: None,
             mtls_advertised_port: None,
             fleet_worker_bin: None,
             fleet_worker_bin_by_arch: HashMap::new(),
@@ -158,26 +159,22 @@ pub struct InventoryWorker {
     /// 설정 가능)을 써야 한다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet_worker_bin: Option<String>,
-    // ── mTLS (로드맵 #37) ────────────────────────────────────────────────
+    // ── mTLS (로드맵 `#37` 런타임, `#85` 배포 배선) ─────────────────────
+    // 서버 인증서/키는 더 이상 인벤토리 필드가 아니다 — `mtls_enabled`인
+    // 워커마다 `IssueMtlsAssets`가 `ProvisionOptions.mtls_ca_dir`로 SAN=
+    // `effective_mtls_advertised_host()`인 인증서를 그때그때 발급한다(로드맵
+    // `#85`). 미리 발급해 경로만 채우는 옛 모델(`mtls_server_cert`/
+    // `mtls_server_key`)은 완전히 대체됐다.
     /// `defaults.mtls_enabled` 오버라이드. 특정 워커만 mTLS를 끄거나 켤 때 사용.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_enabled: Option<bool>,
     /// `defaults.mtls_listen_addr` 오버라이드.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_listen_addr: Option<String>,
-    /// 이 워커의 서버 인증서 PEM 원격 절대경로. 워커마다 고유해야 함
-    /// (`fleet mtls issue-server`로 사전 발급 — 인증서 파일 자체는 프로비저너가
-    /// 업로드하지 않고 worker.toml의 경로만 채운다).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mtls_server_cert: Option<String>,
-    /// 이 워커의 서버 비밀키 PEM 원격 절대경로.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mtls_server_key: Option<String>,
-    /// `defaults.mtls_client_ca` 오버라이드.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mtls_client_ca: Option<String>,
     /// orchestrator 에 광고할 호스트명. 미지정 시 `name` 필드를 그대로 사용
-    /// (대부분의 경우 워커 이름 = mTLS 광고 호스트명이므로).
+    /// (대부분의 경우 워커 이름 = mTLS 광고 호스트명이므로). `mtls_enabled`인
+    /// 워커의 서버 인증서 SAN은 항상 이 값이다 — 별도로 맞출 필요 없이
+    /// 구조적으로 일치한다(로드맵 `#85`가 요구하는 SAN 일관성).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_advertised_host: Option<String>,
     /// `defaults.mtls_advertised_port` 오버라이드.
@@ -227,13 +224,6 @@ impl InventoryWorker {
             .or_else(|| defaults.mtls_listen_addr.clone())
     }
 
-    /// 클라이언트 CA 경로 — 개별값 우선, 그 다음 defaults.
-    pub fn effective_mtls_client_ca(&self, defaults: &InventoryDefaults) -> Option<String> {
-        self.mtls_client_ca
-            .clone()
-            .or_else(|| defaults.mtls_client_ca.clone())
-    }
-
     /// 광고 포트 — 개별값 우선, 그 다음 defaults.
     pub fn effective_mtls_advertised_port(&self, defaults: &InventoryDefaults) -> Option<u16> {
         self.mtls_advertised_port.or(defaults.mtls_advertised_port)
@@ -272,6 +262,15 @@ pub struct ProvisionOptions {
     /// 발급에 각각 사용한다(로드맵 `#82`) — 후자는 `token:issue` capability가 필요.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
+    /// `fleet mtls init-ca`가 만든 로컬 CA 디렉토리(`<dir>/ca.pem` +
+    /// `<dir>/ca.key`) — fleet 전체가 공유하는 단일 신뢰 앵커다(로드맵
+    /// `#85`). `mtls_enabled`인 워커가 하나라도 있으면 필수이며, 없으면
+    /// SSH 연결을 시도하기 전에 즉시 실패한다. `api_token`과 마찬가지로
+    /// `fleet provision`을 실행하는 CLI 프로세스만 이 값을 알고, 발급된
+    /// 인증서만 대상 호스트에 전달된다 — CA 비밀키(`ca.key`)는 절대 원격에
+    /// 업로드되지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtls_ca_dir: Option<String>,
 }
 
 fn default_parallel() -> usize {
@@ -287,6 +286,7 @@ impl Default for ProvisionOptions {
             only: vec![],
             dry_run: false,
             api_token: None,
+            mtls_ca_dir: None,
         }
     }
 }
@@ -495,23 +495,22 @@ workers:
     }
 
     #[test]
-    fn parses_shared_mtls_defaults_and_per_worker_cert_paths() {
+    fn parses_shared_mtls_defaults_and_ca_dir_option() {
+        // 서버 인증서/키는 더 이상 인벤토리 필드가 아니다(로드맵 #85) —
+        // IssueMtlsAssets가 options.mtls_ca_dir로 워커마다 자동 발급한다.
         let yaml = r#"
 defaults:
   ssh_key: ~/.ssh/fleet_workers_ed25519
   mtls_enabled: true
   mtls_listen_addr: "0.0.0.0:2420"
-  mtls_client_ca: /etc/fleet/ca.pem
   mtls_advertised_port: 2420
 workers:
   - host: 10.0.0.1
     name: worker-1
-    mtls_server_cert: /etc/fleet/worker-1.pem
-    mtls_server_key: /etc/fleet/worker-1.key
   - host: 10.0.0.2
     name: worker-2
-    mtls_server_cert: /etc/fleet/worker-2.pem
-    mtls_server_key: /etc/fleet/worker-2.key
+options:
+  mtls_ca_dir: /secure/path/fleet-mtls-ca
 "#;
         let inv = Inventory::parse(yaml).unwrap();
         let w1 = &inv.workers[0];
@@ -521,27 +520,25 @@ workers:
             w1.effective_mtls_listen_addr(&inv.defaults).as_deref(),
             Some("0.0.0.0:2420")
         );
-        assert_eq!(
-            w1.effective_mtls_client_ca(&inv.defaults).as_deref(),
-            Some("/etc/fleet/ca.pem")
-        );
         assert_eq!(w1.effective_mtls_advertised_port(&inv.defaults), Some(2420));
         assert_eq!(
-            w1.mtls_server_cert.as_deref(),
-            Some("/etc/fleet/worker-1.pem")
-        );
-        assert_eq!(
-            w1.mtls_server_key.as_deref(),
-            Some("/etc/fleet/worker-1.key")
+            inv.options.mtls_ca_dir.as_deref(),
+            Some("/secure/path/fleet-mtls-ca")
         );
 
-        // 워커별 cert/key는 공유되지 않는다 — 각자 고유.
+        // SAN은 인증서 파일 경로가 아니라 워커 이름에서 나온다 — 서로 다른
+        // 워커는 자동으로 서로 다른 SAN을 갖는다(경로 충돌 여지 자체가 없음).
         let w2 = &inv.workers[1];
-        assert_eq!(
-            w2.mtls_server_cert.as_deref(),
-            Some("/etc/fleet/worker-2.pem")
+        assert_ne!(
+            w1.effective_mtls_advertised_host(),
+            w2.effective_mtls_advertised_host()
         );
-        assert_ne!(w1.mtls_server_cert, w2.mtls_server_cert);
+    }
+
+    #[test]
+    fn mtls_ca_dir_defaults_to_none() {
+        let inv = Inventory::parse(SAMPLE_YAML).unwrap();
+        assert!(inv.options.mtls_ca_dir.is_none());
     }
 
     #[test]
