@@ -936,6 +936,60 @@ pub async fn sync_env_admin_tokens_to_store(
     Ok(())
 }
 
+/// DB에 admin API 토큰이 하나도 없으면 전체 capability를 가진 1개를
+/// 발급한다 (로드맵 `#80`).
+///
+/// `fleet admin-tokens create`/`fleet token issue` 둘 다 기존 admin bearer를
+/// 요구하므로, 이 함수가 없으면 최초 admin 토큰을 API로 만들 방법이 없었다
+/// — 운영자가 `FLEET_API_TOKENS` JSON manifest를 손으로 작성하는 것뿐이었다.
+///
+/// **`sync_env_admin_tokens_to_store` 이후에 호출해야 한다.** env
+/// `FLEET_API_TOKENS`가 설정된 배포는 그 호출이 먼저 DB를 채우므로 여기서는
+/// 아무 것도 하지 않는다 — env 토큰이 있는데 별도 bootstrap 토큰까지 발급하면
+/// 최소 권한 원칙에 어긋난다.
+///
+/// dashboard OTP(`fleet_store::seed_rbac_and_maybe_issue_bootstrap`)를
+/// 재사용하지 않는다 — 그 함수는 `purpose`를 구분하지 않고 모든 사용 가능한
+/// bootstrap token을 세므로(`rbac.rs`), worker join 토큰이 하나라도 살아
+/// 있으면 admin OTP가 영구 미발급된다. 여기서는 그 함수와 별개로
+/// `admin_api_tokens` 테이블만 본다.
+///
+/// 반환값은 원문 토큰이다. **이 함수는 어디에도 파일을 쓰지 않는다** — 값을
+/// 저널/표준출력에 남기지 않고 저장하는 것은 호출자(`fleet-cli`)의 책임이다.
+pub async fn issue_admin_bootstrap_token_if_needed(
+    store: &dyn fleet_store::Store,
+) -> Result<Option<String>, fleet_store::StoreError> {
+    let existing = store.list_admin_tokens().await?;
+    if !existing.is_empty() {
+        return Ok(None);
+    }
+
+    let raw = handlers::generate_random_bytes(32)
+        .map_err(|e| fleet_store::StoreError::Decode(format!("CSPRNG failure: {e}")))?;
+    let token = format!("fat_{}", handlers::base64url(&raw));
+    let record = fleet_store::AdminApiToken {
+        principal_id: "bootstrap".to_string(),
+        token_digest: fleet_core::BootstrapToken::digest_for(&token),
+        capabilities: PermissionKind::all().to_vec(),
+        created_at: chrono::Utc::now(),
+        rotated_at: None,
+        revoked_at: None,
+        rotation_generation: 1,
+    };
+    match store.create_admin_token(&record).await {
+        Ok(()) => {
+            info!(
+                principal_id = "bootstrap",
+                "issued first-run admin bootstrap token (full capability) — 로드맵 #80"
+            );
+            Ok(Some(token))
+        }
+        // 동시 기동한 다른 인스턴스가 이미 발급했다 — 조용히 넘어간다.
+        Err(fleet_store::StoreError::Conflict(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// 서버 바인딩 + serve. shutdown 시그널은 호출자가 처리.
 pub async fn run_http_server(state: Arc<AppState>, bind: SocketAddr) -> std::io::Result<()> {
     let app = build_app(state);

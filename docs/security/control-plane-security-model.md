@@ -18,9 +18,10 @@ owners: ["security"]
 | 주제 | 현재 구현 | 목표 계약 |
 |---|---|---|
 | API 인증 | non-loopback bind는 scoped bearer manifest 또는 Cloudflare audience 없이 기동을 거부. bearer는 principal·capability를 가진 JSON manifest이고 등록된 관리 route는 capability를 검사. Cloudflare claim→principal 연결과 Worker self binding은 배선 완료 | Project scope와 audit 확장은 #58 잔여 |
-| capability 행렬 커버리지 | **행렬 미등록 route는 검사 없이 통과한다.** 현재 누락: `GET /v1/workers/{id}`, `POST /v1/hosts/register` | 기본값을 deny로 두고 capability 불필요 route만 명시 allow-list (→ [Authorization 계약](authorization-and-audit.md)) |
+| capability 행렬 커버리지 | `authorize_http_endpoint`가 행렬 미등록 route를 기본 deny로 처리한다(`#73` 완료). `/health`·`POST /workers/join`만 명시 예외. Dashboard `/api`에는 아직 같은 불변식이 없음(`#92`) | Dashboard 표면 적용 |
 | Cloudflare 전용 배포의 권한 | **principal→capability 매핑이 없으면 인증 통과 주체가 전체 capability를 받는다.** 매핑을 설정하는 경로가 `fleet-cli`에 없어 운영 배포에서 끌 수 없다 | 매핑 없는 principal에게 write·export capability를 부여하지 않으며, 매핑 부재 시 기동을 거부 |
 | admin bearer 회전 | `admin_api_tokens` digest 저장, create/rotate/revoke/list API, `FLEET_API_TOKENS` env→DB 1회 자동 전환 (#72 완료) | 제3자 발급 시크릿(`FLEET_GMAIL_APP_PASS` 등)은 이 메커니즘 대상 아님 |
+| 최초 admin 토큰 발급 | `fleet serve`가 `--http-bind` 기동 시 `admin_api_tokens`가 비어 있으면(env sync 이후에도) 전체 capability 토큰 1개를 발급해 `0600` 파일로 1회 출력한다(`#80` 완료). env로 admin을 구성한 배포에는 추가 발급하지 않음 | 없음 — 완료 |
 | bootstrap token 저장 | Fleet DB·메모리 저장소는 SHA-256 digest만 보관하며 PostgreSQL migration이 기존 값을 치환. Worker 설정에는 join 전 일회성 원문이 있을 수 있음 | digest·식별자만 저장하고 발급 응답에서만 원문 표시. join 뒤 Worker 설정 원문 제거와 Worker identity 전환은 #60 |
 | Worker identity | join이 digest-only `fwo_` operational credential을 1회 발급하고 register/heartbeat/deregister가 `worker:self` binding을 검사. rotate/revoke API 존재. `agent_endpoint`의 `server-key`는 여전히 평문 전파 | mTLS identity(#60 9단계)와 secret을 URL 밖으로 분리 |
 | MCP 권한 | `FLEET_MCP_CAPABILITIES` launcher allow-list로 노출 도구를 제한하고 값이 없으면 stdio 기동을 거부. ToolContext에는 아직 principal·project scope가 없음 | principal·capability·project scope를 fail-closed로 검사 |

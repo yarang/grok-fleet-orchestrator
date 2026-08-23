@@ -1007,7 +1007,7 @@ fn render_worker_config_toml(params: WorkerConfigTomlParams<'_>) -> String {
 }
 
 /// 운영체제 CSPRNG에서 n 바이트 읽기.
-fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut buf = vec![0u8; n];
     #[cfg(unix)]
@@ -1030,7 +1030,7 @@ fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
 }
 
 /// base64url-no-pad 인코딩.
-fn base64url(input: &[u8]) -> String {
+pub(crate) fn base64url(input: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
     let mut chunks = input.chunks_exact(3);

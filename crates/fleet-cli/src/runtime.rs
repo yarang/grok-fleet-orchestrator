@@ -28,7 +28,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-use fleet_api::{run_http_server, sync_env_admin_tokens_to_store, ApiTokenCredential, AppState};
+use fleet_api::{
+    issue_admin_bootstrap_token_if_needed, run_http_server, sync_env_admin_tokens_to_store,
+    ApiTokenCredential, AppState,
+};
 use fleet_core::{
     CircuitBreakerConfig, TaskFilter, TaskId, TaskStatus, TaskStatusFilter, WorkerFilter,
     WorkerStatus,
@@ -494,6 +497,41 @@ pub async fn run_serve(
             }
         } else if !has_cf_access {
             tracing::warn!(bind = %bind, "HTTP API server in NO-AUTH mode (dev only)");
+        }
+
+        // 로드맵 #80 — DB에 admin API 토큰이 하나도 없으면(위 sync가 방금 채운
+        // 경우 제외) 최초 1개를 발급해 0600 파일로 남긴다. `fleet
+        // admin-tokens create`/`fleet token issue`는 둘 다 기존 bearer를
+        // 요구하므로, 이게 없으면 API로는 최초 admin 토큰을 만들 방법이
+        // 없었다. 저널/표준출력에는 원문을 남기지 않는다 — 로그는 영구
+        // 보존되는 경우가 많아 dashboard OTP(`tracing::info!`)와 달리 이
+        // 값은 파일로만 1회 넘긴다.
+        match issue_admin_bootstrap_token_if_needed(&*store).await {
+            Ok(Some(token)) => match write_admin_bootstrap_token_file(&token) {
+                Ok(path) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        "issued first-run admin bootstrap token (full capability); \
+                         read it once from this file and rotate/revoke it afterward"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "issued admin bootstrap token but failed to write it to disk — \
+                         it is now stranded in the DB with no way to retrieve the plaintext; \
+                         revoke principal_id 'bootstrap' and re-issue via a working token file path"
+                    );
+                }
+            },
+            Ok(None) => {
+                tracing::debug!(
+                    "admin_api_tokens already has at least one entry — no bootstrap token issued"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "admin bootstrap token check failed (continuing)");
+            }
         }
 
         let app_state = Arc::new(app_state);
@@ -1775,6 +1813,59 @@ fn recover_completed_steps(err: &anyhow::Error) -> Vec<fleet_provisioner::StepRe
     }
 }
 
+/// admin bootstrap 토큰 파일의 기본 경로. `FLEET_ADMIN_BOOTSTRAP_TOKEN_FILE`로
+/// 오버라이드 가능 (로드맵 #80).
+const DEFAULT_ADMIN_BOOTSTRAP_TOKEN_FILE: &str = "/etc/fleet/bootstrap-admin-token";
+
+/// admin bootstrap 토큰 파일 경로. `FLEET_ADMIN_BOOTSTRAP_TOKEN_FILE`로
+/// 오버라이드 가능하다.
+fn resolve_admin_bootstrap_token_path() -> PathBuf {
+    std::env::var("FLEET_ADMIN_BOOTSTRAP_TOKEN_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_ADMIN_BOOTSTRAP_TOKEN_FILE))
+}
+
+/// admin bootstrap 토큰 원문을 `0600` 파일에 1회 쓴다.
+fn write_admin_bootstrap_token_file(token: &str) -> std::io::Result<PathBuf> {
+    let path = resolve_admin_bootstrap_token_path();
+    write_admin_bootstrap_token_to_path(&path, token)?;
+    Ok(path)
+}
+
+/// 경로를 명시적으로 받는 실제 쓰기 로직 — env var를 건드리지 않고
+/// 단위 테스트할 수 있도록 [`write_admin_bootstrap_token_file`]에서 분리했다.
+///
+/// 이미 파일이 존재하면 **덮어쓰지 않고 에러를 반환한다** — 이 함수는
+/// `issue_admin_bootstrap_token_if_needed`가 DB에 새로 발급한 토큰에 대해서만
+/// 호출되므로, 이 시점에 파일이 이미 있다는 것은 이전 실행의 잔재이거나
+/// 예상치 못한 충돌이다. 조용히 덮어쓰면 이전에 발급된(운영자가 이미
+/// 회수했을 수도 있는) 값을 새 값으로 가장하게 된다.
+fn write_admin_bootstrap_token_to_path(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    use std::io::Write;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+
+    file.write_all(token.as_bytes())
+}
+
 async fn run_playbook(
     exec: &dyn RemoteExecutor,
     ctx: &PlaybookContext,
@@ -2069,5 +2160,54 @@ mod recover_completed_steps_tests {
         // 스텝이 없으므로 빈 벡터가 정확한 답이다.
         let err = anyhow::anyhow!("ssh connection refused");
         assert!(recover_completed_steps(&err).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod admin_bootstrap_token_file_tests {
+    use super::*;
+
+    #[test]
+    fn writes_token_with_0600_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bootstrap-admin-token");
+
+        write_admin_bootstrap_token_to_path(&path, "fat_secret-value").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "fat_secret-value");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "token file must be 0600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn creates_missing_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("etc").join("fleet").join("bootstrap-admin-token");
+
+        write_admin_bootstrap_token_to_path(&path, "fat_x").unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn refuses_to_overwrite_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bootstrap-admin-token");
+        write_admin_bootstrap_token_to_path(&path, "fat_first").unwrap();
+
+        // 두 번째 발급을 같은 경로에 쓰려는 시도 — 조용히 값을 갈아치우면
+        // 안 된다. `issue_admin_bootstrap_token_if_needed`가 정상 동작하는
+        // 한 이 경로에는 절대 도달하지 않아야 하지만, 파일 시스템 잔재가
+        // 남아 있는 경우를 위한 안전장치다.
+        let result = write_admin_bootstrap_token_to_path(&path, "fat_second");
+        assert!(result.is_err());
+
+        // 원래 값이 그대로 남아 있어야 한다.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fat_first");
     }
 }
