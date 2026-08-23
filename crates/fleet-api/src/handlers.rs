@@ -16,7 +16,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 use fleet_core::audit::{action, AuditEvent};
-use fleet_core::{Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
+use fleet_core::{mask_server_key, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus};
 
 use crate::app::{AppState, AuthorizationContext};
 use crate::error::ApiError;
@@ -146,7 +146,8 @@ pub async fn register_worker(
     let is_new = existing_by_name.is_none() && existing_by_id.is_none();
     let event = if is_new {
         info!(%worker_id, name = %worker.name, "worker registered");
-        fleet_core::FleetEvent::worker_joined(worker_id, &worker.name, &worker.endpoint)
+        // 로드맵 #75 — 이벤트 로그는 append-only이므로 쓰기 시점에 마스킹한다.
+        fleet_core::FleetEvent::worker_joined(worker_id, &worker.name, mask_server_key(&worker.endpoint))
     } else {
         info!(%worker_id, name = %worker.name, "worker re-registered");
         fleet_core::FleetEvent::WorkerHeartbeat {
@@ -669,7 +670,7 @@ pub async fn join_worker(
         {
             tracing::warn!(
                 worker_id = %worker.id,
-                endpoint = %worker.endpoint,
+                endpoint = %mask_server_key(&worker.endpoint),
                 max_concurrent = worker.max_concurrent,
                 error = %e,
                 "transport.register failed — worker is in Store but cannot accept tasks until healthy"
@@ -678,12 +679,15 @@ pub async fn join_worker(
     }
 
     info!(%worker_id, name = %worker.name, "worker joined via bootstrap token");
+    // 로드맵 #75 — 이벤트 로그는 append-only라 여기서 마스킹해 두지 않으면
+    // secret 원문이 events 테이블에 영구히 남는다. 나중에 되돌릴 수 없으므로
+    // 쓰기 시점에 막는다(읽기 시점 필터링은 우회 경로를 남긴다).
     let _ = state
         .store
         .append_event(&fleet_core::FleetEvent::worker_joined(
             worker_id,
             &worker.name,
-            &worker.endpoint,
+            mask_server_key(&worker.endpoint),
         ))
         .await;
 
@@ -1144,7 +1148,7 @@ async fn upsert_and_register(state: &AppState, worker: &Worker) -> Result<Worker
         {
             tracing::warn!(
                 worker_id = %worker.id,
-                endpoint = %worker.endpoint,
+                endpoint = %mask_server_key(&worker.endpoint),
                 max_concurrent = worker.max_concurrent,
                 error = %e,
                 "transport.register failed — worker is in Store but cannot accept tasks until healthy"
@@ -1170,7 +1174,11 @@ fn worker_to_summary(w: &Worker) -> WorkerSummary {
     WorkerSummary {
         id: w.id.to_string(),
         name: w.name.clone(),
-        endpoint: w.endpoint.clone(),
+        // 로드맵 #75 — endpoint의 `server-key=` 값은 워커의 grok ACP 인증
+        // 토큰 원문이다. 이 응답의 정당한 소비자 중 그 값을 봐야 하는
+        // 사람은 없다(다이얼은 fleet-transport가 Worker 엔티티를 직접
+        // 읽어 처리 — 이 DTO를 거치지 않는다).
+        endpoint: mask_server_key(&w.endpoint),
         status: WorkerSummary::status_str(w.status).to_string(),
         labels: w.labels.clone(),
         active_tasks: w.active_tasks,

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use fleet_api::{build_app, AppState};
-use fleet_core::{BootstrapToken, PermissionKind, Worker};
+use fleet_core::{BootstrapToken, FleetEvent, PermissionKind, Worker};
 use fleet_store::mem::MemStore;
 use fleet_store::{Store, WorkerOperationalCredential};
 
@@ -91,6 +91,83 @@ async fn get_worker_by_id_with_worker_list_capability_succeeds() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "worker:list must still be sufficient");
+}
+
+/// `worker:list`가 있어 열람은 허용돼도 `endpoint`의 `server-key` 원문은
+/// 응답에 실리지 않는다 (로드맵 #75) — `#73`이 막은 것은 인가(누가 볼 수
+/// 있는가)이고, 이 테스트가 막는 것은 노출(볼 수 있는 사람에게 무엇이
+/// 보이는가)이다. 둘은 서로 다른 계층의 방어라 각자 테스트가 필요하다.
+#[tokio::test]
+async fn get_worker_by_id_never_leaks_raw_server_key_even_with_capability() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let worker_id = seed_worker(&store, "target-worker").await;
+
+    let mut state = AppState::new(store);
+    state.allow_no_auth = false;
+    state = state.with_tokens(vec![scoped_token(
+        "listing-token",
+        vec![PermissionKind::WorkerList],
+    )]);
+    let url = spawn_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{url}/v1/workers/{worker_id}"))
+        .header("authorization", "Bearer listing-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("leaked-secret"),
+        "response body must not contain the raw server-key: {body}"
+    );
+    assert!(
+        body.contains("<redacted>"),
+        "endpoint field should show the masked marker: {body}"
+    );
+}
+
+/// 로드맵 #75 — `events` 로그는 append-only라 마스킹을 쓰기 시점(핸들러가
+/// `FleetEvent::worker_joined`를 구성할 때)에 해야 한다. 읽기 시점 필터링만
+/// 하면 DB에는 원문이 영구히 남는다. `register_worker` 핸들러가 실제로
+/// 마스킹된 값을 이벤트에 넣는지 저장소를 직접 읽어 확인한다.
+#[tokio::test]
+async fn register_worker_writes_masked_endpoint_into_the_event_log() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let mut state = AppState::new(store.clone());
+    state.allow_no_auth = false;
+    state = state.with_tokens(vec![scoped_token(
+        "register-token",
+        vec![PermissionKind::WorkerRegister],
+    )]);
+    let url = spawn_server(state).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/workers/register"))
+        .header("authorization", "Bearer register-token")
+        .json(&serde_json::json!({
+            "name": "event-worker",
+            "agent_endpoint": "ws://h/ws?server-key=event-secret",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let events = store.list_events(0, 100).await.unwrap();
+    let joined = events
+        .iter()
+        .find(|e| matches!(&e.event, FleetEvent::WorkerJoined { name, .. } if name == "event-worker"))
+        .expect("expected a WorkerJoined event for event-worker");
+    let FleetEvent::WorkerJoined { endpoint, .. } = &joined.event else {
+        unreachable!();
+    };
+    assert!(
+        !endpoint.contains("event-secret"),
+        "persisted event must not contain the raw server-key: {endpoint}"
+    );
+    assert!(endpoint.contains("<redacted>"));
 }
 
 /// 워커 A의 operational credential(=`WorkerRegister`/`WorkerDelete`만 가짐)

@@ -54,5 +54,6 @@ pub use task::{
     TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,
 };
 pub use worker::{
-    CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat, WorkerLivenessMode, WorkerStatus,
+    mask_server_key, CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerLivenessMode, WorkerStatus,
 };

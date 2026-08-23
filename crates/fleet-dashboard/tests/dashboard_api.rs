@@ -446,6 +446,33 @@ async fn workers_list_returns_summaries() {
     assert!(names.contains(&"beta"));
 }
 
+/// `endpoint`의 `server-key=` 값은 워커의 grok ACP 인증 토큰 원문이다 —
+/// 대시보드 뷰어 중 그 값을 봐야 하는 사람은 없다(로드맵 #75).
+#[tokio::test]
+async fn workers_list_never_leaks_raw_server_key() {
+    let mut worker = sample_worker("gamma", WorkerStatus::Online);
+    worker.endpoint = "wss://gamma.example/ws?server-key=leaked-secret".into();
+    let store = MemStore::new().with_worker(worker);
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/workers", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("leaked-secret"),
+        "response body must not contain the raw server-key: {body}"
+    );
+    assert!(body.contains("<redacted>"));
+}
+
 #[tokio::test]
 async fn workers_list_status_filter() {
     let store = MemStore::new()

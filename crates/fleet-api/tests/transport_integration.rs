@@ -136,6 +136,55 @@ async fn register_calls_transport_register() {
     assert_eq!(reg[0].1, "ws://127.0.0.1:9999/ws?server-key=x");
 }
 
+/// 로드맵 #75 — `transport.register`는 워커에 실제로 다이얼해야 하므로
+/// `server-key` 원문을 그대로 받아야 한다(위 테스트가 확인). 하지만 그
+/// 이후 같은 워커를 조회하면 원문이 나오면 안 된다 — 다이얼에 필요한
+/// 소비자와 조회 응답의 소비자는 서로 다른 권한 경계를 갖는다.
+#[tokio::test]
+async fn registered_worker_endpoint_is_masked_on_read_even_though_transport_got_the_raw_value() {
+    let (transport, reg_log, _unreg_log) = RecordingTransport::new_shared();
+    let url = spawn_server(transport).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{url}/v1/workers/register"))
+        .header("authorization", "Bearer test-token")
+        .json(&serde_json::json!({
+            "name": "readback-worker",
+            "agent_endpoint": "ws://127.0.0.1:9997/ws?server-key=readback-secret",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let worker_id = resp.json::<serde_json::Value>().await.unwrap()["worker_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // transport는 여전히 원문을 받는다 — 다이얼에 필요하므로.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        reg_log.lock().unwrap()[0].1,
+        "ws://127.0.0.1:9997/ws?server-key=readback-secret"
+    );
+
+    // 그러나 GET /v1/workers/{id} 응답에는 마스킹된 값만 있다.
+    let get_resp = client
+        .get(format!("{url}/v1/workers/{worker_id}"))
+        .header("authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), 200);
+    let body = get_resp.text().await.unwrap();
+    assert!(
+        !body.contains("readback-secret"),
+        "GET response must not contain the raw server-key: {body}"
+    );
+    assert!(body.contains("<redacted>"));
+}
+
 #[tokio::test]
 async fn deregister_calls_transport_unregister() {
     let (transport, _reg_log, unreg_log) = RecordingTransport::new_shared();

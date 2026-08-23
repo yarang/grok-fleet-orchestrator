@@ -274,7 +274,9 @@ fn worker_to_summary(w: &fleet_core::Worker) -> WorkerSummary {
     WorkerSummary {
         id: w.id.to_string(),
         name: w.name.clone(),
-        endpoint: w.endpoint.clone(),
+        // 로드맵 #75 — endpoint의 `server-key=` 값은 워커의 grok ACP 인증
+        // 토큰 원문이다. 대시보드 뷰어 중 그 값을 봐야 하는 사람은 없다.
+        endpoint: fleet_core::mask_server_key(&w.endpoint),
         status: WorkerSummary::status_str(w.status).to_string(),
         labels: w.labels.clone(),
         active_tasks: w.active_tasks,

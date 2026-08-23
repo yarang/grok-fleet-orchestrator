@@ -55,7 +55,7 @@ use agent_client_protocol::{Agent, ConnectionTo};
 use agent_client_protocol_http::HttpClient;
 use async_trait::async_trait;
 use chrono::Utc;
-use fleet_core::{TaskId, TaskResult, TokenUsage, WorkerId};
+use fleet_core::{mask_server_key, TaskId, TaskResult, TokenUsage, WorkerId};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -309,7 +309,7 @@ impl WorkerTransport for AcpTransport {
         let cap = max_concurrent_tasks.max(1);
         info!(
             %worker_id,
-            endpoint = %sanitize_endpoint(endpoint),
+            endpoint = %mask_server_key(endpoint),
             max_concurrent = cap,
             "registering ACP worker"
         );
@@ -870,7 +870,7 @@ fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
     let client = HttpClient::with_endpoint(&session.endpoint).map_err(|e| {
         format!(
             "invalid endpoint {}: {e}",
-            sanitize_endpoint(&session.endpoint)
+            mask_server_key(&session.endpoint)
         )
     })?;
     #[cfg(feature = "mtls")]
@@ -881,30 +881,9 @@ fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
     Ok(client)
 }
 
-/// endpoint에서 server-key 마스킹 (로깅용).
-fn sanitize_endpoint(endpoint: &str) -> String {
-    if let Some(idx) = endpoint.find("server-key=") {
-        let start = idx + "server-key=".len();
-        let end = endpoint[start..]
-            .find(['&', '#'])
-            .map(|e| start + e)
-            .unwrap_or(endpoint.len());
-        format!("{}<redacted>{}", &endpoint[..start], &endpoint[end..])
-    } else {
-        endpoint.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sanitize_endpoint_masks_server_key() {
-        let s = sanitize_endpoint("ws://h:1/ws?server-key=topsecret");
-        assert!(!s.contains("topsecret"));
-        assert!(s.contains("<redacted>"));
-    }
 
     #[tokio::test]
     async fn new_transport_has_no_clients() {

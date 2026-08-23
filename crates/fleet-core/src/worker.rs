@@ -18,6 +18,13 @@ pub struct Worker {
     /// 사람이 읽을 수 있는 고유 이름 (예: "build-farm-1").
     pub name: String,
     /// 워커의 접속 엔드포인트 (예: "wss://worker-a.fleet.example.com/ws").
+    ///
+    /// **secret을 담고 있다** — 대부분의 배포에서 `?server-key=<값>` 쿼리
+    /// 파라미터가 붙어 있으며, 이는 워커의 grok 서브프로세스 ACP 인증
+    /// 토큰 원문이다(로드맵 `#75`). 이 필드를 외부 응답·이벤트·로그로
+    /// 그대로 내보내면 안 된다 — [`mask_server_key`]로 마스킹한 뒤에만
+    /// 내보낸다. 원문이 필요한 유일한 정당한 소비자는 `fleet-transport`가
+    /// 실제로 워커에 다이얼할 때뿐이다.
     pub endpoint: String,
     /// 라벨 맵 (예: {"arch":"arm64", "gpu":"true"}). 작업 라벨 필터에 사용.
     #[serde(default)]
@@ -221,6 +228,29 @@ fn default_true() -> bool {
     true
 }
 
+/// `agent_endpoint`류 문자열에서 `server-key=` 값을 `<redacted>`로 마스킹한다
+/// (로드맵 `#75`). `?server-key=<secret>&other=...`/`#fragment` 어느
+/// 위치에 있든 다음 `&`/`#` 또는 문자열 끝까지만 값으로 보고 그 구간만
+/// 치환한다 — 앞뒤(스킴·호스트·포트·경로·다른 쿼리 파라미터)는 그대로 둔다.
+/// `server-key=`가 없으면 원문을 그대로 반환한다(이미 secret이 없는 값을
+/// 실수로 바꾸지 않기 위해).
+///
+/// `Worker.endpoint`/`agent_endpoint`를 **어떤 외부 응답·이벤트·로그로든**
+/// 내보내기 전에는 항상 이 함수를 거쳐야 한다 — 원문이 필요한 유일한 소비자는
+/// `fleet-transport`가 워커에 실제로 다이얼할 때뿐이다.
+pub fn mask_server_key(endpoint: &str) -> String {
+    const MARKER: &str = "server-key=";
+    let Some(idx) = endpoint.find(MARKER) else {
+        return endpoint.to_string();
+    };
+    let start = idx + MARKER.len();
+    let end = endpoint[start..]
+        .find(['&', '#'])
+        .map(|e| start + e)
+        .unwrap_or(endpoint.len());
+    format!("{}<redacted>{}", &endpoint[..start], &endpoint[end..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +337,45 @@ mod tests {
         });
         let w: Worker = serde_json::from_value(json).unwrap();
         assert_eq!(w.liveness_mode, WorkerLivenessMode::Periodic);
+    }
+
+    // ── mask_server_key (로드맵 #75) ────────────────────────────────────
+
+    #[test]
+    fn mask_server_key_redacts_query_param_value() {
+        let s = mask_server_key("wss://h:1/ws?server-key=topsecret");
+        assert!(!s.contains("topsecret"));
+        assert!(s.contains("<redacted>"));
+    }
+
+    #[test]
+    fn mask_server_key_preserves_scheme_host_path() {
+        let s = mask_server_key("wss://worker-1.fleet.internal:2420/ws?server-key=topsecret");
+        assert!(s.starts_with("wss://worker-1.fleet.internal:2420/ws?server-key="));
+    }
+
+    #[test]
+    fn mask_server_key_preserves_trailing_query_params() {
+        let s = mask_server_key("ws://h/ws/name?server-key=topsecret&foo=bar");
+        assert!(!s.contains("topsecret"));
+        assert!(s.ends_with("&foo=bar"));
+    }
+
+    #[test]
+    fn mask_server_key_preserves_fragment() {
+        let s = mask_server_key("ws://h/ws?server-key=topsecret#frag");
+        assert!(!s.contains("topsecret"));
+        assert!(s.ends_with("#frag"));
+    }
+
+    #[test]
+    fn mask_server_key_leaves_endpoint_without_secret_untouched() {
+        let s = mask_server_key("wss://h:1/ws");
+        assert_eq!(s, "wss://h:1/ws");
+    }
+
+    #[test]
+    fn mask_server_key_leaves_empty_string_untouched() {
+        assert_eq!(mask_server_key(""), "");
     }
 }

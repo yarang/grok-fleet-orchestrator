@@ -43,12 +43,20 @@ owners: ["fleet-api", "fleet-worker"]
 ### 남은 노출 경계
 
 - **`agent_endpoint`의 `server-key`가 secret-bearing 정규 필드다.** server는 이 query 값을 읽어
-  join 응답 `worker.toml`의 `[grok].secret`에 평문으로 기록하며, 같은 값이 `workers.endpoint`
-  컬럼에 저장되어 `GET /v1/workers/{id}`, Dashboard `/api/workers`·`/api/events`,
-  MCP `fleet_list_workers` 응답으로 전파된다. `GET /v1/workers/{id}`는 현재 capability 행렬에
-  등록되어 있지 않아 인증만 통과하면 호출되므로(→ [Authorization 계약](../security/authorization-and-audit.md)),
-  워커 A의 operational token 보유자가 워커 B의 ACP secret을 얻어 orchestrator를 우회할 수 있다.
-  이 필드는 redaction 대상이자 목표 계약 6번의 대상이다.
+  join 응답 `worker.toml`의 `[grok].secret`에 평문으로 기록한다 — 이건 그 워커 자신에게 1회
+  전달되는 정당한 경로이므로 그대로 유지한다. 같은 값이 `workers.endpoint` 컬럼에도 저장되는데,
+  **이 컬럼을 되읽어 응답·이벤트로 내보내는 경로(`GET /v1/workers/{id}`, Dashboard
+  `/api/workers`·`/api/events`, MCP `fleet_list_workers`)는 `#75`(완료, 2026-08-23)가
+  `fleet_core::mask_server_key`로 마스킹했다** — 목표 계약 6번의 "응답·이벤트에서 secret 분리"
+  절반이 닫혔다. 인가(누가 `GET /v1/workers/{id}`를 호출할 수 있는가)는 별개로 `#73`이 이미
+  기본값 deny로 닫아 뒀다(→ [Authorization 계약](../security/authorization-and-audit.md)) —
+  둘은 서로 다른 계층이라 각각 별도로 막아야 했다. **아직 남은 절반**: 이벤트 로그 컬럼 자체는
+  ACP 인증을 여전히 URL query(`?server-key=`)로 운반한다 — 목표 계약 6번의 "URL query 밖(헤더
+  또는 mTLS)으로 이전"은 착수 전이다. mTLS 활성화 워커도 예외가 아니다 — `crates/fleet-provisioner/src/steps/join_worker.rs::mtls_agent_endpoint`가
+  여전히 `wss://…?server-key=…`를 만든다(mTLS client cert가 이미 채널을 인증한 뒤에도 URL의
+  `server-key`가 두 번째 인증 인자로 남아 있다는 뜻 — cert 인증만으로 충분한지는 `grok agent
+  serve`(이 저장소 밖의 외부 프로세스)가 어떤 인증을 실제로 강제하는지에 달려 있어, 그걸 먼저
+  확인하지 않고는 URL에서 제거할 수 없다).
 - join CLI는 Authorization header를 보내지 않으므로 API token 보호 모드에서는 middleware가 join을
   handler 이전에 거절할 수 있다(join route는 bootstrap body를 자체 인증 수단으로 처리한다).
 - `fleet provision`(SSH 자동 프로비저닝)은 `/v1/workers/join`과 배선되어 있다(로드맵 `#82`) —
@@ -65,8 +73,9 @@ owners: ["fleet-api", "fleet-worker"]
 | Cloudflare만 설정 | Cloudflare assertion 미전송 | edge middleware에서 거절 |
 | 둘 다 설정 | 두 header 모두 미전송 | join 불가 |
 
-따라서 현재 흐름은 `partial`이다. bootstrap 원문 저장과 scoped Worker identity는 해결됐고,
-`server-key` 평문 전파와 provision 배선, mTLS가 남아 있다.
+따라서 현재 흐름은 `partial`이다. bootstrap 원문 저장, scoped Worker identity, provision 배선,
+응답·이벤트에서의 `server-key` 마스킹(`#75`)은 해결됐고, ACP 인증을 URL query 밖으로 옮기는
+것과 mTLS 관련 나머지가 남아 있다.
 
 ## 목표 계약
 

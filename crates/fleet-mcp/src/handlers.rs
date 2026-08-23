@@ -610,7 +610,9 @@ fn worker_summary(w: &fleet_core::Worker) -> Value {
     json!({
         "id": w.id.to_string(),
         "name": w.name,
-        "endpoint": w.endpoint,
+        // 로드맵 #75 — endpoint의 `server-key=` 값은 워커의 grok ACP 인증
+        // 토큰 원문이다. MCP tool 호출자 중 그 값을 봐야 하는 사람은 없다.
+        "endpoint": fleet_core::mask_server_key(&w.endpoint),
         "status": format!("{:?}", w.status).to_lowercase(),
         "labels": w.labels,
         "active_tasks": w.active_tasks,
@@ -901,6 +903,20 @@ mod tests {
             cancelled_at: chrono::Utc::now(),
         };
         assert_eq!(phase_str(&cancelled), "cancelled");
+    }
+
+    #[test]
+    fn worker_summary_never_leaks_raw_server_key() {
+        // 로드맵 #75 — MCP tool 호출자 중 endpoint의 server-key 원문을
+        // 봐야 하는 사람은 없다.
+        let w = fleet_core::Worker::new(
+            "leaky",
+            "wss://leaky.example/ws?server-key=leaked-secret",
+        );
+        let summary = worker_summary(&w);
+        let rendered = summary.to_string();
+        assert!(!rendered.contains("leaked-secret"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
