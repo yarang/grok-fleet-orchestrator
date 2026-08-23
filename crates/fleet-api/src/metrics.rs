@@ -13,15 +13,17 @@
 //! | `fleet_workers_capacity_total`        | gauge   | —               | 모든 워커의 max_concurrent 합계    |
 //! | `fleet_workers_active_tasks_total`    | gauge   | —               | 현재 실행 중인 작업 수 합계       |
 //! | `fleet_tasks_total`                   | gauge   | phase           | 위상별 작업 수                    |
+//! | `fleet_tasks_failed_total`            | gauge   | kind            | 실패 원인(`FailureKind`)별 작업 수 (로드맵 #70) |
 //! | `fleet_events_written_total`          | gauge   | —               | 가장 최근 이벤트 seq (단조 증가)  |
 //! | `fleet_task_tokens_total`             | counter | type            | 완료된 작업의 누적 토큰 사용량    |
 //! | `fleet_task_duration_seconds`         | histogram | —             | 완료된 작업의 실행 시간 분포      |
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::response::{IntoResponse, Response};
-use fleet_core::{TaskFilter, TaskStatus, WorkerFilter, WorkerStatus};
+use fleet_core::{FailureKind, TaskFilter, TaskStatus, WorkerFilter, WorkerStatus};
 use fleet_store::Store;
 use tracing::debug;
 
@@ -93,6 +95,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     }
 
     let mut t_counts = TaskCounts::default();
+    let mut failed_by_kind: HashMap<FailureKind, u64> = HashMap::new();
     let mut tok_counts = TokenCounts::default();
     let mut duration_hist = Histogram::new(TASK_DURATION_BUCKETS);
     let mut dispatch_latency_hist = Histogram::new(TASK_DISPATCH_LATENCY_BUCKETS);
@@ -117,7 +120,10 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
                     tok_counts.total += usage.total();
                 }
             }
-            TaskStatus::Failed(_) => t_counts.failed += 1,
+            TaskStatus::Failed(failure) => {
+                t_counts.failed += 1;
+                *failed_by_kind.entry(failure.kind).or_insert(0) += 1;
+            }
             TaskStatus::Cancelled { .. } => t_counts.cancelled += 1,
         }
     }
@@ -225,6 +231,25 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
         &[("phase", "total")],
         t_counts.total,
     );
+    out.push('\n');
+
+    // fleet_tasks_failed_total{kind} — 로드맵 #70. `fleet_tasks_total{phase="failed"}`는
+    // 실패 총량만 알려주고 원인을 분해하지 않아, "credential 미프로비저닝으로
+    // 몇 건 실패했나" 같은 질문에 답할 수 없었다(#90 조사에서 발견). `kind`가
+    // 하나도 관측되지 않아도 0을 명시적으로 찍어(FailureKind::ALL 순회) 없는
+    // 라인과 0건인 라인을 구분한다.
+    out.push_str(
+        "# HELP fleet_tasks_failed_total Number of failed tasks by FailureKind.\n",
+    );
+    out.push_str("# TYPE fleet_tasks_failed_total gauge\n");
+    for kind in FailureKind::ALL {
+        push_gauge(
+            &mut out,
+            "fleet_tasks_failed_total",
+            &[("kind", kind.as_str())],
+            *failed_by_kind.get(&kind).unwrap_or(&0),
+        );
+    }
     out.push('\n');
 
     // fleet_events_written_total
@@ -621,6 +646,60 @@ mod tests {
         assert!(out.contains("fleet_task_tokens_total{type=\"output\"} 130"));
         assert!(out.contains("fleet_task_tokens_total{type=\"cache_read\"} 20"));
         assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 430"));
+    }
+
+    #[tokio::test]
+    async fn failed_tasks_are_broken_down_by_failure_kind() {
+        // 로드맵 #70 — `fleet_tasks_total{phase="failed"}`는 총량만 알려줄 뿐
+        // "credential 미프로비저닝으로 몇 건 실패했나" 같은 질문에 답하지
+        // 못했다. `fleet_tasks_failed_total{kind}`가 그 분해를 제공한다.
+        let store = MemStore::new_arc();
+
+        let mut credential_missing = Task::from_request(TaskRequest {
+            prompt: "a".into(),
+            ..Default::default()
+        });
+        credential_missing.status = TaskStatus::Failed(fleet_core::TaskFailure {
+            error: "no worker has the required credential".into(),
+            kind: FailureKind::CredentialMissing,
+            worker_id: None,
+            attempts: 1,
+        });
+        store.insert_task(&credential_missing).await.unwrap();
+
+        // 같은 kind가 두 번째로 실패해도 정확히 누적돼야 한다.
+        let mut credential_missing_2 = Task::from_request(TaskRequest {
+            prompt: "b".into(),
+            ..Default::default()
+        });
+        credential_missing_2.status = TaskStatus::Failed(fleet_core::TaskFailure {
+            error: "no worker has the required credential".into(),
+            kind: FailureKind::CredentialMissing,
+            worker_id: None,
+            attempts: 1,
+        });
+        store.insert_task(&credential_missing_2).await.unwrap();
+
+        let mut worker_error = Task::from_request(TaskRequest {
+            prompt: "c".into(),
+            ..Default::default()
+        });
+        worker_error.status = TaskStatus::Failed(fleet_core::TaskFailure {
+            error: "exit code 1".into(),
+            kind: FailureKind::WorkerError,
+            worker_id: None,
+            attempts: 1,
+        });
+        store.insert_task(&worker_error).await.unwrap();
+
+        let out = metrics_text(store.as_ref()).await.unwrap();
+        assert!(out.contains("fleet_tasks_total{phase=\"failed\"} 3"));
+        assert!(out.contains("fleet_tasks_failed_total{kind=\"credential_missing\"} 2"));
+        assert!(out.contains("fleet_tasks_failed_total{kind=\"worker_error\"} 1"));
+        // 관측되지 않은 kind도 0으로 명시적으로 찍혀야 한다 — 라인이 아예
+        // 없는 것과 0건인 것을 대시보드/alert가 구분할 수 있어야 한다.
+        assert!(out.contains("fleet_tasks_failed_total{kind=\"worker_unavailable\"} 0"));
+        assert!(out.contains("fleet_tasks_failed_total{kind=\"circuit_open\"} 0"));
     }
 
     #[tokio::test]

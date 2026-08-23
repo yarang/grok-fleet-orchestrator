@@ -275,27 +275,51 @@ pub struct TaskFailure {
 }
 
 /// 실패 원인 분류. 재시도 정책과 모니터링 대시보드에서 사용.
+///
+/// 여기 있는 variant는 전부 저장소 어딘가에서 실제로 생성된다 — 아무도
+/// 만들지 않는 variant는 재시도 정책·metric 분해를 조용히 잘못 이해하게
+/// 만드는 죽은 코드다(로드맵 `#70`, `#90` 흡수 조사에서 `Timeout`·
+/// `AuthFailed`·`Cancelled` 세 variant가 이 기준을 어기고 있음을 확인해
+/// 제거했다). 새 variant를 추가할 때는 실제 생성 지점을 함께 만든다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureKind {
     /// 워커가 응답하지 않거나 등록 해제됨.
     WorkerUnavailable,
-    /// 작업 시간 제한 초과.
-    Timeout,
     /// 워커에서 실행 중 발생한 에러 (exit ≠ 0, panic 등).
     WorkerError,
-    /// OIDC 토큰 검증 실패 또는 만료.
-    AuthFailed,
     /// CircuitBreaker가 열려 있어 dispatch 자체가 차단됨.
     CircuitOpen,
-    /// 클라이언트가 취소.
-    Cancelled,
     /// 요청된 model의 credential을 보유한 워커가 하나도 없어 dispatch 후보가
     /// 전부 걸러짐 (로드맵 #71). `WorkerUnavailable`과 달리 원인이 명확히
     /// "credential 미프로비저닝"이므로, 재시도로는 해소되지 않고
     /// `fleet provision`의 `PushCredentials` 스텝으로 해당 워커에 credential을
     /// 배포해야 해소된다.
     CredentialMissing,
+}
+
+impl FailureKind {
+    /// 모든 variant를 순서대로 나열 — metric label 등 전량 순회가 필요한
+    /// 곳에서 사용(새 variant 추가를 컴파일러가 강제하도록 이 배열도 함께
+    /// 갱신해야 한다).
+    pub const ALL: [FailureKind; 4] = [
+        FailureKind::WorkerUnavailable,
+        FailureKind::WorkerError,
+        FailureKind::CircuitOpen,
+        FailureKind::CredentialMissing,
+    ];
+
+    /// Prometheus label 등 안정적인 텍스트 표현이 필요한 곳에서 사용.
+    /// `#[serde(rename_all = "snake_case")]`가 만드는 JSON 표현과 동일한
+    /// 문자열이다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkerUnavailable => "worker_unavailable",
+            Self::WorkerError => "worker_error",
+            Self::CircuitOpen => "circuit_open",
+            Self::CredentialMissing => "credential_missing",
+        }
+    }
 }
 
 /// 작업 목록 조회용 필터. Store::list_tasks에 전달.
@@ -507,6 +531,16 @@ mod tests {
     fn failure_kind_credential_missing_snake_case() {
         let json = serde_json::to_string(&FailureKind::CredentialMissing).unwrap();
         assert_eq!(json, "\"credential_missing\"");
+    }
+
+    #[test]
+    fn failure_kind_as_str_matches_serde_snake_case_for_every_variant() {
+        // as_str()이 직렬화 표현과 갈라지면 metric label과 API 응답의 kind
+        // 문자열이 서로 달라진다 — ALL을 순회해 모든 variant를 강제한다.
+        for kind in FailureKind::ALL {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+        }
     }
 
     #[test]
