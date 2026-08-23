@@ -118,15 +118,14 @@ impl Step for PushCredentials {
         // 4. 병합 — [model.*] 섹션만 교체.
         let merged = merge_config(&existing, &sections);
 
-        // 5. atomic write via /tmp + sudo mv.
+        // 5. atomic write via /tmp + sudo mv (로드맵 #79 — 실패를 삼키지 않는다).
         exec.write_file("/tmp/grok-config.toml", &merged).await?;
-        let _ = exec
-            .exec(&format!(
-                "sudo mkdir -p $(dirname {REMOTE_CONFIG_PATH}) \
-                 && sudo mv /tmp/grok-config.toml {REMOTE_CONFIG_PATH} \
-                 && sudo chmod 600 {REMOTE_CONFIG_PATH}"
-            ))
-            .await;
+        exec.exec_checked(&format!(
+            "sudo mkdir -p $(dirname {REMOTE_CONFIG_PATH}) \
+             && sudo mv /tmp/grok-config.toml {REMOTE_CONFIG_PATH} \
+             && sudo chmod 600 {REMOTE_CONFIG_PATH}"
+        ))
+        .await?;
 
         Ok(StepOutput::message(format!(
             "pushed {} credential section(s) → {REMOTE_CONFIG_PATH}",

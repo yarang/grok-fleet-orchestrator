@@ -787,3 +787,15 @@ last_verified: "2026-08-15"
 - 병행 유지 목록의 한계를 문서에 명시했다: `capability_matrix_covers_router_routes`는 `build_app`의 route 목록을 손으로 병행 유지하므로, 새 route를 추가하면서 이 목록에 반영하지 않으면 테스트는 통과하지만 실제로는 놓친다. 진짜 안전장치는 기본값 deny 전환 자체다 — 목록 갱신을 잊어도 새 route는 자동으로 403이지 열려 있지 않다.
 - `http-api.md`와 `authorization-and-audit.md`의 "현재 구현" 서술을 코드 기준으로 갱신하고, Dashboard `/api`(중앙 행렬 부재, 핸들러에 29곳 산재)에는 같은 불변식이 아직 없다는 점과 `#92`가 그 범위를 다룬다는 점을 명시했다.
 - 검증: `cargo test --workspace`(진행 중, 현재까지 실패 0), `cargo check --no-default-features` 통과, `cargo clippy -p fleet-api --all-targets --all-features` 경고 0.
+
+## 2026-08-23 — `#79` 원격 실행 실패 관측 가능화
+
+- 유형: `implementation` + `verification`
+- `crates/fleet-provisioner/src/ssh.rs`의 `RemoteExecutor`에 `exec_checked` 기본 메서드를 추가했다. `exec_streaming`을 위임해 exit code를 얻고, 비0이면 `StepError::RemoteExit`로 승격한다. `exec()` 자체는 그대로 두었다 — `test -f ... && echo yes`처럼 비0 종료가 정상적인 "아니오" 응답인 조회 명령에는 exit code 무시가 필요하기 때문이다.
+- `install_fleet_worker.rs`(디렉토리 생성, config/유닛 이동, daemon-reload), `push_credentials.rs`(config.toml atomic write), `install_cloudflared.rs`(자격증명 생성, config.yml 이동, 재시작)의 mutation 명령에서 `let _ =`/`|| true`로 버려지던 실패를 `exec_checked`로 교체했다. cloudflared enable/restart는 `#85`에서 표준 playbook 제거가 예정된 과도기 스텝이라 best-effort로 남기되, 실패를 로그로 관측 가능하게 했다(조용히 삼키지 않음).
+- **구현 중 실제 잠복 버그를 발견했다**: `install_cloudflared.rs`에 `/etc/cloudflared` 디렉토리를 만드는 스텝이 없어, 새 호스트에서 `config.yml`의 `sudo mv`가 "디렉토리 없음"으로 조용히 실패하고 있었다(스텝은 "Applied"로 보고됨 — 정확히 이번 항목이 막으려던 사고 유형). `sudo mkdir -p /etc/cloudflared`를 추가해 해소했다.
+- `start_services.rs`의 죽은 `wait_timeout_secs`(전 저장소 참조 0건)를 실제 폴링으로 구현했다. 로컬 `systemctl is-active`는 즉시 1회 확인 대신 타임아웃까지 재시도한다. `orchestrator_api_token`이 있으면 `GET /v1/workers`를 폴링해 워커가 `online`으로 보고될 때까지 기다린다 — 토큰이 없으면(하위 호환) 로컬 상태만 확인했다고 경고 로그를 남기고 진행한다.
+- 이 하트비트 폴링을 구현하다 **두 번째 관측 결함을 스스로 만들 뻔했다**: 401/403(capability 부족)을 아무 처리 없이 "아직 못 찾음"과 똑같이 취급하면, 남은 시간 내내 폴링하다 결국 "워커가 등록 안 됨" 타임아웃으로 오인시킨다. 상태 코드 분류를 `classify_status` 순수 함수로 분리해 401/403은 즉시 별도 원인으로 실패하도록 정정했다 — `#79`의 취지를 그 안에서 한 번 더 확인한 사례다. `docs/deployment/worker-provisioning.md`에 `worker:list` capability 요구사항을 문서화했다.
+- `PlaybookError::StepFailed`에 `completed_steps: Vec<StepReport>`를 추가했다. 이전에는 이 정보가 에러에 실리지 않아 `fleet-cli`의 실패 처리가 매번 `steps: vec![]`로 리포트를 만들었고, 20대 중 7번째가 어느 스텝에서 멈췄는지 실패 리포트만으로는 알 수 없었다. `fleet-cli`에 `recover_completed_steps` 헬퍼(anyhow로 소거된 에러에서 `downcast_ref`로 복원)를 추가해 두 catch 지점(dry-run/실제 SSH 병렬 실행)에 적용했다.
+- 신규 테스트 12건: `playbook.rs`의 `completed_steps_includes_earlier_skipped_and_applied_steps`(+ 기존 `stops_on_step_failure` 확장), `start_services.rs`의 `apply_fails_when_daemon_reload_fails`/`apply_continues_when_only_cloudflared_enable_fails`/`apply_without_orchestrator_token_skips_heartbeat_check_but_succeeds`/`classify_status_*`(3종), `runtime.rs`의 `recover_completed_steps_tests`(2종).
+- 검증: `cargo test --workspace`(1090 passed), `DATABASE_URL` 주입 `fleet-store`/`fleet-api` 직렬 재실행(226 passed), `cargo check --no-default-features`, `cargo clippy -p fleet-provisioner -p fleet-cli --all-targets --all-features`(경고 0).

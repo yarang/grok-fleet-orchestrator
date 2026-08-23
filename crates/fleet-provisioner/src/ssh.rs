@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::error::SshError;
+use crate::error::{SshError, StepError};
 
 /// 원격 명령 실행기 추상화.
 ///
@@ -46,6 +46,44 @@ pub trait RemoteExecutor: Send + Sync {
 
     /// 원격 경로에 content를 직접 작성.
     async fn write_file(&self, path: &str, content: &str) -> Result<(), SshError>;
+
+    /// `exec_streaming`을 실행하고 exit code가 0이 아니면 `StepError::RemoteExit`로
+    /// 승격한다 (로드맵 `#79`).
+    ///
+    /// `exec()`는 의도적으로 exit code를 무시한다 — `test -f ... && echo yes`처럼
+    /// 비0 종료가 정상적인 "아니오" 응답인 조회에 쓰기 위해서다. 반면 `sudo mv`,
+    /// `daemon-reload`, `systemctl enable/restart` 같은 **변경 명령**은 실패를
+    /// 조용히 삼키면 안 된다 — 스텝이 "Applied"로 보고된 뒤에야 실패가 드러나는
+    /// 사고(base64 업로드 ARG_MAX 초과, 권한 부족 등)를 만든다. 이런 명령에는
+    /// `exec()`+`let _ =` 대신 이 메서드를 쓴다.
+    ///
+    /// 기본 구현은 `exec_streaming`을 그대로 위임하므로 `SshClient`/`MockExecutor`
+    /// 모두 별도 구현 없이 사용할 수 있다. `MockExecutor`는 `expect_exit`로
+    /// 실패를 프로그래밍할 수 있다.
+    async fn exec_checked(&self, command: &str) -> Result<String, StepError> {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = lines.clone();
+        let code = self
+            .exec_streaming(
+                command,
+                Box::new(move |line: &str| {
+                    sink.lock().unwrap().push(line.to_string());
+                }),
+            )
+            .await?;
+        let output = lines.lock().unwrap().join("\n");
+        if code != 0 {
+            return Err(StepError::RemoteExit {
+                code,
+                stderr: if output.trim().is_empty() {
+                    format!("command exited with code {code}: {command}")
+                } else {
+                    output
+                },
+            });
+        }
+        Ok(output)
+    }
 }
 
 /// SSH 접속 정보. 재연결이나 진단 로그에 활용.

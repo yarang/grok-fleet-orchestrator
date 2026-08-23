@@ -144,14 +144,14 @@ impl Playbook {
             tracing::info!(step = name, host = %host, "running step");
 
             // 멱등성 검사
-            let already_applied =
-                step.is_applied(exec)
-                    .await
-                    .map_err(|e| PlaybookError::StepFailed {
-                        step: name.into(),
-                        host: host.clone(),
-                        source: Box::new(e),
-                    })?;
+            let already_applied = step.is_applied(exec).await.map_err(|e| {
+                PlaybookError::StepFailed {
+                    step: name.into(),
+                    host: host.clone(),
+                    source: Box::new(e),
+                    completed_steps: reports.clone(),
+                }
+            })?;
 
             if already_applied {
                 tracing::info!(step = name, "already applied, skipping");
@@ -186,6 +186,7 @@ impl Playbook {
                         step: name.into(),
                         host: host.clone(),
                         source: Box::new(e),
+                        completed_steps: reports.clone(),
                     });
                 }
             }
@@ -302,12 +303,48 @@ mod tests {
                 step,
                 host: _,
                 source,
+                completed_steps,
             } => {
                 assert_eq!(step, "failing");
                 assert!(matches!(*source, StepError::UnsupportedOs(_)));
+                // 로드맵 #79 — 실패한 스텝 자신의 Failed 항목까지 실려 있어야
+                // 호출자가 빈 steps 벡터 없이 완전한 리포트를 재구성할 수 있다.
+                assert_eq!(completed_steps.len(), 1);
+                assert_eq!(completed_steps[0].name, "failing");
+                assert!(matches!(
+                    completed_steps[0].status,
+                    StepStatus::Failed { .. }
+                ));
             }
             _ => panic!("unexpected error variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn completed_steps_includes_earlier_skipped_and_applied_steps() {
+        let exec = MockExecutor::new();
+        let pb = make_playbook(vec![
+            Arc::new(AlwaysApplied),
+            Arc::new(NeverApplied),
+            Arc::new(Failing),
+        ]);
+        let result = pb
+            .run(&exec, &PlaybookContext::new(StepContext::default()))
+            .await;
+        let err = result.unwrap_err();
+        let PlaybookError::StepFailed {
+            completed_steps, ..
+        } = err
+        else {
+            panic!("unexpected error variant");
+        };
+        assert_eq!(completed_steps.len(), 3);
+        assert!(matches!(completed_steps[0].status, StepStatus::Skipped));
+        assert!(matches!(
+            completed_steps[1].status,
+            StepStatus::Applied { .. }
+        ));
+        assert!(matches!(completed_steps[2].status, StepStatus::Failed { .. }));
     }
 
     #[tokio::test]

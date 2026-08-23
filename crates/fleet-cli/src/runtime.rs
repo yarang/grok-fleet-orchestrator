@@ -38,8 +38,9 @@ use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction
 use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig, HostKeyPolicy,
-    Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookReport,
-    PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo, StepContext,
+    Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookError,
+    PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
+    StepContext,
 };
 use fleet_scheduler::{
     CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, MultiAdminSync,
@@ -1681,7 +1682,7 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
                     tracing::error!(worker = %w.name, error = %e, "playbook failed");
                     reports.push(PlaybookReport {
                         worker_name: w.name.clone(),
-                        steps: vec![],
+                        steps: recover_completed_steps(&e),
                         succeeded: false,
                     });
                 }
@@ -1715,7 +1716,7 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
                             tracing::error!(worker = %worker_name, error = %e, "playbook failed");
                             PlaybookReport {
                                 worker_name: worker_name.clone(),
-                                steps: vec![],
+                                steps: recover_completed_steps(&e),
                                 succeeded: false,
                             }
                         }
@@ -1761,6 +1762,19 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
 }
 
 /// Playbook을 실행하고 결과 반환. prereq를 추정(단순화 — ubuntu/x86_64 가정).
+/// `run_playbook`이 실패했을 때 (`anyhow::Error`로 소거된) 부분 실행 이력을
+/// 복원한다 (로드맵 #79). 실패가 `PlaybookError::StepFailed`가 아니면(예:
+/// `run_playbook` 자체의 다른 오류) 빈 벡터로 폴백한다 — 이 경우는 애초에
+/// 어떤 스텝도 실행되지 않았을 가능성이 높다.
+fn recover_completed_steps(err: &anyhow::Error) -> Vec<fleet_provisioner::StepReport> {
+    match err.downcast_ref::<PlaybookError>() {
+        Some(PlaybookError::StepFailed {
+            completed_steps, ..
+        }) => completed_steps.clone(),
+        _ => Vec::new(),
+    }
+}
+
 async fn run_playbook(
     exec: &dyn RemoteExecutor,
     ctx: &PlaybookContext,
@@ -2006,4 +2020,54 @@ fn print_report(report: &PlaybookReport) {
         println!("  {:<25} {mark}", step.name);
     }
     println!("{}", "=".repeat(60));
+}
+
+#[cfg(test)]
+mod recover_completed_steps_tests {
+    use super::*;
+    use fleet_provisioner::{StepReport, StepStatus};
+
+    #[test]
+    fn extracts_completed_steps_from_step_failed_error() {
+        let err: anyhow::Error = PlaybookError::StepFailed {
+            step: "install_grok".into(),
+            host: "worker-7".into(),
+            source: Box::new(fleet_provisioner::StepError::UnsupportedOs("bsd".into())),
+            completed_steps: vec![
+                StepReport {
+                    name: "check_prereqs".into(),
+                    status: StepStatus::Skipped,
+                },
+                StepReport {
+                    name: "install_deps".into(),
+                    status: StepStatus::Applied {
+                        message: "ok".into(),
+                    },
+                },
+                StepReport {
+                    name: "install_grok".into(),
+                    status: StepStatus::Failed {
+                        error: "unsupported OS".into(),
+                    },
+                },
+            ],
+        }
+        .into();
+
+        // 로드맵 #79 — 실패한 20대 인벤토리 중 7번째 워커가 어느 스텝에서
+        // 멈췄는지, 그 전에 무엇까지 성공했는지를 이 벡터만으로 알 수 있어야
+        // 한다. 빈 벡터로 돌아가면 그 회귀다.
+        let steps = recover_completed_steps(&err);
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[2].name, "install_grok");
+        assert!(matches!(steps[2].status, StepStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn falls_back_to_empty_for_non_playbook_errors() {
+        // playbook 자체에 도달하지 못한 실패(예: SSH 연결 실패)는 실행된
+        // 스텝이 없으므로 빈 벡터가 정확한 답이다.
+        let err = anyhow::anyhow!("ssh connection refused");
+        assert!(recover_completed_steps(&err).is_empty());
+    }
 }

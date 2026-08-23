@@ -62,8 +62,8 @@ impl Step for InstallFleetWorker {
                 )
             })?;
 
-        // 1. 디렉토리 준비
-        let _ = exec.exec("sudo mkdir -p /etc/fleet").await;
+        // 1. 디렉토리 준비 (로드맵 #79 — 실패를 삼키지 않는다).
+        exec.exec_checked("sudo mkdir -p /etc/fleet").await?;
 
         // 2. 바이너리 업로드 (base64 trick 또는 SFTP).
         exec.upload_file(local_bin, "/usr/local/bin/fleet-worker", 0o755)
@@ -90,17 +90,19 @@ impl Step for InstallFleetWorker {
         })?;
         exec.write_file("/tmp/fleet-worker.toml", &config_toml)
             .await?;
-        let _ = exec
-            .exec("sudo mv /tmp/fleet-worker.toml /etc/fleet/worker.toml && sudo chmod 600 /etc/fleet/worker.toml")
-            .await;
+        exec.exec_checked(
+            "sudo mv /tmp/fleet-worker.toml /etc/fleet/worker.toml && sudo chmod 600 /etc/fleet/worker.toml",
+        )
+        .await?;
 
         // 4. systemd 유닛 작성.
         let unit = crate::templates::FLEET_WORKER_UNIT;
         exec.write_file("/tmp/fleet-worker.service", unit).await?;
-        let _ = exec
-            .exec("sudo mv /tmp/fleet-worker.service /etc/systemd/system/fleet-worker.service")
-            .await;
-        let _ = exec.exec("sudo systemctl daemon-reload").await;
+        exec.exec_checked(
+            "sudo mv /tmp/fleet-worker.service /etc/systemd/system/fleet-worker.service",
+        )
+        .await?;
+        exec.exec_checked("sudo systemctl daemon-reload").await?;
 
         Ok(StepOutput::message(format!(
             "fleet-worker deployed from {local_bin}"

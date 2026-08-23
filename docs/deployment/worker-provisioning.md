@@ -60,6 +60,11 @@ sequenceDiagram
 - Worker 지속 신원(`operational_token`)과 bootstrap token의 분리는 `#60` 1~8단계로 완료됐다.
   현재 남은 제약은 프로비저너가 그 신원을 발급받지 못한다는 것이며
   [Worker enrollment](../contracts/worker-enrollment.md)와 Roadmap `#81`에서 확인한다.
+- `orchestrator_api_token`(`ProvisionOptions.api_token`)의 capability 요구사항 (`#79`로 확장됨):
+  - `PushCredentials` 스텝은 `worker:llm_credential:read`/`:export`가 필요하다(`#66`).
+  - `StartServices` 스텝의 하트비트 확인은 `worker:list`가 필요하다 — 없으면 그 폴링만
+    `401`/`403`으로 즉시 실패한다(로컬 systemctl 확인까지는 이미 통과한 상태). 토큰 자체가
+    없으면 하트비트 확인을 건너뛰고 로컬 상태만으로 진행한다(경고 로그, 하위 호환).
 
 운영 환경은 `strict` host-key 정책을 사용하고 `fleet scan-host-keys` 출력의 fingerprint를 별도
 신뢰 채널에서 확인한다. `tofu`는 최초 연결 공격을 방지하지 못하고 `accept-all`은 운영에 사용하지

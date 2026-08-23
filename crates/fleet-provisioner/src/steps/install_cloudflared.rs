@@ -86,12 +86,18 @@ impl Step for InstallCloudflared {
             StepError::PrereqFailed("cf_token is required for tunnel creation".into())
         })?;
 
+        // 자격증명 디렉토리 준비 (로드맵 #79 — 이전에는 이 mkdir이 없어서
+        // 아래 config.yml `mv`가 새 호스트에서 "디렉토리 없음"으로 조용히
+        // 실패하고 있었다. 실패해도 config.yml이 /tmp에만 남고 스텝은
+        // "Applied"로 보고됐다).
+        exec.exec_checked("sudo mkdir -p /etc/cloudflared").await?;
+
         // 토큰 인증 (cloudflared tunnel login은 대화형이라 토큰 방식 선호).
-        let _ = exec
-            .exec(&format!(
-                "cloudflared tunnel --cred-file /etc/cloudflared/creds.json token {cf_token} 2>&1 || true"
-            ))
-            .await;
+        // 자격증명 생성은 이후 모든 단계의 전제이므로 실패를 삼키지 않는다.
+        exec.exec_checked(&format!(
+            "cloudflared tunnel --cred-file /etc/cloudflared/creds.json token {cf_token}"
+        ))
+        .await?;
 
         // 3. config.yml 생성 (템플릿).
         let tmpl_ctx = TemplateContext {
@@ -103,11 +109,8 @@ impl Step for InstallCloudflared {
         let config_yaml = crate::templates::render_cloudflared_config(&tmpl_ctx)?;
         exec.write_file("/tmp/cloudflared-config.yml", &config_yaml)
             .await?;
-        let mv_code = exec
-            .exec("sudo mv /tmp/cloudflared-config.yml /etc/cloudflared/config.yml")
-            .await;
-        // mv 실패는 무시 (이미 존재하는 디렉토리일 수 있음).
-        let _ = mv_code;
+        exec.exec_checked("sudo mv /tmp/cloudflared-config.yml /etc/cloudflared/config.yml")
+            .await?;
 
         // 4. systemd 유닛 설치. cloudflared는 `service install` 명령 제공.
         let install_code = exec
@@ -123,9 +126,13 @@ impl Step for InstallCloudflared {
                 "cloudflared service install returned non-zero (may already be installed)"
             );
         }
-        let _ = exec
-            .exec("sudo systemctl restart cloudflared 2>&1 || true")
-            .await;
+
+        // 재시작은 best-effort로 남긴다 — service install 방식에 따라 이미
+        // active 상태일 수 있다. 다만 실패는 더 이상 조용히 삼키지 않고
+        // 로그로 관측 가능하게 한다 (로드맵 #79).
+        if let Err(e) = exec.exec_checked("sudo systemctl restart cloudflared").await {
+            tracing::warn!(error = %e, "cloudflared restart failed (best-effort, continuing)");
+        }
 
         let info = TunnelInfo {
             tunnel_name,

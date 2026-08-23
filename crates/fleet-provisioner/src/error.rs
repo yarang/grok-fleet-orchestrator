@@ -75,6 +75,14 @@ pub enum PlaybookError {
         host: String,
         #[source]
         source: Box<StepError>,
+        /// 실패 이전에 완료(Skipped/Applied)되고, 실패한 스텝 자신의 `Failed`
+        /// 항목까지 포함한 부분 실행 이력 (로드맵 #79).
+        ///
+        /// 이전에는 이 정보가 에러에 실리지 않아, 호출자(`fleet-cli`의
+        /// `run_playbook` 실패 처리)가 매번 `steps: vec![]`로 리포트를
+        /// 만들었다 — 20대 중 7번째가 어느 스텝에서 실패했는지, 그 전에
+        /// 무엇까지 성공했는지를 실패 리포트만으로는 알 수 없었다.
+        completed_steps: Vec<crate::playbook::StepReport>,
     },
     #[error("all retries exhausted for step '{step}' on '{host}'")]
     RetriesExhausted { step: String, host: String },
