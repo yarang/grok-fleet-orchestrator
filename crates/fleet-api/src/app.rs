@@ -84,9 +84,9 @@ pub struct AppState {
     pub cf_audience: Option<String>,
     /// CF Access principal(JWT `email` 클레임) → capability 매핑.
     ///
-    /// 키는 소문자 이메일. `None`이면 CF Access를 통과한 모든 세션이
-    /// [`PermissionKind::all`]을 갖는다 — 아래 [`cf_access_capabilities`]의
-    /// 임시 정책 주석 참조.
+    /// 키는 소문자 이메일. `None`이면 CF Access를 통과한 모든 세션이 아무
+    /// capability도 갖지 못한다(fail-closed, 로드맵 `#74`) — 아래
+    /// [`cf_access_capabilities`] 참조.
     pub cf_principal_capabilities: Option<Arc<HashMap<String, Vec<PermissionKind>>>>,
     /// Credentials 암호화용 마스터 키 (Phase 8.6).
     /// `None`이면 credentials API 엔드포인트가 503 반환.
@@ -154,12 +154,13 @@ impl AppState {
         self
     }
 
-    /// CF Access principal별 capability allow-list 설정 (로드맵 #58).
+    /// CF Access principal별 capability allow-list 설정 (로드맵 `#58`, `#74`).
     ///
     /// 이메일은 대소문자를 구분하지 않도록 소문자로 정규화해서 보관한다.
     /// 매핑을 설정하면 **열거되지 않은 이메일은 capability가 없다**
-    /// (fail-closed). 매핑을 아예 설정하지 않은 배포는 기존 동작대로
-    /// 전체 capability를 받는다 — [`cf_access_capabilities`] 참조.
+    /// (fail-closed). 이 빌더를 아예 호출하지 않은 배포도 마찬가지로
+    /// fail-closed다(전체 capability를 받던 과거 동작은 로드맵 `#74`로
+    /// 제거됨) — [`cf_access_capabilities`] 참조.
     pub fn with_cf_principal_capabilities(
         mut self,
         capabilities: impl IntoIterator<Item = (String, Vec<PermissionKind>)>,
@@ -653,25 +654,24 @@ fn cf_access_principal_id(user: &crate::cloudflare::VerifiedUser) -> String {
 
 /// CF Access principal에게 부여할 capability.
 ///
-/// ## 임시 정책 — least privilege 아님
+/// **Fail-closed** (로드맵 `#74`) — 매핑이 아예 설정되지 않은 배포에서도
+/// 빈 capability를 반환한다. `cf_principal_capabilities`가 `None`이면
+/// CF Access를 통과한 어떤 세션도 아무 capability를 갖지 못한다(`/health`
+/// 같은 인증 예외 경로만 여전히 접근 가능). 매핑이 설정된 경우에는
+/// 열거되지 않은 이메일에 capability를 주지 않는다 — 매핑을 명시한
+/// 운영자의 의도는 "여기 적힌 principal만 권한을 갖는다"이지, "적지 않으면
+/// 전권"이 아니다.
 ///
-/// `cf_principal_capabilities`가 설정되지 않은 배포에서는 CF Access를 통과한
-/// 모든 세션이 [`PermissionKind::all`]을 받는다. 이는 CF Access 전용 배포가
-/// 지금까지 capability 검사를 아예 거치지 않던 동작과의 호환성을 위한
-/// **한시적** 기본값이며, 최소 권한 원칙을 만족하지 않는다. CF Access
-/// application 정책이 곧 유일한 접근 통제이므로, 그 정책이 넓게 열려 있으면
-/// 통과한 누구나 토큰 발급·워커 삭제까지 수행할 수 있다.
-///
-/// 후속 작업(#66 / #58 잔여)에서 principal→role 매핑을 정본 설정(manifest)으로
-/// 옮기고 이 기본값을 제거해야 한다. 잔여 범위는 docs/roadmap/roadmap.md의
-/// #58 행에 기록돼 있다.
-///
-/// 매핑이 설정된 경우에는 열거되지 않은 이메일에 capability를 주지 않는다
-/// (fail-closed). 매핑을 명시한 운영자의 의도는 "여기 적힌 principal만
-/// 권한을 갖는다"이지, "적지 않으면 전권"이 아니다.
+/// 과거에는 매핑이 없는 배포에서 [`PermissionKind::all`]을 부여했다 — CF
+/// Access application 정책이 곧 유일한 접근 통제라 그 정책이 넓게 열려
+/// 있으면 통과한 누구나 토큰 발급·워커 삭제까지 수행할 수 있었다(감사에서
+/// 발견). `fleet-cli::runtime::run_serve`가 이제 `FLEET_CF_AUDIENCE`가
+/// 설정됐는데 매핑이 비어 있으면 기동 자체를 거부하므로(비로그백 무인증
+/// bind 거부와 같은 원칙), 이 함수의 `None` 분기는 방어적 이중 안전장치다
+/// — 정상적으로 기동한 배포라면 이 분기에 도달하지 않는다.
 fn cf_access_capabilities(state: &AppState, email: &str) -> Vec<PermissionKind> {
     match state.cf_principal_capabilities.as_ref() {
-        None => PermissionKind::all().to_vec(),
+        None => Vec::new(),
         Some(map) => map
             .get(email.trim().to_ascii_lowercase().as_str())
             .cloned()
@@ -1560,13 +1560,11 @@ mod tests {
     }
 
     #[test]
-    fn cf_capabilities_default_to_all_when_unmapped_deployment() {
-        // 임시 정책: 매핑을 설정하지 않은 배포는 기존 동작(전권)을 유지한다.
+    fn cf_capabilities_default_to_empty_when_unmapped_deployment() {
+        // 로드맵 #74 — 매핑을 아예 설정하지 않은 배포는 fail-closed다.
+        // 전체 capability를 부여하던 과거 동작(fail-open)은 제거됐다.
         let state = AppState::new(MemStore::new_arc()).with_cf_audience("aud-123");
-        assert_eq!(
-            cf_access_capabilities(&state, "ops@example.com"),
-            PermissionKind::all().to_vec()
-        );
+        assert_eq!(cf_access_capabilities(&state, "ops@example.com"), Vec::new());
     }
 
     #[test]

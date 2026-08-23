@@ -178,6 +178,15 @@ enum Command {
         #[arg(long, env = "FLEET_CF_AUDIENCE")]
         cf_audience: Option<String>,
 
+        /// CF Access principal(JWT `email` 클레임)별 capability 매핑 JSON
+        /// (로드맵 `#74`). 예: `[{"email":"admin@example.com","capabilities":["task:read"]}]`.
+        /// `--cf-audience`를 설정했는데 이 값이 비어 있으면 기동을 거부한다 —
+        /// 매핑 없이는 CF Access를 통과한 어떤 세션도 어떤 capability도 갖지
+        /// 못해(fail-closed) 사실상 아무 요청도 처리할 수 없는 배포가 되므로,
+        /// 조용히 그런 상태로 기동하는 대신 명확한 에러로 즉시 알린다.
+        #[arg(long, env = "FLEET_CF_PRINCIPAL_CAPABILITIES")]
+        cf_principal_capabilities: Option<String>,
+
         /// 웹 대시보드 바인드 주소 (예: `127.0.0.1:8082`).
         /// 생략하면 대시보드 서버를 실행하지 않습니다.
         /// 지정하면 `/api/overview`, `/api/workers`, `/api/tasks`,
@@ -1133,6 +1142,7 @@ async fn main() -> Result<()> {
             http_bind,
             api_tokens,
             cf_audience,
+            cf_principal_capabilities,
             dashboard_bind,
             no_circuit_sync,
             mtls_ca,
@@ -1160,6 +1170,7 @@ async fn main() -> Result<()> {
                 http_bind.as_deref(),
                 api_tokens.as_deref(),
                 cf_audience.as_deref(),
+                cf_principal_capabilities.as_deref(),
                 dashboard_bind.as_deref(),
                 no_circuit_sync,
                 runtime::MtlsFlags {

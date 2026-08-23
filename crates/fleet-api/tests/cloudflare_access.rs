@@ -111,13 +111,17 @@ async fn cf_access_accepts_valid_jwt() {
     let iss = "https://test.cloudflareaccess.com";
     fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
 
-    let state = spawn_with_cf_audience("my-aud-123").await;
-    let app = build_app(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    // 로드맵 #74 — 매핑 없는 배포는 fail-closed이므로, "유효한 JWT는 통과한다"를
+    // 캡ability 게이트와 분리해서 보려면 명시적 매핑이 필요하다(그러지 않으면
+    // 이 테스트가 JWT 검증이 아니라 우연히 fail-open에 의존하게 된다).
+    let addr = spawn_with_cf_capabilities(
+        "my-aud-123",
+        vec![(
+            "user@example.com".to_string(),
+            vec![PermissionKind::WorkerList],
+        )],
+    )
+    .await;
 
     let jwt = make_jwt(
         iss,
@@ -370,12 +374,13 @@ async fn cf_access_principal_is_the_jwt_email() {
     assert_eq!(cf_get(addr, "/v1/workers", &anonymous).await, 403);
 }
 
-/// principal capability 매핑을 설정하지 않은 배포는 기존 동작(전권)을 유지한다.
-///
-/// **임시 정책이며 최소 권한이 아니다** — cf. `app::cf_access_capabilities`
-/// 주석과 docs/roadmap/roadmap.md의 #58 행.
+/// principal capability 매핑을 설정하지 않은 배포는 fail-closed다 — 아무
+/// capability도 부여되지 않는다(로드맵 `#74`). 전체 capability를 부여하던
+/// 과거 동작(fail-open)은 실제 보안 결함이었다 — CF Access application
+/// 정책이 넓게 열려 있으면 통과한 누구나 토큰 발급·워커 삭제까지 수행할 수
+/// 있었다.
 #[tokio::test]
-async fn cf_access_without_capability_mapping_keeps_full_access() {
+async fn cf_access_without_capability_mapping_denies_all_capability_gated_routes() {
     let iss = "https://test.cloudflareaccess.com";
     fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
 
@@ -393,7 +398,7 @@ async fn cf_access_without_capability_mapping_keeps_full_access() {
         unix_now() + 3600,
         Some("any@example.com"),
     );
-    assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 200);
+    assert_eq!(cf_get(addr, "/v1/workers", &jwt).await, 403);
     assert_eq!(
         cf_post(
             addr,
@@ -402,8 +407,14 @@ async fn cf_access_without_capability_mapping_keeps_full_access() {
             serde_json::json!({"prefix": "fleet", "bytes": 16}),
         )
         .await,
-        200
+        403
     );
+    // /health는 인증 예외 경로라 capability 없이도 여전히 통과한다 —
+    // fail-closed가 헬스체크까지 막는 과잉 조치가 아님을 함께 고정한다.
+    let resp = reqwest::get(format!("http://{addr}/v1/health"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]
@@ -411,15 +422,25 @@ async fn cf_access_case_insensitive_header() {
     let iss = "https://test.cloudflareaccess.com";
     fleet_api::setup_test_jwks_for_testing(iss, TEST_JWK_JSON).await;
 
-    let state = spawn_with_cf_audience("aud").await;
-    let app = build_app(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    // 로드맵 #74 — 헤더 대소문자 처리를 capability 게이트와 분리해서 보려면
+    // 명시적 매핑이 필요하다(빈 email 키가 아니라 실제 이메일로 매핑해
+    // 이 테스트가 헤더 파싱만 검증하도록 한다 — 익명 principal의 매핑
+    // 조회 방식은 다른 테스트가 이미 다룬다).
+    let addr = spawn_with_cf_capabilities(
+        "aud",
+        vec![(
+            "headertest@example.com".to_string(),
+            vec![PermissionKind::WorkerList],
+        )],
+    )
+    .await;
 
-    let jwt = make_jwt(iss, "aud", unix_now() + 3600, None);
+    let jwt = make_jwt(
+        iss,
+        "aud",
+        unix_now() + 3600,
+        Some("headertest@example.com"),
+    );
     // 대문자 헤더
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/workers"))

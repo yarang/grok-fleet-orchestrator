@@ -35,8 +35,8 @@ use fleet_api::{
     ApiTokenCredential, AppState,
 };
 use fleet_core::{
-    CircuitBreakerConfig, TaskFilter, TaskId, TaskStatus, TaskStatusFilter, WorkerFilter,
-    WorkerStatus,
+    CircuitBreakerConfig, PermissionKind, TaskFilter, TaskId, TaskStatus, TaskStatusFilter,
+    WorkerFilter, WorkerStatus,
 };
 // CLI 하위 명령 enum (main.rs).
 use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
@@ -236,6 +236,7 @@ pub async fn run_serve(
     http_bind: Option<&str>,
     api_tokens: Option<&str>,
     cf_audience: Option<&str>,
+    cf_principal_capabilities: Option<&str>,
     dashboard_bind: Option<&str>,
     no_circuit_sync: bool,
     mtls_flags: MtlsFlags<'_>,
@@ -422,6 +423,28 @@ pub async fn run_serve(
             ));
         }
 
+        // 로드맵 #74 — CF Access는 인증(누구인지 확인)만 하고 인가(무엇을 할 수
+        // 있는지)는 별개다. 매핑 없이 기동을 허용하면 fail-open으로 되돌아갈
+        // 여지가 남는다(`fleet-api::app::cf_access_capabilities`는 이미
+        // fail-closed로 고쳤지만, 매핑 없는 CF 전용 배포는 아무 요청도 처리하지
+        // 못하는 채로 조용히 기동하게 된다 — 그 상태를 방치하지 않고 위
+        // non-loopback bind 거부와 같은 원칙으로 명확히 실패시킨다).
+        let cf_capability_map = cf_principal_capabilities
+            .map(parse_cf_principal_capabilities)
+            .transpose()?;
+        let has_cf_capability_mapping = cf_capability_map
+            .as_ref()
+            .is_some_and(|map| !map.is_empty());
+        if has_cf_access && !has_cf_capability_mapping {
+            return Err(anyhow!(
+                "FLEET_CF_AUDIENCE is set without FLEET_CF_PRINCIPAL_CAPABILITIES — refusing to \
+                 start; without a mapping every CF Access session gets zero capabilities \
+                 (fail-closed) and no request would succeed. Configure \
+                 FLEET_CF_PRINCIPAL_CAPABILITIES, e.g. \
+                 '[{{\"email\":\"admin@example.com\",\"capabilities\":[\"task:read\"]}}]'"
+            ));
+        }
+
         let mut app_state = AppState::new(store.clone())
             .with_heartbeat_interval(health_interval_secs as u32)
             .with_transport(transport_handle.clone());
@@ -478,7 +501,18 @@ pub async fn run_serve(
 
         if let Some(aud) = cf_audience.filter(|aud| !aud.trim().is_empty()) {
             app_state = app_state.with_cf_audience(aud);
-            tracing::info!(bind = %bind, aud = %aud, "HTTP API server with Cloudflare Access auth");
+            // 위에서 이미 has_cf_access && !has_cf_capability_mapping을 거부했으므로
+            // 여기 도달했다면 cf_capability_map은 항상 비어 있지 않은 Some이다.
+            if let Some(map) = cf_capability_map {
+                let principal_count = map.len();
+                app_state = app_state.with_cf_principal_capabilities(map);
+                tracing::info!(
+                    bind = %bind,
+                    aud = %aud,
+                    principals = principal_count,
+                    "HTTP API server with Cloudflare Access auth (fail-closed capability mapping)"
+                );
+            }
         }
         if let Some(token_list) = scoped_tokens {
             if !token_list.is_empty() {
@@ -634,6 +668,41 @@ fn parse_scoped_api_tokens(raw: &str) -> Result<Vec<ApiTokenCredential>> {
         ));
     }
     Ok(tokens)
+}
+
+/// `FLEET_CF_PRINCIPAL_CAPABILITIES` 항목 하나 (로드맵 `#74`). CF Access
+/// principal은 이미 검증된 JWT의 `email` 클레임으로 식별되므로,
+/// `ApiTokenCredential`과 달리 별도 bearer secret(`token`)이 없다.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct CfPrincipalCapabilityEntry {
+    email: String,
+    capabilities: Vec<PermissionKind>,
+}
+
+/// `FLEET_CF_PRINCIPAL_CAPABILITIES` JSON을 `AppState::with_cf_principal_capabilities`가
+/// 받는 형태로 파싱한다 — 이메일은 소문자로 정규화하지 않는다(그 정규화는
+/// `AppState::with_cf_principal_capabilities` 자신의 책임이므로 여기서
+/// 중복하지 않는다).
+fn parse_cf_principal_capabilities(
+    raw: &str,
+) -> Result<std::collections::HashMap<String, Vec<PermissionKind>>> {
+    let entries: Vec<CfPrincipalCapabilityEntry> = serde_json::from_str(raw).context(
+        "FLEET_CF_PRINCIPAL_CAPABILITIES must be a JSON array of {email, capabilities}",
+    )?;
+    if entries.is_empty()
+        || entries
+            .iter()
+            .any(|e| e.email.trim().is_empty() || e.capabilities.is_empty())
+    {
+        return Err(anyhow!(
+            "each FLEET_CF_PRINCIPAL_CAPABILITIES entry requires a non-empty email and \
+             non-empty capabilities"
+        ));
+    }
+    Ok(entries
+        .into_iter()
+        .map(|e| (e.email, e.capabilities))
+        .collect())
 }
 
 /// `migrate` 명령.
@@ -2333,5 +2402,77 @@ mod admin_bootstrap_token_file_tests {
 
         // 원래 값이 그대로 남아 있어야 한다.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "fat_first");
+    }
+}
+
+#[cfg(test)]
+mod cf_principal_capabilities_tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_manifest() {
+        let raw = r#"[{"email":"admin@example.com","capabilities":["worker:list"]}]"#;
+        let map = parse_cf_principal_capabilities(raw).unwrap();
+        assert_eq!(
+            map.get("admin@example.com"),
+            Some(&vec![PermissionKind::WorkerList])
+        );
+    }
+
+    #[test]
+    fn parses_multiple_entries() {
+        let raw = r#"[
+            {"email":"a@example.com","capabilities":["worker:list"]},
+            {"email":"b@example.com","capabilities":["task:read","task:create"]}
+        ]"#;
+        let map = parse_cf_principal_capabilities(raw).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get("b@example.com"),
+            Some(&vec![PermissionKind::TaskRead, PermissionKind::TaskCreate])
+        );
+    }
+
+    #[test]
+    fn rejects_empty_array() {
+        let err = parse_cf_principal_capabilities("[]").unwrap_err();
+        assert!(format!("{err}").contains("non-empty"));
+    }
+
+    #[test]
+    fn rejects_entry_with_empty_email() {
+        let raw = r#"[{"email":"  ","capabilities":["worker:list"]}]"#;
+        let err = parse_cf_principal_capabilities(raw).unwrap_err();
+        assert!(format!("{err}").contains("non-empty"));
+    }
+
+    #[test]
+    fn rejects_entry_with_empty_capabilities() {
+        let raw = r#"[{"email":"admin@example.com","capabilities":[]}]"#;
+        let err = parse_cf_principal_capabilities(raw).unwrap_err();
+        assert!(format!("{err}").contains("non-empty"));
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        let err = parse_cf_principal_capabilities("not json").unwrap_err();
+        assert!(format!("{err}").contains("FLEET_CF_PRINCIPAL_CAPABILITIES"));
+    }
+
+    #[test]
+    fn rejects_missing_capabilities_field() {
+        // token 필드가 없는 것은 의도된 스키마 차이(ApiTokenCredential과 달리
+        // bearer secret이 없다)이지만, capabilities 자체가 없으면 여전히 에러.
+        let raw = r#"[{"email":"admin@example.com"}]"#;
+        assert!(parse_cf_principal_capabilities(raw).is_err());
+    }
+
+    #[test]
+    fn does_not_lowercase_email_itself() {
+        // 정규화는 AppState::with_cf_principal_capabilities의 책임 — 이
+        // 함수는 원문을 그대로 넘긴다(중복 정규화 방지).
+        let raw = r#"[{"email":"Admin@Example.com","capabilities":["worker:list"]}]"#;
+        let map = parse_cf_principal_capabilities(raw).unwrap();
+        assert!(map.contains_key("Admin@Example.com"));
     }
 }

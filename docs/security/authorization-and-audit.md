@@ -4,8 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-08-22"
-last_verified_commit: "574feb4"
+last_verified: "2026-08-23"
+last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
 
@@ -136,20 +136,18 @@ capability 행렬이 없고 핸들러에 `PermissionKind` 검사가 산재해 �
 ### 매핑되지 않은 principal의 capability
 
 **principal→capability 매핑이 없는 인증 주체에게 기본 capability를 부여하지 않는다.** 특히
-write·export 계열(`credential:break_glass_export`, `admin_token:manage`, `token:issue`,
+write·export 계열(`worker:llm_credential:export`, `admin_token:manage`, `token:issue`,
 `worker:delete`)은 명시 매핑 없이는 어떤 경로로도 부여되지 않는다.
 
-현재 Cloudflare Access 전용 배포는 이 불변식을 만족하지 않는다. `app.rs`의
-`cf_access_capabilities`는 `cf_principal_capabilities`가 `None`이면 `PermissionKind::all()`을
-반환하며, 매핑을 설정하는 `with_cf_principal_capabilities`를 호출하는 코드가
-`crates/fleet-api/tests/` 안에만 있고 `crates/fleet-cli/src/runtime.rs`에는 없다. 즉 **운영 배포에는
-이 fail-open을 끄는 설정 경로가 존재하지 않으며**, CF Access 정책을 통과한 모든 사용자가 모든 워커의
-LLM 프로바이더 API 키 원문 export와 admin token 발급 권한을 갖는다. 매핑이 설정된 경우에만
-fail-closed가 성립한다(열거되지 않은 이메일은 빈 capability).
-
-조치는 두 가지를 함께 요구한다: `fleet-cli`에 매핑 설정 경로를 추가하고, `FLEET_CF_AUDIENCE`가
-설정됐는데 매핑이 없으면 non-loopback bind 거부와 동일한 정신으로 기동을 거부하거나 최소한
-write·export capability를 하드 제외한다.
+**로드맵 `#74`(완료)** — 이 불변식은 이제 Cloudflare Access 전용 배포에도 적용된다.
+`app.rs::cf_access_capabilities`는 `cf_principal_capabilities`가 `None`이어도 빈 `Vec`을
+반환한다(과거에는 `PermissionKind::all()`을 반환했다 — CF Access 정책을 통과한 모든 사용자가
+모든 워커의 LLM 프로바이더 API 키 원문 export와 admin token 발급 권한을 가졌던 실제 결함).
+매핑 설정 경로도 `fleet-cli`에 생겼다 — `Command::Serve`의 `--cf-principal-capabilities`/
+`FLEET_CF_PRINCIPAL_CAPABILITIES`(JSON 배열, `[{"email":...,"capabilities":[...]}]`)가
+`AppState::with_cf_principal_capabilities`를 호출한다. `FLEET_CF_AUDIENCE`가 설정됐는데 이
+매핑이 비어 있으면 `run_serve`가 non-loopback bind 거부와 같은 원칙으로 기동 자체를 거부한다
+— fail-closed 상태로 조용히 기동해 모든 요청이 이유 없이 403을 받는 배포를 방치하지 않는다.
 
 MCP의 tool 이름이나 사용자의 자연어 지시는 capability가 아니다. tool마다 required capability,
 resource scope resolver, mutation precondition, audit event type을 등록해야 하며 등록되지 않은 tool은
