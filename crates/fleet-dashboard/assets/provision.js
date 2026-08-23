@@ -46,7 +46,7 @@
         worker_name: fd.get('worker_name'),
         labels,
         orchestrator_url: fd.get('orchestrator_url'),
-        bootstrap_token: fd.get('bootstrap_token') || null,
+        api_token: fd.get('api_token') || null,
         fleet_worker_bin: fd.get('fleet_worker_bin') || '',
         dry_run: fd.get('dry_run') === 'on',
       };

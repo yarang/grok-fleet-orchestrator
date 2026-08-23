@@ -75,9 +75,13 @@
           <label>Labels (comma-separated key=value)
             <input name="labels_raw" type="text" placeholder="arch=arm64,gpu=false" style="display:block;margin-top:4px;width:100%;" />
           </label>
-          <label>Bootstrap Token (optional)
-            <input name="bootstrap_token" type="text" placeholder="fleet-xxx" style="display:block;margin-top:4px;width:100%;" />
+          <label>Orchestrator API Token
+            <input name="api_token" type="text" placeholder="fat_xxx" style="display:block;margin-top:4px;width:100%;" />
           </label>
+          <p style="font-size:12px;color:var(--muted,#888);margin:2px 0 8px;">
+            admin bearer with <code>token:issue</code> (자동 워커 join) and
+            <code>worker:llm_credential:read</code>/<code>:export</code> (credential push) capabilities.
+          </p>
           <label>Fleet Worker Binary Path
             <input name="fleet_worker_bin" type="text" placeholder="/usr/local/bin/fleet-worker" style="display:block;margin-top:4px;width:100%;" />
           </label>

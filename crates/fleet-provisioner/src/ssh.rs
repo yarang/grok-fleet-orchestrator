@@ -47,6 +47,19 @@ pub trait RemoteExecutor: Send + Sync {
     /// 원격 경로에 content를 직접 작성.
     async fn write_file(&self, path: &str, content: &str) -> Result<(), SshError>;
 
+    /// 명령을 실행하되, exec 직후 `stdin_data`를 채널로 써서 EOF까지 보낸
+    /// 뒤 stdout/stderr와 exit code를 반환한다 (로드맵 `#82`).
+    ///
+    /// bootstrap token처럼 명령행 인자·환경변수·디스크 파일 어디에도 남기고
+    /// 싶지 않은 값을 원격 프로세스의 stdin으로 직접 전달하는 용도다 —
+    /// `write_file`은 base64를 명령행에 보간하므로 이 목적에는 쓰지 않는다
+    /// (원문이 `ps`/쉘 히스토리에 노출된다).
+    async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin_data: &[u8],
+    ) -> Result<(String, i32), SshError>;
+
     /// `exec_streaming`을 실행하고 exit code가 0이 아니면 `StepError::RemoteExit`로
     /// 승격한다 (로드맵 `#79`).
     ///
@@ -658,6 +671,50 @@ mod russh_impl {
                 .await?;
             Ok(())
         }
+
+        async fn exec_with_stdin(
+            &self,
+            command: &str,
+            stdin_data: &[u8],
+        ) -> Result<(String, i32), SshError> {
+            let guard = self.session_ref().await?;
+            let session = guard.as_ref().unwrap();
+            let mut channel = session
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::Protocol(format!("open channel: {e}")))?;
+
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| SshError::Protocol(format!("exec: {e}")))?;
+
+            // stdin_data를 쓰고 즉시 EOF를 보낸다 — 원격 프로세스가 표준
+            // 입력을 끝까지 읽고 진행하려면(예: `--token-file -`) EOF가
+            // 반드시 도착해야 한다.
+            channel
+                .data(stdin_data)
+                .await
+                .map_err(|e| SshError::Protocol(format!("write stdin: {e}")))?;
+            channel
+                .eof()
+                .await
+                .map_err(|e| SshError::Protocol(format!("stdin eof: {e}")))?;
+
+            let mut output = Vec::new();
+            let mut exit_code: i32 = 0;
+            while let Some(msg) = channel.wait().await {
+                match msg {
+                    ChannelMsg::Data { ref data } => output.extend_from_slice(data),
+                    ChannelMsg::ExtendedData { ref data, .. } => output.extend_from_slice(data),
+                    ChannelMsg::ExitStatus { exit_status } => {
+                        exit_code = exit_status as i32;
+                    }
+                    _ => {}
+                }
+            }
+            Ok((String::from_utf8_lossy(&output).into_owned(), exit_code))
+        }
     }
 }
 
@@ -707,6 +764,10 @@ pub struct MockExecutor {
     responses: Mutex<HashMap<String, String>>,
     exit_codes: Mutex<HashMap<String, i32>>,
     calls: Mutex<Vec<String>>,
+    /// `exec_with_stdin`으로 전달된 (command, stdin bytes) 기록 (로드맵
+    /// `#82`) — 테스트가 "토큰이 명령행이 아니라 stdin으로만 전달됐는지"를
+    /// 검증하는 데 쓴다.
+    stdin_writes: Mutex<Vec<(String, Vec<u8>)>>,
 }
 
 impl MockExecutor {
@@ -715,7 +776,13 @@ impl MockExecutor {
             responses: Mutex::new(HashMap::new()),
             exit_codes: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
+            stdin_writes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// `exec_with_stdin`으로 전달된 (command, stdin bytes) 기록 조회.
+    pub fn recorded_stdin_writes(&self) -> Vec<(String, Vec<u8>)> {
+        self.stdin_writes.lock().unwrap().clone()
     }
 
     /// `command` 실행 시 `response` 반환하도록 프로그래밍.
@@ -791,6 +858,19 @@ impl RemoteExecutor for MockExecutor {
             on_line(line);
         }
         Ok(self.lookup_exit(command))
+    }
+
+    async fn exec_with_stdin(
+        &self,
+        command: &str,
+        stdin_data: &[u8],
+    ) -> Result<(String, i32), SshError> {
+        self.calls.lock().unwrap().push(command.to_string());
+        self.stdin_writes
+            .lock()
+            .unwrap()
+            .push((command.to_string(), stdin_data.to_vec()));
+        Ok((self.lookup_response(command), self.lookup_exit(command)))
     }
 
     async fn upload_file(

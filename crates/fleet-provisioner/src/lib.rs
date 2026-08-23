@@ -41,8 +41,8 @@ pub use ssh::{
 pub use steps::{
     check_prereqs::CheckPrereqs, install_cloudflared::InstallCloudflared,
     install_deps::InstallDeps, install_fleet_worker::InstallFleetWorker, install_grok::InstallGrok,
-    push_credentials::PushCredentials, start_services::StartServices, PrereqReport, Step,
-    StepContext, StepOutput, TunnelInfo,
+    join_worker::JoinWorker, push_credentials::PushCredentials, start_services::StartServices,
+    PrereqReport, Step, StepContext, StepOutput, TunnelInfo,
 };
 
 pub use templates::TemplateContext;

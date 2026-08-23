@@ -1471,7 +1471,6 @@ pub struct ProvisionArgs {
     pub orchestrator_url: Option<String>,
     pub fleet_worker_bin: Option<String>,
     pub grok_secret: Option<String>,
-    pub bootstrap_token: Option<String>,
     pub api_token: Option<String>,
     pub inventory: Option<String>,
     pub parallel: usize,
@@ -1573,7 +1572,6 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         args.cf_token.as_deref(),
         args.fleet_worker_bin.as_deref(),
         args.grok_secret.as_deref(),
-        args.bootstrap_token.as_deref(),
         args.dry_run,
         args,
     );
@@ -1901,7 +1899,6 @@ fn build_step_context(
     cf_token: Option<&str>,
     fleet_worker_bin: Option<&str>,
     grok_secret: Option<&str>,
-    bootstrap_token: Option<&str>,
     dry_run: bool,
     args: &ProvisionArgs,
 ) -> PlaybookContext {
@@ -1912,7 +1909,6 @@ fn build_step_context(
         cf_token: cf_token.map(String::from),
         fleet_worker_bin: fleet_worker_bin.map(String::from),
         grok_secret: grok_secret.map(String::from),
-        bootstrap_token: bootstrap_token.map(String::from),
         orchestrator_api_token: args.api_token.clone(),
         dry_run,
         mtls_enabled: args.mtls_enabled,
@@ -1941,7 +1937,6 @@ fn build_inventory_step_context(
         cf_token,
         fleet_worker_bin: None,
         grok_secret: w.grok_secret.clone(),
-        bootstrap_token: options.bootstrap_token.clone(),
         orchestrator_api_token: options.api_token.clone(),
         dry_run: options.dry_run,
         // 로드맵 #37 — 인벤토리 모드 mTLS 설정 주입. cert/key는 워커별 필드에서만

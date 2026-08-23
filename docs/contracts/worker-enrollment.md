@@ -4,8 +4,8 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/worker-enrollment.md"
-last_verified: "2026-08-22"
-last_verified_commit: "574feb4"
+last_verified: "2026-08-23"
+last_verified_commit: "working-tree"
 owners: ["fleet-api", "fleet-worker"]
 ---
 
@@ -51,9 +51,11 @@ owners: ["fleet-api", "fleet-worker"]
   이 필드는 redaction 대상이자 목표 계약 6번의 대상이다.
 - join CLI는 Authorization header를 보내지 않으므로 API token 보호 모드에서는 middleware가 join을
   handler 이전에 거절할 수 있다(join route는 bootstrap body를 자체 인증 수단으로 처리한다).
-- `fleet provision`(SSH 자동 프로비저닝)은 아직 `/v1/workers/join`과 배선되어 있지 않아
-  legacy `bootstrap_token` 키를 기록한다. 5번의 fail-closed 거절 덕분에 조용히 동작하지는 않지만,
-  프로비저닝된 워커는 `fleet-worker join` 재실행 또는 credential rotate 결과의 수동 반영이 필요하다.
+- `fleet provision`(SSH 자동 프로비저닝)은 `/v1/workers/join`과 배선되어 있다(로드맵 `#82`) —
+  프로비저너 자신은 admin bearer로 호스트별 1회용 bootstrap token만 발급하고, 대상 호스트에서
+  `fleet-worker join --token-file -`을 원격 실행해 그 호스트가 직접 join하게 한다.
+  `operational_token`은 대상 호스트만 알고 프로비저너는 보지도 저장하지도 않는다. 자세한 절차는
+  [Worker provisioning](../deployment/worker-provisioning.md)에서 확인한다.
 - mTLS(9단계)와 staging rehearsal(10단계)은 착수 전이다.
 
 | API 인증 설정 | 현재 join CLI | 결과 |

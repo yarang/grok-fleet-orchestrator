@@ -241,7 +241,6 @@ async fn run_provisioning(
         grok_bind_addr: None,
         grok_secret: Some(grok_secret.clone()),
         max_concurrent_tasks: req.max_concurrent_tasks,
-        bootstrap_token: req.bootstrap_token.clone(),
         orchestrator_api_token: req.api_token.clone(),
         dry_run: req.dry_run,
         mtls_enabled: false,
@@ -443,8 +442,8 @@ pub struct ProvisionRequest {
     pub orchestrator_url: String,
     #[serde(default)]
     pub grok_secret: String,
-    #[serde(default)]
-    pub bootstrap_token: Option<String>,
+    /// 오케스트레이터 관리 API 용 bearer 토큰. JoinWorker가 `/v1/bootstrap-tokens`
+    /// 발급에 사용한다(로드맵 `#82`) — `token:issue` capability 필요.
     #[serde(default)]
     pub api_token: Option<String>,
     #[serde(default)]

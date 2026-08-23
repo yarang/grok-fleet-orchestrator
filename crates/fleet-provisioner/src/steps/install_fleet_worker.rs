@@ -1,13 +1,17 @@
-//! Step 5: fleet-worker 바이너리 배포 + 설정 파일 작성 + systemd 유닛 설치.
+//! Step 5: fleet-worker 바이너리 배포 + systemd 유닛 설치.
+//!
+//! worker.toml 작성은 이 스텝의 책임이 아니다 — 뒤이은 `JoinWorker` 스텝
+//! (로드맵 `#82`)이 원격에서 `fleet-worker join`을 실행해 오케스트레이터의
+//! `/v1/workers/join` 응답을 직접 디스크에 쓴다. 이 스텝은 `/etc/fleet`
+//! 디렉토리를 준비해 그 join이 쓸 수 있는 자리를 마련해 둔다.
 
 use async_trait::async_trait;
 
 use crate::error::StepError;
 use crate::ssh::RemoteExecutor;
 use crate::steps::{Step, StepContext, StepOutput};
-use crate::templates::TemplateContext;
 
-/// fleet-worker 바이너리 배포 + 설정 파일 작성 + systemd 유닛 설치 스텝.
+/// fleet-worker 바이너리 배포 + systemd 유닛 설치 스텝.
 #[derive(Default)]
 pub struct InstallFleetWorker {
     /// 로컬에 빌드된 fleet-worker 바이너리 경로. 명시하면 아래 아키텍처
@@ -87,40 +91,15 @@ impl Step for InstallFleetWorker {
             ),
         })?;
 
-        // 1. 디렉토리 준비 (로드맵 #79 — 실패를 삼키지 않는다).
+        // 1. 디렉토리 준비 — 뒤이은 JoinWorker 스텝이 여기에 worker.toml을
+        //    쓴다(로드맵 #82). 실패를 삼키지 않는다(로드맵 #79).
         exec.exec_checked("sudo mkdir -p /etc/fleet").await?;
 
         // 2. 바이너리 업로드 (base64 trick 또는 SFTP).
         exec.upload_file(local_bin, "/usr/local/bin/fleet-worker", 0o755)
             .await?;
 
-        // 3. 설정 파일 작성 (템플릿).
-        let config_toml = crate::templates::render_worker_config(&TemplateContext {
-            tunnel_name: ctx.worker_name.clone(),
-            hostname: ctx.orchestrator_url.clone(),
-            credentials_path: "/etc/cloudflared/creds.json".into(),
-            grok_secret: ctx.grok_secret.clone(),
-            grok_bind_addr: ctx.grok_bind_addr.clone(),
-            max_concurrent_tasks: ctx.max_concurrent_tasks,
-            bootstrap_token: ctx.bootstrap_token.clone(),
-            labels: Some(ctx.labels.clone()),
-            mtls_enabled: ctx.mtls_enabled,
-            mtls_listen_addr: ctx.mtls_listen_addr.clone(),
-            mtls_server_cert_path: ctx.mtls_server_cert_path.clone(),
-            mtls_server_key_path: ctx.mtls_server_key_path.clone(),
-            mtls_client_ca_path: ctx.mtls_client_ca_path.clone(),
-            mtls_advertised_host: ctx.mtls_advertised_host.clone(),
-            mtls_advertised_port: ctx.mtls_advertised_port,
-            ..Default::default()
-        })?;
-        exec.write_file("/tmp/fleet-worker.toml", &config_toml)
-            .await?;
-        exec.exec_checked(
-            "sudo mv /tmp/fleet-worker.toml /etc/fleet/worker.toml && sudo chmod 600 /etc/fleet/worker.toml",
-        )
-        .await?;
-
-        // 4. systemd 유닛 작성.
+        // 3. systemd 유닛 작성.
         let unit = crate::templates::FLEET_WORKER_UNIT;
         exec.write_file("/tmp/fleet-worker.service", unit).await?;
         exec.exec_checked(
@@ -168,7 +147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_uploads_binary_and_writes_config() {
+    async fn apply_uploads_binary_and_installs_unit() {
         let exec = MockExecutor::new();
         let step = InstallFleetWorker {
             local_bin: Some("/tmp/test-worker".into()),
@@ -177,7 +156,6 @@ mod tests {
         let ctx = StepContext {
             worker_name: "build-1".into(),
             orchestrator_url: "https://orch.fleet.example.com".into(),
-            grok_secret: Some("server-secret".into()),
             ..Default::default()
         };
         let out = step.apply(&exec, &ctx).await.unwrap();
@@ -186,30 +164,13 @@ mod tests {
         assert!(calls
             .iter()
             .any(|c| c.contains("upload") && c.contains("fleet-worker")));
-        assert!(calls
-            .iter()
-            .any(|c| c.contains("write /tmp/fleet-worker.toml")));
+        assert!(calls.iter().any(|c| c.contains("mkdir -p /etc/fleet")));
         assert!(calls
             .iter()
             .any(|c| c.contains("write /tmp/fleet-worker.service")));
-    }
-
-    #[tokio::test]
-    async fn apply_fails_without_grok_secret() {
-        let exec = MockExecutor::new();
-        let step = InstallFleetWorker {
-            local_bin: Some("/tmp/test-worker".into()),
-            ..InstallFleetWorker::default()
-        };
-        let ctx = StepContext {
-            worker_name: "build-1".into(),
-            orchestrator_url: "https://orch.fleet.example.com".into(),
-            ..Default::default()
-        };
-        let result = step.apply(&exec, &ctx).await;
-        assert!(matches!(result, Err(StepError::Template(_))));
-        let err = result.unwrap_err();
-        assert!(format!("{err}").contains("grok_secret"));
+        // worker.toml 작성은 이 스텝의 책임이 아니다 — JoinWorker가 담당한다
+        // (로드맵 #82).
+        assert!(!calls.iter().any(|c| c.contains("fleet-worker.toml")));
     }
 
     #[tokio::test]
