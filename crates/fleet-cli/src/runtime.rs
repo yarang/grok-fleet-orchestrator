@@ -42,7 +42,7 @@ use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig, HostKeyPolicy,
     Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookError,
-    PlaybookReport, PrereqReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
+    PlaybookReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
     StepContext,
 };
 use fleet_scheduler::{
@@ -1871,17 +1871,21 @@ async fn run_playbook(
     ctx: &PlaybookContext,
     tags: &[String],
 ) -> Result<PlaybookReport> {
-    // 단순화: 실제 환경에서는 check_prereqs 결과를 받아 다음 스텝에 전달.
-    // 여기서는 기본값(ubuntu, x86_64, 충분한 자원)을 가정.
-    let assumed_prereq = PrereqReport {
-        os: "ubuntu".into(),
-        arch: "x86_64".into(),
-        mem_mb: 16384,
-        disk_gb: 100,
-        has_rust: false,
-        has_systemd: true,
+    // 로드맵 #81 — 이전에는 os/arch를 항상 ubuntu/x86_64로 가정해, 이기종
+    // fleet에서 잘못된 패키지 매니저·바이너리를 선택했다(커밋된 인벤토리
+    // 25대 중 7대가 arm64).
+    //
+    // dry-run은 MockExecutor로 시뮬레이션하며 실제 연결이 없으므로,
+    // check_prereqs를 진짜로 호출하지 않고 인벤토리 라벨(`arch`/`os`)에서
+    // 미리보기용 가정값을 구성한다. 실제 실행은 check_prereqs를 정말로
+    // 실행해 얻은 값을 쓰고, 그 검증 실패(지원되지 않는 OS 등)를 조용히
+    // 가정값으로 덮지 않고 그대로 전파한다.
+    let prereq = if ctx.base.dry_run {
+        fleet_provisioner::assumed_prereq_from_labels(&ctx.base.labels)
+    } else {
+        fleet_provisioner::detect_prereq(exec).await?
     };
-    let playbook = Playbook::standard(&assumed_prereq);
+    let playbook = Playbook::standard(&prereq);
     let mut pb_ctx = ctx.clone();
     if !tags.is_empty() {
         pb_ctx = pb_ctx.with_tags(tags.to_vec());

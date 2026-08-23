@@ -108,8 +108,16 @@ pub struct StepContext {
     pub orchestrator_url: String,
     /// Cloudflare 인증 토큰 (오리진 CA 또는 API 토큰).
     pub cf_token: Option<String>,
-    /// fleet-worker 바이너리 로컬 경로 (cargo build 결과).
+    /// fleet-worker 바이너리 로컬 경로 (cargo build 결과). 이기종 fleet에서는
+    /// `fleet_worker_bin_by_arch`가 우선 매칭되고, 이 필드는 arch 매칭이
+    /// 없을 때의 폴백이다 (로드맵 `#81`).
     pub fleet_worker_bin: Option<String>,
+    /// 아키텍처(`PrereqReport.arch`, 즉 `uname -m` 값 — 예: `x86_64`,
+    /// `aarch64`)별 fleet-worker 바이너리 로컬 경로 (로드맵 `#81`). 값을
+    /// 채우는 것은 이 크레이트의 책임이 아니다 — CLI/인벤토리 배선은
+    /// 로드맵 `#83`이 담당한다. 비어 있으면 `fleet_worker_bin`만 쓰인다
+    /// (기존 단일 아키텍처 배포와 완전히 하위 호환).
+    pub fleet_worker_bin_by_arch: std::collections::HashMap<String, String>,
     /// grok 서브프로세스가 listen할 로컬 호스트:포트.
     /// 미설정 시 템플릿 기본값 `127.0.0.1:2419` 사용.
     pub grok_bind_addr: Option<String>,

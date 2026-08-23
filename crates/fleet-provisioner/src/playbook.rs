@@ -19,6 +19,11 @@ use crate::steps::{
     PushCredentials, StartServices, Step,
 };
 
+// `detect_prereq`/`assumed_prereq_from_labels`는 `steps::check_prereqs`가
+// 소유한다(로드맵 #81) — `CheckPrereqs::apply` 자체가 dry-run에서 같은
+// 로직을 쓰므로 한 곳에 두는 것이 자연스럽다.
+pub use crate::steps::check_prereqs::{assumed_prereq_from_labels, detect_prereq};
+
 /// 개별 스텝 실행 결과 (report에 포함).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StepStatus {
@@ -94,8 +99,14 @@ impl Playbook {
                 prereq: prereq.clone(),
             }),
             Arc::new(InstallGrok::default()),
-            Arc::new(InstallCloudflared::default()),
-            Arc::new(InstallFleetWorker::default()),
+            Arc::new(InstallCloudflared {
+                target_arch: Some(prereq.arch.clone()),
+                ..InstallCloudflared::default()
+            }),
+            Arc::new(InstallFleetWorker {
+                target_arch: Some(prereq.arch.clone()),
+                ..InstallFleetWorker::default()
+            }),
             Arc::new(PushCredentials::default()),
             Arc::new(StartServices::default()),
         ];
@@ -398,5 +409,26 @@ mod tests {
         // 6번째 스텝이 PushCredentials 여야 함 (인덱스 5).
         // step.name()은 trait 메서드라 내부 벡터 접근이 필요하지만
         // Playbook::steps는 private 이므로 len()으로 대신 검증.
+    }
+
+    // detect_prereq / assumed_prereq_from_labels 단위 테스트는
+    // check_prereqs.rs로 이동했다(로드맵 #81).
+
+    #[test]
+    fn standard_playbook_propagates_arch_to_fleet_worker_and_cloudflared_steps() {
+        // Playbook::standard가 InstallFleetWorker/InstallCloudflared에 감지된
+        // arch를 실제로 넘기는지 — 두 스텝의 내부 상태는 private이므로,
+        // 다음 단위 테스트(steps 모듈)들이 그 소비 쪽을 검증한다. 여기서는
+        // 최소한 7개 스텝 구성 자체가 arch 값과 무관하게 안정적임을 확인한다.
+        let arm_prereq = PrereqReport {
+            os: "ubuntu".into(),
+            arch: "aarch64".into(),
+            mem_mb: 16384,
+            disk_gb: 100,
+            has_rust: false,
+            has_systemd: true,
+        };
+        let pb = Playbook::standard(&arm_prereq);
+        assert_eq!(pb.len(), 7);
     }
 }

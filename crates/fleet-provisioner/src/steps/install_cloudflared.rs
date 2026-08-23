@@ -17,13 +17,41 @@ pub struct InstallCloudflared {
     /// 터널 DNS 호스트명 패턴. `{worker}` 자리표시자 포함 가능.
     /// 예: `"{worker}.fleet.example.com"`.
     pub hostname_pattern: String,
+    /// 대상 호스트의 아키텍처(`PrereqReport.arch`). `Playbook::standard`가
+    /// `check_prereqs` 결과로 채운다 (로드맵 `#81`). cloudflared 릴리스
+    /// 바이너리의 arch suffix(`amd64`/`arm64`) 선택에 쓰인다.
+    pub target_arch: Option<String>,
 }
 
 impl Default for InstallCloudflared {
     fn default() -> Self {
         Self {
             hostname_pattern: "{worker}.fleet.internal".into(),
+            target_arch: None,
         }
+    }
+}
+
+/// `PrereqReport.arch`(`uname -m` 값)를 cloudflared 릴리스 자산의 arch
+/// suffix로 변환한다. cloudflared는 Linux 자산을 `amd64`/`arm64`로 이름
+/// 붙이지만 `uname -m`은 `x86_64`/`aarch64`를 반환하므로 그대로 쓸 수 없다.
+///
+/// 알 수 없는 값은 `amd64`로 폴백하고 경고를 남긴다 — 이 스텝은 표준
+/// playbook에서 곧 제거될 예정이라(mTLS 직접 다이얼 채택, 로드맵 `#85`)
+/// 여기서 하드 실패로 무인 프로비저닝 전체를 막을 정도의 투자를 하지
+/// 않는다. 다만 잘못된 선택이 조용히 일어나지는 않게 한다.
+fn cloudflared_arch_suffix(arch: Option<&str>) -> &'static str {
+    match arch {
+        Some("aarch64") | Some("arm64") => "arm64",
+        Some("x86_64") | Some("amd64") => "amd64",
+        Some(other) => {
+            tracing::warn!(
+                arch = other,
+                "unrecognized architecture for cloudflared release asset — defaulting to amd64"
+            );
+            "amd64"
+        }
+        None => "amd64",
     }
 }
 
@@ -62,15 +90,18 @@ impl Step for InstallCloudflared {
             )));
         }
 
-        // 1. 바이너리 다운로드
+        // 1. 바이너리 다운로드 (로드맵 #81 — 아키텍처별 자산 선택).
+        let arch_suffix = cloudflared_arch_suffix(self.target_arch.as_deref());
         let code = exec
             .exec_streaming(
-                "curl -fsSL \
-                 https://github.com/cloudflare/cloudflared/releases/latest/download/\
-                 cloudflared-linux-amd64 \
-                 -o /tmp/cloudflared && \
-                 sudo mv /tmp/cloudflared /usr/local/bin/cloudflared && \
-                 sudo chmod +x /usr/local/bin/cloudflared",
+                &format!(
+                    "curl -fsSL \
+                     https://github.com/cloudflare/cloudflared/releases/latest/download/\
+                     cloudflared-linux-{arch_suffix} \
+                     -o /tmp/cloudflared && \
+                     sudo mv /tmp/cloudflared /usr/local/bin/cloudflared && \
+                     sudo chmod +x /usr/local/bin/cloudflared"
+                ),
                 Box::new(|line| tracing::info!("[remote] {line}")),
             )
             .await?;
@@ -206,6 +237,7 @@ mod tests {
         let exec = MockExecutor::new();
         let step = InstallCloudflared {
             hostname_pattern: "{worker}.fleet.example.com".into(),
+            ..InstallCloudflared::default()
         };
         let ctx = StepContext {
             worker_name: "gpu-runner-1".into(),
@@ -230,5 +262,56 @@ mod tests {
         let out = step.apply(&exec, &ctx).await.unwrap();
         assert!(out.message.contains("dry-run"));
         assert!(exec.recorded_calls().is_empty());
+    }
+
+    // ── 아키텍처별 cloudflared 자산 선택 (로드맵 #81) ─────────────────────
+
+    #[test]
+    fn cloudflared_arch_suffix_maps_uname_values() {
+        assert_eq!(cloudflared_arch_suffix(Some("aarch64")), "arm64");
+        assert_eq!(cloudflared_arch_suffix(Some("arm64")), "arm64");
+        assert_eq!(cloudflared_arch_suffix(Some("x86_64")), "amd64");
+        assert_eq!(cloudflared_arch_suffix(Some("amd64")), "amd64");
+    }
+
+    #[test]
+    fn cloudflared_arch_suffix_defaults_to_amd64_for_unknown_or_missing() {
+        assert_eq!(cloudflared_arch_suffix(Some("riscv64")), "amd64");
+        assert_eq!(cloudflared_arch_suffix(None), "amd64");
+    }
+
+    #[tokio::test]
+    async fn apply_downloads_arm64_binary_for_aarch64_target() {
+        let exec = MockExecutor::new();
+        let step = InstallCloudflared {
+            target_arch: Some("aarch64".into()),
+            ..InstallCloudflared::default()
+        };
+        let ctx = StepContext {
+            worker_name: "arm-worker".into(),
+            cf_token: Some("tok".into()),
+            ..Default::default()
+        };
+        step.apply(&exec, &ctx).await.unwrap();
+        let calls = exec.recorded_calls();
+        assert!(
+            calls.iter().any(|c| c.contains("cloudflared-linux-arm64")),
+            "expected arm64 asset download, got: {calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.contains("cloudflared-linux-amd64")));
+    }
+
+    #[tokio::test]
+    async fn apply_downloads_amd64_binary_by_default() {
+        let exec = MockExecutor::new();
+        let step = InstallCloudflared::default(); // target_arch: None
+        let ctx = StepContext {
+            worker_name: "x86-worker".into(),
+            cf_token: Some("tok".into()),
+            ..Default::default()
+        };
+        step.apply(&exec, &ctx).await.unwrap();
+        let calls = exec.recorded_calls();
+        assert!(calls.iter().any(|c| c.contains("cloudflared-linux-amd64")));
     }
 }

@@ -13,9 +13,9 @@ use axum::Json;
 use uuid::Uuid;
 
 use fleet_core::{HostStatus, SshKey, SshKeySummary};
-use fleet_provisioner::playbook::{Playbook, PlaybookContext, StepStatus};
+use fleet_provisioner::playbook::{detect_prereq, Playbook, PlaybookContext, StepStatus};
 use fleet_provisioner::ssh::{HostKeyConfig, SshClient, SshConnectInfo};
-use fleet_provisioner::steps::{PrereqReport, StepContext};
+use fleet_provisioner::steps::StepContext;
 
 use crate::app::DashboardState;
 use crate::auth::{require_permission, AuthPrincipal};
@@ -234,6 +234,10 @@ async fn run_provisioning(
         orchestrator_url: req.orchestrator_url.clone(),
         cf_token: None,
         fleet_worker_bin: Some(fleet_worker_bin),
+        // 대시보드에서 트리거하는 프로비저닝은 아직 아키텍처별 바이너리
+        // 소스를 입력받지 않는다 — 단일 경로(`fleet_worker_bin`)로만 동작한다
+        // (로드맵 #81 — 메커니즘은 있으나 이 호출부의 배선은 #83 범위).
+        fleet_worker_bin_by_arch: std::collections::HashMap::new(),
         grok_bind_addr: None,
         grok_secret: Some(grok_secret.clone()),
         max_concurrent_tasks: req.max_concurrent_tasks,
@@ -275,16 +279,14 @@ async fn run_provisioning(
             ApiError::Unavailable(format!("SSH connection failed: {e}"))
         })?;
 
-    // Playbook 실행.
-    let assumed_prereq = PrereqReport {
-        os: "ubuntu".into(),
-        arch: "x86_64".into(),
-        mem_mb: 16384,
-        disk_gb: 100,
-        has_rust: false,
-        has_systemd: true,
-    };
-    let playbook = Playbook::standard(&assumed_prereq);
+    // Playbook 실행. 로드맵 #81 — 이전에는 os/arch를 항상 ubuntu/x86_64로
+    // 가정했다. 이 시점에는 이미 실 SSH 연결이 있으므로(dry_run은 위에서
+    // 먼저 반환) check_prereqs를 실제로 실행해 얻은 값을 쓴다.
+    let prereq = detect_prereq(&ssh).await.map_err(|e| {
+        tracing::error!(error = %e, host = %req.host, "check_prereqs failed");
+        ApiError::Unavailable(format!("host prerequisite check failed: {e}"))
+    })?;
+    let playbook = Playbook::standard(&prereq);
     let pb_ctx = PlaybookContext {
         base: step_ctx,
         only_tags: if req.tags.is_empty() {

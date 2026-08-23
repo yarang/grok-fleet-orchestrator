@@ -30,7 +30,10 @@ pub mod templates;
 
 pub use error::{InventoryError, PlaybookError, ProvisionError, SshError, StepError};
 pub use inventory::{Inventory, InventoryDefaults, InventoryWorker, ProvisionOptions};
-pub use playbook::{Playbook, PlaybookContext, PlaybookReport, StepReport, StepStatus};
+pub use playbook::{
+    assumed_prereq_from_labels, detect_prereq, Playbook, PlaybookContext, PlaybookReport,
+    StepReport, StepStatus,
+};
 pub use ssh::{
     append_known_hosts_line, arc_executor, default_known_hosts_path, scan_host_key, HostKeyConfig,
     HostKeyPolicy, MockExecutor, RemoteExecutor, ScannedHostKey, SshClient, SshConnectInfo,

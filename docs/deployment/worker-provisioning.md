@@ -55,11 +55,15 @@ sequenceDiagram
 ## 사전 조건
 
 - 대상 host, SSH user, private key와 검증된 known-hosts 정보를 준비한다.
-- 로컬 `fleet-worker` binary 경로와 Worker의 grok secret을 준비한다.
+- 로컬 `fleet-worker` binary 경로와 Worker의 grok secret을 준비한다. 이기종 fleet(예: arm64와
+  x86_64 워커가 섞여 있음)에서는 `StepContext.fleet_worker_bin_by_arch`(`PrereqReport.arch`,
+  즉 `uname -m` 값을 키로 하는 맵)에 아키텍처별 바이너리 경로를 채우면 `InstallFleetWorker`가
+  감지된 아키텍처에 맞는 것을 자동 선택한다(`#81`). CLI/인벤토리 YAML에서 이 맵을 채우는 배선은
+  아직 없다 — 현재는 `fleet_worker_bin`(단일 아키텍처) 경로만 CLI에서 설정할 수 있다.
 - Orchestrator URL과 host 등록용 API bearer가 필요한지 확인한다.
 - Worker 지속 신원(`operational_token`)과 bootstrap token의 분리는 `#60` 1~8단계로 완료됐다.
   현재 남은 제약은 프로비저너가 그 신원을 발급받지 못한다는 것이며
-  [Worker enrollment](../contracts/worker-enrollment.md)와 Roadmap `#81`에서 확인한다.
+  [Worker enrollment](../contracts/worker-enrollment.md)와 Roadmap `#82`에서 확인한다.
 - `orchestrator_api_token`(`ProvisionOptions.api_token`)의 capability 요구사항 (`#79`로 확장됨):
   - `PushCredentials` 스텝은 `worker:llm_credential:read`/`:export`가 필요하다(`#66`).
   - `StartServices` 스텝의 하트비트 확인은 `worker:list`가 필요하다 — 없으면 그 폴링만
