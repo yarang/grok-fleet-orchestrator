@@ -226,6 +226,18 @@ impl Reconciler {
     /// tick에서 재시도할 수 있도록 루프가 죽지 않아야 하기 때문
     /// (`HealthChecker`/`SessionCleanup`과 동일한 회복성 패턴).
     pub async fn reconcile_once(&self) -> ReconcileSummary {
+        // control plane lease 확인 (로드맵 #63 불변식 2·"Reconciler는 Active
+        // Orchestrator epoch에서만 동작한다"). 개별 dispatch 시도가 아니라
+        // sweep 전체를 건너뛴다 — dead-letter 확정, dispatch, stale
+        // Dispatched reap이 전부 이 인스턴스가 지금 제어권을 갖고 있다는
+        // 전제 위에 있다. 조회(list_tasks)는 lease 없이도 허용되지만
+        // (불변식 1), 이 함수는 조회로 끝나지 않고 항상 mutation까지
+        // 이어지므로 여기서는 조회 전에 미리 막는다.
+        if !self.state.lease_allows_control() {
+            debug!("reconcile: skipping sweep — this instance does not hold the control plane lease");
+            return ReconcileSummary::default();
+        }
+
         let pending = match self
             .state
             .store
@@ -332,6 +344,13 @@ impl Reconciler {
                     if self.config.max_dispatch_retries > 0 {
                         let _ = self.state.store.increment_task_retry_count(task_id).await;
                     }
+                }
+                Err(DispatchError::ControlPlaneFenced) => {
+                    // sweep 시작 시점엔 lease가 유효했지만 그 사이(다른 task
+                    // 처리 중) fenced된 드문 경합 — task 상태는 건드려지지
+                    // 않았으므로(Pending 유지) 로깅만 하고 이번 sweep의
+                    // 나머지도 계속 스킵되게 둔다.
+                    warn!(%task_id, "reconcile: lost the control plane lease mid-sweep, leaving pending");
                 }
                 Err(e) => {
                     // 진짜 dispatch 에러(transport 실패 등) — dispatch_existing이
@@ -609,6 +628,60 @@ mod tests {
             TaskStatus::Completed(result) => assert_eq!(result.worker_id, worker_id),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reconcile_once_skips_the_whole_sweep_when_control_plane_lease_is_fenced() {
+        // 로드맵 #63 2단계 — "Reconciler는 Active Orchestrator epoch에서만
+        // 동작한다"(docs/architecture/control-plane-authority-and-failover.md).
+        // dispatch_existing 레벨의 개별 거절이 아니라, sweep 자체가 아예
+        // 시작되지 않아야 한다.
+        let worker = make_worker("idle-1");
+        let worker_id = worker.id;
+
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_pending_task("stale work", chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(MockTransport::new());
+        let state = Arc::new(
+            FleetState::new(store.clone(), transport, CircuitBreakerConfig::default())
+                .with_lease(crate::lease::LeaseObserver::with_status(
+                    crate::lease::LeaseStatus::Fenced,
+                )),
+        );
+        let dispatcher = Arc::new(Dispatcher::new(state.clone()));
+
+        let reconciler = Reconciler::new(
+            state.clone(),
+            dispatcher,
+            ReconcileConfig {
+                interval: Duration::from_secs(3600),
+                stale_after: Duration::from_secs(60),
+                dispatched_worker_check_after: Duration::from_secs(30),
+                offline_worker_grace: Duration::from_secs(300),
+                max_dispatch_retries: 20,
+            },
+        );
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(
+            summary,
+            ReconcileSummary::default(),
+            "the entire sweep must be skipped while fenced, not just individual dispatch attempts"
+        );
+
+        // 워커도 있고 stale하기까지 한 task인데도 손대지 않았어야 한다.
+        let _ = worker_id;
+        let stored = store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Pending),
+            "expected Pending (untouched), got {:?}",
+            stored.status
+        );
     }
 
     #[tokio::test]

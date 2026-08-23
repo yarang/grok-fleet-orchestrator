@@ -48,8 +48,8 @@ use fleet_provisioner::{
     StepContext,
 };
 use fleet_scheduler::{
-    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, MultiAdminSync,
-    ReconcileConfig, Reconciler, SessionCleanup,
+    CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, LeaseManager,
+    LeaseManagerConfig, MultiAdminSync, ReconcileConfig, Reconciler, SessionCleanup,
 };
 use fleet_store::{PgStore, PoolConfig, Store};
 use fleet_transport::{MockTransport, WorkerTransport};
@@ -290,11 +290,27 @@ pub async fn run_serve(
 
     let transport_handle = transport.clone();
 
-    let state = Arc::new(FleetState::new(
+    // control plane lease (로드맵 #63 2단계). 단일 인스턴스 배포에서도 항상
+    // 켠다 — 경쟁자가 없는 lease 획득은 사실상 즉시 성공하므로 실질적인
+    // 지연이 없고(그러지 않으면 이 메커니즘 전체가 실제 배포 어디서도
+    // 검증되지 않는 죽은 코드로 남는다), 여러 인스턴스를 실수로 동시에
+    // 띄우는 사고에서도 처음부터 보호받는다. `cluster_id`는 이 저장소가
+    // 아직 단일 클러스터만 지원하므로 고정값이다 — 멀티 클러스터가 생기면
+    // 그때 설정 가능하게 확장한다. migration은 이 함수 앞부분에서 이미
+    // 끝났으므로 `control_plane_lease` 테이블은 이 시점에 항상 존재한다.
+    let lease_manager = LeaseManager::new(
         store.clone(),
-        transport,
-        CircuitBreakerConfig::default(),
-    ));
+        "default",
+        uuid::Uuid::new_v4().to_string(),
+        LeaseManagerConfig::default(),
+    );
+    let lease_handle = lease_manager.spawn();
+    let lease_observer = lease_handle.observer();
+
+    let state = Arc::new(
+        FleetState::new(store.clone(), transport, CircuitBreakerConfig::default())
+            .with_lease(lease_observer),
+    );
 
     // 로드맵 #38 — `Dispatcher`와 `Reconciler`가 같은 재시도 상한
     // (`reconcile_max_dispatch_retries`)을 공유해야 `submit()`이 남겨둔
@@ -642,6 +658,12 @@ pub async fn run_serve(
     if let Some(h) = _circuit_sync_handle {
         h.abort();
     }
+    // lease는 명시적으로 release하지 않는다 — `LeaseManagerHandle`은 그
+    // 책임을 (의도적으로) 갖고 있지 않다(lease.rs의 abort() doc 참고).
+    // 갱신 루프만 멈추므로, 이 lease는 최대 TTL(기본 15초)만큼 유효한
+    // 채로 남았다가 자연 만료된다 — graceful shutdown에서 즉시 release해
+    // 대기 인스턴스의 failover를 앞당기는 건 후속 개선으로 남긴다.
+    lease_handle.abort().await;
     if let Some(h) = _http_handle {
         h.abort();
     }

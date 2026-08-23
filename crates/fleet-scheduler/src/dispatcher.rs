@@ -91,6 +91,31 @@ impl Dispatcher {
 
     #[tracing::instrument(skip(self, event))]
     async fn handle_worker_event(&self, event: WorkerEvent) {
+        // control plane lease 확인 (로드맵 #63 불변식 2). `Completed`/`Failed`만
+        // 대상이다 — 이 둘만 breaker 상태와 task의 최종 상태를 바꾸는 "제어"
+        // 결정이다. `Output`(stdout/stderr 버퍼링)은 권위 있는 결정이 아니라
+        // 순수 append-only 관측 데이터 전달이므로 lease 여부와 무관하게
+        // 계속 흘려보낸다 — 막으면 사용자가 보고 있는 실시간 출력만 끊기고
+        // 얻는 안전 이득은 없다.
+        if matches!(event, WorkerEvent::Completed { .. } | WorkerEvent::Failed { .. })
+            && !self.state.lease_allows_control()
+        {
+            // `event`를 통째로 로깅하지 않는다 — `Completed.result.output`은
+            // 워커 실행 결과 원문이라 로그에 남기면 안 되는 데이터다.
+            let task_id = match &event {
+                WorkerEvent::Completed { task_id, .. } | WorkerEvent::Failed { task_id, .. } => {
+                    *task_id
+                }
+                WorkerEvent::Output { .. } => unreachable!("filtered by the matches! guard above"),
+            };
+            warn!(
+                %task_id,
+                "worker event dropped — this instance does not hold the control plane lease \
+                 (breaker/task state left untouched; the new lease owner must reconcile it)"
+            );
+            return;
+        }
+
         match event {
             WorkerEvent::Completed { task_id, result } => {
                 let worker_id = result.worker_id;
@@ -336,6 +361,16 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         let task_id = task.id;
 
+        // 0. control plane lease 확인 (로드맵 #63 불변식 2). 워커 선택·breaker
+        // 변경·transport dispatch 전부 여기서 막는다 — task 상태는 건드리지
+        // 않고 `Pending`인 채로 둔다(재시도 대상). `mark_unavailable_as_failed`
+        // 여부와 무관하게 항상 거절한다 — lease 없이 "즉시 실패로 확정"하는
+        // 것조차 이 인스턴스가 하면 안 되는 상태 변경이다.
+        if !self.state.lease_allows_control() {
+            warn!(%task_id, "dispatch refused — this instance does not hold the control plane lease");
+            return Err(DispatchError::ControlPlaneFenced);
+        }
+
         // 3. 워커 선택
         let worker_id = match self.state.selector.select(&task).await {
             Ok(id) => id,
@@ -560,6 +595,17 @@ impl Dispatcher {
         task_id: TaskId,
         reason: impl Into<String>,
     ) -> Result<(), CancelError> {
+        // control plane lease 확인 (로드맵 #63 불변식 2 — "cancel"이 명시
+        // 대상이다). 존재하지 않는 task_id로 취소를 시도한 경우와 구분하기
+        // 위해 조회보다 먼저 거절한다 — lease 없는 인스턴스는 어차피 어떤
+        // task도 취소할 권한이 없으므로, 조회 결과를 보여주는 것 자체가
+        // 의미 없다(불변식 1의 "조회는 허용" 예외는 순수 read-only 경로에
+        // 대한 것이지, mutation의 전제 조사에는 적용하지 않는다).
+        if !self.state.lease_allows_control() {
+            warn!(%task_id, "cancel refused — this instance does not hold the control plane lease");
+            return Err(CancelError::ControlPlaneFenced);
+        }
+
         let reason = reason.into();
 
         let task = self
@@ -721,6 +767,13 @@ pub enum DispatchError {
 
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// 이 인스턴스가 지금 control plane lease를 쥐고 있지 않다(로드맵
+    /// `#63` 불변식 2). Cold Standby거나 갱신에 실패해 fenced됐다 —
+    /// 재시도는 안전하지만(Reconciler가 다음 tick에 다시 시도), 지금 이
+    /// 인스턴스가 dispatch를 대신 수행하면 안 된다.
+    #[error("this instance does not currently hold the control plane lease")]
+    ControlPlaneFenced,
 }
 
 impl From<TransportError> for DispatchError {
@@ -743,6 +796,10 @@ pub enum CancelError {
         task_id: TaskId,
         phase: &'static str,
     },
+
+    /// 로드맵 `#63` 불변식 2 — [`DispatchError::ControlPlaneFenced`] 참고.
+    #[error("this instance does not currently hold the control plane lease")]
+    ControlPlaneFenced,
 }
 
 /// 작업 대기 에러.
@@ -936,6 +993,162 @@ mod tests {
             matches!(stored.status, TaskStatus::Dispatched { .. }),
             "expected Dispatched, got {:?}",
             stored.status
+        );
+    }
+
+    // ── 로드맵 #63 2단계: control plane lease gating ────────────────────
+
+    use crate::lease::{LeaseObserver, LeaseStatus};
+
+    fn setup_fenced() -> (Arc<FleetState>, Dispatcher) {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(
+            FleetState::new(store, transport, CircuitBreakerConfig::default())
+                .with_lease(LeaseObserver::with_status(LeaseStatus::Fenced)),
+        );
+        let dispatcher = Dispatcher::new(state.clone());
+        (state, dispatcher)
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_when_control_plane_lease_is_fenced() {
+        let (state, dispatcher) = setup_fenced();
+        let task = sample_task();
+        let task_id = task.id;
+
+        let err = dispatcher
+            .submit(task)
+            .await
+            .expect_err("submit() must refuse dispatch while fenced");
+        assert!(matches!(err, DispatchError::ControlPlaneFenced));
+
+        // task row는 insert_task까지는 진행됐으니 존재하되, dispatch_existing
+        // 이전에 거절됐으므로 여전히 Pending이어야 한다 — Failed로 잘못
+        // 확정되면 안 된다.
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Pending),
+            "expected Pending (never touched by dispatch), got {:?}",
+            stored.status
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_refuses_when_control_plane_lease_is_fenced_even_for_unknown_task() {
+        let (_state, dispatcher) = setup_fenced();
+        // 존재하지 않는 task_id를 써도 NotFound가 아니라 ControlPlaneFenced가
+        // 먼저 나와야 한다 — lease 확인이 조회보다 앞선다.
+        let bogus_task_id = TaskId::new();
+
+        let err = dispatcher
+            .cancel(bogus_task_id, "test")
+            .await
+            .expect_err("cancel() must refuse while fenced");
+        assert!(matches!(err, CancelError::ControlPlaneFenced));
+    }
+
+    #[tokio::test]
+    async fn completed_event_is_dropped_when_control_plane_lease_is_fenced() {
+        let (state, dispatcher) = setup_fenced();
+
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        let result = fleet_core::TaskResult {
+            output: "should never be persisted while fenced".into(),
+            exit_code: 0,
+            duration_secs: 1.0,
+            token_usage: None,
+            worker_id: worker.id,
+            finished_at: Utc::now(),
+        };
+        dispatcher
+            .handle_worker_event(WorkerEvent::Completed { task_id, result })
+            .await;
+
+        // fenced 인스턴스는 이 이벤트를 버려야 한다 — task는 Dispatched에서
+        // 움직이지 않는다. 새 lease 소유자가 나중에 재조정해야 할 상태다.
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Dispatched { .. }),
+            "expected Dispatched (event dropped), got {:?}",
+            stored.status
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_event_is_dropped_when_control_plane_lease_is_fenced() {
+        let (state, dispatcher) = setup_fenced();
+
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::Failed {
+                task_id,
+                error: "should never be persisted while fenced".into(),
+            })
+            .await;
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Dispatched { .. }),
+            "expected Dispatched (event dropped), got {:?}",
+            stored.status
+        );
+    }
+
+    #[tokio::test]
+    async fn output_event_is_still_processed_when_control_plane_lease_is_fenced() {
+        // Output은 권위 있는 "제어" 결정이 아니라 순수 관측 데이터 전달이라,
+        // fenced 상태에서도 계속 흘려보내야 한다 — breaker/task 최종 상태만
+        // 막는 것이지 모든 쓰기를 막는 게 아니다.
+        let (state, dispatcher) = setup_fenced();
+
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::Output {
+                task_id,
+                seq: 1,
+                chunk: "hello from worker".into(),
+            })
+            .await;
+
+        let output = state.store.get_output(task_id, 0).await.unwrap();
+        assert!(
+            output
+                .chunks
+                .iter()
+                .any(|c| c.chunk.contains("hello from worker")),
+            "output must still be buffered while fenced: {output:?}"
         );
     }
 }

@@ -108,6 +108,13 @@ impl LeaseManagerHandle {
         *self.status.lock().unwrap()
     }
 
+    /// 읽기 전용 관측 handle을 복제한다. `FleetState`처럼 lease 획득·갱신
+    /// 책임 없이 "지금 신규 control-plane 동작을 해도 되는가"만 확인하고
+    /// 싶은 소비자에게 넘긴다(로드맵 #63 2단계 — dispatch/cancel 경로).
+    pub fn observer(&self) -> LeaseObserver {
+        LeaseObserver(self.status.clone())
+    }
+
     /// 백그라운드 루프를 취소하고 종료 대기. lease는 명시적으로 release하지
     /// 않는다 — abort는 비정상 종료를 흉내내는 데도 쓰이므로, 여기서
     /// release까지 시도하면 "프로세스가 죽었을 때"와 "정상 종료"를 같은
@@ -115,6 +122,36 @@ impl LeaseManagerHandle {
     pub async fn abort(self) {
         self.inner.abort();
         let _ = self.inner.await;
+    }
+}
+
+/// [`LeaseManager`]/[`LeaseManagerHandle`]의 상태만 읽는 가벼운 handle.
+///
+/// dispatch/cancel처럼 "지금 신규 control-plane 동작을 해도 되는가"만 알면
+/// 되는 소비자가 lease 획득·갱신 책임(store 접근, cluster_id/instance_id)
+/// 전체를 짊어지지 않도록 분리했다. `Clone`이라 `FleetState`에 값으로
+/// 담아 자유롭게 공유할 수 있다.
+#[derive(Clone)]
+pub struct LeaseObserver(Arc<Mutex<LeaseStatus>>);
+
+impl LeaseObserver {
+    pub fn status(&self) -> LeaseStatus {
+        *self.0.lock().unwrap()
+    }
+
+    /// 지금 신규 control-plane 동작(dispatch/cancel/breaker 변경)을
+    /// 수행해도 되는지 (로드맵 #63 불변식 2).
+    pub fn allows_control(&self) -> bool {
+        self.status().is_active()
+    }
+
+    /// 임의 상태의 observer를 직접 만든다. 정상 production 경로는 항상
+    /// [`LeaseManagerHandle::observer`]를 거친다 — 이 생성자는 실제
+    /// `LeaseManager` 없이 "지금 lease가 Active/Fenced/Stopped라면
+    /// dispatch/cancel/reconcile이 어떻게 반응하는가"를 검증해야 하는
+    /// 상위 크레이트(fleet-scheduler 자신을 포함) 테스트를 위한 것이다.
+    pub fn with_status(status: LeaseStatus) -> Self {
+        Self(Arc::new(Mutex::new(status)))
     }
 }
 
