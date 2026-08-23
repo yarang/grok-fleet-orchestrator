@@ -81,6 +81,17 @@ pub struct InventoryDefaults {
     /// orchestrator 에 광고할 포트. 보통 모든 워커가 동일 값을 공유.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtls_advertised_port: Option<u16>,
+    /// fleet-worker 바이너리 로컬 경로 — 아키텍처 매칭이 없을 때의 폴백
+    /// (`StepContext.fleet_worker_bin`과 동일 의미). 개별 워커가
+    /// `InventoryWorker.fleet_worker_bin`으로 오버라이드 가능.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_worker_bin: Option<String>,
+    /// 아키텍처(`uname -m` 값, 예: `x86_64`/`aarch64`)별 fleet-worker 바이너리
+    /// 로컬 경로 (로드맵 `#81`이 만든 매커니즘, `#83`이 이 배선을 채운다).
+    /// 이기종 fleet 전체가 공유하는 맵이므로 워커별 오버라이드는 없다 — 특정
+    /// 워커만 다른 바이너리를 강제하려면 `InventoryWorker.fleet_worker_bin`을 쓴다.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub fleet_worker_bin_by_arch: HashMap<String, String>,
 }
 
 fn default_user() -> String {
@@ -104,6 +115,8 @@ impl Default for InventoryDefaults {
             mtls_listen_addr: None,
             mtls_client_ca: None,
             mtls_advertised_port: None,
+            fleet_worker_bin: None,
+            fleet_worker_bin_by_arch: HashMap::new(),
         }
     }
 }
@@ -131,9 +144,20 @@ pub struct InventoryWorker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
     /// 이 워커 전용 grok 서버 키 시크릿. worker.toml `[grok] secret`에 기록.
-    /// 미설정 시 프로비저닝 단계에서 실패함 — caller가 반드시 채워야 함.
+    /// 미설정 시 원격 `fleet-worker join`이 무작위로 생성한다(로드맵 `#82`) —
+    /// 이 값을 지정하는 것은 재현 가능한 값을 강제하고 싶을 때만 필요한
+    /// 선택 사항이다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grok_secret: Option<String>,
+    /// fleet-worker 바이너리 로컬 경로 — `InventoryDefaults.fleet_worker_bin`
+    /// 오버라이드(개별값 우선, 그 다음 defaults — 다른 오버라이드 필드와 동일
+    /// 우선순위 규칙). `InstallFleetWorker::resolve_local_bin`에서는 여전히
+    /// `fleet_worker_bin_by_arch`(아키텍처 매칭)보다 낮은 우선순위인 단일
+    /// 폴백 자리에 들어간다 — 아키텍처와 무관하게 강제로 바꾸려면 아직
+    /// 인벤토리 필드가 아니라 `InstallFleetWorker.local_bin`(현재는 코드에서만
+    /// 설정 가능)을 써야 한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_worker_bin: Option<String>,
     // ── mTLS (로드맵 #37) ────────────────────────────────────────────────
     /// `defaults.mtls_enabled` 오버라이드. 특정 워커만 mTLS를 끄거나 켤 때 사용.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,6 +206,15 @@ impl InventoryWorker {
         self.ssh_port.unwrap_or(defaults.ssh_port)
     }
 
+    /// fleet-worker 바이너리 단일 폴백 경로 — 개별값 우선, 그 다음 defaults
+    /// (로드맵 `#83`). 아키텍처 매칭 맵(`InventoryDefaults.fleet_worker_bin_by_arch`)은
+    /// 워커별 오버라이드가 없다 — 이기종 fleet 전체가 공유하는 맵이기 때문이다.
+    pub fn effective_fleet_worker_bin(&self, defaults: &InventoryDefaults) -> Option<String> {
+        self.fleet_worker_bin
+            .clone()
+            .or_else(|| defaults.fleet_worker_bin.clone())
+    }
+
     /// mTLS 활성화 여부 — 개별값 우선, 그 다음 defaults.
     pub fn effective_mtls_enabled(&self, defaults: &InventoryDefaults) -> bool {
         self.mtls_enabled.unwrap_or(defaults.mtls_enabled)
@@ -225,9 +258,6 @@ pub struct ProvisionOptions {
     /// 동시 프로비저닝 수 (기본 1).
     #[serde(default = "default_parallel")]
     pub parallel: usize,
-    /// 실패 시 재시도 여부.
-    #[serde(default = "default_true")]
-    pub retry_failed: bool,
     /// 특정 태그만 실행.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -248,16 +278,11 @@ fn default_parallel() -> usize {
     1
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for ProvisionOptions {
     fn default() -> Self {
         Self {
             orchestrator_url: None,
             parallel: default_parallel(),
-            retry_failed: true,
             tags: vec![],
             only: vec![],
             dry_run: false,
@@ -566,5 +591,89 @@ workers:
         let inv = Inventory::parse(yaml).unwrap();
         assert!(!inv.workers[0].effective_mtls_enabled(&inv.defaults));
         assert!(inv.workers[1].effective_mtls_enabled(&inv.defaults));
+    }
+
+    // ── fleet_worker_bin / fleet_worker_bin_by_arch (로드맵 #83) ────────
+
+    #[test]
+    fn fleet_worker_bin_by_arch_defaults_to_empty_map() {
+        let d = InventoryDefaults::default();
+        assert!(d.fleet_worker_bin.is_none());
+        assert!(d.fleet_worker_bin_by_arch.is_empty());
+    }
+
+    #[test]
+    fn parses_fleet_worker_bin_by_arch_shared_map() {
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+  fleet_worker_bin: /opt/fleet-worker-generic
+  fleet_worker_bin_by_arch:
+    x86_64: /opt/fleet-worker-x86_64
+    aarch64: /opt/fleet-worker-aarch64
+workers:
+  - host: 10.0.0.1
+    name: w1
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert_eq!(
+            inv.defaults.fleet_worker_bin.as_deref(),
+            Some("/opt/fleet-worker-generic")
+        );
+        assert_eq!(
+            inv.defaults.fleet_worker_bin_by_arch.get("aarch64"),
+            Some(&"/opt/fleet-worker-aarch64".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_fleet_worker_bin_prefers_worker_override_over_defaults() {
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+  fleet_worker_bin: /opt/generic
+workers:
+  - host: 10.0.0.1
+    name: default-bin
+  - host: 10.0.0.2
+    name: overridden-bin
+    fleet_worker_bin: /opt/special
+"#;
+        let inv = Inventory::parse(yaml).unwrap();
+        assert_eq!(
+            inv.workers[0].effective_fleet_worker_bin(&inv.defaults).as_deref(),
+            Some("/opt/generic")
+        );
+        assert_eq!(
+            inv.workers[1].effective_fleet_worker_bin(&inv.defaults).as_deref(),
+            Some("/opt/special")
+        );
+    }
+
+    #[test]
+    fn effective_fleet_worker_bin_none_when_neither_set() {
+        let yaml = "defaults:\n  ssh_key: /x\nworkers:\n  - host: 10.0.0.1\n    name: w1\n";
+        let inv = Inventory::parse(yaml).unwrap();
+        assert!(inv.workers[0]
+            .effective_fleet_worker_bin(&inv.defaults)
+            .is_none());
+    }
+
+    // ── retry_failed 제거 (로드맵 #83 — 선언만 있고 참조 0건이던 필드) ──
+
+    #[test]
+    fn unknown_legacy_retry_failed_field_is_ignored_not_rejected() {
+        // 제거된 필드가 남아 있는 기존 인벤토리 YAML도 계속 파싱돼야 한다
+        // (deny_unknown_fields 미사용 — 하위 호환).
+        let yaml = r#"
+defaults:
+  ssh_key: /x
+workers:
+  - host: 10.0.0.1
+    name: w1
+options:
+  retry_failed: true
+"#;
+        assert!(Inventory::parse(yaml).is_ok());
     }
 }

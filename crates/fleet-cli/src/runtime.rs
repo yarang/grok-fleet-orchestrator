@@ -1698,6 +1698,21 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
         }
     }
 
+    // 로드맵 #83 — 실 프로비저닝(dry-run 아님)에서 api_token 누락은 이전에는
+    // CheckPrereqs/InstallDeps/InstallGrok/InstallCloudflared/InstallFleetWorker
+    // 까지 SSH로 실제 실행한 뒤에야 JoinWorker에서 처음 드러났다. dry-run은
+    // MockExecutor라 이 검사가 필요 없고(JoinWorker 자체도 dry_run이면 이
+    // 필드를 보지 않는다), 여기서 미리 막으면 host마다 반복될 실 작업 낭비를
+    // 피한다.
+    if !options.dry_run && options.api_token.as_deref().is_none_or(str::is_empty) {
+        return Err(anyhow!(
+            "orchestrator_api_token is required for non-dry-run inventory provisioning \
+             (JoinWorker needs token:issue, PushCredentials needs \
+             worker:llm_credential:read/:export) — set options.api_token in the inventory \
+             or pass --api-token/FLEET_API_TOKEN"
+        ));
+    }
+
     let workers: Vec<InventoryWorker> = filter_workers(&inv, &options);
     if workers.is_empty() {
         tracing::warn!("no workers matched filters");
@@ -1935,16 +1950,18 @@ fn build_inventory_step_context(
         labels: w.labels.clone(),
         orchestrator_url: options.orchestrator_url.clone().unwrap_or_default(),
         cf_token,
-        fleet_worker_bin: None,
+        fleet_worker_bin: w.effective_fleet_worker_bin(defaults),
+        fleet_worker_bin_by_arch: defaults.fleet_worker_bin_by_arch.clone(),
         grok_secret: w.grok_secret.clone(),
         orchestrator_api_token: options.api_token.clone(),
         dry_run: options.dry_run,
         // 로드맵 #37 — 인벤토리 모드 mTLS 설정 주입. cert/key는 워커별 필드에서만
         // 오고(defaults에는 없음), listen_addr/client_ca/advertised_port는
-        // defaults와 워커별 오버라이드를 함께 본다. 실제로 이 필드가 비어있는데
-        // mtls_enabled=true인 경우의 검증은 `templates.rs`의 렌더링 단계
-        // (`StepError::Template("mtls_enabled=true requires ...")`)가 그대로
-        // 담당한다 — 여기서 별도 검증을 중복하지 않는다.
+        // defaults와 워커별 오버라이드를 함께 본다. `#82`가 로컬 worker.toml
+        // 렌더링(`templates.rs::render_worker_config`)을 완전히 제거했으므로,
+        // 이 필드들을 실제로 소비하는 검증·배선은 현재 존재하지 않는다 —
+        // `fleet-worker join` CLI에 mTLS 플래그가 없다. 자산 배포와 SAN 일관성
+        // 확보는 로드맵 `#85`가 소유한다.
         mtls_enabled,
         mtls_listen_addr: if mtls_enabled {
             w.effective_mtls_listen_addr(defaults)

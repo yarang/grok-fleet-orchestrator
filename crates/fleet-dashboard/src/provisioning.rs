@@ -236,7 +236,10 @@ async fn run_provisioning(
         fleet_worker_bin: Some(fleet_worker_bin),
         // 대시보드에서 트리거하는 프로비저닝은 아직 아키텍처별 바이너리
         // 소스를 입력받지 않는다 — 단일 경로(`fleet_worker_bin`)로만 동작한다
-        // (로드맵 #81 — 메커니즘은 있으나 이 호출부의 배선은 #83 범위).
+        // (메커니즘 자체는 로드맵 `#81`이 만들었다). `#83`은 YAML 인벤토리
+        // 모드(`fleet provision --inventory`)만 배선했다 — `ProvisionRequest`는
+        // 인벤토리가 아닌 단건 JSON 요청이라 범위 밖이다. 이 호출부에 맵을
+        // 채우는 배선은 아직 별도 항목이 없다.
         fleet_worker_bin_by_arch: std::collections::HashMap::new(),
         grok_bind_addr: None,
         grok_secret: Some(grok_secret.clone()),

@@ -18,6 +18,10 @@
 #     재생성 계획 없음. arm2 이름을 다시 쓰려면 새 인스턴스를 만들어야 한다.
 #   * 2026-08-22 — `oci-ajou-arm1`이 운영 중임을 확인하고 되돌렸다. 커밋
 #     50ce018의 "terminated" 판단은 사실이 아니었다.
+#   * 2026-08-23 — `options.retry_failed`(참조 0건이던 죽은 필드)를 스키마에서
+#     제거했다(로드맵 #83). dry-run이 아닌 실 프로비저닝에는 `--api-token` 또는
+#     `FLEET_API_TOKEN`이 필요하다(로드맵 #82의 JoinWorker가 소비) — 이 파일은
+#     비밀을 커밋하지 않으므로 `options.api_token`을 두지 않는다.
 
 defaults:
   user: ubuntu
@@ -27,7 +31,6 @@ defaults:
 options:
   orchestrator_url: https://fleet.agentthread.dev
   parallel: 4
-  retry_failed: true
 
 workers:
   # ═══════════════════════════════════════════════════════════════════════
