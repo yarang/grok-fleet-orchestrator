@@ -24,6 +24,7 @@ pub mod breaker;
 pub mod cleanup;
 pub mod dispatcher;
 pub mod health;
+pub mod lease;
 pub mod reconcile;
 pub mod router;
 pub mod selector;

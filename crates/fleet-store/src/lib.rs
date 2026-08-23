@@ -66,6 +66,22 @@ pub struct AdminApiToken {
     pub rotation_generation: i64,
 }
 
+/// Control plane 권한 lease의 저장 형태 (로드맵 #63, 1단계).
+///
+/// Fleet는 유효한 dispatch lease를 가진 Orchestrator가 최대 하나여야 한다
+/// ([Control Plane 권한과 장애 전환](../../../docs/architecture/control-plane-authority-and-failover.md)).
+/// `epoch`는 획득마다 단조 증가하며, 이전 epoch에서 시작된 in-flight 요청이
+/// 새 epoch 획득 이후 상태를 바꾸는 걸 막는 근거가 된다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlLease {
+    pub cluster_id: String,
+    pub active_instance_id: String,
+    pub epoch: i64,
+    pub acquired_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_renewed_at: DateTime<Utc>,
+}
+
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
 ///
 /// 구현체:
@@ -732,6 +748,63 @@ pub trait Store: Send + Sync {
     /// SSH 키 삭제.
     async fn delete_ssh_key(&self, _name: &str) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("delete_ssh_key"))
+    }
+
+    // ── Control plane lease (로드맵 #63, 1단계) ──────────────────────
+    //
+    // 기본 구현은 `Unsupported` — lease 없이도 동작하던 기존 minimal Store
+    // 테스트 double(통합 테스트가 직접 구현하는 fixture)을 깨지 않기 위함.
+    // PgStore/MemStore만 실제로 CAS 의미론을 구현한다.
+
+    /// lease를 획득한다(최초 획득 포함). 유효한(만료되지 않은) lease를 다른
+    /// instance가 쥐고 있으면 `StoreError::Conflict`를 반환한다 — 상태
+    /// 다이어그램의 `Refused` 전이. 기존 lease가 이미 만료됐으면 그대로
+    /// 가로채(`epoch`를 올려) 새로 획득한다 — Cold Standby가 이전 Primary의
+    /// TTL 만료를 기다렸다가 자동으로 승격하는 경로다.
+    async fn acquire_control_lease(
+        &self,
+        _cluster_id: &str,
+        _instance_id: &str,
+        _ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        Err(StoreError::Unsupported("acquire_control_lease"))
+    }
+
+    /// 현재 보유 중인 lease를 갱신한다. `(instance_id, epoch)`가 저장된
+    /// 값과 정확히 일치하고 아직 만료되지 않은 경우에만 성공한다 — 실패는
+    /// 이 instance가 더 이상 유효한 제어권이 없다는 뜻이므로(다른
+    /// instance가 가로챘거나 이미 만료됨) 신규 제어 동작을 즉시 멈춰야
+    /// 한다(상태 다이어그램의 `Active → Fenced`).
+    async fn renew_control_lease(
+        &self,
+        _cluster_id: &str,
+        _instance_id: &str,
+        _epoch: i64,
+        _ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        Err(StoreError::Unsupported("renew_control_lease"))
+    }
+
+    /// lease를 명시적으로 반납한다(정상 종료). `expires_at`을 즉시 과거로
+    /// 당겨 standby가 TTL을 기다리지 않고 곧바로 획득할 수 있게 한다.
+    /// `(instance_id, epoch)`가 일치하지 않으면(이미 다른 instance가
+    /// 가로챈 경우 등) `false`를 반환하고 아무것도 바꾸지 않는다.
+    async fn release_control_lease(
+        &self,
+        _cluster_id: &str,
+        _instance_id: &str,
+        _epoch: i64,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("release_control_lease"))
+    }
+
+    /// 현재 lease 상태를 읽기 전용으로 조회한다(관측용). 한 번도 획득된
+    /// 적 없으면 `None`.
+    async fn get_control_lease(
+        &self,
+        _cluster_id: &str,
+    ) -> Result<Option<ControlLease>, StoreError> {
+        Err(StoreError::Unsupported("get_control_lease"))
     }
 }
 

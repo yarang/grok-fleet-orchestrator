@@ -34,7 +34,9 @@ use fleet_core::{
     UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
-use crate::{AdminApiToken, Store, StoreError, StoredCredential, WorkerOperationalCredential};
+use crate::{
+    AdminApiToken, ControlLease, Store, StoreError, StoredCredential, WorkerOperationalCredential,
+};
 
 /// 모든 메서드가 실제로 동작하는 인메모리 [`Store`] — 테스트 전용 단일 구현.
 #[derive(Default)]
@@ -66,6 +68,7 @@ pub struct MemStore {
     hosts: Mutex<Vec<Host>>,
     host_events: Mutex<Vec<HostEvent>>,
     ssh_keys: Mutex<HashMap<String, SshKey>>,
+    control_leases: Mutex<HashMap<String, ControlLease>>,
     /// 실패 주입 대상 메서드 이름 집합 — `check`/`record` 자체가 아니라
     /// 테스트 셋업 편의를 위한 것이므로 트레이트 밖 필드.
     failing: Mutex<HashSet<&'static str>>,
@@ -1262,6 +1265,89 @@ impl Store for MemStore {
 
     async fn delete_ssh_key(&self, name: &str) -> Result<bool, StoreError> {
         Ok(self.ssh_keys.lock().unwrap().remove(name).is_some())
+    }
+
+    // ── Control plane lease (로드맵 #63, 1단계) ──────────────────────
+    //
+    // PgStore의 `NOW()` 기반 CAS와 동일한 의미론을 단일 프로세스 안에서
+    // `Utc::now()` + `Mutex` lock으로 재현한다 — MemStore는 테스트 전용이라
+    // 여러 프로세스 사이의 클럭 스큐 문제가 없다.
+
+    async fn acquire_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        let now = Utc::now();
+        let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(30));
+        let mut leases = self.control_leases.lock().unwrap();
+        let next_epoch = match leases.get(cluster_id) {
+            Some(existing) if existing.expires_at > now => {
+                return Err(StoreError::Conflict(format!(
+                    "control plane lease for cluster '{cluster_id}' is held by another instance"
+                )));
+            }
+            Some(existing) => existing.epoch + 1,
+            None => 1,
+        };
+        let lease = ControlLease {
+            cluster_id: cluster_id.to_string(),
+            active_instance_id: instance_id.to_string(),
+            epoch: next_epoch,
+            acquired_at: now,
+            expires_at: now + ttl,
+            last_renewed_at: now,
+        };
+        leases.insert(cluster_id.to_string(), lease.clone());
+        Ok(lease)
+    }
+
+    async fn renew_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        epoch: i64,
+        ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        let now = Utc::now();
+        let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(30));
+        let mut leases = self.control_leases.lock().unwrap();
+        let lease = leases
+            .get_mut(cluster_id)
+            .filter(|l| {
+                l.active_instance_id == instance_id && l.epoch == epoch && l.expires_at > now
+            })
+            .ok_or(StoreError::NotFound)?;
+        lease.expires_at = now + ttl;
+        lease.last_renewed_at = now;
+        Ok(lease.clone())
+    }
+
+    async fn release_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        epoch: i64,
+    ) -> Result<bool, StoreError> {
+        let now = Utc::now();
+        let mut leases = self.control_leases.lock().unwrap();
+        match leases.get_mut(cluster_id) {
+            Some(l) if l.active_instance_id == instance_id && l.epoch == epoch => {
+                l.expires_at = now;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn get_control_lease(&self, cluster_id: &str) -> Result<Option<ControlLease>, StoreError> {
+        Ok(self
+            .control_leases
+            .lock()
+            .unwrap()
+            .get(cluster_id)
+            .cloned())
     }
 }
 

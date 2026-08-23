@@ -30,7 +30,7 @@ use fleet_core::{
 };
 
 use crate::error::StoreError;
-use crate::{AdminApiToken, Store, StoredCredential, WorkerOperationalCredential};
+use crate::{AdminApiToken, ControlLease, Store, StoredCredential, WorkerOperationalCredential};
 
 /// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
 ///
@@ -2048,6 +2048,118 @@ impl Store for PgStore {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    // ── Control plane lease (로드맵 #63, 1단계) ──────────────────────
+
+    async fn acquire_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        // `ON CONFLICT ... DO UPDATE ... WHERE`가 이 메서드의 CAS 전체를
+        // 단일 원자적 statement로 표현한다. WHERE 조건(만료됨)이 거짓이면
+        // Postgres는 그 행을 갱신하지도, RETURNING에 포함하지도 않는다 —
+        // `fetch_optional`이 `None`을 돌려주는 것과 "다른 instance가 아직
+        // 유효한 lease를 쥐고 있다(Refused)"가 정확히 대응한다. `NOW()`(DB
+        // 서버 시각)만 시간 비교에 쓴다 — 애플리케이션 서버 시각을 신뢰하면
+        // 클럭 스큐만으로 두 instance가 동시에 "내가 유효하다"고 믿을 수
+        // 있다.
+        let row = sqlx::query(
+            r#"
+            INSERT INTO control_plane_lease
+                (cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at)
+            VALUES ($1, $2, 1, NOW(), NOW() + $3, NOW())
+            ON CONFLICT (cluster_id) DO UPDATE
+               SET active_instance_id = EXCLUDED.active_instance_id,
+                   epoch = control_plane_lease.epoch + 1,
+                   acquired_at = NOW(),
+                   expires_at = NOW() + $3,
+                   last_renewed_at = NOW()
+             WHERE control_plane_lease.expires_at < NOW()
+            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at
+            "#,
+        )
+        .bind(cluster_id)
+        .bind(instance_id)
+        .bind(ttl)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            StoreError::Conflict(format!(
+                "control plane lease for cluster '{cluster_id}' is held by another instance"
+            ))
+        })?;
+        row_to_control_lease(row)
+    }
+
+    async fn renew_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        epoch: i64,
+        ttl: std::time::Duration,
+    ) -> Result<ControlLease, StoreError> {
+        // `(instance_id, epoch)` 일치 + 아직 만료되지 않음을 모두 요구한다.
+        // `expires_at > NOW()`를 빼면, 이미 만료돼 다른 instance가 막 가로챈
+        // lease를 이 instance가 "갱신"이라는 이름으로 되살려(epoch은 그대로
+        // 두고 expires_at만 미래로) 두 instance가 동시에 유효하다고 믿는
+        // 경합을 만들 수 있다.
+        let row = sqlx::query(
+            r#"
+            UPDATE control_plane_lease
+               SET expires_at = NOW() + $4,
+                   last_renewed_at = NOW()
+             WHERE cluster_id = $1
+               AND active_instance_id = $2
+               AND epoch = $3
+               AND expires_at > NOW()
+            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at
+            "#,
+        )
+        .bind(cluster_id)
+        .bind(instance_id)
+        .bind(epoch)
+        .bind(ttl)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+        row_to_control_lease(row)
+    }
+
+    async fn release_control_lease(
+        &self,
+        cluster_id: &str,
+        instance_id: &str,
+        epoch: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE control_plane_lease
+               SET expires_at = NOW()
+             WHERE cluster_id = $1
+               AND active_instance_id = $2
+               AND epoch = $3
+            "#,
+        )
+        .bind(cluster_id)
+        .bind(instance_id)
+        .bind(epoch)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_control_lease(&self, cluster_id: &str) -> Result<Option<ControlLease>, StoreError> {
+        let row = sqlx::query(
+            "SELECT cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at \
+               FROM control_plane_lease WHERE cluster_id = $1",
+        )
+        .bind(cluster_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_control_lease).transpose()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2182,6 +2294,17 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
         notes,
         last_used_by,
         last_used_at,
+    })
+}
+
+fn row_to_control_lease(row: sqlx::postgres::PgRow) -> Result<ControlLease, StoreError> {
+    Ok(ControlLease {
+        cluster_id: row.try_get("cluster_id")?,
+        active_instance_id: row.try_get("active_instance_id")?,
+        epoch: row.try_get("epoch")?,
+        acquired_at: row.try_get("acquired_at")?,
+        expires_at: row.try_get("expires_at")?,
+        last_renewed_at: row.try_get("last_renewed_at")?,
     })
 }
 
