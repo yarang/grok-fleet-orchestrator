@@ -37,6 +37,12 @@ pub trait RemoteExecutor: Send + Sync {
     ) -> Result<i32, SshError>;
 
     /// 로컬 파일을 원격으로 업로드. `mode`는 8진수 (예: `0o755`).
+    ///
+    /// `SshClient` 구현은 `exec_with_stdin`으로 원문 바이트를 채널 데이터
+    /// 메시지로 청크 전송한다(로드맵 `#84`) — 과거에는 base64로 인코딩해
+    /// 단일 셸 명령행에 보간했는데, 릴리스 바이너리 같은 대용량 파일은
+    /// `ARG_MAX`를 넘길 수 있었고 `umask` 처리 순서 때문에 짧게라도
+    /// world-readable 창이 생겼다.
     async fn upload_file(
         &self,
         local_path: &str,
@@ -44,16 +50,22 @@ pub trait RemoteExecutor: Send + Sync {
         mode: u32,
     ) -> Result<(), SshError>;
 
-    /// 원격 경로에 content를 직접 작성.
+    /// 원격 경로에 content를 직접 작성. 항상 `0600`으로 생성된다(`umask 077`) —
+    /// 이 메서드로 만들어진 파일은 보통 비밀이 담긴 `/tmp` 스테이징 파일이고,
+    /// 호출자가 이어서 `sudo mv`/`sudo chmod`로 최종 위치·권한을 정한다.
+    /// `upload_file`과 같은 이유로 base64 명령행 보간 대신 `exec_with_stdin`을
+    /// 쓴다(로드맵 `#84`).
     async fn write_file(&self, path: &str, content: &str) -> Result<(), SshError>;
 
     /// 명령을 실행하되, exec 직후 `stdin_data`를 채널로 써서 EOF까지 보낸
     /// 뒤 stdout/stderr와 exit code를 반환한다 (로드맵 `#82`).
     ///
-    /// bootstrap token처럼 명령행 인자·환경변수·디스크 파일 어디에도 남기고
-    /// 싶지 않은 값을 원격 프로세스의 stdin으로 직접 전달하는 용도다 —
-    /// `write_file`은 base64를 명령행에 보간하므로 이 목적에는 쓰지 않는다
-    /// (원문이 `ps`/쉘 히스토리에 노출된다).
+    /// `write_file`/`upload_file`이 "이 바이트를 이 경로에 써라"라는 고정된
+    /// 의미를 가진 반면, 이 메서드는 호출자가 임의의 원격 명령(예:
+    /// `fleet-worker join --token-file -`)을 지정하고 그 프로세스의 stdin으로
+    /// 데이터를 흘려보내는 범용 primitive다 — bootstrap token처럼 명령행
+    /// 인자·환경변수·디스크 파일 어디에도 남기고 싶지 않은 값을 전달하는
+    /// 용도로 쓴다.
     async fn exec_with_stdin(
         &self,
         command: &str,
@@ -67,8 +79,8 @@ pub trait RemoteExecutor: Send + Sync {
     /// 비0 종료가 정상적인 "아니오" 응답인 조회에 쓰기 위해서다. 반면 `sudo mv`,
     /// `daemon-reload`, `systemctl enable/restart` 같은 **변경 명령**은 실패를
     /// 조용히 삼키면 안 된다 — 스텝이 "Applied"로 보고된 뒤에야 실패가 드러나는
-    /// 사고(base64 업로드 ARG_MAX 초과, 권한 부족 등)를 만든다. 이런 명령에는
-    /// `exec()`+`let _ =` 대신 이 메서드를 쓴다.
+    /// 사고(권한 부족, 디스크 공간 부족 등)를 만든다. 이런 명령에는 `exec()`+
+    /// `let _ =` 대신 이 메서드를 쓴다.
     ///
     /// 기본 구현은 `exec_streaming`을 그대로 위임하므로 `SshClient`/`MockExecutor`
     /// 모두 별도 구현 없이 사용할 수 있다. `MockExecutor`는 `expect_exit`로
@@ -97,6 +109,18 @@ pub trait RemoteExecutor: Send + Sync {
         }
         Ok(output)
     }
+}
+
+/// POSIX 셸 안전 작은따옴표 quoting: `'`를 `'\''`로 치환하고 전체를 감싼다.
+/// `steps/join_worker.rs`의 동일 로직과 같은 목적(의존성 추가 방지로 인라인
+/// 중복 — `push_credentials.rs`의 `urlencode`와 같은 관례) — 원격 셸 명령에
+/// 보간되는 경로 문자열(`remote_path`/`path`)을 인젝션으로부터 보호한다.
+/// `ssh` feature 하의 `russh_impl::SshClient::upload_file`/`write_file`에서만
+/// 쓰인다 — `--no-default-features`에서는 dead code이므로 그 빌드에서도
+/// `dead_code` 경고가 없도록 게이팅한다.
+#[cfg(feature = "ssh")]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r#"'\''"#))
 }
 
 /// SSH 접속 정보. 재연결이나 진단 로그에 활용.
@@ -493,6 +517,22 @@ mod russh_impl {
             }
             Ok(guard)
         }
+
+        /// `command`를 `exec_with_stdin`으로 실행하고 exit code가 0이 아니면
+        /// `SshError::Protocol`로 승격한다 (로드맵 `#84`). `upload_file`/`write_file`이
+        /// 공유하는 원격 파일 작성 primitive — 둘 다 base64 명령행 보간
+        /// (`ARG_MAX` 초과 위험, `echo '...' | base64 -d > path`)을 이걸로
+        /// 대체한다.
+        async fn write_stdin_checked(&self, command: &str, data: &[u8]) -> Result<(), SshError> {
+            let (output, code) = self.exec_with_stdin(command, data).await?;
+            if code != 0 {
+                return Err(SshError::Protocol(format!(
+                    "remote write failed (exit {code}): {}",
+                    output.trim()
+                )));
+            }
+            Ok(())
+        }
     }
 
     /// 서버가 제시하는 SSH 호스트 공개키만 수집. 인증은 하지 않는다
@@ -654,22 +694,34 @@ mod russh_impl {
             remote_path: &str,
             mode: u32,
         ) -> Result<(), SshError> {
+            // 로드맵 #84 — 이전에는 전체 파일을 base64로 인코딩해 단일 셸
+            // 명령행에 보간했다. 릴리스 바이너리(수십 MB)는 base64로 부풀린
+            // 뒤(~1.33배) 통째로 명령행에 들어가 `ARG_MAX`를 넘길 수 있었고,
+            // `> {remote_path}` 셸 리다이렉트가 SSH 세션 사용자의 umask(보통
+            // 0644)로 파일을 먼저 만든 뒤에야 `chmod`가 뒤따라 붙어, 그 사이
+            // 짧게라도 world-readable 상태로 남았다. 지금은 원문 바이트를
+            // `exec_with_stdin`(SSH 채널 데이터 메시지로 청크 전송, russh가
+            // window/max_packet_size를 알아서 지킨다)으로 흘려보내고,
+            // `umask 077`로 파일을 생성 시점부터 0600으로 만든 뒤에만 목표
+            // `mode`로 넓힌다 — 좁혔다 넓히는 순서라 world-readable 창이 없다.
             let data = tokio::fs::read(local_path).await?;
-            use base64::{engine::general_purpose::STANDARD, Engine as _};
-            let b64 = STANDARD.encode(&data);
-            self.exec(&format!(
-                "echo '{b64}' | base64 -d > {remote_path} && chmod {mode:o} {remote_path}",
-            ))
-            .await?;
-            Ok(())
+            let cmd = format!(
+                "umask 077 && cat > {remote} && chmod {mode:o} {remote}",
+                remote = shell_quote(remote_path),
+            );
+            self.write_stdin_checked(&cmd, &data).await
         }
 
         async fn write_file(&self, path: &str, content: &str) -> Result<(), SshError> {
-            use base64::{engine::general_purpose::STANDARD, Engine as _};
-            let b64 = STANDARD.encode(content.as_bytes());
-            self.exec(&format!("echo '{b64}' | base64 -d > {path}"))
-                .await?;
-            Ok(())
+            // 로드맵 #84 — upload_file과 동일한 이유로 base64 명령행 보간을
+            // 제거했다. 이 메서드는 항상 `/tmp` 스테이징 파일에 쓰고 호출자가
+            // 별도 `exec_checked("sudo mv ... && sudo chmod ...")`로 최종
+            // 위치·권한을 정한다 — 그 사이 스테이징 파일이 기본 umask로
+            // world-readable 상태가 되는 창을 `umask 077`로 없앤다(비밀이
+            // 담긴 worker.toml/grok config.toml/cloudflared config가 이
+            // 경로를 지난다).
+            let cmd = format!("umask 077 && cat > {}", shell_quote(path));
+            self.write_stdin_checked(&cmd, content.as_bytes()).await
         }
 
         async fn exec_with_stdin(
@@ -966,6 +1018,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(code, 42);
+    }
+
+    // ── shell_quote (로드맵 #84 — upload_file/write_file의 원격 경로 quoting) ──
+    // shell_quote 자체가 `ssh` feature 전용이라(--no-default-features에서는
+    // dead code) 테스트도 같이 게이팅한다.
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn shell_quote_wraps_plain_paths() {
+        assert_eq!(shell_quote("/usr/local/bin/fleet-worker"), "'/usr/local/bin/fleet-worker'");
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        assert_eq!(shell_quote("it's"), r#"'it'\''s'"#);
+    }
+
+    #[cfg(feature = "ssh")]
+    #[test]
+    fn shell_quote_neutralizes_shell_metacharacters() {
+        // 따옴표로 감싸면 안의 `;`/`$()`/`&&` 등은 리터럴 문자열로만 취급된다.
+        let dangerous = "/tmp/x; rm -rf / #";
+        let quoted = shell_quote(dangerous);
+        assert_eq!(quoted, "'/tmp/x; rm -rf / #'");
     }
 
     // ── HostKeyPolicy / HostKeyConfig 단위 테스트 ──────────────────────

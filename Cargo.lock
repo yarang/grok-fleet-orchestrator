@@ -1850,7 +1850,6 @@ name = "fleet-provisioner"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "chrono",
  "fleet-core",
  "reqwest 0.12.28",
