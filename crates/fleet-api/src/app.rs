@@ -23,6 +23,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
+use fleet_core::audit::{action, AuditEvent};
 use fleet_core::PermissionKind;
 use fleet_credentials::MasterKey;
 use fleet_store::Store;
@@ -467,7 +468,16 @@ async fn auth_middleware(
             capabilities: PermissionKind::all().to_vec(),
             worker_id: None,
         });
-        authorize_http_endpoint(&req)?;
+        if let Err(status) = authorize_http_endpoint(&req) {
+            record_capability_denial(
+                &state,
+                req.method().clone(),
+                normalized_v1_path(req.uri().path()).to_string(),
+                req.extensions().get::<AuthorizationContext>().cloned(),
+            )
+            .await;
+            return Err(status);
+        }
         return Ok(next.run(req).await);
     }
 
@@ -518,7 +528,16 @@ async fn auth_middleware(
                     ],
                     worker_id: Some(credential.worker_id),
                 });
-                authorize_http_endpoint(&req)?;
+                if let Err(status) = authorize_http_endpoint(&req) {
+                    record_capability_denial(
+                        &state,
+                        req.method().clone(),
+                        normalized_v1_path(req.uri().path()).to_string(),
+                        req.extensions().get::<AuthorizationContext>().cloned(),
+                    )
+                    .await;
+                    return Err(status);
+                }
                 return Ok(next.run(req).await);
             }
         }
@@ -560,7 +579,16 @@ async fn auth_middleware(
                         capabilities: admin_token.capabilities.clone(),
                         worker_id: None,
                     });
-                    authorize_http_endpoint(&req)?;
+                    if let Err(status) = authorize_http_endpoint(&req) {
+                        record_capability_denial(
+                            &state,
+                            req.method().clone(),
+                            normalized_v1_path(req.uri().path()).to_string(),
+                            req.extensions().get::<AuthorizationContext>().cloned(),
+                        )
+                        .await;
+                        return Err(status);
+                    }
                     return Ok(next.run(req).await);
                 }
             }
@@ -597,7 +625,16 @@ async fn auth_middleware(
                 capabilities,
                 worker_id: None,
             });
-            authorize_http_endpoint(&req)?;
+            if let Err(status) = authorize_http_endpoint(&req) {
+                record_capability_denial(
+                    &state,
+                    req.method().clone(),
+                    normalized_v1_path(req.uri().path()).to_string(),
+                    req.extensions().get::<AuthorizationContext>().cloned(),
+                )
+                .await;
+                return Err(status);
+            }
             return Ok(next.run(req).await);
         }
         tracing::error!(path = %req.uri().path(), "protected API has no authentication provider");
@@ -631,7 +668,16 @@ async fn auth_middleware(
             capabilities: credential.capabilities.clone(),
             worker_id: None,
         });
-        authorize_http_endpoint(&req)?;
+        if let Err(status) = authorize_http_endpoint(&req) {
+            record_capability_denial(
+                &state,
+                req.method().clone(),
+                normalized_v1_path(req.uri().path()).to_string(),
+                req.extensions().get::<AuthorizationContext>().cloned(),
+            )
+            .await;
+            return Err(status);
+        }
         Ok(next.run(req).await)
     } else {
         tracing::warn!(path = %req.uri().path(), "invalid bearer token");
@@ -860,6 +906,46 @@ fn authorize_http_endpoint(req: &Request) -> Result<(), StatusCode> {
             "HTTP capability denied"
         );
         Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// `authorize_http_endpoint`가 거절한 요청의 감사 기록 (로드맵 #76).
+///
+/// 이 시점의 요청은 이미 인증(401 경계)을 통과한 principal이다 — 익명
+/// 스캐닝은 이 함수에 도달하기 전에 걸러진다. 어떤 capability가 없어서
+/// 거절됐는지, 아니면 route 자체가 행렬에 없어서 거절됐는지(`#73`)를
+/// `detail`에 남긴다.
+///
+/// 감사 기록 자체가 실패해도 이미 결정된 403 응답을 바꾸지 않는다 — 거절은
+/// 권한을 내주는 쪽이 아니라 주지 않는 쪽이라, `worker_llm_credential_export`
+/// 처럼 기록 실패를 이유로 응답을 바꿔야 할 위험이 없다(log-only로 충분).
+async fn record_capability_denial(
+    state: &AppState,
+    method: Method,
+    path: String,
+    ctx: Option<AuthorizationContext>,
+) {
+    let actor_label = crate::handlers::audit_actor_label(ctx.as_ref());
+
+    let mut detail = serde_json::json!({
+        "path": path,
+        "method": method.as_str(),
+    });
+    match required_capability(&method, &path) {
+        Some(required) => {
+            detail["required_capability"] = serde_json::json!(required.as_str());
+        }
+        None => {
+            detail["reason"] = serde_json::json!("no_capability_matrix_entry");
+        }
+    }
+    if let Some(ctx) = &ctx {
+        detail["authentication_method"] = serde_json::json!(format!("{:?}", ctx.authentication_method));
+    }
+
+    let event = AuditEvent::failure(actor_label, action::HTTP_CAPABILITY_DENIED).detail(detail);
+    if let Err(e) = state.store.record_audit_event(&event).await {
+        tracing::error!(path = %path, error = %e, "failed to record audit event for capability denial");
     }
 }
 

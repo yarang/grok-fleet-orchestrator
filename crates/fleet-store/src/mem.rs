@@ -86,7 +86,9 @@ impl MemStore {
     /// 반환하도록 만든다. 회복성(에러 처리) 테스트 전용.
     ///
     /// 지원 대상: `"list_tasks"`, `"delete_expired_sessions"`,
-    /// `"delete_old_login_attempts"`.
+    /// `"delete_old_login_attempts"`, `"record_audit_event"`(로드맵 `#76` —
+    /// 감사 기록 실패 시 발급된 secret을 즉시 회수하는 fail-closed 경로를
+    /// 시험하기 위함).
     pub fn with_failing(self, methods: &[&'static str]) -> Self {
         self.failing.lock().unwrap().extend(methods.iter().copied());
         self
@@ -1073,6 +1075,9 @@ impl Store for MemStore {
     // ── Audit log ──────────────────────────────────────────────────────
 
     async fn record_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {
+        if self.is_failing("record_audit_event") {
+            return Err(StoreError::Unsupported("record_audit_event"));
+        }
         self.audit_events.lock().unwrap().push(event.clone());
         Ok(())
     }

@@ -185,21 +185,23 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 
 ### 현재 감사 범위
 
-위 규칙은 목표 계약이다. 실제로 `AuditEvent`를 남기는 경로는 다음 세 곳뿐이며, 나머지 mutation과
-모든 capability 거절은 `tracing` 출력으로만 남아 사후 조회가 불가능하다.
+위 규칙은 목표 계약이다. **`#76`(2026-08-23, 1단계)로 HTTP `/v1` 표면의 mutation과 capability 거절은
+대부분 감사된다.** Dashboard·MCP 표면과 상관관계 필드는 아직이다(`#95`).
 
 | 경로 | 현재 감사 | 비고 |
 |---|---|---|
-| `GET /v1/workers/{name}/credentials/{model}/export` | 기록함 | 감사 기록 실패 시 평문을 반환하지 않는다 — 다른 mutation이 따라야 할 fail-closed 패턴 |
+| `GET /v1/workers/{name}/credentials/{model}/export` | 기록함 | 감사 기록 실패 시 평문을 반환하지 않는다(fail-closed) — `#76`이 발급(mint) 계열에도 같은 원칙을 적용했다 |
 | `PUT /v1/workers/{name}/credentials/{model}` | 기록함 | |
 | `DELETE /v1/workers/{name}/credentials/{model}` | 기록함 | |
-| bootstrap token 발급·회수 | **없음** | `token:issue`/`token:revoke` |
-| admin token 생성·회전·회수 | **없음** | `admin_token:manage` |
-| Worker 삭제·등록, Host 등록 | **없음** | |
-| capability/scope 거절 | **없음** | `tracing::warn!`만 |
+| bootstrap token 발급·회수 | **기록함 (`#76`)** | `token.bootstrap.issue`/`.revoke`. 발급은 fail-closed(감사 실패 시 방금 만든 토큰 즉시 회수), 회수는 log-only |
+| admin token 생성·회전·회수 | **기록함 (`#76`)** | `admin_token.create`/`.rotate`/`.revoke`. 생성·회전은 fail-closed, 회수는 log-only |
+| Worker 등록·등록해제, Host 등록 | **기록함 (`#76`)** | `worker.register`/`.deregister`/`host.register`, 전부 log-only. heartbeat(고빈도)는 제외 |
+| HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
+| Dashboard·MCP mutation/거절 | **없음** | Dashboard는 중앙 capability 행렬 자체가 없다(`#92`가 다룸). MCP tool별 감사도 착수 전 |
 
 또한 현재 `AuditEvent`에는 `request_id`, `project_id`, `attempt_id`, `policy_revision` 상관관계
-필드가 없어 구현 게이트 6을 만족할 수 없다. 스키마 확장이 선행되어야 한다.
+필드가 없어 구현 게이트 6을 완전히 만족하지 못한다(`#95`). `project_id`/`attempt_id`는 대응하는
+Project/Attempt 엔티티가 아직 없어(`#48`·`#62` 계열 선행) 상관시킬 대상 자체가 없다.
 
 ## 구현 게이트
 

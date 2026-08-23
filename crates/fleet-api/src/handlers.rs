@@ -159,6 +159,18 @@ pub async fn register_worker(
     };
     let _ = state.store.append_event(&event).await;
 
+    // 감사 (로드맵 #76). heartbeat와 달리 register/re-register는 identity
+    // 변경이라 감사 대상이다 — heartbeat(고빈도)는 여기 포함하지 않는다.
+    record_mutation_audit(
+        &state,
+        ctx.as_deref(),
+        action::WORKER_REGISTER,
+        "worker",
+        worker_id.to_string(),
+        serde_json::json!({ "name": worker.name, "is_new": is_new }),
+    )
+    .await;
+
     Ok(Json(RegisterResponse {
         worker_id: worker_id.to_string(),
         heartbeat_interval_secs: state.heartbeat_interval_secs,
@@ -316,6 +328,7 @@ pub async fn heartbeat(
 /// 호스트를 upsert하고 프로비저닝 결과를 host_events에 기록한다.
 pub async fn register_host(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Json(req): Json<HostRegisterRequest>,
 ) -> Result<Json<HostRegisterResponse>, ApiError> {
     let host_id = uuid::Uuid::new_v4();
@@ -366,6 +379,17 @@ pub async fn register_host(
     let _ = state.store.append_host_event(&event).await;
 
     debug!(hostname = %req.hostname, succeeded = req.succeeded, "host registered");
+
+    // 감사 (로드맵 #76).
+    record_mutation_audit(
+        &state,
+        ctx.as_deref(),
+        action::HOST_REGISTER,
+        "host",
+        host_id.to_string(),
+        serde_json::json!({ "hostname": req.hostname, "succeeded": req.succeeded }),
+    )
+    .await;
 
     Ok(Json(HostRegisterResponse {
         ok: true,
@@ -481,6 +505,19 @@ pub async fn deregister_worker(
     state.store.delete_worker(worker_id).await?;
 
     info!(%worker_id, name = %worker.name, reason = %reason, "worker deregistered");
+
+    // 감사 (로드맵 #76). 삭제는 이미 반영됐다 — 감사 실패로 응답을 뒤집지
+    // 않는다(log-only).
+    record_mutation_audit(
+        &state,
+        ctx.as_deref(),
+        action::WORKER_DEREGISTER,
+        "worker",
+        worker_id.to_string(),
+        serde_json::json!({ "name": worker.name, "reason": reason }),
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "worker_id": id_str,
         "status": "deregistered",
@@ -717,6 +754,7 @@ pub async fn join_worker(
 /// `POST /v1/bootstrap-tokens` — 어드민이 부트스트랩 토큰 발급.
 pub async fn create_bootstrap_token(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Json(req): Json<CreateBootstrapTokenRequest>,
 ) -> Result<Json<CreateBootstrapTokenResponse>, ApiError> {
     if !(8..=256).contains(&req.bytes) {
@@ -764,6 +802,25 @@ pub async fn create_bootstrap_token(
     };
     state.store.create_bootstrap_token(&bt).await?;
 
+    // 감사 (로드맵 #76). 방금 발급한 토큰은 그 자체가 "누군가 워커를 join시킬
+    // 수 있는 권한"이다 — 누가 발급했는지 남기지 못하면 export(#66)와 같은
+    // 이유로 발급 자체를 무효화한다: 감사 실패 시 방금 만든 토큰을 즉시
+    // 회수하고 원문을 반환하지 않는다.
+    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::TOKEN_BOOTSTRAP_ISSUE)
+        .target("bootstrap_token", bt.public_id())
+        .detail(serde_json::json!({
+            "prefix": req.prefix,
+            "max_uses": req.max_uses,
+            "expires_at": expires_at,
+        }));
+    if let Err(e) = state.store.record_audit_event(&audit_event).await {
+        tracing::error!(error = %e, "failed to record audit event for bootstrap token issuance — revoking token");
+        let _ = state.store.revoke_bootstrap_token(&bt.token_digest).await;
+        return Err(ApiError::Internal(
+            "audit recording failed; issued bootstrap token was revoked".into(),
+        ));
+    }
+
     info!(token_prefix = %req.prefix, max_uses = req.max_uses, "bootstrap token issued");
     Ok(Json(CreateBootstrapTokenResponse {
         token,
@@ -790,6 +847,7 @@ pub async fn list_bootstrap_tokens(
 /// `DELETE /v1/bootstrap-tokens/:token_id` — 공개 식별자로 토큰 회수.
 pub async fn revoke_bootstrap_token(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Path(token_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let token_digest = fleet_core::BootstrapToken::digest_from_public_id(&token_id)
@@ -799,6 +857,19 @@ pub async fn revoke_bootstrap_token(
         return Err(ApiError::NotFound("bootstrap token not found".into()));
     }
     info!("bootstrap token revoked");
+
+    // 감사 (로드맵 #76). 회수는 권한을 줄이는 방향이라 감사 실패로 응답을
+    // 뒤집지 않는다(log-only) — export/발급과 반대로 실패해도 위험이 없다.
+    record_mutation_audit(
+        &state,
+        ctx.as_deref(),
+        action::TOKEN_BOOTSTRAP_REVOKE,
+        "bootstrap_token",
+        token_id.clone(),
+        serde_json::Value::Null,
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "status": "revoked",
         "token_id": token_id,
@@ -815,6 +886,7 @@ pub async fn revoke_bootstrap_token(
 /// 토큰 원문은 이 응답에서만 반환된다 — 다시 조회할 수 없다.
 pub async fn create_admin_token(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Json(req): Json<CreateAdminTokenRequest>,
 ) -> Result<Json<CreateAdminTokenResponse>, ApiError> {
     let principal_id = req.principal_id.trim().to_string();
@@ -846,6 +918,21 @@ pub async fn create_admin_token(
     };
     state.store.create_admin_token(&record).await?;
 
+    // 감사 (로드맵 #76). admin API 토큰은 임의 capability를 부여할 수 있는
+    // 가장 강한 credential이다 — 누가 어떤 principal에게 어떤 capability를
+    // 발급했는지 남기지 못하면 즉시 회수한다(create_bootstrap_token과 동일한
+    // fail-closed 원칙).
+    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::ADMIN_TOKEN_CREATE)
+        .target("admin_token", principal_id.clone())
+        .detail(serde_json::json!({ "capabilities": req.capabilities }));
+    if let Err(e) = state.store.record_audit_event(&audit_event).await {
+        tracing::error!(%principal_id, error = %e, "failed to record audit event for admin token creation — revoking token");
+        let _ = state.store.revoke_admin_token(&principal_id).await;
+        return Err(ApiError::Internal(
+            "audit recording failed; issued admin token was revoked".into(),
+        ));
+    }
+
     info!(%principal_id, "admin API token created");
     Ok(Json(CreateAdminTokenResponse {
         principal_id,
@@ -862,6 +949,7 @@ pub async fn create_admin_token(
 /// 이 응답의 새 원문으로 인증해야 한다.
 pub async fn rotate_admin_token(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Path(principal_id): Path<String>,
 ) -> Result<Json<RotateAdminTokenResponse>, ApiError> {
     let raw = generate_random_bytes(32)
@@ -880,6 +968,22 @@ pub async fn rotate_admin_token(
             other => other.into(),
         })?;
 
+    // 감사 (로드맵 #76). rotate는 create와 같은 fail-closed 원칙을 따르되,
+    // 이전 토큰은 이미 되돌릴 수 없이 무효화됐다 — 감사 실패 시 보상으로
+    // "이전 토큰 복원"은 불가능하므로, 대신 방금 발급한 새 토큰마저
+    // 즉시 회수해 principal을 무자격 상태로 안전하게 실패시킨다(권한이
+    // 남는 쪽보다 없는 쪽으로 실패하는 게 안전하다).
+    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::ADMIN_TOKEN_ROTATE)
+        .target("admin_token", principal_id.clone())
+        .detail(serde_json::json!({ "rotation_generation": record.rotation_generation }));
+    if let Err(e) = state.store.record_audit_event(&audit_event).await {
+        tracing::error!(%principal_id, error = %e, "failed to record audit event for admin token rotation — revoking new token");
+        let _ = state.store.revoke_admin_token(&principal_id).await;
+        return Err(ApiError::Internal(
+            "audit recording failed; rotated admin token was revoked".into(),
+        ));
+    }
+
     info!(%principal_id, rotation_generation = record.rotation_generation, "admin API token rotated — previous token invalidated");
     Ok(Json(RotateAdminTokenResponse {
         principal_id: record.principal_id,
@@ -894,6 +998,7 @@ pub async fn rotate_admin_token(
 /// 회수 뒤에는 이전 토큰으로 어떤 요청도 인증되지 않는다.
 pub async fn revoke_admin_token(
     State(state): State<Arc<AppState>>,
+    ctx: Option<Extension<AuthorizationContext>>,
     Path(principal_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let revoked = state.store.revoke_admin_token(&principal_id).await?;
@@ -903,6 +1008,18 @@ pub async fn revoke_admin_token(
         )));
     }
     info!(%principal_id, "admin API token revoked");
+
+    // 감사 (로드맵 #76). 회수는 권한을 줄이는 방향이라 log-only.
+    record_mutation_audit(
+        &state,
+        ctx.as_deref(),
+        action::ADMIN_TOKEN_REVOKE,
+        "admin_token",
+        principal_id.clone(),
+        serde_json::Value::Null,
+    )
+    .await;
+
     Ok(Json(serde_json::json!({
         "principal_id": principal_id,
         "status": "revoked",
@@ -1452,7 +1569,7 @@ pub async fn delete_worker_credential(
 /// 넣지 못한 경우 등)에도 "누군지 모른다"는 사실 자체를 기록한다. 행위자를
 /// 특정하지 못했다는 이유로 기록을 생략하면, 가장 수상한 접근이 흔적 없이
 /// 사라진다.
-fn audit_actor_label(ctx: Option<&AuthorizationContext>) -> String {
+pub(crate) fn audit_actor_label(ctx: Option<&AuthorizationContext>) -> String {
     match ctx {
         Some(ctx) => ctx.principal_id.clone(),
         None => "unattributed".to_string(),
@@ -1481,6 +1598,31 @@ async fn record_credential_audit(
         .target("worker_llm_credential", format!("{worker_name}/{model_id}"))
         .detail(detail);
     state.store.record_audit_event(&event).await
+}
+
+/// 이미 반영된(되돌릴 필요 없는) mutation의 감사 기록 (로드맵 #76).
+///
+/// bootstrap/admin token 회수, worker 등록/등록해제, host 등록처럼 감사
+/// 기록이 실패해도 이미 결정된 응답을 바꾸지 않는 mutation에 쓴다 — 삭제나
+/// 등록해제처럼 이미 반영된 변경을 감사 실패를 이유로 500으로 뒤집으면
+/// 호출자에게 "반영되지 않았다"는 잘못된 신호를 준다(`delete_worker_credential`과
+/// 같은 원칙). 새로 발급되는 secret(bootstrap/admin token 발급·회전)은 이
+/// 헬퍼를 쓰지 않는다 — 그쪽은 감사 실패 시 방금 발급한 자격을 즉시
+/// 회수해야 하므로 각 handler가 직접 처리한다.
+async fn record_mutation_audit(
+    state: &AppState,
+    ctx: Option<&AuthorizationContext>,
+    action_name: &str,
+    target_type: &str,
+    target_id: impl Into<String>,
+    detail: serde_json::Value,
+) {
+    let event = AuditEvent::success(audit_actor_label(ctx), action_name)
+        .target(target_type, target_id)
+        .detail(detail);
+    if let Err(e) = state.store.record_audit_event(&event).await {
+        tracing::error!(action = action_name, error = %e, "failed to record audit event");
+    }
 }
 
 #[cfg(test)]

@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use fleet_api::{build_app, AppState};
 use fleet_core::{
-    BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId, TaskOutput, TaskStatus,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
+    TaskOutput, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use fleet_store::{Store, StoreError, WorkerOperationalCredential};
 use serde_json::json;
@@ -626,6 +626,12 @@ struct BsStore {
     tokens: Mutex<HashMap<String, BootstrapToken>>,
     operational_credentials: Mutex<HashMap<String, WorkerOperationalCredential>>,
     events: Mutex<Vec<EventEntry>>,
+    // 로드맵 #76 — create_bootstrap_token 등은 감사 기록 실패 시 방금 발급한
+    // 토큰을 즉시 회수한다(fail-closed). `Store` 트레이트의 기본 구현은
+    // `record_audit_event`를 `Unsupported`로 반환하므로, 여기서 실제로
+    // 기록하지 않으면 이 테스트 파일의 발급 관련 테스트가 전부 500으로
+    // 깨진다.
+    audit_events: Mutex<Vec<AuditEvent>>,
 }
 
 #[async_trait]
@@ -731,6 +737,13 @@ impl Store for BsStore {
     }
     async fn revoke_bootstrap_token(&self, token_digest: &str) -> Result<bool, StoreError> {
         Ok(self.tokens.lock().unwrap().remove(token_digest).is_some())
+    }
+    async fn record_audit_event(&self, event: &AuditEvent) -> Result<(), StoreError> {
+        self.audit_events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+    async fn list_audit_events(&self, _: &AuditFilter) -> Result<Vec<AuditEvent>, StoreError> {
+        Ok(self.audit_events.lock().unwrap().clone())
     }
     async fn upsert_worker_operational_credential(
         &self,

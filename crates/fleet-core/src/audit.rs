@@ -77,6 +77,26 @@ pub mod action {
     pub const WORKER_LLM_CREDENTIAL_PUT: &str = "worker.llm_credential.put";
     /// worker LLM credential 삭제 (로드맵 #66).
     pub const WORKER_LLM_CREDENTIAL_DELETE: &str = "worker.llm_credential.delete";
+    /// bootstrap token 발급 (로드맵 #76).
+    pub const TOKEN_BOOTSTRAP_ISSUE: &str = "token.bootstrap.issue";
+    /// bootstrap token 회수 (로드맵 #76).
+    pub const TOKEN_BOOTSTRAP_REVOKE: &str = "token.bootstrap.revoke";
+    /// admin API bearer token 발급 (로드맵 #76).
+    pub const ADMIN_TOKEN_CREATE: &str = "admin_token.create";
+    /// admin API bearer token 회전 (로드맵 #76).
+    pub const ADMIN_TOKEN_ROTATE: &str = "admin_token.rotate";
+    /// admin API bearer token 회수 (로드맵 #76).
+    pub const ADMIN_TOKEN_REVOKE: &str = "admin_token.revoke";
+    /// worker 등록/재등록 (로드맵 #76). 고빈도인 heartbeat는 감사 대상이
+    /// 아니다 — register만 identity 변경에 해당한다.
+    pub const WORKER_REGISTER: &str = "worker.register";
+    /// worker 등록 해제 (로드맵 #76).
+    pub const WORKER_DEREGISTER: &str = "worker.deregister";
+    /// host 등록 (로드맵 #76).
+    pub const HOST_REGISTER: &str = "host.register";
+    /// HTTP capability 거절 (로드맵 #76). 인증까지 통과한 principal이
+    /// 대상이다 — 미인증 요청은 이 이벤트 이전에 이미 401로 걸러진다.
+    pub const HTTP_CAPABILITY_DENIED: &str = "http.capability_denied";
 }
 
 /// 감사 로그 한 건.
