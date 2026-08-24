@@ -29,9 +29,10 @@ use uuid::Uuid;
 
 use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, EmailVerificationToken, EventEntry, FleetEvent, Host,
-    HostEvent, LoginAttempt, Permission, PermissionId, Role, RoleId, Session, SessionId, SshKey,
-    Task, TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskStatus, TaskStatusFilter, User,
-    UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    HostEvent, LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId,
+    ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter,
+    WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -69,6 +70,7 @@ pub struct MemStore {
     host_events: Mutex<Vec<HostEvent>>,
     ssh_keys: Mutex<HashMap<String, SshKey>>,
     control_leases: Mutex<HashMap<String, ControlLease>>,
+    projects: Mutex<HashMap<ProjectId, Project>>,
     /// 실패 주입 대상 메서드 이름 집합 — `check`/`record` 자체가 아니라
     /// 테스트 셋업 편의를 위한 것이므로 트레이트 밖 필드.
     failing: Mutex<HashSet<&'static str>>,
@@ -1348,6 +1350,73 @@ impl Store for MemStore {
             .unwrap()
             .get(cluster_id)
             .cloned())
+    }
+
+    // ── Project (로드맵 #48, 1단계) ───────────────────────────────────
+
+    async fn create_project(&self, project: &Project) -> Result<(), StoreError> {
+        let mut projects = self.projects.lock().unwrap();
+        if projects.values().any(|p| p.name == project.name) {
+            return Err(StoreError::Conflict(format!(
+                "project name already exists: {}",
+                project.name
+            )));
+        }
+        projects.insert(project.id, project.clone());
+        Ok(())
+    }
+
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>, StoreError> {
+        Ok(self.projects.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn get_project_by_name(&self, name: &str) -> Result<Option<Project>, StoreError> {
+        Ok(self
+            .projects
+            .lock()
+            .unwrap()
+            .values()
+            .find(|p| p.name == name)
+            .cloned())
+    }
+
+    async fn list_projects(&self, filter: &ProjectFilter) -> Result<Vec<Project>, StoreError> {
+        let projects = self.projects.lock().unwrap();
+        let mut out: Vec<Project> = projects
+            .values()
+            .filter(|p| match filter.status {
+                Some(status) => p.status == status,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        out.sort_by_key(|p| std::cmp::Reverse(p.created_at));
+        let limit = filter.limit.max(1);
+        Ok(out.into_iter().skip(filter.offset).take(limit).collect())
+    }
+
+    async fn update_project_status(
+        &self,
+        id: ProjectId,
+        status: ProjectStatus,
+    ) -> Result<bool, StoreError> {
+        let mut projects = self.projects.lock().unwrap();
+        match projects.get_mut(&id) {
+            Some(p) => {
+                p.status = status;
+                p.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn project_has_active_tasks(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        let tasks = self.tasks.lock().unwrap();
+        Ok(tasks.values().any(|t| {
+            t.project_id == Some(project_id)
+                && matches!(t.status, TaskStatus::Pending | TaskStatus::Dispatched { .. })
+        }))
     }
 }
 

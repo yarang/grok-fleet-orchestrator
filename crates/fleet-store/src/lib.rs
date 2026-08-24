@@ -36,8 +36,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission,
-    PermissionId, PermissionKind, Role, RoleId, Session, SessionId, Task, TaskFilter, TaskId,
-    TaskOutput, TaskStatus, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
+    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -805,6 +806,52 @@ pub trait Store: Send + Sync {
         _cluster_id: &str,
     ) -> Result<Option<ControlLease>, StoreError> {
         Err(StoreError::Unsupported("get_control_lease"))
+    }
+
+    // ── Project (로드맵 #48, 1단계) ───────────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — 다른 신규 trait method들과 같은 관례로,
+    // 기존 minimal Store 테스트 double을 깨지 않기 위함이다.
+
+    /// Project를 생성한다. `name`이 이미 존재하면 `StoreError::Conflict`.
+    async fn create_project(&self, _project: &Project) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_project"))
+    }
+
+    /// id로 단건 조회.
+    async fn get_project(&self, _id: ProjectId) -> Result<Option<Project>, StoreError> {
+        Err(StoreError::Unsupported("get_project"))
+    }
+
+    /// 고유 이름으로 단건 조회 (생성 시 중복 확인, Task 제출 시 이름으로
+    /// project를 지정하는 경로 등에 사용).
+    async fn get_project_by_name(&self, _name: &str) -> Result<Option<Project>, StoreError> {
+        Err(StoreError::Unsupported("get_project_by_name"))
+    }
+
+    /// 목록 조회 (최신순).
+    async fn list_projects(&self, _filter: &ProjectFilter) -> Result<Vec<Project>, StoreError> {
+        Err(StoreError::Unsupported("list_projects"))
+    }
+
+    /// 상태를 전이하고 `updated_at`을 갱신한다. 전이 유효성(예: `Archived`에서
+    /// 곧바로 `Draining`으로 못 감)은 이 메서드가 아니라 호출부(`fleet-api`
+    /// 핸들러)가 검사한다 — Store는 CAS 없는 단순 쓰기다. 존재하지 않는
+    /// id면 `false`.
+    async fn update_project_status(
+        &self,
+        _id: ProjectId,
+        _status: ProjectStatus,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("update_project_status"))
+    }
+
+    /// 이 Project를 참조하는 비종료(`Pending`/`Dispatched`) Task가 하나라도
+    /// 있는지. `Draining → Archived` 전이의 유일한 게이트(1단계) — 목표
+    /// 계약의 나머지 archive 게이트(Agent process/lease/credential grant
+    /// cleanup 증거)는 그 하부 구조가 생기기 전까지 없다.
+    async fn project_has_active_tasks(&self, _project_id: ProjectId) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("project_has_active_tasks"))
     }
 }
 

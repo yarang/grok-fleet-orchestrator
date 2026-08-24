@@ -97,6 +97,12 @@ pub mod action {
     /// HTTP capability 거절 (로드맵 #76). 인증까지 통과한 principal이
     /// 대상이다 — 미인증 요청은 이 이벤트 이전에 이미 401로 걸러진다.
     pub const HTTP_CAPABILITY_DENIED: &str = "http.capability_denied";
+    /// Project 생성 (로드맵 #48).
+    pub const PROJECT_CREATE: &str = "project.create";
+    /// Project archive 요청(`Active → Draining`) (로드맵 #48).
+    pub const PROJECT_ARCHIVE_REQUESTED: &str = "project.archive_requested";
+    /// Project가 실제로 `Archived`에 도달함 (로드맵 #48).
+    pub const PROJECT_ARCHIVED: &str = "project.archived";
 }
 
 /// 감사 로그 한 건.

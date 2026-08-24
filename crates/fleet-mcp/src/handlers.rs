@@ -23,10 +23,11 @@ use fleet_scheduler::{BreakerState, Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
-    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_DISPATCH_TASK,
-    TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS, TOOL_LIST_HOSTS, TOOL_LIST_TASKS,
-    TOOL_LIST_WORKERS, TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN,
-    TOOL_STREAM_TASK_OUTPUT, TOOL_WAIT_FOR_TASK,
+    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_CREATE_PROJECT,
+    TOOL_DELETE_PROJECT, TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS,
+    TOOL_LIST_HOSTS, TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS,
+    TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STREAM_TASK_OUTPUT,
+    TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -65,6 +66,9 @@ pub async fn dispatch_tool(
         TOOL_RESET_WORKER_BREAKER => handle_reset_worker_breaker(ctx, arguments).await,
         TOOL_LIST_BOOTSTRAP_TOKENS => handle_list_bootstrap_tokens(ctx, arguments).await,
         TOOL_REVOKE_BOOTSTRAP_TOKEN => handle_revoke_bootstrap_token(ctx, arguments).await,
+        TOOL_CREATE_PROJECT => handle_create_project(ctx, arguments).await,
+        TOOL_LIST_PROJECTS => handle_list_projects(ctx, arguments).await,
+        TOOL_DELETE_PROJECT => handle_delete_project(ctx, arguments).await,
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -111,13 +115,36 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         .map(|n| n as u32);
     req.timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64());
     req.project_id = match args.get("project_id") {
-        Some(value) => Some(
-            value
+        Some(value) => {
+            let project_id = value
                 .as_str()
                 .ok_or_else(|| JsonRpcError::invalid_params("project_id must be a UUID string"))?
                 .parse::<ProjectId>()
-                .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?,
-        ),
+                .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?;
+
+            // 로드맵 #48 1단계 — 지금까지 project_id는 저장만 되고 아무도
+            // 검증하지 않는 순수 메타데이터였다. 여기서 처음으로 실제 존재·
+            // 상태 확인을 건다: 없는 project를 가리키거나, 이미 새 Task를
+            // 받지 않는 상태(Draining/Archived)면 제출 자체를 거절한다.
+            let project = ctx
+                .state
+                .store
+                .get_project(project_id)
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("failed to look up project: {e}")))?
+                .ok_or_else(|| {
+                    JsonRpcError::invalid_params(format!("no such project: {project_id}"))
+                })?;
+            if !project.status.accepts_new_tasks() {
+                return Err(JsonRpcError::invalid_params(format!(
+                    "project '{}' is {} and does not accept new tasks",
+                    project.name,
+                    project.status.as_str()
+                )));
+            }
+
+            Some(project_id)
+        }
         None => None,
     };
     req.skills_required = args
@@ -878,6 +905,138 @@ async fn handle_revoke_bootstrap_token(
     }
 }
 
+// ── fleet_create_project / fleet_list_projects / fleet_delete_project ──
+// (로드맵 #48, 1단계)
+
+fn project_json(p: &fleet_core::Project) -> Value {
+    json!({
+        "id": p.id.to_string(),
+        "name": p.name,
+        "description": p.description,
+        "created_by": p.created_by,
+        "status": p.status.as_str(),
+        "created_at": p.created_at.to_rfc3339(),
+        "updated_at": p.updated_at.to_rfc3339(),
+    })
+}
+
+async fn handle_create_project(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: name"))?
+        .trim();
+    if name.is_empty() {
+        return Err(JsonRpcError::invalid_params("name must not be empty"));
+    }
+
+    let mut project = fleet_core::Project::new(name);
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+        let description = description.trim();
+        if !description.is_empty() {
+            project = project.with_description(description);
+        }
+    }
+
+    ctx.state
+        .store
+        .create_project(&project)
+        .await
+        .map_err(|e| match e {
+            fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
+            other => JsonRpcError::internal(format!("store error: {other}")),
+        })?;
+
+    Ok(schema::tool_json(&project_json(&project)))
+}
+
+async fn handle_list_projects(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(100);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+
+    let projects = ctx
+        .state
+        .store
+        .list_projects(&fleet_core::ProjectFilter {
+            status: None,
+            limit,
+            offset,
+        })
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let summary: Vec<Value> = projects.iter().map(project_json).collect();
+    Ok(schema::tool_json(&json!({
+        "projects": summary,
+        "count": summary.len(),
+    })))
+}
+
+async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let project_id: ProjectId = args
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: project_id"))?
+        .parse()
+        .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?;
+
+    let Some(mut project) = ctx
+        .state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+    else {
+        return Ok(schema::tool_error("project not found"));
+    };
+
+    // 로드맵 #48 1단계 — Dashboard의 delete_project_api와 동일한 idempotent
+    // archive 절차. Active → Draining → (비종료 Task 없으면) Archived.
+    if project.status == fleet_core::ProjectStatus::Active {
+        ctx.state
+            .store
+            .update_project_status(project_id, fleet_core::ProjectStatus::Draining)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        project.status = fleet_core::ProjectStatus::Draining;
+    }
+
+    if project.status == fleet_core::ProjectStatus::Draining {
+        let has_active_tasks = ctx
+            .state
+            .store
+            .project_has_active_tasks(project_id)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        if !has_active_tasks {
+            ctx.state
+                .store
+                .update_project_status(project_id, fleet_core::ProjectStatus::Archived)
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+            project.status = fleet_core::ProjectStatus::Archived;
+        }
+    }
+
+    Ok(schema::tool_json(&project_json(&project)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,7 +1120,7 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 15);
     }
 
     #[test]
@@ -1283,5 +1442,158 @@ mod tests {
     fn parse_tool_json(result: &Value) -> Value {
         let text = result["content"][0]["text"].as_str().unwrap();
         serde_json::from_str(text).unwrap()
+    }
+
+    // ── fleet_create_project / fleet_list_projects / fleet_delete_project
+    // (로드맵 #48, 1단계) ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_list_and_delete_project_round_trip() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+
+        let created = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_PROJECT,
+            &json!({"name": "acme-web", "description": "main web app"}),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&created);
+        assert_eq!(body["name"], "acme-web");
+        assert_eq!(body["description"], "main web app");
+        assert_eq!(body["status"], "active");
+        let project_id = body["id"].as_str().unwrap().to_string();
+
+        let listed = dispatch_tool(&ctx, TOOL_LIST_PROJECTS, &json!({}))
+            .await
+            .unwrap();
+        let body = parse_tool_json(&listed);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["projects"][0]["id"], project_id);
+
+        // 참조하는 Task가 없으므로 한 번의 delete 호출로 곧바로 archived까지
+        // 진행된다.
+        let deleted = dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id}),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&deleted);
+        assert_eq!(body["status"], "archived");
+    }
+
+    #[tokio::test]
+    async fn create_project_rejects_empty_name() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "   "})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_project_rejects_duplicate_name() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "dup"}))
+            .await
+            .unwrap();
+        let result = dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "dup"})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_unknown_project_returns_tool_error() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": fleet_core::ProjectId::new().to_string()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn delete_project_stays_draining_while_a_task_still_references_it() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+
+        let created = dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "busy"}))
+            .await
+            .unwrap();
+        let project_id: ProjectId = parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+
+        // test_ctx에는 워커가 하나도 없어 fleet_dispatch_task를 실제로 타면
+        // 즉시 Failed(terminal)로 확정된다 — "아직 실행 중"인 상황을 흉내낼
+        // 수 없다. 대신 store에 Pending task를 직접 주입한다(dashboard의
+        // delete_project_stays_draining_when_active_tasks_exist와 동일한
+        // 접근).
+        let mut task = Task::from_request(TaskRequest {
+            prompt: "still running".into(),
+            created_by: "test".into(),
+            ..Default::default()
+        });
+        task.project_id = Some(project_id);
+        ctx.state.store.insert_task(&task).await.unwrap();
+
+        let deleted = dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id.to_string()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            parse_tool_json(&deleted)["status"],
+            "draining",
+            "must not archive while a non-terminal task still references the project"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_unknown_project_id() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "test", "project_id": fleet_core::ProjectId::new().to_string()}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "dispatching against a nonexistent project must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_archived_project_id() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+
+        let created = dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "closed-shop"}))
+            .await
+            .unwrap();
+        let project_id = parse_tool_json(&created)["id"].as_str().unwrap().to_string();
+        dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id}),
+        )
+        .await
+        .unwrap();
+
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "too late", "project_id": project_id}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "dispatching against an archived project must be rejected"
+        );
     }
 }

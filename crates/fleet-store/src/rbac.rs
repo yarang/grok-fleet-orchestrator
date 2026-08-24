@@ -93,6 +93,9 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::RoleDelete => "Delete roles",
         PermissionKind::AuditRead => "Read audit log",
         PermissionKind::HostProvision => "Provision hosts and manage SSH keys",
+        PermissionKind::ProjectRead => "List/read projects",
+        PermissionKind::ProjectCreate => "Create projects",
+        PermissionKind::ProjectDelete => "Archive projects (request draining, not permanent delete)",
         PermissionKind::EventsList => "List events",
         PermissionKind::MetricsView => "View metrics",
     }

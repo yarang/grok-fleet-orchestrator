@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/project-task-agent-lifecycle.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-24"
 ---
 
 # Project · Task · Attempt · Agent Lifecycle 계약
@@ -48,9 +48,15 @@ flowchart LR
 ### 현재 구현과 목표 모델
 
 현재 구현에는 `Task`의 5상태가 있으며 `ProjectId`와 `tasks.project_id` 저장·Task 요청 전달은
-존재한다. 그러나 Project 엔티티·정책 enforcement와 TaskAttempt는 아직
-구현되지 않았다. 따라서 현재 Task 상태와 목표 Attempt 상태를 같은 상태 기계로
-표현하거나, 목표 계약을 현재 동작처럼 설명하지 않는다.
+존재한다. **로드맵 `#48` 1단계(2026-08-24)로 `Project` 엔티티도 존재하지만, 이 문서가 정의하는
+5-상태 lifecycle(`Draft`/`Active`/`Draining`/`ArchiveBlocked`/`Archived`)이 아니라
+`Active`/`Draining`/`Archived` 3-상태로 축소돼 있다** — `Draft`는 AgentTemplate 검증 대상이 없어
+모든 Project가 생성과 동시에 `Active`로 시작하고, `ArchiveBlocked`는 Agent process/lease/credential
+grant cleanup 증거가 필요한데 그 하부 구조(Agent, `#67`)가 없어 만들 수 없다. `Draining → Archived`
+게이트도 이 문서의 sequence diagram이 그리는 전체 절차(Attempt 관찰, effect ledger 재평가, cleanup
+증거 확인)가 아니라 "이 Project를 참조하는 비종료 Task가 없다" 하나뿐이다. Project 엔티티·정책
+enforcement와 TaskAttempt는 여전히 대부분 아직 구현되지 않았다. 따라서 현재 Task 상태와 목표
+Attempt 상태를 같은 상태 기계로 표현하거나, 목표 계약을 현재 동작처럼 설명하지 않는다.
 
 목표 도입 기간에는 Task가 외부 호환 상태를 유지하고, 최신 Attempt의 terminal 결과를
 Task에 투영한다. 과거 Attempt 결과와 audit record를 덮어쓰지 않는다.

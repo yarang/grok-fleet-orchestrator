@@ -252,6 +252,17 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/me", get(handlers::me))
         .route("/api/hosts", get(handlers::list_hosts_api))
         .route("/api/hosts/:hostname", get(handlers::get_host_detail_api))
+        // Project (로드맵 #48, 1단계). PATCH(policy 변경)와 host/worker 배정
+        // endpoint는 docs/contracts/project-management.md가 승인 전 차단
+        // 대상으로 명시해 아직 없다.
+        .route(
+            "/api/projects",
+            get(handlers::list_projects_api).post(handlers::create_project_api),
+        )
+        .route(
+            "/api/projects/:id",
+            get(handlers::get_project_detail_api).delete(handlers::delete_project_api),
+        )
         // 인증/권한 감사 로그 (audit_log 테이블).
         // 작업·워커 생명주기 이벤트는 위의 /api/events가 담당한다 — 이전에는
         // 같은 이벤트 데이터를 /api/audit이 중복 제공해 이름이 혼동됐다.

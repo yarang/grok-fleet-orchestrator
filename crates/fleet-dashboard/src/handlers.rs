@@ -1001,6 +1001,189 @@ pub async fn list_hosts_api(
     Ok(Json(summaries))
 }
 
+// ── Project (로드맵 #48, 1단계) ────────────────────────────────────────
+//
+// `docs/contracts/project-management.md`의 "승인 전 차단 후보"에 해당하는
+// `PATCH /api/projects/{id}`(policy 변경)와 host/worker 배정 endpoint는
+// 여기 없다 — 보안 모델 승인 전까지 구현하지 않는다는 그 문서의 명시적
+// 지시를 따른다.
+
+/// GET /api/projects — Project 목록 JSON API.
+pub async fn list_projects_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Result<Json<Vec<crate::schema::ProjectSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::ProjectRead)?;
+    let projects = state
+        .store
+        .list_projects(&fleet_core::ProjectFilter {
+            status: None,
+            limit: 1000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_projects failed");
+            ApiError::Store(e.to_string())
+        })?;
+    Ok(Json(
+        projects.iter().map(crate::schema::ProjectSummary::from).collect(),
+    ))
+}
+
+/// POST /api/projects — Project 생성 JSON API.
+///
+/// CSRF: JS에서 `X-CSRF-Token` 헤더로 전송(`logout`과 동일한 헤더 variant —
+/// 이 endpoint는 HTML form이 아니라 JSON body를 받으므로 form 필드에 심는
+/// 방식을 쓸 수 없다).
+pub async fn create_project_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<crate::schema::CreateProjectRequest>,
+) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::ProjectCreate)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+
+    let mut project = fleet_core::Project::new(name);
+    if let Some(description) = body.description.as_deref().map(str::trim) {
+        if !description.is_empty() {
+            project = project.with_description(description);
+        }
+    }
+    project = project.with_created_by(principal.user.username.clone());
+
+    state.store.create_project(&project).await.map_err(|e| {
+        if let fleet_store::StoreError::Conflict(msg) = &e {
+            return ApiError::Conflict(msg.clone());
+        }
+        tracing::error!(error = %e, "create_project failed");
+        ApiError::Store(e.to_string())
+    })?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_CREATE)
+            .actor(principal.user.id)
+            .target("project", project.id.to_string())
+            .detail(serde_json::json!({ "name": project.name })),
+    )
+    .await;
+
+    Ok(Json(crate::schema::ProjectSummary::from(&project)))
+}
+
+/// GET /api/projects/:id — Project 상세 JSON API.
+pub async fn get_project_detail_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::ProjectRead)?;
+    let project_id = parse_project_id(&id)?;
+    let project = state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("project {id}")))?;
+    Ok(Json(crate::schema::ProjectSummary::from(&project)))
+}
+
+/// DELETE /api/projects/:id — archive 요청(즉시 영구 삭제 아님).
+///
+/// `docs/contracts/project-management.md`: "`Active → Draining` idempotent
+/// archive 요청". 재호출은 안전하다 — 이미 `Draining`/`Archived`인
+/// Project에 다시 호출해도 현재 상태를 그대로 반환한다. `Active`면
+/// `Draining`으로 전이하고, 이 Project를 참조하는 비종료 Task가 하나도
+/// 없으면(1단계의 유일한 archive 게이트) 같은 요청 안에서 곧바로
+/// `Archived`까지 진행한다 — Agent/effect ledger가 없는 지금은 그 이상
+/// 기다릴 대상이 없다.
+pub async fn delete_project_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::ProjectDelete)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let project_id = parse_project_id(&id)?;
+    let mut project = state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("project {id}")))?;
+
+    if project.status == fleet_core::ProjectStatus::Active {
+        state
+            .store
+            .update_project_status(project_id, fleet_core::ProjectStatus::Draining)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?;
+        project.status = fleet_core::ProjectStatus::Draining;
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_ARCHIVE_REQUESTED)
+                .actor(principal.user.id)
+                .target("project", project.id.to_string()),
+        )
+        .await;
+    }
+
+    if project.status == fleet_core::ProjectStatus::Draining {
+        let has_active_tasks = state
+            .store
+            .project_has_active_tasks(project_id)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?;
+        if !has_active_tasks {
+            state
+                .store
+                .update_project_status(project_id, fleet_core::ProjectStatus::Archived)
+                .await
+                .map_err(|e| ApiError::Store(e.to_string()))?;
+            project.status = fleet_core::ProjectStatus::Archived;
+            crate::audit::record(
+                &state,
+                fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_ARCHIVED)
+                    .actor(principal.user.id)
+                    .target("project", project.id.to_string()),
+            )
+            .await;
+        }
+    }
+
+    Ok(Json(crate::schema::ProjectSummary::from(&project)))
+}
+
+fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
+    raw.parse::<fleet_core::ProjectId>()
+        .map_err(|_| ApiError::BadRequest("invalid project id".into()))
+}
+
+/// 더블 서밋 CSRF 검증 (헤더 variant) — JSON body를 받는 API 전용.
+/// `logout`(form 없는 endpoint)과 동일한 패턴.
+fn verify_csrf_header(jar: &CookieJar, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
+    let header_csrf = headers
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !csrf_valid(cookie_csrf.as_deref(), header_csrf) {
+        return Err(ApiError::Forbidden("CSRF token invalid".into()));
+    }
+    Ok(())
+}
+
 /// GET /api/hosts/:hostname — 호스트 상세 JSON API.
 pub async fn get_host_detail_api(
     State(state): State<Arc<DashboardState>>,

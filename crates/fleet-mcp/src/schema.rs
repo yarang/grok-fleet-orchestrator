@@ -48,6 +48,12 @@ pub const TOOL_RESET_WORKER_BREAKER: &str = "fleet_reset_worker_breaker";
 pub const TOOL_LIST_BOOTSTRAP_TOKENS: &str = "fleet_list_bootstrap_tokens";
 /// 부트스트랩 토큰 폐기 도구 (로드맵 #28).
 pub const TOOL_REVOKE_BOOTSTRAP_TOKEN: &str = "fleet_revoke_bootstrap_token";
+/// Project 생성 도구 (로드맵 #48, 1단계).
+pub const TOOL_CREATE_PROJECT: &str = "fleet_create_project";
+/// Project 목록 조회 도구 (로드맵 #48, 1단계).
+pub const TOOL_LIST_PROJECTS: &str = "fleet_list_projects";
+/// Project archive 요청 도구 (로드맵 #48, 1단계). 영구 삭제가 아니다.
+pub const TOOL_DELETE_PROJECT: &str = "fleet_delete_project";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  JSON-RPC 2.0 봉투
@@ -471,6 +477,55 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["token_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_CREATE_PROJECT,
+            description: "Create a new Project — a grouping boundary for Tasks under a development goal. Once created, pass its id as project_id to fleet_dispatch_task to scope tasks under it. This is stage-1 support: Project policy (agent slots, worker eligibility) is not enforced yet, only identity and lifecycle (active/draining/archived).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Unique display name for the project."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional free-text description."
+                    }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_PROJECTS,
+            description: "List Projects, newest first.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of projects to return (default 100)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of projects to skip (pagination)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_DELETE_PROJECT,
+            description: "Request that a Project be archived (not permanently deleted). Active projects transition to draining and stop accepting new tasks; once every task that referenced the project has reached a terminal state, it finishes archiving to archived. Safe to call again on the same project_id — it reports current progress rather than erroring.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "UUID of the project (as returned by fleet_create_project or fleet_list_projects)."
+                    }
+                },
+                "required": ["project_id"]
             }),
         },
     ]

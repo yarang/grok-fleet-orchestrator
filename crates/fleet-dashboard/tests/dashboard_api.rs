@@ -1157,3 +1157,374 @@ async fn submit_task_without_dispatcher_returns_unavailable_and_creates_no_task(
     let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert!(tasks.is_empty(), "no task should be created: {tasks:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Project API (로드맵 #48, 1단계)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 세션 쿠키 + CSRF 쿠키/헤더를 포함한 JSON body POST/DELETE 요청.
+/// `logout`(form 없는 endpoint)과 동일한 헤더 CSRF variant — project API는
+/// HTML form이 아니라 JSON body를 받는다.
+fn authed_json(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    cookie: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .request(method, url)
+        .header(
+            "cookie",
+            format!("fleet_session={cookie}; fleet_csrf={TEST_CSRF}"),
+        )
+        .header("x-csrf-token", TEST_CSRF)
+}
+
+/// `spawn_authed_server`와 동일하지만 삽입에 쓸 `Arc<dyn Store>` 핸들도
+/// 함께 반환한다 — project archive 게이트(비종료 Task 존재 여부) 테스트가
+/// HTTP API를 거치지 않고 task를 직접 주입해야 한다.
+async fn spawn_authed_server_with_store_handle(
+    store: MemStore,
+) -> (TestServer, String, Arc<dyn Store>) {
+    let (store, cookie) = seed_test_session(store).await;
+    let store = Arc::new(store) as Arc<dyn Store>;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(store.clone(), pool, None));
+    let app = build_dashboard_app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+        store,
+    )
+}
+
+#[tokio::test]
+async fn list_projects_requires_project_read_permission() {
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::DashboardView]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(&client, &format!("http://{}/api/projects", server.addr), &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_project_requires_project_create_permission() {
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::ProjectRead]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "should-not-be-created"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_and_list_project_roundtrip() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let create_resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "acme-web", "description": "main web app"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(create_resp.status(), 200);
+    let created: serde_json::Value = create_resp.json().await.unwrap();
+    assert_eq!(created["name"], "acme-web");
+    assert_eq!(created["description"], "main web app");
+    assert_eq!(created["status"], "active");
+    assert_eq!(created["created_by"], "test_admin");
+
+    let list_resp = authed_get(
+        &client,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(list_resp.status(), 200);
+    let projects: Vec<serde_json::Value> = list_resp.json().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0]["id"], created["id"]);
+
+    let detail_resp = authed_get(
+        &client,
+        &format!("http://{}/api/projects/{}", server.addr, created["id"].as_str().unwrap()),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(detail_resp.status(), 200);
+    let detail: serde_json::Value = detail_resp.json().await.unwrap();
+    assert_eq!(detail["id"], created["id"]);
+}
+
+#[tokio::test]
+async fn create_project_rejects_empty_name() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "   "}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_project_without_csrf_header_is_rejected() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    // 쿠키/헤더 CSRF 없이 세션 쿠키만.
+    let resp = client
+        .post(format!("http://{}/api/projects", server.addr))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .json(&serde_json::json!({"name": "no-csrf"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_project_conflicts_on_duplicate_name() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        let resp = authed_json(
+            &client,
+            reqwest::Method::POST,
+            &format!("http://{}/api/projects", server.addr),
+            &cookie,
+        )
+        .json(&serde_json::json!({"name": "dup-name"}))
+        .send()
+        .await
+        .unwrap();
+        let status = resp.status();
+        if status != 200 {
+            assert_eq!(status, 409);
+            return;
+        }
+    }
+    panic!("second create with the same name must not both succeed with 200");
+}
+
+#[tokio::test]
+async fn get_project_detail_returns_404_for_unknown_id() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/projects/{}",
+            server.addr,
+            fleet_core::ProjectId::new()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn delete_project_archives_immediately_when_no_active_tasks() {
+    let (server, cookie, _store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "empty-project"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    let delete_resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!(
+            "http://{}/api/projects/{}",
+            server.addr,
+            created["id"].as_str().unwrap()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(delete_resp.status(), 200);
+    let archived: serde_json::Value = delete_resp.json().await.unwrap();
+    assert_eq!(
+        archived["status"], "archived",
+        "a project with no active tasks must archive immediately"
+    );
+}
+
+#[tokio::test]
+async fn delete_project_stays_draining_when_active_tasks_exist() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "busy-project"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let project_id: fleet_core::ProjectId = created["id"].as_str().unwrap().parse().unwrap();
+
+    let mut task = Task::from_request(fleet_core::TaskRequest {
+        prompt: "still running".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    task.project_id = Some(project_id);
+    store.insert_task(&task).await.unwrap();
+
+    let delete_resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/projects/{}", server.addr, project_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(delete_resp.status(), 200);
+    let draining: serde_json::Value = delete_resp.json().await.unwrap();
+    assert_eq!(
+        draining["status"], "draining",
+        "a project with a pending task must not archive yet"
+    );
+
+    // 다시 호출해도(같은 pending task가 아직 남아 있으므로) 여전히 draining —
+    // idempotent 재확인.
+    let second_delete = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/projects/{}", server.addr, project_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(second_delete.status(), 200);
+    let still_draining: serde_json::Value = second_delete.json().await.unwrap();
+    assert_eq!(still_draining["status"], "draining");
+
+    // task를 종결시키면, 다음 DELETE 호출이 archive까지 진행한다.
+    task.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test cleanup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.update_task_status(task.id, &task.status).await.unwrap();
+
+    let final_delete = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/projects/{}", server.addr, project_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(final_delete.status(), 200);
+    let archived: serde_json::Value = final_delete.json().await.unwrap();
+    assert_eq!(
+        archived["status"], "archived",
+        "once the referencing task is terminal, a repeat DELETE must finish archiving"
+    );
+}
+
+#[tokio::test]
+async fn delete_project_on_already_archived_project_is_a_harmless_noop() {
+    let (server, cookie, _store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"name": "archive-twice"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let url = format!(
+        "http://{}/api/projects/{}",
+        server.addr,
+        created["id"].as_str().unwrap()
+    );
+
+    for _ in 0..2 {
+        let resp = authed_json(&client, reqwest::Method::DELETE, &url, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "archived");
+    }
+}

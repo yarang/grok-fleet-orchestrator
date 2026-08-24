@@ -24,9 +24,10 @@ use uuid::Uuid;
 
 use fleet_core::{
     AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, EventEntry, FleetEvent,
-    Labels, LoginAttempt, Permission, PermissionKind, Role, Session, SessionId, Task, TaskFilter,
-    TaskId, TaskOutput, TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId,
+    ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskOutputChunk,
+    TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter,
+    WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -2160,6 +2161,103 @@ impl Store for PgStore {
         .await?;
         row.map(row_to_control_lease).transpose()
     }
+
+    // ── Project (로드맵 #48, 1단계) ───────────────────────────────────
+
+    async fn create_project(&self, project: &Project) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO projects (id, name, description, created_by, status, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(project.id.0)
+        .bind(&project.name)
+        .bind(project.description.as_ref())
+        .bind(project.created_by.as_ref())
+        .bind(project.status.as_str())
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::Conflict(
+                format!("project name already exists: {}", db.message()),
+            ),
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn get_project(&self, id: ProjectId) -> Result<Option<Project>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, created_by, status, created_at, updated_at \
+               FROM projects WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_project).transpose()
+    }
+
+    async fn get_project_by_name(&self, name: &str) -> Result<Option<Project>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, created_by, status, created_at, updated_at \
+               FROM projects WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_project).transpose()
+    }
+
+    async fn list_projects(&self, filter: &ProjectFilter) -> Result<Vec<Project>, StoreError> {
+        let limit = filter.limit.clamp(1, 1000) as i64;
+        let offset = filter.offset as i64;
+        let status_str = filter.status.map(|s| s.as_str());
+
+        let rows = sqlx::query(
+            "SELECT id, name, description, created_by, status, created_at, updated_at \
+               FROM projects \
+              WHERE ($1::text IS NULL OR status = $1) \
+              ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(status_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(row_to_project).collect()
+    }
+
+    async fn update_project_status(
+        &self,
+        id: ProjectId,
+        status: ProjectStatus,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(status.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn project_has_active_tasks(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        // `status_phase`는 001_init.sql의 생성 칼럼(`status->>'phase'`) —
+        // TaskStatus가 `#[serde(tag = "phase")]`라 이 값이 정확히
+        // 'pending'/'dispatched'/'completed'/'failed'/'cancelled'다.
+        let (exists,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE project_id = $1 AND status_phase IN ('pending', 'dispatched'))",
+        )
+        .bind(project_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2294,6 +2392,23 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
         notes,
         last_used_by,
         last_used_at,
+    })
+}
+
+fn row_to_project(row: sqlx::postgres::PgRow) -> Result<Project, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let status_str: String = row.try_get("status")?;
+    let status = ProjectStatus::parse_str(&status_str).ok_or_else(|| {
+        StoreError::Decode(format!("unknown project status in DB: {status_str}"))
+    })?;
+    Ok(Project {
+        id: ProjectId(id),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        created_by: row.try_get("created_by")?,
+        status,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 

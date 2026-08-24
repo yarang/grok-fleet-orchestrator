@@ -415,6 +415,17 @@ pub enum PermissionKind {
     AuditRead,
     #[serde(rename = "host:provision")]
     HostProvision,
+    // Project (로드맵 #48 1단계). `project:policy_manage`/`project:assign`은
+    // 목표 계약에서 명시적으로 승인 전 차단 대상이라 아직 만들지 않는다
+    // (docs/architecture/project-feature-design.md "권한과 구현 차단 조건").
+    #[serde(rename = "project:read")]
+    ProjectRead,
+    #[serde(rename = "project:create")]
+    ProjectCreate,
+    /// Project를 `Draining`으로 전이(archive 요청)한다. 영구 삭제가 아니다
+    /// — [`crate::project::ProjectStatus`] 참고.
+    #[serde(rename = "project:delete")]
+    ProjectDelete,
     // 시스템
     #[serde(rename = "events:list")]
     EventsList,
@@ -453,6 +464,9 @@ impl PermissionKind {
             Self::RoleDelete => "role:delete",
             Self::AuditRead => "audit:read",
             Self::HostProvision => "host:provision",
+            Self::ProjectRead => "project:read",
+            Self::ProjectCreate => "project:create",
+            Self::ProjectDelete => "project:delete",
             Self::EventsList => "events:list",
             Self::MetricsView => "metrics:view",
         }
@@ -488,6 +502,9 @@ impl PermissionKind {
             Self::RoleDelete,
             Self::AuditRead,
             Self::HostProvision,
+            Self::ProjectRead,
+            Self::ProjectCreate,
+            Self::ProjectDelete,
             Self::EventsList,
             Self::MetricsView,
         ]
@@ -541,6 +558,7 @@ impl BuiltinRole {
                 PermissionKind::TaskRead,
                 PermissionKind::TaskOutput,
                 PermissionKind::WorkerList,
+                PermissionKind::ProjectRead,
                 PermissionKind::EventsList,
                 PermissionKind::MetricsView,
             ],
@@ -549,6 +567,7 @@ impl BuiltinRole {
                 PermissionKind::TaskList,
                 PermissionKind::TaskRead,
                 PermissionKind::WorkerList,
+                PermissionKind::ProjectRead,
                 PermissionKind::EventsList,
             ],
         }

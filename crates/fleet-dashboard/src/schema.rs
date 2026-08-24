@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use fleet_core::WorkerStatus;
+use fleet_core::{Project, WorkerStatus};
 
 /// `/api/overview` 응답.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +43,42 @@ pub struct TaskCounts {
     pub failed: u32,
     pub cancelled: u32,
     pub total: u32,
+}
+
+/// `/api/projects` 배열 요소 (로드맵 #48, 1단계).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Project> for ProjectSummary {
+    fn from(p: &Project) -> Self {
+        Self {
+            id: p.id.to_string(),
+            name: p.name.clone(),
+            description: p.description.clone(),
+            created_by: p.created_by.clone(),
+            status: p.status.as_str().to_string(),
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+        }
+    }
+}
+
+/// `POST /api/projects` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// `/api/workers` 배열 요소.

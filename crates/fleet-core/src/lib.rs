@@ -33,6 +33,7 @@ pub mod error;
 pub mod events;
 pub mod host;
 pub mod ids;
+pub mod project;
 pub mod task;
 pub mod worker;
 
@@ -49,6 +50,7 @@ pub use error::{FleetError, Result, SelectionError};
 pub use events::{EventEntry, FleetEvent};
 pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus, SshKey, SshKeySummary};
 pub use ids::{ProjectId, TaskId, WorkerId};
+pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
     FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,
     TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,

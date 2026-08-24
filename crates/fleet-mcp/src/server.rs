@@ -97,6 +97,9 @@ fn required_permission(tool: &str) -> Option<PermissionKind> {
         TOOL_RESET_WORKER_BREAKER => PermissionKind::WorkerDelete,
         TOOL_LIST_BOOTSTRAP_TOKENS => PermissionKind::TokenList,
         TOOL_REVOKE_BOOTSTRAP_TOKEN => PermissionKind::TokenRevoke,
+        TOOL_CREATE_PROJECT => PermissionKind::ProjectCreate,
+        TOOL_LIST_PROJECTS => PermissionKind::ProjectRead,
+        TOOL_DELETE_PROJECT => PermissionKind::ProjectDelete,
         _ => return None,
     })
 }
