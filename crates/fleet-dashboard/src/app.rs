@@ -263,6 +263,33 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             "/api/projects/:id",
             get(handlers::get_project_detail_api).delete(handlers::delete_project_api),
         )
+        // Issue (로드맵 #92, Issue 표면). 상태 전이는 PATCH가 아니라 별도
+        // endpoint다 — 목표 상태마다 요구 capability가 다르기 때문
+        // (handlers::required_capability_for_transition).
+        .route(
+            "/api/issues",
+            get(handlers::list_issues_api).post(handlers::create_issue_api),
+        )
+        .route(
+            "/api/issues/:id",
+            get(handlers::get_issue_api).patch(handlers::update_issue_api),
+        )
+        .route(
+            "/api/issues/:id/transition",
+            post(handlers::transition_issue_api),
+        )
+        .route(
+            "/api/issues/:id/comments",
+            get(handlers::list_issue_comments_api).post(handlers::add_issue_comment_api),
+        )
+        .route(
+            "/api/issues/:id/links",
+            get(handlers::list_issue_links_api).post(handlers::link_issue_task_api),
+        )
+        .route(
+            "/api/issues/:id/links/:task_id",
+            axum::routing::delete(handlers::unlink_issue_task_api),
+        )
         // 인증/권한 감사 로그 (audit_log 테이블).
         // 작업·워커 생명주기 이벤트는 위의 /api/events가 담당한다 — 이전에는
         // 같은 이벤트 데이터를 /api/audit이 중복 제공해 이름이 혼동됐다.

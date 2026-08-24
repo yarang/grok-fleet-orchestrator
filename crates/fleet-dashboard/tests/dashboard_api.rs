@@ -1821,3 +1821,562 @@ async fn reply_is_rejected_when_the_parents_project_has_since_been_archived() {
         "continuing into an archived project must be refused"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Issue API (로드맵 #92, Issue 표면)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Issue 테스트용 서버 — store 핸들과 시딩된 Project를 함께 돌려준다.
+async fn spawn_issue_server(
+    perms: Option<&[PermissionKind]>,
+) -> (TestServer, String, Arc<dyn Store>, fleet_core::Project) {
+    let (store, cookie) = match perms {
+        Some(p) => seed_test_session_with_perms(MemStore::new(), p).await,
+        None => seed_test_session(MemStore::new()).await,
+    };
+    let store = Arc::new(store) as Arc<dyn Store>;
+    let project = fleet_core::Project::new("issue-project");
+    store.create_project(&project).await.unwrap();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(store.clone(), pool, None));
+    let app = build_dashboard_app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+        store,
+        project,
+    )
+}
+
+/// 목표 상태별 요구 capability가 계약과 일치하는지 — 이 표면의 보안 핵심.
+#[test]
+fn transition_capability_mapping_matches_the_contract() {
+    use fleet_core::IssueStatus::*;
+    use fleet_dashboard::required_capability_for_transition as cap;
+
+    // Agent 자동 착수의 유일한 인가 지점.
+    assert_eq!(
+        cap(ReadyForAgent),
+        PermissionKind::IssueApproveAgentWork,
+        "promoting to ReadyForAgent is the agent-work authorization point"
+    );
+    // 승인 철회는 approve 권한을 요구하지 않는다 — 권한 회수가 부여보다
+    // 어려우면 잘못된 승인을 되돌리기가 더 힘들어진다.
+    assert_eq!(cap(Triaged), PermissionKind::IssueUpdate);
+    assert_ne!(cap(Triaged), PermissionKind::IssueApproveAgentWork);
+    // "문제가 처리됐다"는 판정은 둘 다 close 권한.
+    assert_eq!(cap(Resolved), PermissionKind::IssueClose);
+    assert_eq!(cap(Closed), PermissionKind::IssueClose);
+    // 텍스트 편집 권한으로 문제를 종결할 수 없어야 한다.
+    assert_ne!(cap(Resolved), PermissionKind::IssueUpdate);
+    assert_ne!(cap(Closed), PermissionKind::IssueUpdate);
+    assert_eq!(cap(Open), PermissionKind::IssueReopen);
+}
+
+#[tokio::test]
+async fn create_and_get_issue_roundtrip() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": project.id.to_string(),
+        "title": "login is broken",
+        "body": "steps: ...",
+        "severity": "high",
+        "labels": ["bug", "auth"],
+    }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    assert_eq!(created["title"], "login is broken");
+    assert_eq!(created["status"], "open");
+    assert_eq!(created["severity"], "high");
+    assert_eq!(created["created_by"], "test_admin");
+    assert_eq!(created["has_active_tasks"], false);
+    assert!(created.get("close_reason").is_none());
+
+    let fetched: serde_json::Value = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/issues/{}",
+            server.addr,
+            created["id"].as_str().unwrap()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(fetched["id"], created["id"]);
+
+    let listed: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("http://{}/api/issues", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(listed.len(), 1);
+}
+
+#[tokio::test]
+async fn create_issue_rejects_unknown_project() {
+    let (server, cookie, _store, _project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": fleet_core::ProjectId::new().to_string(),
+        "title": "orphan",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_issue_requires_issue_create_permission() {
+    let (server, cookie, _store, project) =
+        spawn_issue_server(Some(&[PermissionKind::IssueRead])).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": project.id.to_string(),
+        "title": "should not be created",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+/// 헬퍼: Issue 하나를 만들고 id를 돌려준다.
+async fn make_issue(client: &reqwest::Client, server: &TestServer, cookie: &str, project_id: &str, title: &str) -> String {
+    let created: serde_json::Value = authed_json(
+        client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues", server.addr),
+        cookie,
+    )
+    .json(&serde_json::json!({ "project_id": project_id, "title": title }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    created["id"].as_str().unwrap().to_string()
+}
+
+async fn transition(
+    client: &reqwest::Client,
+    server: &TestServer,
+    cookie: &str,
+    issue_id: &str,
+    status: &str,
+    close_reason: Option<&str>,
+) -> reqwest::Response {
+    let mut body = serde_json::json!({ "status": status });
+    if let Some(r) = close_reason {
+        body["close_reason"] = serde_json::json!(r);
+    }
+    authed_json(
+        client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{issue_id}/transition", server.addr),
+        cookie,
+    )
+    .json(&body)
+    .send()
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn full_transition_lifecycle_through_the_api() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "lifecycle").await;
+
+    for (status, reason, expect_status) in [
+        ("triaged", None, "triaged"),
+        ("ready_for_agent", None, "ready_for_agent"),
+        ("resolved", None, "resolved"),
+    ] {
+        let resp = transition(&client, &server, &cookie, &id, status, reason).await;
+        assert_eq!(resp.status(), 200, "transition to {status}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], expect_status);
+    }
+
+    let resp = transition(&client, &server, &cookie, &id, "closed", Some("fixed")).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "closed");
+    assert_eq!(body["close_reason"], "fixed");
+
+    // reopen — close_reason이 사라져야 한다.
+    let resp = transition(&client, &server, &cookie, &id, "open", None).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "open");
+    assert!(body.get("close_reason").is_none());
+}
+
+#[tokio::test]
+async fn disallowed_transition_returns_409() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "no shortcut").await;
+
+    // Open -> ReadyForAgent 간선은 없다(사람의 triage를 반드시 거친다).
+    let resp = transition(&client, &server, &cookie, &id, "ready_for_agent", None).await;
+    assert_eq!(resp.status(), 409);
+}
+
+#[tokio::test]
+async fn closing_without_a_reason_returns_409() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "needs reason").await;
+
+    let resp = transition(&client, &server, &cookie, &id, "closed", None).await;
+    assert_eq!(resp.status(), 409);
+}
+
+#[tokio::test]
+async fn promoting_to_ready_for_agent_requires_the_approval_capability() {
+    // 계약의 핵심 — issue:update만 가진 사람은 Agent 착수를 승인할 수 없다.
+    let (server, cookie, store, project) = spawn_issue_server(Some(&[
+        PermissionKind::IssueRead,
+        PermissionKind::IssueCreate,
+        PermissionKind::IssueUpdate,
+    ]))
+    .await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "gated").await;
+
+    // triage는 issue:update로 가능하다.
+    let resp = transition(&client, &server, &cookie, &id, "triaged", None).await;
+    assert_eq!(resp.status(), 200);
+
+    // 승인은 막힌다.
+    let resp = transition(&client, &server, &cookie, &id, "ready_for_agent", None).await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "issue:update alone must not authorize agent pickup"
+    );
+
+    // 저장된 상태도 그대로여야 한다.
+    let issue_id: fleet_core::IssueId = id.parse().unwrap();
+    assert_eq!(
+        store.get_issue(issue_id).await.unwrap().unwrap().status,
+        fleet_core::IssueStatus::Triaged
+    );
+}
+
+#[tokio::test]
+async fn withdrawing_approval_does_not_require_the_approval_capability() {
+    // 권한 회수가 부여보다 어려우면 잘못된 승인을 되돌리기가 더 힘들어진다.
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "withdraw").await;
+    transition(&client, &server, &cookie, &id, "triaged", None).await;
+    transition(&client, &server, &cookie, &id, "ready_for_agent", None).await;
+
+    // approve 권한이 없는 별도 세션으로는 만들 수 없으므로, 매핑 자체로
+    // 확인한다(위 단위 테스트와 짝) — 여기서는 전이가 실제로 동작하는지만.
+    let resp = transition(&client, &server, &cookie, &id, "triaged", None).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "triaged");
+}
+
+#[tokio::test]
+async fn closing_requires_close_capability_not_update() {
+    let (server, cookie, _store, project) = spawn_issue_server(Some(&[
+        PermissionKind::IssueRead,
+        PermissionKind::IssueCreate,
+        PermissionKind::IssueUpdate,
+    ]))
+    .await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "cannot close").await;
+
+    let resp = transition(&client, &server, &cookie, &id, "closed", Some("wont_fix")).await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "a typo-fixer must not be able to close a problem"
+    );
+}
+
+#[tokio::test]
+async fn patch_updates_fields_but_cannot_change_status() {
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "typo ttile").await;
+    transition(&client, &server, &cookie, &id, "triaged", None).await;
+
+    // status 필드를 본문에 끼워 넣어도 무시돼야 한다(스키마에 아예 없다).
+    let resp = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        &format!("http://{}/api/issues/{id}", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "title": "typo title",
+        "severity": "critical",
+        "status": "closed",
+        "close_reason": "fixed",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["title"], "typo title");
+    assert_eq!(body["severity"], "critical");
+    assert_eq!(
+        body["status"], "triaged",
+        "PATCH must not be able to change status"
+    );
+
+    let issue_id: fleet_core::IssueId = id.parse().unwrap();
+    let stored = store.get_issue(issue_id).await.unwrap().unwrap();
+    assert_eq!(stored.status, fleet_core::IssueStatus::Triaged);
+    assert_eq!(stored.close_reason, None);
+}
+
+#[tokio::test]
+async fn changing_assignee_requires_the_assign_capability() {
+    let (server, cookie, _store, project) = spawn_issue_server(Some(&[
+        PermissionKind::IssueRead,
+        PermissionKind::IssueCreate,
+        PermissionKind::IssueUpdate,
+    ]))
+    .await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "assign me").await;
+
+    // title만 바꾸는 건 통과.
+    let resp = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        &format!("http://{}/api/issues/{id}", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "title": "renamed" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // assignee를 건드리면 403.
+    let resp = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        &format!("http://{}/api/issues/{id}", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "assignee": "bob" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn comments_round_trip() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "discuss").await;
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{id}/comments", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "body": "first thought" }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let comments: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("http://{}/api/issues/{id}/comments", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["body"], "first thought");
+    assert_eq!(comments[0]["author"], "test_admin");
+}
+
+#[tokio::test]
+async fn linking_a_task_surfaces_the_derived_in_progress_badge() {
+    // "진행 중"은 파생 값이다 — Issue status는 그대로 두고
+    // has_active_tasks만 바뀐다.
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "has work").await;
+
+    let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: "do the work".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&task).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{id}/links", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "task_id": task.id.to_string() }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["created"],
+        true
+    );
+
+    let fetched: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/issues/{id}", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(fetched["has_active_tasks"], true);
+    assert_eq!(
+        fetched["status"], "open",
+        "a linked in-flight task must not change the stored status"
+    );
+
+    let links: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("http://{}/api/issues/{id}/links", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0]["task_label"], "do the work");
+
+    // 해제.
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!(
+            "http://{}/api/issues/{id}/links/{}",
+            server.addr, task.id
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["removed"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn issue_endpoints_require_read_permission() {
+    let (server, cookie, _store, _project) =
+        spawn_issue_server(Some(&[PermissionKind::DashboardView])).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/issues", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn issue_mutations_require_csrf() {
+    let (server, cookie, _store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/api/issues", server.addr))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .json(&serde_json::json!({
+            "project_id": project.id.to_string(),
+            "title": "no csrf",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

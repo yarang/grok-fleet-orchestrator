@@ -103,6 +103,12 @@ pub mod action {
     pub const PROJECT_ARCHIVE_REQUESTED: &str = "project.archive_requested";
     /// Project가 실제로 `Archived`에 도달함 (로드맵 #48).
     pub const PROJECT_ARCHIVED: &str = "project.archived";
+    /// Issue 생성 (로드맵 #92).
+    pub const ISSUE_CREATE: &str = "issue.create";
+    /// Issue 상태 전이 (로드맵 #92). `detail.to`에 목표 상태가 들어간다 —
+    /// `ready_for_agent`로의 전이는 Agent 자동 착수의 인가 지점이므로
+    /// 누가 승인했는지가 감사에 남아야 한다.
+    pub const ISSUE_TRANSITION: &str = "issue.transition";
 }
 
 /// 감사 로그 한 건.

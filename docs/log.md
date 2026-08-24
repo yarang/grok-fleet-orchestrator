@@ -1028,3 +1028,21 @@ last_verified: "2026-08-15"
 - **게이트 10(MemStore/PgStore 공유 행동)이 테스트 파일의 구조를 정했다**: 모든 시나리오를 `Arc<dyn Store>`를 받는 클로저로 쓰고 `both_backends!` 매크로로 두 백엔드에 각각 돌린다. `DATABASE_URL`이 없으면 PgStore 쪽만 skip되고 MemStore 쪽은 항상 실행되므로, 두 구현이 갈라지는 것을 DB 없는 CI에서도 절반은 잡는다. PgStore가 실제로 실행됐는지는 테스트 후 남은 행을 psql로 직접 조회해 확인했다(조용히 skip되어 "통과"로 보이는 위험이 이 저장소에 전례가 있다 — `integration.rs`의 `try_connect` 주석 참고).
 - 신규 테스트: `fleet-core::issue` 13건(전이표 전체를 훑어 허용 간선 집합이 계약 다이어그램과 정확히 일치하는지 확인하는 것 포함 — 간선을 하나 더 열거나 지우면 잡힌다), `crates/fleet-store/tests/issues.rs` 14건(11건은 두 백엔드 공유, 3건은 DB CHECK 전용).
 - 검증: `cargo check --workspace --all-features`, `cargo test --workspace`(99 스위트 전체 `ok`, 0 FAILED), `DATABASE_URL`+`FLEET_MCP_CAPABILITIES` 주입 재실행(사전 존재 버그 `unknown_tool_returns_error` 1건 제외 전체 통과 — `task_78be5260`으로 이미 분리됨), `cargo check --no-default-features`, `cargo clippy --all-targets --all-features` 경고 0.
+
+## 2026-08-24 — `#92`(Issue 표면) Issue 관리 HTTP API
+
+- 유형: `implementation` + `verification`
+- `#88`로 Issue 엔티티는 생겼지만 만들거나 볼 방법이 없었다 — `#48` 1단계 직후와 같은 상황이라 표면을 붙였다.
+- **`#92`를 갈라 진행한 근거**: 이 항목은 서로 독립인 두 도메인(AgentTemplate, Issue)을 "관리 표면"이라는 주제로만 묶은 것이다. Issue 쪽 선행(`#73`·`#88`)은 모두 완료됐고 AgentTemplate 쪽만 `#86`에 막혀 있어, 그 경계로 갈라 Issue만 먼저 노출했다. 항목 설명이 선행 조건으로 적어 둔 `ApiError`의 422/428/429 확장은 **필요하지 않았다** — 그 요구는 AgentTemplate revision의 낙관적 동시성(`If-Match` → 409/428)과 rate limit(429)에서 오는 것이고, Issue 표면은 400/403/404/409로 충분한데 기존 `ApiError`가 넷 다 갖고 있다. 확장을 "선행"이라고 적어 둔 것을 그대로 따랐다면 필요 없는 작업을 먼저 했을 것이다.
+- **상태 전이를 `PATCH`와 분리한 별도 endpoint로 만든 것이 이 표면의 핵심 설계다.** 목표 상태마다 요구 capability가 다르기 때문이며, 저장소 계층에서 이미 `update_issue_fields`/`transition_issue`로 갈라 둔 것(`#88`)과 같은 이유다. 매핑은 `handlers::required_capability_for_transition` 단일 함수가 소유하고 `pub`으로 노출했다 — MCP 표면이 생기면 그대로 재사용해 계약의 "두 표면 동일 동작" 요구를 구조적으로 만족시키기 위함이다(Project에서 `fleet_store::project_rules`로 했던 것과 같은 접근).
+- **전이별 capability 매핑에서 계약 해석이 갈린 두 지점**:
+  - **승인 철회(`ReadyForAgent → Triaged`)에 `issue:approve_agent_work`를 요구하지 않기로 했다.** 계약이 그 capability를 `Triaged → ReadyForAgent` 한 방향으로만 정의했고, 더 중요하게는 권한을 회수하는 쪽이 부여하는 쪽보다 어려우면 잘못된 승인을 되돌리기가 더 힘들어진다 — 안전한 방향으로 실패하지 않는 설계가 된다. `issue:update`로 매핑했다.
+  - **`→ Resolved`도 `issue:close`로 매핑했다.** capability 목록에 "resolve"가 없어 `update`와 `close` 중 골라야 했는데, `Resolved`는 텍스트 편집이 아니라 "이 문제가 처리됐다"는 판정이다. 계약이 close를 update에서 분리한 이유가 "오탈자 수정 권한이 문제 종결 권한을 함께 주면 안 된다"이고, 그 논리가 Resolved에도 그대로 적용된다.
+  - 두 결정 모두 테스트에 `assert_ne!`로 명시해 뒀다 — 나중에 누가 "당연히 approve겠지"/"당연히 update겠지"로 바꾸면 잡힌다.
+- `assignee` 변경만 `issue:assign`을 **추가로** 요구한다 — 다른 필드 수정에까지 요구하면 계약이 assign을 별도 capability로 분리한 의미가 없어진다. 요청 본문에 `assignee` 키가 있을 때만 검사한다.
+- `has_active_tasks`는 저장하지 않고 조회 시점에 계산해 응답에 싣는다 — `InProgress` 상태를 두지 않은 이유가 정확히 그것이며(`#88`), 표면에서도 그 원칙을 지켰다. Task를 연관지어도 Issue의 `status`는 그대로이고 배지만 켜지는 것을 테스트로 고정했다.
+- `Draining` Project에도 Issue를 만들 수 있게 했다 — 계약의 "`Draining` 중에도 Issue 쓰기는 허용하고 claim과 Issue→Task 생성만 막는다"를 따른다. 생성 시 Project **존재**만 확인하고 상태는 보지 않는다(Task 제출이 `active`를 요구하는 것과 의도적으로 다르다).
+- 신규 감사 액션 `issue.create`/`issue.transition`. 전이는 `detail.to`에 목표 상태를 남긴다 — `ready_for_agent` 승인은 Agent 자동 착수의 인가 지점이므로 누가 승인했는지가 감사에 남아야 한다.
+- 신규 테스트 16건: 전이별 capability 매핑을 계약과 대조하는 단위 테스트, 전체 lifecycle 왕복(Open→Triaged→ReadyForAgent→Resolved→Closed→reopen), 허용되지 않는 간선 409, 사유 없는 close 409, `issue:update`만 가진 principal이 승인·종결에 403을 받고 **저장된 상태도 안 바뀌는 것**, PATCH 본문에 `status`/`close_reason`을 끼워 넣어도 상태가 안 바뀌는 것, assignee만 추가 권한, 코멘트 왕복, Task 연관이 파생 배지를 켜되 status는 그대로, 연관 해제, read 권한 403, CSRF 403.
+- 검증: `cargo check --workspace --all-features`, `cargo test --workspace`(99 스위트 전체 `ok`, 0 FAILED), `DATABASE_URL`+`FLEET_MCP_CAPABILITIES` 주입 재실행(사전 존재 버그 `unknown_tool_returns_error` 1건 제외 전체 통과 — `task_78be5260`으로 이미 분리됨), `cargo check --no-default-features`, `cargo clippy --all-targets --all-features` 경고 0.
+- **남은 것**: AgentTemplate 표면(`#86` 선행), Issue의 MCP 표면, `issue:archive_hold_manage`(`#91` 선행), Dashboard UI 화면(`docs/ui-dashboard/ui-design.md` 소유 — 이번엔 JSON wire 표면만 냈다).

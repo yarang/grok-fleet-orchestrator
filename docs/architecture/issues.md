@@ -30,12 +30,35 @@ owners: ["architecture", "agent-platform", "security"]
 |---|---|---|
 | Agent가 여는 Issue (dedup key, `occurrence_count`, `origin_attempt_id`, `author_kind`) | `#89` | Worker control stream 보고 경로와 Attempt 행이 필요하다(`#67` 선행). 지금 컬럼만 만들면 항상 `NULL`인 죽은 컬럼이 된다 |
 | Agent backlog claim (claim lease, Project 예산, 계보 깊이 상한) | `#93` | Agent 자체가 없다 |
-| HTTP·MCP 관리 표면 | `#92` | 그 항목이 Issue 표면 노출을 소유한다 |
+| Issue의 MCP 표면 | `#92` | Dashboard HTTP 표면은 2026-08-24에 노출됐다(아래). MCP는 아직 — 설계상 Issue의 모든 전이가 사람의 행위이고 Agent/Worker에게는 어떤 issue capability도 부여하지 않으므로 자동화 표면의 우선순위가 낮다 |
+| AgentTemplate 표면 | `#86`, `#92` | AgentTemplate 엔티티 자체가 없다 |
 | `issue:archive_hold_manage` capability | `#91` | 토글 대상인 `project_archive_holds` 테이블이 없다 |
 
 구현 게이트 중 이번에 확인된 것은 2(교착 없음 3종 중 저장소 계층 2종), 3(`InProgress` 부재 —
 enum·`ALL`·DB CHECK 세 겹), 10(MemStore/PgStore 공유 행동)이다. 나머지 게이트는 위 표의 후속
 항목에 속한다.
+
+### Dashboard HTTP 표면 (`#92`, 2026-08-24)
+
+`GET/POST /api/issues`, `GET/PATCH /api/issues/{id}`, `POST /api/issues/{id}/transition`,
+`GET/POST /api/issues/{id}/comments`, `GET/POST /api/issues/{id}/links`,
+`DELETE /api/issues/{id}/links/{task_id}`.
+
+**상태 전이가 `PATCH`와 분리된 endpoint인 이유**: 목표 상태마다 요구 capability가 다르다.
+`fleet_dashboard::required_capability_for_transition`이 그 매핑의 단일 구현이며(MCP 표면이
+생기면 재사용한다), 아래 두 결정이 계약 해석의 핵심이다.
+
+- **승인 철회(`ReadyForAgent → Triaged`)는 `issue:approve_agent_work`를 요구하지 않는다.**
+  이 문서가 그 capability를 `Triaged → ReadyForAgent` 한 방향으로만 정의했고, 권한을 회수하는
+  쪽이 부여하는 쪽보다 어려우면 잘못된 승인을 되돌리기가 더 힘들어진다 — 안전한 방향으로
+  실패해야 한다.
+- **`→ Resolved`도 `issue:close`다.** `Resolved`는 텍스트 편집이 아니라 "이 문제가 처리됐다"는
+  판정이며, close를 update에서 분리한 이유("오탈자 수정 권한이 문제 종결 권한을 함께 주면 안
+  된다")가 그대로 적용된다.
+
+`assignee` 변경만 `issue:assign`을 **추가로** 요구한다. `has_active_tasks`는 저장하지 않고 조회
+시점에 계산해 응답에 싣는다(파생 배지). `Draining` Project의 Issue 쓰기는 허용한다 — 이 문서의
+"`Draining` 중에도 Issue 쓰기는 허용하고 claim과 Issue→Task 생성만 막는다"를 따른다.
 
 ## 결정
 

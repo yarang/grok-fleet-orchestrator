@@ -81,6 +81,125 @@ pub struct CreateProjectRequest {
     pub description: Option<String>,
 }
 
+// ── Issue (로드맵 #92, Issue 표면) ──────────────────────────────────────
+
+/// `/api/issues` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub body: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// **파생 값** — 비터미널 연관 Task가 있는지. `InProgress` 상태를 두지
+    /// 않은 이유가 이것이다(계약: "UI는 파생 배지로 표시하고 저장하지
+    /// 않는다"). 저장된 필드가 아니라 조회 시점에 계산한다.
+    pub has_active_tasks: bool,
+}
+
+impl IssueSummary {
+    /// `has_active_tasks`는 Store 조회가 필요해 호출부가 넘긴다 — 이 변환
+    /// 자체는 순수 함수로 남긴다.
+    pub fn from_issue(i: &fleet_core::Issue, has_active_tasks: bool) -> Self {
+        Self {
+            id: i.id.to_string(),
+            project_id: i.project_id.to_string(),
+            title: i.title.clone(),
+            body: i.body.clone(),
+            status: i.status.as_str().to_string(),
+            close_reason: i.close_reason.map(|r| r.as_str().to_string()),
+            severity: i.severity.as_str().to_string(),
+            labels: i.labels.clone(),
+            assignee: i.assignee.clone(),
+            created_by: i.created_by.clone(),
+            created_at: i.created_at,
+            updated_at: i.updated_at,
+            has_active_tasks,
+        }
+    }
+}
+
+/// `POST /api/issues` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateIssueRequest {
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+}
+
+/// `PATCH /api/issues/{id}` 요청 본문 — **상태는 바꿀 수 없다**.
+/// 상태 전이는 `POST /api/issues/{id}/transition`이 담당하며, 그쪽은
+/// 목표 상태별로 다른 capability를 요구한다.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateIssueRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub labels: Option<Vec<String>>,
+    /// `Some(None)`(JSON `null`)이면 assignee 해제, 생략이면 변경 없음.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<Option<String>>,
+}
+
+/// `POST /api/issues/{id}/transition` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TransitionIssueRequest {
+    pub status: String,
+    #[serde(default)]
+    pub close_reason: Option<String>,
+}
+
+/// `POST /api/issues/{id}/comments` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddIssueCommentRequest {
+    pub body: String,
+}
+
+/// `/api/issues/{id}/comments` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueCommentSummary {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /api/issues/{id}/links` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinkIssueTaskRequest {
+    pub task_id: String,
+}
+
+/// `/api/issues/{id}/links` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueTaskLinkSummary {
+    /// Task가 삭제되면 `None`이 되고 `task_label`만 남는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub task_label: String,
+    pub linked_by: String,
+    pub linked_at: DateTime<Utc>,
+}
+
 /// `/api/workers` 배열 요소.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerSummary {

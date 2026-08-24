@@ -34,4 +34,5 @@ pub mod sse;
 
 pub use app::{build_dashboard_app, run_dashboard_server, DashboardState};
 pub use auth::{AuthPrincipal, SESSION_COOKIE, SESSION_DURATION_SECS};
-pub use schema::{OverviewResponse, TaskSummary, WorkerSummary};
+pub use handlers::required_capability_for_transition;
+pub use schema::{IssueSummary, OverviewResponse, TaskSummary, WorkerSummary};

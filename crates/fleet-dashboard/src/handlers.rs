@@ -1198,6 +1198,475 @@ fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
         .map_err(|_| ApiError::BadRequest("invalid project id".into()))
 }
 
+// ── Issue (로드맵 #92, Issue 표면) ──────────────────────────────────────
+//
+// `#92`는 AgentTemplate 표면도 함께 소유하지만 그쪽은 `#86`(AgentTemplate
+// 엔티티)에 막혀 있다. 두 도메인은 "관리 표면"이라는 주제만 공유할 뿐
+// 서로 독립이므로 그 경계로 갈라 Issue 쪽만 먼저 노출한다.
+//
+// 상태 전이는 `PATCH`(필드 수정)와 **분리된** endpoint다 — 계약이
+// `issue:update`(오탈자 수정)와 `issue:close`(문제 종결)를 다른 capability로
+// 나눈 것을 표면에서도 유지하기 위함이며, 저장소 계층에서 이미
+// `update_issue_fields`/`transition_issue`로 갈라 둔 것과 같은 이유다.
+
+/// 목표 상태별로 요구되는 capability (로드맵 #92).
+///
+/// **이 함수가 Issue 표면의 보안 핵심이다.** 전이마다 위험도가 달라 하나의
+/// capability로 묶을 수 없다:
+///
+/// - `ReadyForAgent`로 올리는 것은 [Issue 계약](../../../docs/architecture/issues.md)이
+///   "Agent 자동 착수의 유일한 인가 지점"으로 못 박은 전이다 —
+///   `issue:approve_agent_work`를 요구한다.
+/// - **`ReadyForAgent`에서 내려오는 것(승인 철회)은 그 capability를 요구하지
+///   않는다.** 계약이 `approve_agent_work`를 `Triaged → ReadyForAgent`
+///   한 방향으로만 정의했고, 권한을 회수하는 쪽이 부여하는 쪽보다 어려우면
+///   잘못된 승인을 되돌리기가 더 힘들어진다 — 안전한 방향으로 실패해야 한다.
+/// - `Resolved`/`Closed`는 둘 다 "이 문제가 처리됐다"는 판정이므로
+///   `issue:close`다. 계약이 close를 update에서 분리한 이유가 "오탈자 수정
+///   권한이 문제 종결 권한을 함께 주면 안 된다"이고, `Resolved`도 문제 상태에
+///   대한 판정이지 텍스트 편집이 아니다.
+/// - `Open`으로 되돌리는 것은 `issue:reopen`.
+/// - `Triaged`(severity·labels·owner 지정)는 편집 성격이라 `issue:update`.
+pub fn required_capability_for_transition(to: fleet_core::IssueStatus) -> PermissionKind {
+    use fleet_core::IssueStatus::*;
+    match to {
+        ReadyForAgent => PermissionKind::IssueApproveAgentWork,
+        Resolved | Closed => PermissionKind::IssueClose,
+        Open => PermissionKind::IssueReopen,
+        Triaged => PermissionKind::IssueUpdate,
+    }
+}
+
+fn parse_issue_id(raw: &str) -> Result<fleet_core::IssueId, ApiError> {
+    raw.parse::<fleet_core::IssueId>()
+        .map_err(|_| ApiError::BadRequest("invalid issue id".into()))
+}
+
+fn parse_severity(raw: &str) -> Result<fleet_core::IssueSeverity, ApiError> {
+    fleet_core::IssueSeverity::parse_str(raw)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown severity: {raw}")))
+}
+
+/// Issue를 조회하고 파생 `has_active_tasks`까지 채워 응답 형태로 만든다.
+async fn issue_summary(
+    state: &DashboardState,
+    issue: &fleet_core::Issue,
+) -> Result<crate::schema::IssueSummary, ApiError> {
+    let has_active_tasks = state
+        .store
+        .issue_has_active_tasks(issue.id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+    Ok(crate::schema::IssueSummary::from_issue(issue, has_active_tasks))
+}
+
+async fn load_issue(
+    state: &DashboardState,
+    id: fleet_core::IssueId,
+) -> Result<fleet_core::Issue, ApiError> {
+    state
+        .store
+        .get_issue(id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("issue {id}")))
+}
+
+/// `GET /api/issues` — Project 범위 Issue 목록.
+#[derive(Debug, serde::Deserialize)]
+pub struct ListIssuesQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub open_only: Option<bool>,
+}
+
+pub async fn list_issues_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<ListIssuesQuery>,
+) -> Result<Json<Vec<crate::schema::IssueSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueRead)?;
+
+    let project_id = match query.project_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => Some(parse_project_id(raw)?),
+        None => None,
+    };
+    let status = match query.status.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => Some(
+            fleet_core::IssueStatus::parse_str(raw)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown issue status: {raw}")))?,
+        ),
+        None => None,
+    };
+
+    let issues = state
+        .store
+        .list_issues(&fleet_core::IssueFilter {
+            project_id,
+            status,
+            open_only: query.open_only.unwrap_or(false),
+            limit: 1000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(issues.len());
+    for issue in &issues {
+        out.push(issue_summary(&state, issue).await?);
+    }
+    Ok(Json(out))
+}
+
+/// `POST /api/issues` — Issue 생성. 항상 `Open`으로 시작한다.
+pub async fn create_issue_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<crate::schema::CreateIssueRequest>,
+) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueCreate)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let title = body.title.trim();
+    if title.is_empty() {
+        return Err(ApiError::BadRequest("title must not be empty".into()));
+    }
+    let project_id = parse_project_id(&body.project_id)?;
+
+    // Issue는 항상 Project 경계 안에 있다 — 존재하지 않는 Project를 가리키는
+    // Issue를 만들 수 없다. (Project 상태는 보지 않는다: 계약이 "`Draining`
+    // 중에도 Issue 쓰기는 허용하고 claim과 Issue→Task 생성만 막는다"고
+    // 명시했다.)
+    if state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .is_none()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "no such project: {project_id}"
+        )));
+    }
+
+    let mut issue = fleet_core::Issue::new(project_id, title, &principal.user.username);
+    if let Some(b) = body.body.as_deref() {
+        issue.body = b.to_string();
+    }
+    if let Some(sev) = body.severity.as_deref().filter(|s| !s.is_empty()) {
+        issue.severity = parse_severity(sev)?;
+    }
+    if let Some(labels) = body.labels {
+        issue.labels = labels;
+    }
+
+    state
+        .store
+        .create_issue(&issue)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("issue", issue.id.to_string())
+        .detail(serde_json::json!({ "project_id": project_id.to_string() })),
+    )
+    .await;
+
+    Ok(Json(issue_summary(&state, &issue).await?))
+}
+
+/// `GET /api/issues/:id`.
+pub async fn get_issue_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueRead)?;
+    let issue = load_issue(&state, parse_issue_id(&id)?).await?;
+    Ok(Json(issue_summary(&state, &issue).await?))
+}
+
+/// `PATCH /api/issues/:id` — title·body·severity·labels·assignee 수정.
+///
+/// **상태는 바꾸지 못한다** — `POST .../transition`이 담당한다.
+/// `assignee` 변경은 `issue:assign`을 추가로 요구한다(계약이 별도
+/// capability로 분리했다).
+pub async fn update_issue_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::UpdateIssueRequest>,
+) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueUpdate)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    // assignee를 건드리는 요청만 추가 권한을 요구한다 — 나머지 필드 수정에
+    // assign 권한을 함께 요구하면 계약의 capability 분리가 무의미해진다.
+    if body.assignee.is_some() {
+        require_permission(&principal, PermissionKind::IssueAssign)?;
+    }
+
+    let mut issue = load_issue(&state, parse_issue_id(&id)?).await?;
+
+    if let Some(title) = body.title.as_deref() {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(ApiError::BadRequest("title must not be empty".into()));
+        }
+        issue.title = title.to_string();
+    }
+    if let Some(b) = body.body {
+        issue.body = b;
+    }
+    if let Some(sev) = body.severity.as_deref().filter(|s| !s.is_empty()) {
+        issue.severity = parse_severity(sev)?;
+    }
+    if let Some(labels) = body.labels {
+        issue.labels = labels;
+    }
+    if let Some(assignee) = body.assignee {
+        issue.assignee = assignee.filter(|s| !s.trim().is_empty());
+    }
+
+    state
+        .store
+        .update_issue_fields(&issue)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    let issue = load_issue(&state, issue.id).await?;
+    Ok(Json(issue_summary(&state, &issue).await?))
+}
+
+/// `POST /api/issues/:id/transition` — 상태 전이.
+///
+/// 요구 capability는 **목표 상태에 따라 다르다** —
+/// [`required_capability_for_transition`] 참고.
+pub async fn transition_issue_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::TransitionIssueRequest>,
+) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
+    verify_csrf_header(&jar, &headers)?;
+
+    let to = fleet_core::IssueStatus::parse_str(&body.status)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown issue status: {}", body.status)))?;
+    require_permission(&principal, required_capability_for_transition(to))?;
+
+    let close_reason = match body.close_reason.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => Some(
+            fleet_core::CloseReason::parse_str(raw)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown close_reason: {raw}")))?,
+        ),
+        None => None,
+    };
+
+    let mut issue = load_issue(&state, parse_issue_id(&id)?).await?;
+
+    // 상태 기계 검증은 도메인 타입이 소유한다 — 허용되지 않는 간선과
+    // close_reason 정합성 위반은 409(lifecycle 위반)로 매핑한다.
+    issue
+        .transition_to(to, close_reason)
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+
+    state
+        .store
+        .transition_issue(issue.id, issue.status, issue.close_reason)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_TRANSITION,
+        )
+        .actor(principal.user.id)
+        .target("issue", issue.id.to_string())
+        .detail(serde_json::json!({
+            "to": to.as_str(),
+            "close_reason": close_reason.map(|r| r.as_str()),
+        })),
+    )
+    .await;
+
+    let issue = load_issue(&state, issue.id).await?;
+    Ok(Json(issue_summary(&state, &issue).await?))
+}
+
+/// `GET /api/issues/:id/comments`.
+pub async fn list_issue_comments_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::schema::IssueCommentSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueRead)?;
+    let issue_id = parse_issue_id(&id)?;
+    let comments = state
+        .store
+        .list_issue_comments(issue_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+    Ok(Json(
+        comments
+            .into_iter()
+            .map(|c| crate::schema::IssueCommentSummary {
+                id: c.id.to_string(),
+                author: c.author,
+                body: c.body,
+                created_at: c.created_at,
+            })
+            .collect(),
+    ))
+}
+
+/// `POST /api/issues/:id/comments`.
+pub async fn add_issue_comment_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::AddIssueCommentRequest>,
+) -> Result<Json<crate::schema::IssueCommentSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueComment)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let text = body.body.trim();
+    if text.is_empty() {
+        return Err(ApiError::BadRequest("comment body must not be empty".into()));
+    }
+
+    // 존재하지 않는 Issue에 코멘트를 남길 수 없다.
+    let issue = load_issue(&state, parse_issue_id(&id)?).await?;
+
+    let comment = fleet_core::IssueComment::new(issue.id, &principal.user.username, text);
+    state
+        .store
+        .add_issue_comment(&comment)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    Ok(Json(crate::schema::IssueCommentSummary {
+        id: comment.id.to_string(),
+        author: comment.author,
+        body: comment.body,
+        created_at: comment.created_at,
+    }))
+}
+
+/// `GET /api/issues/:id/links` — 연관된 Task 목록.
+pub async fn list_issue_links_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::schema::IssueTaskLinkSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueRead)?;
+    let links = state
+        .store
+        .list_issue_task_links(parse_issue_id(&id)?)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+    Ok(Json(
+        links
+            .into_iter()
+            .map(|l| crate::schema::IssueTaskLinkSummary {
+                task_id: l.task_id.map(|t| t.to_string()),
+                task_label: l.task_label,
+                linked_by: l.linked_by,
+                linked_at: l.linked_at,
+            })
+            .collect(),
+    ))
+}
+
+/// `POST /api/issues/:id/links` — Task 연관 추가 (멱등).
+pub async fn link_issue_task_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::LinkIssueTaskRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueLink)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let issue = load_issue(&state, parse_issue_id(&id)?).await?;
+    let task_id: fleet_core::TaskId = body
+        .task_id
+        .parse()
+        .map_err(|_| ApiError::BadRequest("invalid task id".into()))?;
+    let task = state
+        .store
+        .get_task(task_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::BadRequest(format!("no such task: {task_id}")))?;
+
+    // task_label은 Task가 삭제된 뒤에도 남는 표시 문자열이다 — prompt 앞부분을
+    // 쓰되 길이를 제한한다.
+    let label: String = task.prompt.chars().take(80).collect();
+
+    let created = state
+        .store
+        .link_issue_task(&fleet_core::IssueTaskLink {
+            issue_id: issue.id,
+            task_id: Some(task_id),
+            task_label: label,
+            linked_by: principal.user.username.clone(),
+            linked_at: Utc::now(),
+        })
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "issue_id": issue.id.to_string(),
+        "task_id": task_id.to_string(),
+        "created": created,
+    })))
+}
+
+/// `DELETE /api/issues/:id/links/:task_id` — Task 연관 해제.
+pub async fn unlink_issue_task_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path((id, task_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&principal, PermissionKind::IssueLink)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let issue_id = parse_issue_id(&id)?;
+    let task_id: fleet_core::TaskId = task_id
+        .parse()
+        .map_err(|_| ApiError::BadRequest("invalid task id".into()))?;
+
+    let removed = state
+        .store
+        .unlink_issue_task(issue_id, task_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
 /// 더블 서밋 CSRF 검증 (헤더 variant) — JSON body를 받는 API 전용.
 /// `logout`(form 없는 endpoint)과 동일한 패턴.
 fn verify_csrf_header(jar: &CookieJar, headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
