@@ -1528,3 +1528,296 @@ async fn delete_project_on_already_archived_project_is_a_harmless_noop() {
         assert_eq!(body["status"], "archived");
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Task 제출의 project_id 검증 (로드맵 #48, 2단계)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `spawn_server_with_dispatcher`와 동일하되 store 핸들도 함께 반환한다 —
+/// project를 시딩하고 제출된 task의 project_id를 되읽어야 하는 테스트용.
+async fn spawn_dispatcher_server_with_store(
+    store: MemStore,
+    worker: Worker,
+) -> (TestServer, String, Arc<dyn Store>) {
+    let (store, cookie) = seed_test_session(store).await;
+    let store = Arc::new(store) as Arc<dyn Store>;
+    store.upsert_worker(&worker).await.unwrap();
+
+    let transport = fleet_transport::MockTransport::new();
+    transport
+        .add_worker(fleet_transport::MockWorker::new(
+            worker.id,
+            worker.endpoint.clone(),
+        ))
+        .await;
+    let event_rx = fleet_transport::WorkerTransport::subscribe(&transport)
+        .await
+        .unwrap();
+    let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+
+    let fleet_state = Arc::new(fleet_scheduler::FleetState::new(
+        store.clone(),
+        transport,
+        fleet_core::CircuitBreakerConfig::default(),
+    ));
+    let dispatcher = Arc::new(fleet_scheduler::Dispatcher::new(fleet_state));
+    dispatcher.attach_event_receiver(event_rx).await;
+    let bg = dispatcher.clone();
+    tokio::spawn(async move {
+        bg.run_event_loop().await;
+    });
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(
+        store.clone(),
+        pool,
+        Some(dispatcher),
+    ));
+    let app = build_dashboard_app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+        store,
+    )
+}
+
+#[tokio::test]
+async fn submit_task_with_active_project_id_records_it_on_the_task() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let project = fleet_core::Project::new("acme-web");
+    store.create_project(&project).await.unwrap();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "scoped work"),
+            ("project_id", &project.id.to_string()),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let task_id: fleet_core::TaskId = body["task_id"].as_str().unwrap().parse().unwrap();
+
+    let stored = store.get_task(task_id).await.unwrap().unwrap();
+    assert_eq!(stored.project_id, Some(project.id));
+
+    // 응답 스키마로도 되읽을 수 있어야 한다 — 대시보드가 project_id를 설정할
+    // 수 있게 됐으니 보여줄 수도 있어야 한다.
+    let detail = authed_get(
+        &client,
+        &format!("http://{}/api/tasks/{task_id}", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+    assert_eq!(detail["task"]["project_id"], project.id.to_string());
+}
+
+#[tokio::test]
+async fn submit_task_with_unknown_project_id_is_rejected_and_creates_no_task() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "orphan work"),
+            ("project_id", &fleet_core::ProjectId::new().to_string()),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // 검증이 dispatch 이전이므로 태스크 행 자체가 만들어지면 안 된다.
+    let tasks = store
+        .list_tasks(&fleet_core::TaskFilter::default())
+        .await
+        .unwrap();
+    assert!(tasks.is_empty(), "no task should be created: {tasks:?}");
+}
+
+#[tokio::test]
+async fn submit_task_with_archived_project_id_is_rejected() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let mut project = fleet_core::Project::new("closed-shop");
+    project.status = fleet_core::ProjectStatus::Archived;
+    store.create_project(&project).await.unwrap();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "too late"),
+            ("project_id", &project.id.to_string()),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_with_malformed_project_id_is_rejected() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, _store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "bad id"),
+            ("project_id", "not-a-uuid"),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn reply_inherits_project_from_parent_task() {
+    // 로드맵 #48 2단계 — 이어가기는 같은 작업 흐름이므로 Project 경계도
+    // 물려받는다. 폼에 project_id를 다시 넣지 않아도 유지돼야 한다.
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let project = fleet_core::Project::new("continuing");
+    store.create_project(&project).await.unwrap();
+
+    // 부모: project_id를 명시해 제출한다. 직접 store에 넣지 않고 API를
+    // 거치는 이유는, 이어가기 경로가 실제 저장된 부모를 조회해 상속하기
+    // 때문이다.
+    let mut parent = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: "parent".into(),
+        created_by: "test_admin".into(),
+        project_id: Some(project.id),
+        ..Default::default()
+    });
+    parent.status = fleet_core::TaskStatus::Cancelled {
+        reason: "seeded terminal".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&parent).await.unwrap();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "이어서 해줘"),
+            ("parent_task_id", &parent.id.to_string()),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let reply_id: fleet_core::TaskId = body["task_id"].as_str().unwrap().parse().unwrap();
+
+    let reply = store.get_task(reply_id).await.unwrap().unwrap();
+    assert_eq!(
+        reply.project_id,
+        Some(project.id),
+        "a reply must stay inside the parent's project"
+    );
+}
+
+#[tokio::test]
+async fn reply_is_rejected_when_the_parents_project_has_since_been_archived() {
+    // 상속된 project_id도 명시 입력과 똑같이 검증 대상이다 — 닫힌 Project는
+    // 이어가기라 해도 새 Task를 받지 않는다.
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie, store) =
+        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let mut project = fleet_core::Project::new("archived-mid-thread");
+    store.create_project(&project).await.unwrap();
+
+    let mut parent = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: "parent".into(),
+        created_by: "test_admin".into(),
+        project_id: Some(project.id),
+        ..Default::default()
+    });
+    parent.status = fleet_core::TaskStatus::Cancelled {
+        reason: "seeded terminal".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&parent).await.unwrap();
+
+    // 부모 제출 이후 Project가 archive됐다.
+    project.status = fleet_core::ProjectStatus::Archived;
+    store
+        .update_project_status(project.id, fleet_core::ProjectStatus::Archived)
+        .await
+        .unwrap();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "이어서 해줘"),
+            ("parent_task_id", &parent.id.to_string()),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "continuing into an archived project must be refused"
+    );
+}

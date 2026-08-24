@@ -60,6 +60,16 @@
         </label>
 
         <label style="display:block;margin-bottom:16px;">
+          <span style="display:block;font-weight:600;margin-bottom:4px;">Project (optional)</span>
+          <select name="project_id" id="project-select" style="width:100%;box-sizing:border-box;">
+            <option value="">None — general pool</option>
+          </select>
+          <span id="project-hint" style="display:block;font-size:12px;color:var(--ink-muted-48);margin-top:4px;">
+            Groups this task under a development goal. Only projects accepting new tasks are listed — draining/archived ones are omitted.
+          </span>
+        </label>
+
+        <label style="display:block;margin-bottom:16px;">
           <span style="display:block;font-weight:600;margin-bottom:4px;">Custom instructions (optional)</span>
           <textarea name="custom_instructions" rows="3" placeholder="Extra rules/context prepended to the prompt (e.g. house coding style, output format)" style="width:100%;box-sizing:border-box;"></textarea>
           <span style="display:block;font-size:12px;color:var(--ink-muted-48);margin-top:4px;">

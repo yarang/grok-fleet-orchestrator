@@ -22,11 +22,16 @@ pub mod listener;
 #[cfg(feature = "test-support")]
 pub mod mem;
 pub mod postgres;
+pub mod project_rules;
 pub mod rbac;
 
 pub use error::StoreError;
 pub use listener::listen_events;
 pub use postgres::{PgStore, PoolConfig};
+pub use project_rules::{
+    advance_project_archive, ensure_project_accepts_new_tasks, ArchiveProgress,
+    ProjectAdmissionError,
+};
 pub use rbac::{
     consume_bootstrap_and_create_admin, issue_admin_bootstrap_token, seed_builtin_roles,
     seed_permissions, seed_rbac_and_maybe_issue_bootstrap, BootstrapAdminError,

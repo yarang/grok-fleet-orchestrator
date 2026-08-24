@@ -327,6 +327,7 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
         token_usage,
         thread_id: t.thread_id.to_string(),
         parent_task_id: t.parent_task_id.map(|id| id.to_string()),
+        project_id: t.project_id.map(|id| id.to_string()),
     }
 }
 
@@ -435,6 +436,12 @@ pub struct SubmitTaskForm {
     /// 사용자가 명시한 값 > 부모 태스크 값 > None.
     #[serde(default)]
     pub parent_task_id: Option<String>,
+    /// 이 태스크를 묶을 Project (문자열 UUID). 로드맵 #48 2단계 — MCP
+    /// `fleet_dispatch_task`와 동일하게 존재·상태를 검증한다. 비우면
+    /// 일반 풀 Task이며, 이어가기(`parent_task_id`)인 경우 부모의 Project를
+    /// 상속한다.
+    #[serde(default)]
+    pub project_id: Option<String>,
     #[serde(default)]
     pub csrf_token: String,
 }
@@ -507,6 +514,17 @@ pub async fn submit_task_api(
         None => None,
     };
 
+    // 로드맵 #48 2단계 — 폼에서 명시한 project_id를 파싱한다. 실제 존재·상태
+    // 검증은 부모 상속까지 끝난 뒤에 한다(아래) — 이어가기로 물려받은
+    // project_id도 명시 입력과 똑같이 검증 대상이기 때문이다.
+    let explicit_project_id = match form.project_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => Some(
+            raw.parse::<fleet_core::ProjectId>()
+                .map_err(|_| ApiError::BadRequest("invalid project_id".into()))?,
+        ),
+        None => None,
+    };
+
     let mut task = fleet_core::Task::from_request(fleet_core::TaskRequest {
         prompt: full_prompt,
         cwd: form.cwd.filter(|s| !s.is_empty()),
@@ -518,11 +536,31 @@ pub async fn submit_task_api(
         priority,
         created_by: principal.user.username.clone(),
         parent_task_id: None, // inherit_from_parent가 아래서 채운다.
+        project_id: explicit_project_id,
         ..Default::default()
     });
     if let Some(parent) = &parent_task {
         task.inherit_from_parent(parent);
     }
+
+    // 명시 입력이든 부모에서 상속했든, 최종 project_id를 검증한다 —
+    // 부모가 속한 Project가 그 사이 닫혔으면(Draining/Archived) 이어가기도
+    // 거절돼야 한다. 검증 규칙은 MCP `fleet_dispatch_task`와 공유한다
+    // (`fleet_store::ensure_project_accepts_new_tasks`).
+    if let Some(project_id) = task.project_id {
+        fleet_store::ensure_project_accepts_new_tasks(state.store.as_ref(), project_id)
+            .await
+            .map_err(|e| match e {
+                fleet_store::ProjectAdmissionError::NotFound(_)
+                | fleet_store::ProjectAdmissionError::NotAccepting { .. } => {
+                    ApiError::BadRequest(e.to_string())
+                }
+                fleet_store::ProjectAdmissionError::Store(inner) => {
+                    ApiError::Store(inner.to_string())
+                }
+            })?;
+    }
+
     let task_id = task.id;
 
     match dispatcher.submit(task).await {
@@ -1123,43 +1161,33 @@ pub async fn delete_project_api(
         .map_err(|e| ApiError::Store(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound(format!("project {id}")))?;
 
-    if project.status == fleet_core::ProjectStatus::Active {
-        state
-            .store
-            .update_project_status(project_id, fleet_core::ProjectStatus::Draining)
-            .await
-            .map_err(|e| ApiError::Store(e.to_string()))?;
-        project.status = fleet_core::ProjectStatus::Draining;
+    // archive 절차는 MCP `fleet_delete_project`와 공유한다
+    // (`fleet_store::advance_project_archive`) — 계약 문서가 두 표면의 동일
+    // 동작을 요구하므로 규칙을 각자 구현하지 않는다. 상태 전이는 콜백으로
+    // 받아 이 표면의 감사 파이프라인에 기록한다.
+    let mut transitions = Vec::new();
+    fleet_store::advance_project_archive(state.store.as_ref(), &mut project, |status| {
+        transitions.push(status)
+    })
+    .await
+    .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    for status in transitions {
+        let action = match status {
+            fleet_core::ProjectStatus::Draining => {
+                fleet_core::audit::action::PROJECT_ARCHIVE_REQUESTED
+            }
+            fleet_core::ProjectStatus::Archived => fleet_core::audit::action::PROJECT_ARCHIVED,
+            // advance_project_archive는 Active로 되돌리지 않는다.
+            fleet_core::ProjectStatus::Active => continue,
+        };
         crate::audit::record(
             &state,
-            fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_ARCHIVE_REQUESTED)
+            fleet_core::AuditEvent::success(&principal.user.username, action)
                 .actor(principal.user.id)
                 .target("project", project.id.to_string()),
         )
         .await;
-    }
-
-    if project.status == fleet_core::ProjectStatus::Draining {
-        let has_active_tasks = state
-            .store
-            .project_has_active_tasks(project_id)
-            .await
-            .map_err(|e| ApiError::Store(e.to_string()))?;
-        if !has_active_tasks {
-            state
-                .store
-                .update_project_status(project_id, fleet_core::ProjectStatus::Archived)
-                .await
-                .map_err(|e| ApiError::Store(e.to_string()))?;
-            project.status = fleet_core::ProjectStatus::Archived;
-            crate::audit::record(
-                &state,
-                fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_ARCHIVED)
-                    .actor(principal.user.id)
-                    .target("project", project.id.to_string()),
-            )
-            .await;
-        }
     }
 
     Ok(Json(crate::schema::ProjectSummary::from(&project)))

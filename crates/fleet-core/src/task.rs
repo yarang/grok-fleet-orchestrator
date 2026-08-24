@@ -189,6 +189,18 @@ impl Task {
         if self.model.is_none() {
             self.model = parent.model.clone();
         }
+        // 로드맵 #48 2단계 — 이어가기는 같은 작업 흐름의 연속이므로 Project
+        // 경계도 물려받는다. 그러지 않으면 한 thread가 절반은 Project 안,
+        // 절반은 일반 풀에 걸쳐 Project 경계의 의미가 사라진다.
+        //
+        // **호출부 주의**: 상속된 `project_id`도 명시 입력과 똑같이 검증
+        // 대상이다 — 부모가 속한 Project가 그 사이 `Draining`/`Archived`가
+        // 됐을 수 있고, 그 경우 이어가기는 거절돼야 한다(닫힌 Project는 새
+        // Task를 받지 않는다). 이 메서드는 값을 채우기만 하고 검증하지
+        // 않는다.
+        if self.project_id.is_none() {
+            self.project_id = parent.project_id;
+        }
     }
 
     /// 작업이 종료 상태(Completed/Failed/Cancelled)인지 여부.
@@ -519,6 +531,70 @@ mod tests {
         // cwd/model은 명시하지 않았으므로 부모에서 상속.
         assert_eq!(reply.cwd, parent.cwd);
         assert_eq!(reply.model, parent.model);
+    }
+
+    // 로드맵 #48 2단계 — 이어가기는 Project 경계도 물려받는다.
+    #[test]
+    fn inherit_from_parent_adopts_project_id() {
+        let project_id = ProjectId::new();
+        let parent = Task::from_request(TaskRequest {
+            prompt: "parent".into(),
+            created_by: "admin@org".into(),
+            project_id: Some(project_id),
+            ..Default::default()
+        });
+
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "이어서".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(reply.project_id, Some(project_id));
+    }
+
+    #[test]
+    fn inherit_from_parent_does_not_override_explicit_project_id() {
+        let parent_project = ProjectId::new();
+        let explicit_project = ProjectId::new();
+        let parent = Task::from_request(TaskRequest {
+            prompt: "parent".into(),
+            created_by: "admin@org".into(),
+            project_id: Some(parent_project),
+            ..Default::default()
+        });
+
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "다른 project로".into(),
+            created_by: "admin@org".into(),
+            project_id: Some(explicit_project),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(
+            reply.project_id,
+            Some(explicit_project),
+            "an explicitly supplied project_id must win over the parent's"
+        );
+    }
+
+    #[test]
+    fn inherit_from_parent_leaves_project_id_none_when_parent_has_none() {
+        let parent = Task::from_request(TaskRequest {
+            prompt: "일반 풀 parent".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "이어서".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(reply.project_id, None);
     }
 
     #[test]

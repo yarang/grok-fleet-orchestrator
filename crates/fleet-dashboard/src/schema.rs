@@ -131,6 +131,9 @@ pub struct TaskSummary {
     /// "이어가기(Reply)"라면 직전 태스크의 id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    /// 이 태스크가 묶인 Project (로드맵 #48 2단계). 일반 풀 Task면 없음.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════

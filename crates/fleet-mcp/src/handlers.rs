@@ -124,24 +124,20 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
 
             // 로드맵 #48 1단계 — 지금까지 project_id는 저장만 되고 아무도
             // 검증하지 않는 순수 메타데이터였다. 여기서 처음으로 실제 존재·
-            // 상태 확인을 건다: 없는 project를 가리키거나, 이미 새 Task를
-            // 받지 않는 상태(Draining/Archived)면 제출 자체를 거절한다.
-            let project = ctx
-                .state
-                .store
-                .get_project(project_id)
+            // 상태 확인을 건다. 검증 규칙은 Dashboard `POST /api/tasks`와
+            // 공유한다(`fleet_store::ensure_project_accepts_new_tasks`) —
+            // 계약 문서가 두 표면의 동일 동작을 요구한다.
+            fleet_store::ensure_project_accepts_new_tasks(ctx.state.store.as_ref(), project_id)
                 .await
-                .map_err(|e| JsonRpcError::internal(format!("failed to look up project: {e}")))?
-                .ok_or_else(|| {
-                    JsonRpcError::invalid_params(format!("no such project: {project_id}"))
+                .map_err(|e| match e {
+                    fleet_store::ProjectAdmissionError::NotFound(_)
+                    | fleet_store::ProjectAdmissionError::NotAccepting { .. } => {
+                        JsonRpcError::invalid_params(e.to_string())
+                    }
+                    fleet_store::ProjectAdmissionError::Store(inner) => {
+                        JsonRpcError::internal(format!("failed to look up project: {inner}"))
+                    }
                 })?;
-            if !project.status.accepts_new_tasks() {
-                return Err(JsonRpcError::invalid_params(format!(
-                    "project '{}' is {} and does not accept new tasks",
-                    project.name,
-                    project.status.as_str()
-                )));
-            }
 
             Some(project_id)
         }
@@ -1006,33 +1002,12 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
         return Ok(schema::tool_error("project not found"));
     };
 
-    // 로드맵 #48 1단계 — Dashboard의 delete_project_api와 동일한 idempotent
-    // archive 절차. Active → Draining → (비종료 Task 없으면) Archived.
-    if project.status == fleet_core::ProjectStatus::Active {
-        ctx.state
-            .store
-            .update_project_status(project_id, fleet_core::ProjectStatus::Draining)
-            .await
-            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
-        project.status = fleet_core::ProjectStatus::Draining;
-    }
-
-    if project.status == fleet_core::ProjectStatus::Draining {
-        let has_active_tasks = ctx
-            .state
-            .store
-            .project_has_active_tasks(project_id)
-            .await
-            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
-        if !has_active_tasks {
-            ctx.state
-                .store
-                .update_project_status(project_id, fleet_core::ProjectStatus::Archived)
-                .await
-                .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
-            project.status = fleet_core::ProjectStatus::Archived;
-        }
-    }
+    // archive 절차는 Dashboard `DELETE /api/projects/{id}`와 공유한다
+    // (`fleet_store::advance_project_archive`). MCP 표면에는 아직 감사
+    // 파이프라인이 없어 상태 전이 콜백은 무시한다 — 감사 확장은 `#95`.
+    fleet_store::advance_project_archive(ctx.state.store.as_ref(), &mut project, |_| {})
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
     Ok(schema::tool_json(&project_json(&project)))
 }

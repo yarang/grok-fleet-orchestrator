@@ -62,7 +62,7 @@ Project가 Task 하나를 제출했다고 Agent process를 계속 상주시켜�
 
 `task.project_id`가 있으면 해당 Project의 Agent와 정책을 통해서만 실행한다. 후보 Worker는 Project capability·격리·slot 조건으로 선택하며, 후보가 없더라도 일반 풀 context로 폴백하지 않는다. 이 경우의 재시도, 최종 실패, dead-letter 처리는 [실행 일관성](tasks/execution-consistency.md)의 `WorkerUnavailable` 경로를 따른다. `project_id`가 없는 Task는 기존 일반 풀 선택 규칙을 그대로 따른다.
 
-**1단계(#48, 완료) 구현**: 이 절의 자격 검증(Project capability·격리·slot 조건으로 Worker 후보를 제한하는 것)은 아직 없다 — Agent가 없어 "Project의 Agent"라는 개념 자체가 성립하지 않는다. 지금 실제로 검증하는 건 제출 시점 하나뿐이다: `project_id`가 존재하지 않거나 해당 Project가 `active`가 아니면(`draining`/`archived`) 제출 자체를 거절한다(HTTP `POST /api/tasks`는 아직 project_id 입력을 받지 않고, MCP `fleet_dispatch_task`만 이 검증을 거친다). 통과한 Task는 여전히 기존 일반 풀 선택 규칙 그대로 dispatch된다 — Project는 지금은 "누가 이 Task를 만들 권한이 있었나"를 기록하는 태그일 뿐, 실행 후보를 좁히지 않는다.
+**1·2단계(#48, 완료) 구현**: 이 절의 자격 검증(Project capability·격리·slot 조건으로 Worker 후보를 제한하는 것)은 아직 없다 — Agent가 없어 "Project의 Agent"라는 개념 자체가 성립하지 않는다. 지금 실제로 검증하는 건 제출 시점 하나뿐이다: `project_id`가 존재하지 않거나 해당 Project가 `active`가 아니면(`draining`/`archived`) 제출 자체를 거절한다. **2단계로 이 검증이 두 표면 모두에 적용된다** — Dashboard `POST /api/tasks`와 MCP `fleet_dispatch_task`가 `fleet_store::ensure_project_accepts_new_tasks` 한 구현을 공유한다(계약 문서가 요구하는 "Dashboard와 MCP의 동일한 권한·오류 응답"). 이어가기(`parent_task_id`)는 부모의 Project 경계를 상속하며, 상속된 값도 명시 입력과 똑같이 검증한다 — 부모의 Project가 그 사이 닫혔으면 이어가기도 거절된다. 통과한 Task는 여전히 기존 일반 풀 선택 규칙 그대로 dispatch된다 — Project는 지금은 "이 Task가 어느 개발 목표에 속하는가"를 기록하는 경계일 뿐, 실행 후보를 좁히지 않는다.
 
 Project가 `Draining`이면 새 Task, 새 Agent, 새 자원 배정을 받지 않는다. `Archived` 전이와 보존·정리 순서는 [Lifecycle 계약](project-task-agent-lifecycle.md)을 따른다.
 

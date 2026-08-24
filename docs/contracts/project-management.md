@@ -53,13 +53,19 @@ process cleanup은 그 대상 자체가 아직 없다) — 게이트를 통과�
 | `fleet_list_projects` | 선택 `limit`, `offset` | 구현됨 |
 | `fleet_delete_project` | `project_id` | 구현됨 (Dashboard `DELETE`와 동일한 1단계 축소판) |
 | `fleet_update_project_policy` | `project_id`, revision, agent 상한·worker eligibility | 권한 승인 전 차단 |
-| `fleet_dispatch_task` 확장 | 선택 `project_id` | 구현됨 — **1단계로 저장·조회를 넘어 검증까지 한다**: 존재하지 않거나 `active`가 아닌 `project_id`는 제출 자체를 거절한다(아래 참고) |
+| `fleet_dispatch_task` 확장 | 선택 `project_id` | 구현됨 — 저장·조회를 넘어 검증까지 한다: 존재하지 않거나 `active`가 아닌 `project_id`는 제출 자체를 거절한다(아래 참고) |
 
 Host/Worker 배정 MCP 도구는 범위에 포함하지 않는다. `fleet_dispatch_task`의 선택 `project_id`는
-1단계부터 존재·상태 검증을 수행한다 — "현재 저장·조회만 지원"이라던 이전 상태는 지났다. 다만
-검증을 통과한 뒤의 실제 dispatch는 여전히 project 무관 일반 풀 규칙을 그대로 쓴다(policy·Agent
-admission은 아직 적용되지 않는다) — [Project 모델](../architecture/project-feature-design.md)의
-"디스패치 자격" 절 참고.
+존재·상태 검증을 수행한다 — "현재 저장·조회만 지원"이라던 이전 상태는 지났다. 다만 검증을 통과한
+뒤의 실제 dispatch는 여전히 project 무관 일반 풀 규칙을 그대로 쓴다(policy·Agent admission은 아직
+적용되지 않는다) — [Project 모델](../architecture/project-feature-design.md)의 "디스패치 자격" 절
+참고.
+
+**두 표면의 동일 동작 보장(2단계)**: Task 제출 시 `project_id` 검증과 archive 진행 절차는
+`fleet_store::project_rules`(`ensure_project_accepts_new_tasks` / `advance_project_archive`)에 한 번만
+구현돼 있고, Dashboard와 MCP 핸들러는 그 결과를 각자의 에러 타입(HTTP `ApiError` / JSON-RPC
+`JsonRpcError`)으로 옮기기만 한다 — 규칙을 표면마다 따로 구현해 시간이 지나며 갈라지는 것을
+구조적으로 막는다.
 
 ## 활성화 게이트
 
@@ -72,5 +78,5 @@ policy revision)가 없어 해당하지 않는다 — 대신 1단계 자체의 �
 - Project 데이터와 agent slot·Worker lease 불변식의 저장·통합 테스트 — **미해당(Agent 없음)**
 - `ProjectPolicyManage`로 `AgentCreate`를 우회할 수 없다는 권한 테스트 — **미해당(두 capability 다 없음)**
 - Project의 capability·slot 조건 부재 시 일반 풀 context로 폴백하지 않는 디스패치 테스트 — **미해당(그 자격 검증 자체가 아직 없음 — 지금은 애초에 project 무관 일반 풀 규칙만 있다)**
-- Dashboard와 MCP의 동일한 권한·오류 응답 검증 — 1단계 범위에서 확인됨(둘 다 `project:{read,create,delete}` 사용, 존재/상태 검증 동일)
+- Dashboard와 MCP의 동일한 권한·오류 응답 검증 — 확인됨(둘 다 `project:{read,create,delete}` 사용). 2단계에서 검증·archive 규칙을 `fleet_store::project_rules`로 단일화해 구조적으로 보장한다
 - 목록 pagination·caller Project scope와 삭제 lifecycle의 revision/충돌 검증 — pagination(limit/offset)은 확인됨; Project scope(호출자가 자기 Project만 보는 것)는 아직 모든 인증된 호출자가 전체 Project를 본다(RBAC의 Project 단위 scope는 미구현); revision/충돌은 정책 revision 자체가 없어 미해당

@@ -30,6 +30,34 @@
       } catch (e) { console.error('populateModelOptions', e); }
     }
 
+    // 새 Task를 받을 수 있는 Project만 드롭다운에 올린다 (로드맵 #48).
+    // draining/archived Project를 고르면 서버가 어차피 400으로 거절하므로,
+    // 고를 수 없게 하는 편이 낫다. project:read 권한이 없으면 403이 오고
+    // 그 경우 드롭다운은 "None"만 남는다 — 권한 없는 사용자에게 존재하지도
+    // 않는 선택지를 보여주지 않는다.
+    async function populateProjectOptions() {
+      const select = document.getElementById('project-select');
+      const hint = document.getElementById('project-hint');
+      try {
+        const resp = await fetch('api/projects');
+        if (!resp.ok) {
+          if (hint && resp.status === 403) hint.textContent = 'You do not have permission to list projects — this task will go to the general pool.';
+          return;
+        }
+        const projects = await resp.json();
+        const open = (projects || []).filter((p) => p.status === 'active');
+        for (const p of open.sort((a, b) => a.name.localeCompare(b.name))) {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = p.name;
+          select.appendChild(opt);
+        }
+        if (open.length === 0 && hint) {
+          hint.textContent = 'No project is currently accepting new tasks — this task will go to the general pool.';
+        }
+      } catch (e) { console.error('populateProjectOptions', e); }
+    }
+
     document.getElementById('task-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const form = e.target;
@@ -84,6 +112,7 @@
     });
 
     populateModelOptions();
+    populateProjectOptions();
 
     // SSE
     const pill = document.getElementById('status-pill');
