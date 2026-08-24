@@ -1630,6 +1630,19 @@ pub async fn link_issue_task_api(
         .map_err(|e| ApiError::Store(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest(format!("no such task: {task_id}")))?;
 
+    // Project 경계 검사 (#58): `issue:link`는 호출자의 Project 범위를 검사하지
+    // 않으므로, project_id가 다른 Task를 그대로 받아들이면 다른 Project의
+    // Task 존재·label을 이 Issue를 통해 열람할 수 있는 confused-deputy가
+    // 열린다. 일반 풀 Task(`project_id: None`)는 애초에 어느 Project에도
+    // 속하지 않으므로 대상이 아니다 — 계속 링크를 허용한다(기존 동작·시험과
+    // 일치). 존재하지 않는 Task와 **동일한 오류**로 거절해 "다른 Project
+    // 소속"이라는 사실 자체를 노출하지 않는다.
+    if let Some(task_project_id) = task.project_id {
+        if task_project_id != issue.project_id {
+            return Err(ApiError::BadRequest(format!("no such task: {task_id}")));
+        }
+    }
+
     // task_label은 Task가 삭제된 뒤에도 남는 표시 문자열이다 — prompt 앞부분을
     // 쓰되 길이를 제한한다.
     let label: String = task.prompt.chars().take(80).collect();

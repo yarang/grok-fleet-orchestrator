@@ -2346,6 +2346,88 @@ async fn linking_a_task_surfaces_the_derived_in_progress_badge() {
     );
 }
 
+/// `#58`: `issue:link`는 호출자의 Project 범위를 검사하지 않으므로, 다른
+/// Project 소속 Task를 링크로 끌어올 수 있으면 그 Task의 존재·label을
+/// 노출하는 confused-deputy가 열린다. 이 시험은 그 경로가 막혀 있는지,
+/// 그리고 거절 응답이 "Task 없음"과 구분되지 않는지(존재 은닉) 확인한다.
+#[tokio::test]
+async fn linking_a_task_from_another_project_is_rejected_like_a_missing_task() {
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "scoped").await;
+
+    // 같은 task_id를 두 세계 상태(존재하지 않음 → 다른 Project에 존재함)에
+    // 재사용한다. 호출자가 어차피 아는 값(자기가 보낸 task_id)을 응답이
+    // 그대로 반향하는 것은 정보 노출이 아니다 — 증명해야 할 것은 그 id가
+    // "없다"와 "다른 Project 소속이다" 두 경우에 **동일한** 응답을 낳는다는
+    // 것이므로, id를 고정하고 세계 상태만 바꿔 바이트 단위로 비교한다.
+    let task_id = fleet_core::TaskId::new();
+
+    let missing_resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{id}/links", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "task_id": task_id.to_string() }))
+    .send()
+    .await
+    .unwrap();
+    let missing_status = missing_resp.status();
+    let missing_body: serde_json::Value = missing_resp.json().await.unwrap();
+
+    let other_project = fleet_core::Project::new("other-project");
+    store.create_project(&other_project).await.unwrap();
+    let mut foreign_task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: "belongs to the other project".into(),
+        created_by: "test".into(),
+        project_id: Some(other_project.id),
+        ..Default::default()
+    });
+    foreign_task.id = task_id;
+    foreign_task.thread_id = task_id;
+    store.insert_task(&foreign_task).await.unwrap();
+
+    let cross_project_resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{id}/links", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "task_id": task_id.to_string() }))
+    .send()
+    .await
+    .unwrap();
+    let cross_project_status = cross_project_resp.status();
+    let cross_project_body: serde_json::Value = cross_project_resp.json().await.unwrap();
+
+    assert_eq!(missing_status, 400);
+    assert_eq!(
+        cross_project_status, missing_status,
+        "a task in another project must be rejected the same way as one that does not exist"
+    );
+    assert_eq!(
+        cross_project_body, missing_body,
+        "the error body must not reveal that the task exists in a different project"
+    );
+
+    let links: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("http://{}/api/issues/{id}/links", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(
+        links.is_empty(),
+        "the rejected link must not have been persisted"
+    );
+}
+
 #[tokio::test]
 async fn issue_endpoints_require_read_permission() {
     let (server, cookie, _store, _project) =
