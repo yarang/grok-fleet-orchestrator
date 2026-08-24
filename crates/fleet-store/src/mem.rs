@@ -28,8 +28,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use fleet_core::{
-    AuditEvent, AuditFilter, BootstrapToken, EmailVerificationToken, EventEntry, FleetEvent, Host,
-    HostEvent, LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId,
+    AuditEvent, AuditFilter, BootstrapToken, CloseReason, EmailVerificationToken, EventEntry,
+    FleetEvent, Host, HostEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus,
+    IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId,
     ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId, TaskOutput,
     TaskOutputChunk, TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter,
     WorkerHeartbeat, WorkerId,
@@ -71,6 +72,9 @@ pub struct MemStore {
     ssh_keys: Mutex<HashMap<String, SshKey>>,
     control_leases: Mutex<HashMap<String, ControlLease>>,
     projects: Mutex<HashMap<ProjectId, Project>>,
+    issues: Mutex<HashMap<IssueId, Issue>>,
+    issue_comments: Mutex<Vec<IssueComment>>,
+    issue_task_links: Mutex<Vec<IssueTaskLink>>,
     /// 실패 주입 대상 메서드 이름 집합 — `check`/`record` 자체가 아니라
     /// 테스트 셋업 편의를 위한 것이므로 트레이트 밖 필드.
     failing: Mutex<HashSet<&'static str>>,
@@ -1417,6 +1421,137 @@ impl Store for MemStore {
             t.project_id == Some(project_id)
                 && matches!(t.status, TaskStatus::Pending | TaskStatus::Dispatched { .. })
         }))
+    }
+
+    // ── Issue (로드맵 #88) ────────────────────────────────────────────
+
+    async fn create_issue(&self, issue: &Issue) -> Result<(), StoreError> {
+        self.issues.lock().unwrap().insert(issue.id, issue.clone());
+        Ok(())
+    }
+
+    async fn get_issue(&self, id: IssueId) -> Result<Option<Issue>, StoreError> {
+        Ok(self.issues.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>, StoreError> {
+        let issues = self.issues.lock().unwrap();
+        let mut out: Vec<Issue> = issues
+            .values()
+            .filter(|i| match filter.project_id {
+                Some(p) => i.project_id == p,
+                None => true,
+            })
+            .filter(|i| match filter.status {
+                Some(s) => i.status == s,
+                None => true,
+            })
+            .filter(|i| !filter.open_only || i.status.is_open())
+            .cloned()
+            .collect();
+        out.sort_by_key(|i| std::cmp::Reverse(i.created_at));
+        let limit = filter.limit.max(1);
+        Ok(out.into_iter().skip(filter.offset).take(limit).collect())
+    }
+
+    async fn update_issue_fields(&self, issue: &Issue) -> Result<bool, StoreError> {
+        let mut issues = self.issues.lock().unwrap();
+        match issues.get_mut(&issue.id) {
+            Some(stored) => {
+                // PgStore와 동일하게 status/close_reason은 건드리지 않는다.
+                stored.title = issue.title.clone();
+                stored.body = issue.body.clone();
+                stored.severity = issue.severity;
+                stored.labels = issue.labels.clone();
+                stored.assignee = issue.assignee.clone();
+                stored.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn transition_issue(
+        &self,
+        id: IssueId,
+        status: IssueStatus,
+        close_reason: Option<CloseReason>,
+    ) -> Result<bool, StoreError> {
+        let mut issues = self.issues.lock().unwrap();
+        match issues.get_mut(&id) {
+            Some(issue) => {
+                issue.status = status;
+                issue.close_reason = close_reason;
+                issue.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn add_issue_comment(&self, comment: &IssueComment) -> Result<(), StoreError> {
+        self.issue_comments.lock().unwrap().push(comment.clone());
+        Ok(())
+    }
+
+    async fn list_issue_comments(&self, issue_id: IssueId) -> Result<Vec<IssueComment>, StoreError> {
+        let comments = self.issue_comments.lock().unwrap();
+        let mut out: Vec<IssueComment> = comments
+            .iter()
+            .filter(|c| c.issue_id == issue_id)
+            .cloned()
+            .collect();
+        out.sort_by_key(|c| c.created_at);
+        Ok(out)
+    }
+
+    async fn link_issue_task(&self, link: &IssueTaskLink) -> Result<bool, StoreError> {
+        let mut links = self.issue_task_links.lock().unwrap();
+        // PgStore의 `(issue_id, task_id)` 유니크 인덱스와 같은 멱등성.
+        if links
+            .iter()
+            .any(|l| l.issue_id == link.issue_id && l.task_id.is_some() && l.task_id == link.task_id)
+        {
+            return Ok(false);
+        }
+        links.push(link.clone());
+        Ok(true)
+    }
+
+    async fn unlink_issue_task(
+        &self,
+        issue_id: IssueId,
+        task_id: TaskId,
+    ) -> Result<bool, StoreError> {
+        let mut links = self.issue_task_links.lock().unwrap();
+        let before = links.len();
+        links.retain(|l| !(l.issue_id == issue_id && l.task_id == Some(task_id)));
+        Ok(links.len() != before)
+    }
+
+    async fn list_issue_task_links(
+        &self,
+        issue_id: IssueId,
+    ) -> Result<Vec<IssueTaskLink>, StoreError> {
+        let links = self.issue_task_links.lock().unwrap();
+        let mut out: Vec<IssueTaskLink> = links
+            .iter()
+            .filter(|l| l.issue_id == issue_id)
+            .cloned()
+            .collect();
+        out.sort_by_key(|l| l.linked_at);
+        Ok(out)
+    }
+
+    async fn issue_has_active_tasks(&self, issue_id: IssueId) -> Result<bool, StoreError> {
+        let links = self.issue_task_links.lock().unwrap();
+        let tasks = self.tasks.lock().unwrap();
+        Ok(links
+            .iter()
+            .filter(|l| l.issue_id == issue_id)
+            .filter_map(|l| l.task_id)
+            .filter_map(|tid| tasks.get(&tid))
+            .any(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Dispatched { .. })))
     }
 }
 

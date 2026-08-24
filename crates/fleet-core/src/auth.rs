@@ -426,6 +426,34 @@ pub enum PermissionKind {
     /// — [`crate::project::ProjectStatus`] 참고.
     #[serde(rename = "project:delete")]
     ProjectDelete,
+    // Issue (로드맵 #88). `issue:archive_hold_manage`는 아직 만들지 않는다 —
+    // 그 대상인 `project_archive_holds` 테이블이 없다(`#91`). 없는 것을
+    // 토글하는 capability를 미리 만들면 항상 도달 불가능한 권한이 된다.
+    #[serde(rename = "issue:read")]
+    IssueRead,
+    #[serde(rename = "issue:create")]
+    IssueCreate,
+    #[serde(rename = "issue:comment")]
+    IssueComment,
+    /// title·body·labels·severity 수정. **종결 권한을 포함하지 않는다** —
+    /// 오탈자 수정 권한이 문제 종결 권한을 함께 주면 안 되므로
+    /// [`PermissionKind::IssueClose`]와 분리했다.
+    #[serde(rename = "issue:update")]
+    IssueUpdate,
+    #[serde(rename = "issue:assign")]
+    IssueAssign,
+    /// `Triaged → ReadyForAgent` 전이 — **Agent 자동 착수의 유일한 인가
+    /// 지점**(`#93`). 사람만 가질 수 있으며 Agent/Worker에게는 어떤 경로로도
+    /// 부여하지 않는다. 자동 작업 생성의 관문이므로 반드시 별도 capability다.
+    #[serde(rename = "issue:approve_agent_work")]
+    IssueApproveAgentWork,
+    #[serde(rename = "issue:close")]
+    IssueClose,
+    #[serde(rename = "issue:reopen")]
+    IssueReopen,
+    /// Task 연관 추가·해제.
+    #[serde(rename = "issue:link")]
+    IssueLink,
     // 시스템
     #[serde(rename = "events:list")]
     EventsList,
@@ -467,6 +495,15 @@ impl PermissionKind {
             Self::ProjectRead => "project:read",
             Self::ProjectCreate => "project:create",
             Self::ProjectDelete => "project:delete",
+            Self::IssueRead => "issue:read",
+            Self::IssueCreate => "issue:create",
+            Self::IssueComment => "issue:comment",
+            Self::IssueUpdate => "issue:update",
+            Self::IssueAssign => "issue:assign",
+            Self::IssueApproveAgentWork => "issue:approve_agent_work",
+            Self::IssueClose => "issue:close",
+            Self::IssueReopen => "issue:reopen",
+            Self::IssueLink => "issue:link",
             Self::EventsList => "events:list",
             Self::MetricsView => "metrics:view",
         }
@@ -505,6 +542,15 @@ impl PermissionKind {
             Self::ProjectRead,
             Self::ProjectCreate,
             Self::ProjectDelete,
+            Self::IssueRead,
+            Self::IssueCreate,
+            Self::IssueComment,
+            Self::IssueUpdate,
+            Self::IssueAssign,
+            Self::IssueApproveAgentWork,
+            Self::IssueClose,
+            Self::IssueReopen,
+            Self::IssueLink,
             Self::EventsList,
             Self::MetricsView,
         ]

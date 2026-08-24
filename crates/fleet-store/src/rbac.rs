@@ -96,6 +96,17 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::ProjectRead => "List/read projects",
         PermissionKind::ProjectCreate => "Create projects",
         PermissionKind::ProjectDelete => "Archive projects (request draining, not permanent delete)",
+        PermissionKind::IssueRead => "List/read issues within a project",
+        PermissionKind::IssueCreate => "Open new issues",
+        PermissionKind::IssueComment => "Append comments to issues",
+        PermissionKind::IssueUpdate => "Edit issue title, body, labels, and severity",
+        PermissionKind::IssueAssign => "Change an issue's assignee",
+        PermissionKind::IssueApproveAgentWork => {
+            "Approve an issue for agent pickup (Triaged -> ReadyForAgent)"
+        }
+        PermissionKind::IssueClose => "Close issues with a reason",
+        PermissionKind::IssueReopen => "Reopen closed or resolved issues",
+        PermissionKind::IssueLink => "Link and unlink tasks to issues",
         PermissionKind::EventsList => "List events",
         PermissionKind::MetricsView => "View metrics",
     }

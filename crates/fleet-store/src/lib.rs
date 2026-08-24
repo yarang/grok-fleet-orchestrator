@@ -40,7 +40,8 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Permission,
+    AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry, FleetEvent, Issue,
+    IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
     PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
     Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
     WorkerFilter, WorkerHeartbeat, WorkerId,
@@ -857,6 +858,93 @@ pub trait Store: Send + Sync {
     /// cleanup 증거)는 그 하부 구조가 생기기 전까지 없다.
     async fn project_has_active_tasks(&self, _project_id: ProjectId) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("project_has_active_tasks"))
+    }
+
+    // ── Issue (로드맵 #88) ────────────────────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — 다른 신규 trait method들과 같은 관례.
+    //
+    // **여기에 "Task 상태를 보는" 메서드는 없다**(불변식 I2) — Issue의
+    // close에는 Task 상태에 대한 선행 조건이 없다. 반대로 Task 쪽 메서드도
+    // Issue를 읽지 않는다(I1). 두 방향 모두 비어 있어야 교착이 없다.
+
+    async fn create_issue(&self, _issue: &Issue) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_issue"))
+    }
+
+    async fn get_issue(&self, _id: IssueId) -> Result<Option<Issue>, StoreError> {
+        Err(StoreError::Unsupported("get_issue"))
+    }
+
+    async fn list_issues(&self, _filter: &IssueFilter) -> Result<Vec<Issue>, StoreError> {
+        Err(StoreError::Unsupported("list_issues"))
+    }
+
+    /// 상태 외 필드(title·body·labels·severity·assignee) 갱신.
+    ///
+    /// 상태 전이는 [`Store::transition_issue`]가 따로 담당한다 — `issue:update`
+    /// (오탈자 수정)와 `issue:close`(문제 종결)를 다른 capability로 분리한
+    /// 계약을 저장소 API 수준에서도 갈라 둬, 호출부가 실수로 한 메서드에
+    /// 둘 다 태우지 못하게 한다.
+    async fn update_issue_fields(&self, _issue: &Issue) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("update_issue_fields"))
+    }
+
+    /// 검증된 상태 전이를 영속화한다. 전이 유효성은 호출부가
+    /// [`fleet_core::Issue::transition_to`]로 이미 확인한 상태로 들어온다 —
+    /// 이 메서드는 `(status, close_reason)`을 함께 쓰는 것만 보장한다(DB의
+    /// CHECK 제약이 둘의 정합성을 다시 강제한다).
+    async fn transition_issue(
+        &self,
+        _id: IssueId,
+        _status: IssueStatus,
+        _close_reason: Option<CloseReason>,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("transition_issue"))
+    }
+
+    async fn add_issue_comment(&self, _comment: &IssueComment) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("add_issue_comment"))
+    }
+
+    async fn list_issue_comments(
+        &self,
+        _issue_id: IssueId,
+    ) -> Result<Vec<IssueComment>, StoreError> {
+        Err(StoreError::Unsupported("list_issue_comments"))
+    }
+
+    /// Issue와 Task를 연관짓는다. 이미 연관돼 있으면 `false`(멱등).
+    async fn link_issue_task(&self, _link: &IssueTaskLink) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("link_issue_task"))
+    }
+
+    async fn unlink_issue_task(
+        &self,
+        _issue_id: IssueId,
+        _task_id: TaskId,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("unlink_issue_task"))
+    }
+
+    async fn list_issue_task_links(
+        &self,
+        _issue_id: IssueId,
+    ) -> Result<Vec<IssueTaskLink>, StoreError> {
+        Err(StoreError::Unsupported("list_issue_task_links"))
+    }
+
+    /// 이 Issue에 연관된 비터미널 Task가 있는지 — UI의 "진행 중" **파생**
+    /// 배지용이다(로드맵 `#88`).
+    ///
+    /// **이 값을 Issue 상태로 저장하지 않는다.** `InProgress` 상태를 두지
+    /// 않은 이유가 정확히 이것이다 — 저장하는 순간 Task 상태의 복제본이
+    /// 생기고 두 상태 머신이 경쟁한다. 읽기 전용 유도 값으로만 쓴다.
+    ///
+    /// I2를 깨지 않는다: 이 메서드는 close 경로가 호출하지 않으며, Issue
+    /// 전이의 어떤 선행 조건도 아니다.
+    async fn issue_has_active_tasks(&self, _issue_id: IssueId) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("issue_has_active_tasks"))
     }
 }
 

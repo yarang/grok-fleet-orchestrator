@@ -23,11 +23,12 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, EventEntry, FleetEvent,
-    Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId,
-    ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskOutputChunk,
-    TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId, WorkerStatus,
+    AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry,
+    FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus,
+    IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter,
+    ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -2258,7 +2259,217 @@ impl Store for PgStore {
         .await?;
         Ok(exists)
     }
+
+    // ── Issue (로드맵 #88) ────────────────────────────────────────────
+
+    async fn create_issue(&self, issue: &Issue) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO issues
+                (id, project_id, title, body, status, close_reason, severity, labels,
+                 assignee, created_by, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(issue.id.0)
+        .bind(issue.project_id.0)
+        .bind(&issue.title)
+        .bind(&issue.body)
+        .bind(issue.status.as_str())
+        .bind(issue.close_reason.map(|r| r.as_str()))
+        .bind(issue.severity.as_str())
+        .bind(serde_json::to_value(&issue.labels)?)
+        .bind(issue.assignee.as_ref())
+        .bind(&issue.created_by)
+        .bind(issue.created_at)
+        .bind(issue.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_issue(&self, id: IssueId) -> Result<Option<Issue>, StoreError> {
+        let row = sqlx::query(&format!("{ISSUE_SELECT_COLS} WHERE id = $1"))
+            .bind(id.0)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(row_to_issue).transpose()
+    }
+
+    async fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>, StoreError> {
+        let limit = filter.limit.clamp(1, 1000) as i64;
+        let offset = filter.offset as i64;
+        let rows = sqlx::query(&format!(
+            "{ISSUE_SELECT_COLS} \
+              WHERE ($1::uuid IS NULL OR project_id = $1) \
+                AND ($2::text IS NULL OR status = $2) \
+                AND (NOT $3::bool OR status <> 'closed') \
+              ORDER BY created_at DESC LIMIT $4 OFFSET $5"
+        ))
+        .bind(filter.project_id.map(|p| p.0))
+        .bind(filter.status.map(|s| s.as_str()))
+        .bind(filter.open_only)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_issue).collect()
+    }
+
+    async fn update_issue_fields(&self, issue: &Issue) -> Result<bool, StoreError> {
+        // status/close_reason은 의도적으로 건드리지 않는다 — 상태 전이는
+        // `transition_issue`만 수행한다(`issue:update`와 `issue:close`의
+        // capability 분리를 저장소 API에서도 유지).
+        let result = sqlx::query(
+            r#"
+            UPDATE issues
+               SET title = $2, body = $3, severity = $4, labels = $5,
+                   assignee = $6, updated_at = NOW()
+             WHERE id = $1
+            "#,
+        )
+        .bind(issue.id.0)
+        .bind(&issue.title)
+        .bind(&issue.body)
+        .bind(issue.severity.as_str())
+        .bind(serde_json::to_value(&issue.labels)?)
+        .bind(issue.assignee.as_ref())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn transition_issue(
+        &self,
+        id: IssueId,
+        status: IssueStatus,
+        close_reason: Option<CloseReason>,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE issues SET status = $2, close_reason = $3, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(status.as_str())
+        .bind(close_reason.map(|r| r.as_str()))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn add_issue_comment(&self, comment: &IssueComment) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO issue_comments (id, issue_id, author, body, created_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(comment.id)
+        .bind(comment.issue_id.0)
+        .bind(&comment.author)
+        .bind(&comment.body)
+        .bind(comment.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_issue_comments(&self, issue_id: IssueId) -> Result<Vec<IssueComment>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, issue_id, author, body, created_at FROM issue_comments \
+              WHERE issue_id = $1 ORDER BY created_at",
+        )
+        .bind(issue_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let issue_id: Uuid = row.try_get("issue_id")?;
+                Ok(IssueComment {
+                    id: row.try_get("id")?,
+                    issue_id: IssueId(issue_id),
+                    author: row.try_get("author")?,
+                    body: row.try_get("body")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn link_issue_task(&self, link: &IssueTaskLink) -> Result<bool, StoreError> {
+        // `ON CONFLICT DO NOTHING`으로 멱등 — 유니크 인덱스
+        // `(issue_id, task_id)`가 중복을 막는다.
+        let result = sqlx::query(
+            "INSERT INTO issue_task_links (issue_id, task_id, task_label, linked_by, linked_at) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        )
+        .bind(link.issue_id.0)
+        .bind(link.task_id.map(|t| t.0))
+        .bind(&link.task_label)
+        .bind(&link.linked_by)
+        .bind(link.linked_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn unlink_issue_task(
+        &self,
+        issue_id: IssueId,
+        task_id: TaskId,
+    ) -> Result<bool, StoreError> {
+        let result =
+            sqlx::query("DELETE FROM issue_task_links WHERE issue_id = $1 AND task_id = $2")
+                .bind(issue_id.0)
+                .bind(task_id.0)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_issue_task_links(
+        &self,
+        issue_id: IssueId,
+    ) -> Result<Vec<IssueTaskLink>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT issue_id, task_id, task_label, linked_by, linked_at FROM issue_task_links \
+              WHERE issue_id = $1 ORDER BY linked_at",
+        )
+        .bind(issue_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let issue_id: Uuid = row.try_get("issue_id")?;
+                let task_id: Option<Uuid> = row.try_get("task_id")?;
+                Ok(IssueTaskLink {
+                    issue_id: IssueId(issue_id),
+                    task_id: task_id.map(TaskId),
+                    task_label: row.try_get("task_label")?,
+                    linked_by: row.try_get("linked_by")?,
+                    linked_at: row.try_get("linked_at")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn issue_has_active_tasks(&self, issue_id: IssueId) -> Result<bool, StoreError> {
+        // 파생 "진행 중" 배지 전용 — 이 값을 Issue 상태로 저장하지 않는다
+        // (`InProgress` 부재의 이유). `project_has_active_tasks`와 같은
+        // `status_phase` 생성 칼럼을 쓴다.
+        let (exists,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS( \
+               SELECT 1 FROM issue_task_links l \
+                 JOIN tasks t ON t.id = l.task_id \
+                WHERE l.issue_id = $1 AND t.status_phase IN ('pending', 'dispatched'))",
+        )
+        .bind(issue_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
 }
+
+const ISSUE_SELECT_COLS: &str = "SELECT id, project_id, title, body, status, close_reason, \
+                                        severity, labels, assignee, created_by, created_at, updated_at \
+                                   FROM issues";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  행 → 도메인 변환 헬퍼
@@ -2392,6 +2603,40 @@ fn row_to_bootstrap_token(row: sqlx::postgres::PgRow) -> Result<BootstrapToken, 
         notes,
         last_used_by,
         last_used_at,
+    })
+}
+
+fn row_to_issue(row: sqlx::postgres::PgRow) -> Result<Issue, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let project_id: Uuid = row.try_get("project_id")?;
+    let status_str: String = row.try_get("status")?;
+    let status = IssueStatus::parse_str(&status_str)
+        .ok_or_else(|| StoreError::Decode(format!("unknown issue status in DB: {status_str}")))?;
+    let close_reason_str: Option<String> = row.try_get("close_reason")?;
+    let close_reason = close_reason_str
+        .map(|s| {
+            CloseReason::parse_str(&s)
+                .ok_or_else(|| StoreError::Decode(format!("unknown close_reason in DB: {s}")))
+        })
+        .transpose()?;
+    let severity_str: String = row.try_get("severity")?;
+    let severity = IssueSeverity::parse_str(&severity_str).ok_or_else(|| {
+        StoreError::Decode(format!("unknown issue severity in DB: {severity_str}"))
+    })?;
+    let labels_json: serde_json::Value = row.try_get("labels")?;
+    Ok(Issue {
+        id: IssueId(id),
+        project_id: ProjectId(project_id),
+        title: row.try_get("title")?,
+        body: row.try_get("body")?,
+        status,
+        close_reason,
+        severity,
+        labels: serde_json::from_value(labels_json)?,
+        assignee: row.try_get("assignee")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
 

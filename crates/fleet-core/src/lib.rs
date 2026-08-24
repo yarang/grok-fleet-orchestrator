@@ -33,6 +33,7 @@ pub mod error;
 pub mod events;
 pub mod host;
 pub mod ids;
+pub mod issue;
 pub mod project;
 pub mod task;
 pub mod worker;
@@ -49,7 +50,11 @@ pub use config::{validate_env_with, validate_orchestrator_env, CircuitBreakerCon
 pub use error::{FleetError, Result, SelectionError};
 pub use events::{EventEntry, FleetEvent};
 pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus, SshKey, SshKeySummary};
-pub use ids::{ProjectId, TaskId, WorkerId};
+pub use ids::{IssueId, ProjectId, TaskId, WorkerId};
+pub use issue::{
+    CloseReason, Issue, IssueComment, IssueFilter, IssueSeverity, IssueStatus, IssueTaskLink,
+    TransitionError,
+};
 pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
     FailureKind, Labels, Task, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPriority,

@@ -27,6 +27,12 @@ pub struct WorkerId(pub Uuid);
 #[repr(transparent)]
 pub struct ProjectId(pub Uuid);
 
+/// Issue 식별자 (로드맵 #88). Project가 해결해야 할 일감 하나를 가리킨다 —
+/// 인프라 장애 추적이 아니다([Issue 추적 계약](../../../docs/architecture/issues.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct IssueId(pub Uuid);
+
 // ── TaskId ───────────────────────────────────────────────────────────────
 
 impl TaskId {
@@ -180,6 +186,55 @@ impl Serialize for ProjectId {
 }
 
 impl<'de> Deserialize<'de> for ProjectId {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Uuid::deserialize(de).map(Self)
+    }
+}
+
+// ── IssueId ──────────────────────────────────────────────────────────────
+
+impl IssueId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for IssueId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for IssueId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for IssueId {
+    fn from(u: Uuid) -> Self {
+        Self(u)
+    }
+}
+
+impl FromStr for IssueId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
+impl Serialize for IssueId {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for IssueId {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         Uuid::deserialize(de).map(Self)
     }

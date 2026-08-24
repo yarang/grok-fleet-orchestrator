@@ -1,11 +1,11 @@
 ---
 type: architecture-decision
 authority: canonical
-implementation: proposed
-verification: design-reviewed
+implementation: partial
+verification: code-checked
 source: "docs/architecture/issues.md"
-last_verified: "2026-08-23"
-last_verified_commit: "5080352"
+last_verified: "2026-08-24"
+last_verified_commit: "working-tree"
 owners: ["architecture", "agent-platform", "security"]
 ---
 
@@ -16,6 +16,26 @@ owners: ["architecture", "agent-platform", "security"]
 이 문서는 **프로젝트가 해결해야 할 일감을 관리하는 이슈 트래커**를 정의한다. orchestrator의
 인프라 장애 추적이 아니다 — 워커 도달 불가, credential 미프로비저닝 같은 운영 사건은 alert이며
 [관측성·재조정](observability-and-reconciliation.md)이 소유한다.
+
+## 구현 상태 (2026-08-24)
+
+**`#88` 완료 — 엔티티·상태 머신·연관까지.** `crates/fleet-core/src/issue.rs`(`Issue`,
+`IssueStatus`, `CloseReason`, `IssueSeverity`, `IssueComment`, `IssueTaskLink`), migration
+`023_issues.sql`(`issues`/`issue_comments`/`issue_task_links` — **`tasks`에 `issue_id` 컬럼은
+추가하지 않았다**), `Store`의 Issue 메서드 10종(PgStore+MemStore), capability 9종.
+
+아직인 것과 그 이유:
+
+| 범위 | 로드맵 | 왜 아직인가 |
+|---|---|---|
+| Agent가 여는 Issue (dedup key, `occurrence_count`, `origin_attempt_id`, `author_kind`) | `#89` | Worker control stream 보고 경로와 Attempt 행이 필요하다(`#67` 선행). 지금 컬럼만 만들면 항상 `NULL`인 죽은 컬럼이 된다 |
+| Agent backlog claim (claim lease, Project 예산, 계보 깊이 상한) | `#93` | Agent 자체가 없다 |
+| HTTP·MCP 관리 표면 | `#92` | 그 항목이 Issue 표면 노출을 소유한다 |
+| `issue:archive_hold_manage` capability | `#91` | 토글 대상인 `project_archive_holds` 테이블이 없다 |
+
+구현 게이트 중 이번에 확인된 것은 2(교착 없음 3종 중 저장소 계층 2종), 3(`InProgress` 부재 —
+enum·`ALL`·DB CHECK 세 겹), 10(MemStore/PgStore 공유 행동)이다. 나머지 게이트는 위 표의 후속
+항목에 속한다.
 
 ## 결정
 
