@@ -30,7 +30,7 @@ owners: ["architecture", "agent-platform", "security"]
 |---|---|---|
 | Agent가 여는 Issue (dedup key, `occurrence_count`, `origin_attempt_id`, `author_kind`) | `#89` | Worker control stream 보고 경로와 Attempt 행이 필요하다(`#67` 선행). 지금 컬럼만 만들면 항상 `NULL`인 죽은 컬럼이 된다 |
 | Agent backlog claim (claim lease, Project 예산, 계보 깊이 상한) | `#93` | Agent 자체가 없다 |
-| Issue의 MCP 표면 | `#92` | Dashboard HTTP 표면은 2026-08-24에 노출됐다(아래). MCP는 아직 — 설계상 Issue의 모든 전이가 사람의 행위이고 Agent/Worker에게는 어떤 issue capability도 부여하지 않으므로 자동화 표면의 우선순위가 낮다 |
+| ~~Issue의 MCP 표면~~ | `#92` | **완료 (2026-08-24)** — `fleet_list_issues`/`fleet_create_issue`/`fleet_transition_issue`/`fleet_comment_issue`. 전이별 요구 capability는 Dashboard와 같은 `fleet_core::required_capability_for_transition`을 쓴다 |
 | AgentTemplate 표면 | `#86`, `#92` | AgentTemplate 엔티티 자체가 없다 |
 | `issue:archive_hold_manage` capability | `#91` | 토글 대상인 `project_archive_holds` 테이블이 없다 |
 
@@ -59,6 +59,24 @@ enum·`ALL`·DB CHECK 세 겹), 10(MemStore/PgStore 공유 행동)이다. 나머
 `assignee` 변경만 `issue:assign`을 **추가로** 요구한다. `has_active_tasks`는 저장하지 않고 조회
 시점에 계산해 응답에 싣는다(파생 배지). `Draining` Project의 Issue 쓰기는 허용한다 — 이 문서의
 "`Draining` 중에도 Issue 쓰기는 허용하고 claim과 Issue→Task 생성만 막는다"를 따른다.
+
+### MCP 표면 (`#92`, 2026-08-24)
+
+`fleet_list_issues`, `fleet_create_issue`, `fleet_transition_issue`, `fleet_comment_issue`.
+Dashboard와 **같은 규칙**을 쓴다 — 상태 기계는 `fleet_core::Issue::transition_to`, 전이별 요구
+capability는 `fleet_core::required_capability_for_transition`이다. 규칙을 `fleet-core`에 둔 이유는
+`IssueStatus`와 `PermissionKind` 둘 다 거기 있고 Store 조회가 필요 없는 순수 함수여서, 두 표면이
+같은 구현을 참조하면 활성화 게이트의 "두 표면 동일 동작"이 구조적으로 보장되기 때문이다.
+
+**인자 의존 인가**: `fleet_transition_issue`는 요구 capability가 목표 상태에 따라 달라, MCP
+서버의 `required_permission` 도구-이름 행렬로는 판정할 수 없다. 두 단계로 나눴다 —
+`permits_tool`은 "전이 권한을 하나라도 가졌는가"로 **도구 노출만** 결정하고(하나도 없으면 도구
+자체가 `tools/list`에 나오지 않는다), **정확한 판정은 핸들러**가 `ToolContext.capabilities`로
+한다. 그래서 `issue:update`만 가진 launcher는 triage는 할 수 있지만 agent 승인·종결은 거절되며,
+거절 메시지가 어떤 capability가 없는지 명시한다.
+
+`ToolContext.capabilities`의 기본값은 **빈 집합**이다(fail-closed) — 명시적으로 부여하지 않으면
+인자 의존 도구는 전부 거절된다.
 
 ## 결정
 

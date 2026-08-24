@@ -38,6 +38,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::PermissionKind;
 use crate::ids::{IssueId, ProjectId, TaskId};
 
 /// Issue 상태.
@@ -98,6 +99,38 @@ impl IssueStatus {
     /// dedup 부분 유니크 인덱스(`#89`)의 술어와 같은 정의다.
     pub fn is_open(self) -> bool {
         !matches!(self, Self::Closed)
+    }
+}
+
+/// 목표 상태로 전이하는 데 필요한 capability (로드맵 #92).
+///
+/// **표면(Dashboard HTTP·MCP)이 공유하는 단일 구현이다.** [Issue 추적 계약](../../../docs/architecture/issues.md)의
+/// 활성화 게이트가 "두 표면의 동일한 권한·오류 응답"을 요구하므로, 규칙을
+/// 표면마다 따로 두면 시간이 지나며 갈라진다. `fleet-core`에 있는 이유는
+/// [`IssueStatus`]와 [`PermissionKind`] 둘 다 여기 있고 Store 조회가 전혀
+/// 필요 없는 순수 함수이기 때문이다.
+///
+/// 전이마다 위험도가 달라 하나의 capability로 묶을 수 없다:
+///
+/// - `ReadyForAgent`로 **올리는** 것은 계약이 "Agent 자동 착수의 유일한 인가
+///   지점"으로 못 박은 전이다 — [`PermissionKind::IssueApproveAgentWork`].
+/// - **`ReadyForAgent`에서 내려오는 것(승인 철회)은 그 capability를 요구하지
+///   않는다.** 계약이 `approve_agent_work`를 `Triaged → ReadyForAgent` 한
+///   방향으로만 정의했고, 권한을 회수하는 쪽이 부여하는 쪽보다 어려우면
+///   잘못된 승인을 되돌리기가 더 힘들어진다 — 안전한 방향으로 실패해야 한다.
+/// - `Resolved`/`Closed`는 둘 다 "이 문제가 처리됐다"는 판정이므로
+///   [`PermissionKind::IssueClose`]다. 계약이 close를 update에서 분리한 이유가
+///   "오탈자 수정 권한이 문제 종결 권한을 함께 주면 안 된다"이고, `Resolved`도
+///   텍스트 편집이 아니라 문제 상태에 대한 판정이다.
+/// - `Open`으로 되돌리는 것은 [`PermissionKind::IssueReopen`].
+/// - `Triaged`(severity·labels·owner 지정)는 편집 성격이라
+///   [`PermissionKind::IssueUpdate`].
+pub fn required_capability_for_transition(to: IssueStatus) -> PermissionKind {
+    match to {
+        IssueStatus::ReadyForAgent => PermissionKind::IssueApproveAgentWork,
+        IssueStatus::Resolved | IssueStatus::Closed => PermissionKind::IssueClose,
+        IssueStatus::Open => PermissionKind::IssueReopen,
+        IssueStatus::Triaged => PermissionKind::IssueUpdate,
     }
 }
 

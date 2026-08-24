@@ -54,6 +54,14 @@ pub const TOOL_CREATE_PROJECT: &str = "fleet_create_project";
 pub const TOOL_LIST_PROJECTS: &str = "fleet_list_projects";
 /// Project archive 요청 도구 (로드맵 #48, 1단계). 영구 삭제가 아니다.
 pub const TOOL_DELETE_PROJECT: &str = "fleet_delete_project";
+/// Issue 목록 조회 도구 (로드맵 #92).
+pub const TOOL_LIST_ISSUES: &str = "fleet_list_issues";
+/// Issue 생성 도구 (로드맵 #92).
+pub const TOOL_CREATE_ISSUE: &str = "fleet_create_issue";
+/// Issue 상태 전이 도구 (로드맵 #92). 목표 상태마다 요구 capability가 다르다.
+pub const TOOL_TRANSITION_ISSUE: &str = "fleet_transition_issue";
+/// Issue 코멘트 추가 도구 (로드맵 #92).
+pub const TOOL_COMMENT_ISSUE: &str = "fleet_comment_issue";
 
 // ═══════════════════════════════════════════════════════════════════════
 //  JSON-RPC 2.0 봉투
@@ -526,6 +534,80 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["project_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_ISSUES,
+            description: "List issues — work items a project needs to resolve. Not infrastructure alerts (unreachable workers, missing credentials are alerts, not issues). Each entry includes has_active_tasks, a derived flag meaning a non-terminal task is linked; there is deliberately no 'in progress' status.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Only issues in this project (UUID). Omit for all projects."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status: open, triaged, ready_for_agent, resolved, closed."
+                    },
+                    "open_only": {
+                        "type": "boolean",
+                        "description": "Only issues that are not closed (resolved still counts as open)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_CREATE_ISSUE,
+            description: "Open a new issue against a project. Always starts in status 'open' — triage and agent approval are separate human transitions (see fleet_transition_issue).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": { "type": "string", "description": "UUID of the owning project." },
+                    "title": { "type": "string", "description": "Short problem statement." },
+                    "body": { "type": "string", "description": "Optional detail / reproduction steps." },
+                    "severity": {
+                        "type": "string",
+                        "description": "critical | high | medium (default) | low."
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional labels."
+                    }
+                },
+                "required": ["project_id", "title"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_TRANSITION_ISSUE,
+            description: "Move an issue to a new status. Allowed edges follow the issue contract; promoting to ready_for_agent is the single authorization point for agent pickup and needs issue:approve_agent_work, while resolving/closing needs issue:close and reopening needs issue:reopen. Closing requires a close_reason. An edge the state machine does not allow is refused rather than silently applied.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "issue_id": { "type": "string", "description": "UUID of the issue." },
+                    "status": {
+                        "type": "string",
+                        "description": "Target status: open, triaged, ready_for_agent, resolved, closed."
+                    },
+                    "close_reason": {
+                        "type": "string",
+                        "description": "Required when status is 'closed': fixed | wont_fix | duplicate | obsolete. Rejected for any other target status."
+                    }
+                },
+                "required": ["issue_id", "status"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_COMMENT_ISSUE,
+            description: "Append a comment to an issue thread. Comments are append-only; they never change issue status.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "issue_id": { "type": "string", "description": "UUID of the issue." },
+                    "body": { "type": "string", "description": "Comment text." }
+                },
+                "required": ["issue_id", "body"]
             }),
         },
     ]

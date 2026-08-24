@@ -16,17 +16,18 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fleet_core::{
-    CircuitState, FleetEvent, Host, ProjectId, Task, TaskFilter, TaskId, TaskRequest,
+    CircuitState, FleetEvent, Host, IssueId, ProjectId, Task, TaskFilter, TaskId, TaskRequest,
     TaskStatusFilter, WorkerFilter, WorkerId, WorkerStatus,
 };
 use fleet_scheduler::{BreakerState, Dispatcher, FleetState};
 use tracing::debug;
 
 use crate::schema::{
-    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_CREATE_PROJECT,
-    TOOL_DELETE_PROJECT, TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS,
-    TOOL_LIST_HOSTS, TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS,
-    TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STREAM_TASK_OUTPUT,
+    self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_COMMENT_ISSUE,
+    TOOL_CREATE_ISSUE, TOOL_CREATE_PROJECT, TOOL_DELETE_PROJECT, TOOL_DISPATCH_TASK,
+    TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS, TOOL_LIST_HOSTS, TOOL_LIST_ISSUES,
+    TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS, TOOL_RESET_WORKER_BREAKER,
+    TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE,
     TOOL_WAIT_FOR_TASK,
 };
 
@@ -35,11 +36,35 @@ use crate::schema::{
 pub struct ToolContext {
     pub state: Arc<FleetState>,
     pub dispatcher: Arc<Dispatcher>,
+    /// launcher가 부여한 capability 집합 (`FLEET_MCP_CAPABILITIES`).
+    ///
+    /// 대부분의 도구는 `server::required_permission` 행렬이 호출 **전에**
+    /// 판정하므로 핸들러가 이걸 볼 일이 없다. 예외는 요구 capability가
+    /// 인자에 따라 달라지는 도구다 — `fleet_transition_issue`는 목표
+    /// 상태마다 다른 capability를 요구해(로드맵 #92) 행렬 하나로 판정할 수
+    /// 없고, 핸들러가 직접 확인한다.
+    ///
+    /// 기본값은 **빈 집합**이다(fail-closed) — 명시적으로 부여하지 않으면
+    /// 인자 의존 도구는 전부 거절된다.
+    pub capabilities: Vec<fleet_core::PermissionKind>,
 }
 
 impl ToolContext {
     pub fn new(state: Arc<FleetState>, dispatcher: Arc<Dispatcher>) -> Self {
-        Self { state, dispatcher }
+        Self {
+            state,
+            dispatcher,
+            capabilities: Vec::new(),
+        }
+    }
+
+    pub fn with_capabilities(mut self, capabilities: Vec<fleet_core::PermissionKind>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    fn has(&self, capability: fleet_core::PermissionKind) -> bool {
+        self.capabilities.contains(&capability)
     }
 }
 
@@ -69,6 +94,10 @@ pub async fn dispatch_tool(
         TOOL_CREATE_PROJECT => handle_create_project(ctx, arguments).await,
         TOOL_LIST_PROJECTS => handle_list_projects(ctx, arguments).await,
         TOOL_DELETE_PROJECT => handle_delete_project(ctx, arguments).await,
+        TOOL_LIST_ISSUES => handle_list_issues(ctx, arguments).await,
+        TOOL_CREATE_ISSUE => handle_create_issue(ctx, arguments).await,
+        TOOL_TRANSITION_ISSUE => handle_transition_issue(ctx, arguments).await,
+        TOOL_COMMENT_ISSUE => handle_comment_issue(ctx, arguments).await,
         other => Err(JsonRpcError::method_not_found(other)),
     }
 }
@@ -1012,6 +1041,252 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
     Ok(schema::tool_json(&project_json(&project)))
 }
 
+// ── Issue 도구 (로드맵 #92) ─────────────────────────────────────────────
+//
+// Dashboard HTTP 표면과 **같은 규칙**을 쓴다 — 상태 기계는
+// `fleet_core::Issue::transition_to`, 전이별 요구 capability는
+// `fleet_core::required_capability_for_transition`이 단일 구현이다.
+
+fn issue_json(i: &fleet_core::Issue, has_active_tasks: bool) -> Value {
+    json!({
+        "id": i.id.to_string(),
+        "project_id": i.project_id.to_string(),
+        "title": i.title,
+        "body": i.body,
+        "status": i.status.as_str(),
+        "close_reason": i.close_reason.map(|r| r.as_str()),
+        "severity": i.severity.as_str(),
+        "labels": i.labels,
+        "assignee": i.assignee,
+        "created_by": i.created_by,
+        "created_at": i.created_at.to_rfc3339(),
+        "updated_at": i.updated_at.to_rfc3339(),
+        // 파생 값 — 저장된 상태가 아니다(`InProgress`를 두지 않은 이유).
+        "has_active_tasks": has_active_tasks,
+    })
+}
+
+fn parse_issue_id_arg(args: &serde_json::Map<String, Value>) -> Result<IssueId, JsonRpcError> {
+    args.get("issue_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: issue_id"))?
+        .parse::<IssueId>()
+        .map_err(|_| JsonRpcError::invalid_params("issue_id must be a UUID"))
+}
+
+async fn handle_list_issues(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let project_id = match args.get("project_id").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            raw.parse::<ProjectId>()
+                .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?,
+        ),
+        None => None,
+    };
+    let status = match args.get("status").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            fleet_core::IssueStatus::parse_str(raw)
+                .ok_or_else(|| JsonRpcError::invalid_params(format!("unknown status: {raw}")))?,
+        ),
+        None => None,
+    };
+
+    let issues = ctx
+        .state
+        .store
+        .list_issues(&fleet_core::IssueFilter {
+            project_id,
+            status,
+            open_only: args
+                .get("open_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            limit: 1000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let mut out = Vec::with_capacity(issues.len());
+    for issue in &issues {
+        let active = ctx
+            .state
+            .store
+            .issue_has_active_tasks(issue.id)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        out.push(issue_json(issue, active));
+    }
+    Ok(schema::tool_json(&json!({
+        "issues": out,
+        "count": out.len(),
+    })))
+}
+
+async fn handle_create_issue(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let title = args
+        .get("title")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: title"))?
+        .trim();
+    if title.is_empty() {
+        return Err(JsonRpcError::invalid_params("title must not be empty"));
+    }
+    let project_id = args
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: project_id"))?
+        .parse::<ProjectId>()
+        .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?;
+
+    // Issue는 항상 Project 경계 안에 있다. Project **상태**는 보지 않는다 —
+    // 계약이 "`Draining` 중에도 Issue 쓰기는 허용한다"고 명시했다(Dashboard
+    // `create_issue_api`와 동일).
+    if ctx
+        .state
+        .store
+        .get_project(project_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        .is_none()
+    {
+        return Err(JsonRpcError::invalid_params(format!(
+            "no such project: {project_id}"
+        )));
+    }
+
+    let mut issue = fleet_core::Issue::new(project_id, title, "mcp");
+    if let Some(body) = args.get("body").and_then(|v| v.as_str()) {
+        issue.body = body.to_string();
+    }
+    if let Some(sev) = args.get("severity").and_then(|v| v.as_str()) {
+        issue.severity = fleet_core::IssueSeverity::parse_str(sev)
+            .ok_or_else(|| JsonRpcError::invalid_params(format!("unknown severity: {sev}")))?;
+    }
+    if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
+        issue.labels = labels
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+    }
+
+    ctx.state
+        .store
+        .create_issue(&issue)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    Ok(schema::tool_json(&issue_json(&issue, false)))
+}
+
+async fn handle_transition_issue(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let to = fleet_core::IssueStatus::parse_str(
+        args.get("status")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| JsonRpcError::invalid_params("missing required field: status"))?,
+    )
+    .ok_or_else(|| JsonRpcError::invalid_params("unknown status"))?;
+
+    // **인자 의존 인가** — 요구 capability가 목표 상태에 따라 달라 서버의
+    // capability 행렬이 판정할 수 없다(server.rs의 `permits_tool` 참고).
+    // Dashboard와 같은 함수를 쓴다.
+    let required = fleet_core::required_capability_for_transition(to);
+    if !ctx.has(required) {
+        return Err(JsonRpcError::invalid_request(format!(
+            "transition to '{}' requires the '{}' capability",
+            to.as_str(),
+            required.as_str()
+        )));
+    }
+
+    let close_reason = match args.get("close_reason").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            fleet_core::CloseReason::parse_str(raw)
+                .ok_or_else(|| JsonRpcError::invalid_params(format!("unknown close_reason: {raw}")))?,
+        ),
+        None => None,
+    };
+
+    let issue_id = parse_issue_id_arg(args)?;
+    let Some(mut issue) = ctx
+        .state
+        .store
+        .get_issue(issue_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+    else {
+        return Ok(schema::tool_error("issue not found"));
+    };
+
+    // 상태 기계 검증은 도메인 타입이 소유한다.
+    if let Err(e) = issue.transition_to(to, close_reason) {
+        return Ok(schema::tool_error(e.to_string()));
+    }
+
+    ctx.state
+        .store
+        .transition_issue(issue.id, issue.status, issue.close_reason)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let active = ctx
+        .state
+        .store
+        .issue_has_active_tasks(issue.id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    Ok(schema::tool_json(&issue_json(&issue, active)))
+}
+
+async fn handle_comment_issue(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let body = args
+        .get("body")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: body"))?
+        .trim();
+    if body.is_empty() {
+        return Err(JsonRpcError::invalid_params("body must not be empty"));
+    }
+
+    let issue_id = parse_issue_id_arg(args)?;
+    if ctx
+        .state
+        .store
+        .get_issue(issue_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        .is_none()
+    {
+        return Ok(schema::tool_error("issue not found"));
+    }
+
+    let comment = fleet_core::IssueComment::new(issue_id, "mcp", body);
+    ctx.state
+        .store
+        .add_issue_comment(&comment)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    Ok(schema::tool_json(&json!({
+        "id": comment.id.to_string(),
+        "issue_id": issue_id.to_string(),
+        "author": comment.author,
+        "body": comment.body,
+        "created_at": comment.created_at.to_rfc3339(),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,7 +1370,7 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 19);
     }
 
     #[test]
@@ -1220,6 +1495,19 @@ mod tests {
     // 검증된 적이 없었다.
 
     fn test_ctx(store: fleet_store::mem::MemStore) -> ToolContext {
+        test_ctx_with_caps(store, fleet_core::PermissionKind::all().to_vec())
+    }
+
+    /// capability를 명시해 컨텍스트를 만든다 — 인자 의존 인가
+    /// (`fleet_transition_issue`) 테스트용.
+    fn test_ctx_with_caps(
+        store: fleet_store::mem::MemStore,
+        caps: Vec<fleet_core::PermissionKind>,
+    ) -> ToolContext {
+        build_ctx(store).with_capabilities(caps)
+    }
+
+    fn build_ctx(store: fleet_store::mem::MemStore) -> ToolContext {
         let store: Arc<dyn fleet_store::Store> = Arc::new(store);
         let transport = Arc::new(fleet_transport::MockTransport::new())
             as Arc<dyn fleet_transport::WorkerTransport>;
@@ -1410,6 +1698,207 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result["isError"], true);
+    }
+
+    // ── Issue 도구 (로드맵 #92) ─────────────────────────────────────
+
+    use fleet_core::PermissionKind as PK;
+
+    async fn seed_project(ctx: &ToolContext, name: &str) -> ProjectId {
+        let p = fleet_core::Project::new(name);
+        ctx.state.store.create_project(&p).await.unwrap();
+        p.id
+    }
+
+    async fn make_issue(ctx: &ToolContext, project_id: ProjectId, title: &str) -> String {
+        let created = dispatch_tool(
+            ctx,
+            TOOL_CREATE_ISSUE,
+            &json!({ "project_id": project_id.to_string(), "title": title }),
+        )
+        .await
+        .unwrap();
+        parse_tool_json(&created)["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn create_list_and_comment_issue_round_trip() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = seed_project(&ctx, "mcp-issues").await;
+
+        let created = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_ISSUE,
+            &json!({
+                "project_id": project_id.to_string(),
+                "title": "flaky retry path",
+                "severity": "high",
+                "labels": ["bug"],
+            }),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&created);
+        assert_eq!(body["title"], "flaky retry path");
+        assert_eq!(body["status"], "open");
+        assert_eq!(body["severity"], "high");
+        assert_eq!(body["has_active_tasks"], false);
+        let id = body["id"].as_str().unwrap().to_string();
+
+        let listed = dispatch_tool(&ctx, TOOL_LIST_ISSUES, &json!({})).await.unwrap();
+        let body = parse_tool_json(&listed);
+        assert_eq!(body["count"], 1);
+
+        let commented = dispatch_tool(
+            &ctx,
+            TOOL_COMMENT_ISSUE,
+            &json!({ "issue_id": id, "body": "looked into it" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_tool_json(&commented)["body"], "looked into it");
+    }
+
+    #[tokio::test]
+    async fn create_issue_rejects_unknown_project() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_ISSUE,
+            &json!({ "project_id": ProjectId::new().to_string(), "title": "orphan" }),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn transition_follows_the_state_machine() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = seed_project(&ctx, "mcp-lifecycle").await;
+        let id = make_issue(&ctx, project_id, "lifecycle").await;
+
+        // Open -> ReadyForAgent 간선은 없다(사람의 triage를 반드시 거친다).
+        let refused = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "ready_for_agent" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["isError"], true);
+
+        for status in ["triaged", "ready_for_agent", "resolved"] {
+            let ok = dispatch_tool(
+                &ctx,
+                TOOL_TRANSITION_ISSUE,
+                &json!({ "issue_id": id, "status": status }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(parse_tool_json(&ok)["status"], status);
+        }
+
+        // 사유 없는 close는 거절.
+        let refused = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "closed" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["isError"], true);
+
+        let ok = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "closed", "close_reason": "fixed" }),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&ok);
+        assert_eq!(body["status"], "closed");
+        assert_eq!(body["close_reason"], "fixed");
+    }
+
+    // **인자 의존 인가** — 같은 도구라도 목표 상태에 따라 다른 capability를
+    // 요구한다. 서버의 capability 행렬은 도구 이름만 보므로 판정할 수 없고,
+    // 핸들러가 직접 확인한다.
+    #[tokio::test]
+    async fn transition_capability_is_checked_per_target_status() {
+        let store = fleet_store::mem::MemStore::new();
+        // triage는 가능하지만 agent 승인·종결은 불가능한 capability 집합.
+        let ctx = test_ctx_with_caps(
+            store,
+            vec![PK::IssueRead, PK::IssueCreate, PK::IssueUpdate],
+        );
+        let project_id = seed_project(&ctx, "mcp-gated").await;
+        let id = make_issue(&ctx, project_id, "gated").await;
+
+        // triaged는 issue:update로 통과.
+        let ok = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "triaged" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_tool_json(&ok)["status"], "triaged");
+
+        // ready_for_agent는 issue:approve_agent_work가 없어 거절.
+        let err = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "ready_for_agent" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.message.contains("issue:approve_agent_work"),
+            "error must name the missing capability: {}",
+            err.message
+        );
+
+        // closed는 issue:close가 없어 거절 — 오탈자 수정 권한으로 문제를
+        // 종결할 수 없다.
+        let err = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": id, "status": "closed", "close_reason": "fixed" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("issue:close"), "{}", err.message);
+
+        // 저장된 상태는 triaged 그대로여야 한다.
+        let issue_id: IssueId = id.parse().unwrap();
+        assert_eq!(
+            ctx.state.store.get_issue(issue_id).await.unwrap().unwrap().status,
+            fleet_core::IssueStatus::Triaged
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_and_comment_on_unknown_issue_return_tool_errors() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let ghost = IssueId::new().to_string();
+
+        let r = dispatch_tool(
+            &ctx,
+            TOOL_TRANSITION_ISSUE,
+            &json!({ "issue_id": ghost, "status": "triaged" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["isError"], true);
+
+        let r = dispatch_tool(
+            &ctx,
+            TOOL_COMMENT_ISSUE,
+            &json!({ "issue_id": ghost, "body": "hello" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r["isError"], true);
     }
 
     /// `schema::tool_json`이 만든 `{content:[{type:"text",text:"<json>"}]}`에서

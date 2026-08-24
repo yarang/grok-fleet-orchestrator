@@ -52,8 +52,8 @@ pub use events::{EventEntry, FleetEvent};
 pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus, SshKey, SshKeySummary};
 pub use ids::{IssueId, ProjectId, TaskId, WorkerId};
 pub use issue::{
-    CloseReason, Issue, IssueComment, IssueFilter, IssueSeverity, IssueStatus, IssueTaskLink,
-    TransitionError,
+    required_capability_for_transition, CloseReason, Issue, IssueComment, IssueFilter,
+    IssueSeverity, IssueStatus, IssueTaskLink, TransitionError,
 };
 pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{

@@ -1060,3 +1060,17 @@ last_verified: "2026-08-15"
 - **실제 브라우저 검증** (`tail -f /dev/null | fleet serve` 우회 재사용): 실제 Postgres + 대시보드를 띄워 bootstrap→로그인 후 — 목록이 두 Project를 배지·설명과 함께 렌더링하는 것, 상세가 그 Project의 Issue와 Task를 정확히 필터링해 보여주는 것, archive 클릭이 pending task 때문에 `draining`에 머물며 사유를 표시하고 버튼이 "Retry archive"로 바뀌는 것, task를 종결시킨 뒤 재시도하니 `archived`로 넘어가고 버튼이 사라지는 것, 생성 폼으로 실제 Project가 DB에 저장되며 `created_by`가 세션 사용자로 기록되는 것까지 전부 확인했다. 검증 후 서버·테스트 DB 정리 완료.
 - 신규 테스트 4건: 권한 충분 시 세 페이지 200, `project:read` 없으면 목록 403, `project:create` 없으면 생성 폼만 403(목록은 200), 모든 사이드바 페이지의 Projects 링크 존재.
 - 검증: `cargo test --workspace`(99 스위트 전체 `ok`, 0 FAILED), `cargo check --no-default-features`, `cargo clippy --all-targets --all-features` 경고 0. JS는 `node -e "new Function(...)"`으로 파싱 확인.
+
+## 2026-08-24 — `#92`(Issue MCP 표면)과 공유 규칙의 층위 정정
+
+- 유형: `implementation` + `refactor` + `verification`
+- `#92` HTTP 표면을 내면서 "MCP는 남았다"고 적어 뒀고, 계약의 활성화 게이트가 "Dashboard와 MCP의 동일한 권한·오류 응답"을 요구하므로 그 비대칭을 닫았다.
+- **층위 오류를 발견해 바로잡았다**: HTTP 표면 작업에서 `required_capability_for_transition`을 `fleet-dashboard`에 두고 "MCP가 재사용할 수 있게 `pub`으로 노출했다"고 적었는데, **`fleet-mcp`는 `fleet-dashboard`에 의존하지 않는다**(대시보드는 leaf crate다). 재사용이 애초에 불가능한 배치였다. `IssueStatus`와 `PermissionKind` 둘 다 `fleet-core`에 있고 Store 조회가 전혀 필요 없는 순수 함수이므로 `fleet-core::issue`로 옮겼다 — surface 크레이트에 공유 도메인 정책을 두는 것이 처음부터 잘못이었다. 이제 두 표면이 같은 구현을 참조해 계약의 "동일 동작"이 구조적으로 보장된다.
+- **인자 의존 인가**라는 새 문제를 다뤘다: MCP 서버의 인가는 `required_permission(tool_name) -> Option<PermissionKind>` 행렬인데, `fleet_transition_issue`는 요구 capability가 **목표 상태(인자)에 따라 달라** 도구 이름만으로 판정할 수 없다. 두 단계로 나눴다 —
+  - `permits_tool`은 "전이 권한을 **하나라도** 가졌는가"로 도구 **노출**만 결정한다. 하나도 없으면 도구가 `tools/list`에 나오지 않고 호출도 거절된다(fail-closed).
+  - **정확한 판정은 핸들러**가 한다. 이를 위해 `ToolContext`에 `capabilities`를 실었고, 기본값을 **빈 집합**으로 뒀다 — 명시적으로 부여하지 않으면 인자 의존 도구가 전부 거절되므로, 나중에 다른 곳에서 `ToolContext::new`를 쓰다 인가를 빠뜨려도 열리는 방향으로 실패하지 않는다.
+  - 거절 메시지에 어떤 capability가 없는지 명시한다 — "권한 없음"만 던지면 launcher 설정을 고칠 수 없다.
+- 도구 넷: `fleet_list_issues`(파생 `has_active_tasks` 포함), `fleet_create_issue`, `fleet_transition_issue`, `fleet_comment_issue`. 도구 설명에 "인프라 alert이 아니라 프로젝트 일감"이라는 구분과 "`in progress` 상태가 의도적으로 없다"는 사실을 적었다 — MCP 클라이언트(AI 어시스턴트)가 그 구분을 모르면 워커 장애를 Issue로 열려 할 수 있다.
+- `Draining` Project의 Issue 생성은 Dashboard와 동일하게 허용한다(Project 존재만 확인, 상태는 보지 않음) — 계약의 "`Draining` 중에도 Issue 쓰기는 허용"을 따른다.
+- 신규 테스트 6건(fleet-mcp): 생성·목록·코멘트 왕복, 미존재 project 거절, 상태 기계 준수(허용 안 되는 간선·사유 없는 close), **전이별 capability 판정**(`issue:update`만 가진 launcher가 triage는 되고 승인·종결은 거절되며 저장된 상태도 안 바뀜 + 거절 메시지가 없는 capability를 명시), 미존재 issue 처리. 추가로 server 단위 테스트 1건: 전이 권한이 하나도 없으면 도구 자체가 노출되지 않고, 넷 중 하나라도 있으면 노출됨.
+- 검증: `cargo test --workspace`(99 스위트 전체 `ok`, 0 FAILED), `cargo check --no-default-features`, `cargo clippy --all-targets --all-features` 경고 0.

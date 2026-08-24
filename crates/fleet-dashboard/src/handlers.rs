@@ -1240,33 +1240,12 @@ fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
 // 나눈 것을 표면에서도 유지하기 위함이며, 저장소 계층에서 이미
 // `update_issue_fields`/`transition_issue`로 갈라 둔 것과 같은 이유다.
 
-/// 목표 상태별로 요구되는 capability (로드맵 #92).
+/// 목표 상태별로 요구되는 capability.
 ///
-/// **이 함수가 Issue 표면의 보안 핵심이다.** 전이마다 위험도가 달라 하나의
-/// capability로 묶을 수 없다:
-///
-/// - `ReadyForAgent`로 올리는 것은 [Issue 계약](../../../docs/architecture/issues.md)이
-///   "Agent 자동 착수의 유일한 인가 지점"으로 못 박은 전이다 —
-///   `issue:approve_agent_work`를 요구한다.
-/// - **`ReadyForAgent`에서 내려오는 것(승인 철회)은 그 capability를 요구하지
-///   않는다.** 계약이 `approve_agent_work`를 `Triaged → ReadyForAgent`
-///   한 방향으로만 정의했고, 권한을 회수하는 쪽이 부여하는 쪽보다 어려우면
-///   잘못된 승인을 되돌리기가 더 힘들어진다 — 안전한 방향으로 실패해야 한다.
-/// - `Resolved`/`Closed`는 둘 다 "이 문제가 처리됐다"는 판정이므로
-///   `issue:close`다. 계약이 close를 update에서 분리한 이유가 "오탈자 수정
-///   권한이 문제 종결 권한을 함께 주면 안 된다"이고, `Resolved`도 문제 상태에
-///   대한 판정이지 텍스트 편집이 아니다.
-/// - `Open`으로 되돌리는 것은 `issue:reopen`.
-/// - `Triaged`(severity·labels·owner 지정)는 편집 성격이라 `issue:update`.
-pub fn required_capability_for_transition(to: fleet_core::IssueStatus) -> PermissionKind {
-    use fleet_core::IssueStatus::*;
-    match to {
-        ReadyForAgent => PermissionKind::IssueApproveAgentWork,
-        Resolved | Closed => PermissionKind::IssueClose,
-        Open => PermissionKind::IssueReopen,
-        Triaged => PermissionKind::IssueUpdate,
-    }
-}
+/// 실제 규칙은 [`fleet_core::required_capability_for_transition`]이 소유한다 —
+/// MCP 표면도 같은 함수를 쓴다(계약의 "두 표면 동일 동작" 요구). 여기서는
+/// 이름만 다시 내보내, 이 모듈을 읽는 사람이 규칙의 위치를 찾을 수 있게 한다.
+pub use fleet_core::required_capability_for_transition;
 
 fn parse_issue_id(raw: &str) -> Result<fleet_core::IssueId, ApiError> {
     raw.parse::<fleet_core::IssueId>()

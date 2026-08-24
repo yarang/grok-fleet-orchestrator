@@ -17,7 +17,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
-use fleet_core::PermissionKind;
+use fleet_core::{required_capability_for_transition, IssueStatus, PermissionKind};
 use fleet_scheduler::{Dispatcher, FleetState};
 
 use crate::handlers::ToolContext;
@@ -80,6 +80,17 @@ impl McpAuthorization {
     }
 
     fn permits_tool(&self, tool: &str) -> bool {
+        // 요구 capability가 인자에 따라 달라지는 도구는 행렬 하나로 판정할 수
+        // 없다(로드맵 #92 — `fleet_transition_issue`는 목표 상태마다 다른
+        // capability를 요구한다). 여기서는 "전이 권한을 하나라도 가졌는가"로
+        // 도구 노출만 결정하고, **정확한 판정은 핸들러가 한다** — 그래서
+        // 아무 전이 권한도 없으면 도구 자체가 보이지 않고, 일부만 가진
+        // 호출자는 자기가 가진 전이만 실제로 수행할 수 있다.
+        if tool == crate::schema::TOOL_TRANSITION_ISSUE {
+            return IssueStatus::ALL
+                .iter()
+                .any(|s| self.capabilities.contains(&required_capability_for_transition(*s)));
+        }
         required_permission(tool).is_some_and(|required| self.capabilities.contains(&required))
     }
 }
@@ -100,6 +111,12 @@ fn required_permission(tool: &str) -> Option<PermissionKind> {
         TOOL_CREATE_PROJECT => PermissionKind::ProjectCreate,
         TOOL_LIST_PROJECTS => PermissionKind::ProjectRead,
         TOOL_DELETE_PROJECT => PermissionKind::ProjectDelete,
+        TOOL_LIST_ISSUES => PermissionKind::IssueRead,
+        TOOL_CREATE_ISSUE => PermissionKind::IssueCreate,
+        TOOL_COMMENT_ISSUE => PermissionKind::IssueComment,
+        // `fleet_transition_issue`는 여기서 판정하지 않는다 — 요구 capability가
+        // **목표 상태에 따라 다르기** 때문이다. launcher가 부여한 capability
+        // 집합을 핸들러가 직접 확인한다(`handle_transition_issue`).
         _ => return None,
     })
 }
@@ -122,7 +139,8 @@ impl McpServer {
         authorization: McpAuthorization,
     ) -> Self {
         Self {
-            ctx: ToolContext::new(state, dispatcher),
+            ctx: ToolContext::new(state, dispatcher)
+                .with_capabilities(authorization.capabilities.clone()),
             authorization,
         }
     }
@@ -282,6 +300,38 @@ mod tests {
         assert!(authorization.permits_tool(crate::schema::TOOL_LIST_TASKS));
         assert!(!authorization.permits_tool(crate::schema::TOOL_DISPATCH_TASK));
         assert!(!authorization.permits_tool(crate::schema::TOOL_REVOKE_BOOTSTRAP_TOKEN));
+    }
+
+    /// 인자 의존 도구(`fleet_transition_issue`)의 **노출** 판정 — 정확한
+    /// 인가는 핸들러가 하지만, 전이 권한을 하나도 갖지 않은 launcher에게는
+    /// 도구 자체가 보이지 않아야 한다(로드맵 #92).
+    #[test]
+    fn transition_issue_tool_is_hidden_without_any_transition_capability() {
+        let none = McpAuthorization {
+            capabilities: vec![PermissionKind::IssueRead, PermissionKind::IssueCreate],
+        };
+        assert!(
+            !none.permits_tool(crate::schema::TOOL_TRANSITION_ISSUE),
+            "read/create alone must not expose the transition tool"
+        );
+
+        // 전이 권한을 하나라도 가지면 도구는 보인다 — 어느 전이를 실제로
+        // 수행할 수 있는지는 핸들러가 목표 상태별로 판정한다.
+        for cap in [
+            PermissionKind::IssueUpdate,
+            PermissionKind::IssueApproveAgentWork,
+            PermissionKind::IssueClose,
+            PermissionKind::IssueReopen,
+        ] {
+            let some = McpAuthorization {
+                capabilities: vec![cap],
+            };
+            assert!(
+                some.permits_tool(crate::schema::TOOL_TRANSITION_ISSUE),
+                "{} should expose the transition tool",
+                cap.as_str()
+            );
+        }
     }
 
     // 더 깊은 통합 테스트는 fleet-cli/tests/에서 수행 (실제 Dispatcher + Store 필요).
