@@ -59,9 +59,9 @@ fleet.agentthread.dev/
 ├── /admin/tools                # MCP 도구 탐색기                 [P2]
 ├── /admin/ssh-keys             # SSH 키 금고 관리                 [구현됨] (⚠️ 신규 추가, 실제 존재)
 │
-├── /projects                   # 프로젝트 목록                   [P2] (⚠️ 미구현 — #48, 설계만 완료, 아래 §3.9)
-├── /projects/:id               # 프로젝트 상세                   [P2] (⚠️ 미구현 — #48, §3.10)
-├── /projects/new               # 프로젝트 생성                   [P2] (⚠️ 미구현 — #48)
+├── /projects                   # 프로젝트 목록                   [P2] (✅ 구현 — #48, §3.9)
+├── /projects/:id               # 프로젝트 상세                   [P2] (✅ 구현 — #48, §3.10)
+├── /projects/new               # 프로젝트 생성                   [P2] (✅ 구현 — #48)
 ├── /agents                     # 에이전트 목록 (전체 host 가로지름) [P2] (⚠️ 미구현 — #49, §3.11)
 ├── /agents/:id                 # 에이전트 상세 (메모리 브라우저 포함) [P2] (⚠️ 미구현 — #49, §3.13)
 ├── /agents/new                 # 에이전트 생성                   [P2] (⚠️ 미구현 — #49, §3.12)
@@ -106,9 +106,9 @@ auth.rs`)입니다.
 | `/admin/activity`| ✓    | viewer       | `EventsList` — 전 역할 열람   |
 | `/admin/tools`   | ✓    | viewer       | ⚠️ 정정: `DashboardView`만 검사, operator+ 강제 없음 |
 | `/admin/ssh-keys`| ✓    | admin        | `HostProvision` 권한 필요(기본 admin 전용) |
-| `/projects`      | ✓    | viewer       | `ProjectRead` — 읽기 전용 (⚠️ 미구현, #48) |
-| `/projects/:id`  | ✓    | viewer       | `ProjectRead`, 배정/삭제 액션은 `ProjectAssign`/`ProjectDelete` (⚠️ 미구현) |
-| `/projects/new`  | ✓    | admin        | `ProjectCreate` 권한 필요(기본 admin 전용, operator는 열람만) (⚠️ 미구현) |
+| `/projects`      | ✓    | viewer       | `project:read` — 읽기 전용 (✅ 구현, #48) |
+| `/projects/:id`  | ✓    | viewer       | `project:read`, archive 액션은 `project:delete` (배정 액션은 공유 실행 풀 불변식에 따라 없음) (✅ 구현) |
+| `/projects/new`  | ✓    | admin        | `project:create` 권한 필요(기본 admin 전용, operator는 열람만) (✅ 구현 — 권한 없으면 페이지 자체가 403) |
 | `/agents`        | ✓    | viewer       | `AgentRead` — 읽기 전용 (⚠️ 미구현, #49) |
 | `/agents/:id`    | ✓    | viewer       | `AgentRead`, 정지/편집은 `AgentDelete`/`AgentManage` (⚠️ 미구현) |
 | `/agents/new`    | ✓    | admin        | `AgentCreate` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
@@ -757,11 +757,36 @@ flowchart TD
 
 #### 데이터 소스
 
+> ⚠️ **2026-08-24 정정**: 아래 표의 "Host/Worker 배정 수"는 **폐기됐다.** 모델 정본
+> ([`project-feature-design.md`](../architecture/project-feature-design.md) "공유 실행 풀
+> 불변식")이 "Host와 Worker에는 `project_id`를 두지 않는다. 하나의 Worker는 시간에 따라
+> 여러 Project의 Agent를 실행할 수 있다"로 확정했기 때문이다 — 이 절(2026-08-14)이 그
+> 결정보다 앞서 작성돼 갱신되지 않은 것이다. Project별 host/worker 배정이라는 개념 자체가
+> 없으므로 `list_project_hosts`/`list_project_worker_ids`도 만들지 않는다. 구현된 화면은
+> 아래 "구현 상태"를 따른다.
+
 | 데이터 | 소스 | 비고 |
 | --- | --- | --- |
 | 프로젝트 목록 | `GET /api/projects` | `contracts/project-management.md` |
-| Host/Worker 배정 수 | `list_project_hosts`/`list_project_worker_ids` 카운트 | 목록 응답에 집계 포함하도록 API 확장 필요(현재 설계엔 없음 — 구현 시 반영) |
-| 실행 중 Agent 수 | `#49` `agents` 테이블, `status IN ('Starting','Running')` 카운트 | 위와 동일하게 집계 확장 필요 |
+| ~~Host/Worker 배정 수~~ | — | **폐기** — 공유 실행 풀 불변식과 충돌(위 정정 참고) |
+| 실행 중 Agent 수 | `#49` `agents` 테이블, `status IN ('Starting','Running')` 카운트 | Agent 엔티티 미구현 — 생기면 집계 확장 |
+
+#### 구현 상태 (2026-08-24, `#48`)
+
+`/projects`, `/projects/new`, `/projects/:id` 세 화면이 구현됐다. 현재 Project 모델이 실제로
+가진 필드만 다룬다:
+
+- **목록**: Name • Status(`active`/`draining`/`archived`) • Description • Created by • Created.
+  컬럼 정렬은 기존 `/hosts`·`/tasks` 관례를 따르고 10초 폴링한다.
+- **생성**: name + description 단일 폼. 명세가 언급한 `agent_provisioning_mode`,
+  `workdir_template`, `default_agent_template_id`, `agent_idle_timeout_secs`는 **아직 없다** —
+  `#48` 1단계가 정책 필드를 의도적으로 제외했다(Agent·AgentTemplate 부재). 그 필드들이 생기면
+  이 폼에 추가한다.
+- **상세**: 메타데이터 + 이 Project의 Issue 목록(`#88`/`#92`) + 이 Project의 Task 목록 +
+  archive 액션. archive는 비종료 Task가 남아 있으면 `draining`에 머물고 그 사실을 화면에
+  알린다(버튼이 "Retry archive"로 바뀐다).
+- 권한: `/projects`·`/projects/:id`는 `project:read`, `/projects/new`는 `project:create`가
+  없으면 **페이지 자체가 403**이다 — 폼을 보여준 뒤 제출 시점에 거절하지 않는다.
 
 #### 레이아웃 (SVG wireframe)
 

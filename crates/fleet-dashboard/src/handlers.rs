@@ -1005,6 +1005,37 @@ pub async fn host_detail_page(Path(_hostname): Path<String>) -> Response {
     serve_page("host-detail.html")
 }
 
+// ── Project 화면 (로드맵 #48 / UI 설계 §3.9·§3.10) ─────────────────────
+//
+// **UI 설계 문서와의 차이**: `ui-design.md` §3.9는 목록에 "Host/Worker 배정
+// 수"를 요구하지만, 모델 정본(`project-feature-design.md`)의 공유 실행 풀
+// 불변식은 "Host와 Worker에는 `project_id`를 두지 않는다"고 못 박는다 —
+// UI 문서가 그 결정보다 앞서 작성돼 갱신되지 않은 것이다. 화면은 모델
+// 정본을 따르고, UI 문서는 이 커밋에서 함께 정정했다.
+
+/// GET /projects — 프로젝트 목록 HTML 페이지.
+pub async fn projects_page(
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Response {
+    serve_page_if_permitted(&principal, PermissionKind::ProjectRead, "projects.html")
+}
+
+/// GET /projects/new — 프로젝트 생성 폼. `ProjectCreate`가 없으면 폼을
+/// 아예 보여주지 않는다 — 제출 시점에야 403을 받는 것보다 낫다.
+pub async fn project_new_page(
+    Extension(principal): Extension<AuthPrincipal>,
+) -> Response {
+    serve_page_if_permitted(&principal, PermissionKind::ProjectCreate, "project-new.html")
+}
+
+/// GET /projects/:id — 프로젝트 상세 HTML 페이지.
+pub async fn project_detail_page(
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(_id): Path<String>,
+) -> Response {
+    serve_page_if_permitted(&principal, PermissionKind::ProjectRead, "project-detail.html")
+}
+
 /// GET /api/hosts — 호스트 목록 JSON API.
 pub async fn list_hosts_api(
     State(state): State<Arc<DashboardState>>,

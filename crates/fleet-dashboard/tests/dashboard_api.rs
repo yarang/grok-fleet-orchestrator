@@ -2380,3 +2380,118 @@ async fn issue_mutations_require_csrf() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Project 화면 권한 게이팅 (로드맵 #48 / UI 설계 §3.9·§3.10)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 페이지 자체를 권한으로 가린다 — 폼을 보여준 뒤 제출 시점에야 403을 주는
+// 것보다 낫다. `serve_page_if_permitted`가 403 HTML을 돌려준다.
+
+async fn page_status(client: &reqwest::Client, url: &str, cookie: &str) -> u16 {
+    authed_get(client, url, cookie)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn project_pages_are_served_with_the_right_permissions() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    for path in ["projects", "projects/new"] {
+        assert_eq!(
+            page_status(&client, &format!("http://{}/{path}", server.addr), &cookie).await,
+            200,
+            "/{path} must render for an admin"
+        );
+    }
+    // 상세는 존재하지 않는 id여도 껍데기 HTML을 준다 — 실제 조회는 JS가
+    // `/api/projects/:id`로 하고 404를 화면에 표시한다(host-detail과 동일 관례).
+    assert_eq!(
+        page_status(
+            &client,
+            &format!(
+                "http://{}/projects/{}",
+                server.addr,
+                fleet_core::ProjectId::new()
+            ),
+            &cookie
+        )
+        .await,
+        200
+    );
+}
+
+#[tokio::test]
+async fn projects_list_page_is_forbidden_without_project_read() {
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::DashboardView]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    assert_eq!(
+        page_status(&client, &format!("http://{}/projects", server.addr), &cookie).await,
+        403
+    );
+}
+
+#[tokio::test]
+async fn new_project_page_is_forbidden_without_project_create() {
+    // 읽기만 가능한 사용자에게 생성 폼을 보여주면 안 된다 — 채워 넣고
+    // 제출한 뒤에야 거절당하는 경험이 된다.
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::ProjectRead]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    assert_eq!(
+        page_status(
+            &client,
+            &format!("http://{}/projects", server.addr),
+            &cookie
+        )
+        .await,
+        200,
+        "read-only user can still see the list"
+    );
+    assert_eq!(
+        page_status(
+            &client,
+            &format!("http://{}/projects/new", server.addr),
+            &cookie
+        )
+        .await,
+        403,
+        "but not the create form"
+    );
+}
+
+#[tokio::test]
+async fn every_sidebar_page_links_to_projects() {
+    // 사이드바는 12개 HTML 파일에 손으로 복제돼 있고 동기화 자동화가 없다
+    // (`<!-- sidebar:start -->` 마커만 있고 그걸 읽는 코드는 없다). 링크를
+    // 하나 추가할 때 일부 파일을 빠뜨리기 쉬우므로 여기서 강제한다.
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    for path in [
+        "", "tasks", "tasks/new", "hosts", "hosts/provision", "admin/ssh-keys", "admin/users",
+        "admin/activity", "admin/tools", "projects", "projects/new",
+    ] {
+        let body = authed_get(&client, &format!("http://{}/{path}", server.addr), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(
+            body.contains("<span>Projects</span>"),
+            "/{path} is missing the Projects sidebar link"
+        );
+    }
+}

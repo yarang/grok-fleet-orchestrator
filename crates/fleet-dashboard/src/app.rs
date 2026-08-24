@@ -228,6 +228,11 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/api/users/:id/delete", post(handlers::delete_user_api))
         // ── P1.5: 호스트 ──
         .route("/hosts", get(handlers::host_inventory_page))
+        // Project 화면 (로드맵 #48). `/projects/new`는 `/projects/:id`보다
+        // 먼저 등록해야 "new"가 id로 해석되지 않는다.
+        .route("/projects", get(handlers::projects_page))
+        .route("/projects/new", get(handlers::project_new_page))
+        .route("/projects/:id", get(handlers::project_detail_page))
         .route("/hosts/:hostname", get(handlers::host_detail_page))
         .route("/hosts/provision", get(crate::provisioning::provision_page))
         // ── P2: 관리 ──

@@ -540,6 +540,16 @@ h2 {
   grid-template-columns: 1fr 1.5fr 1fr 0.6fr 1fr 0.8fr;
 }
 
+/* /projects 페이지 (Name/Status/Description/Created by/Created, 5열) — 로드맵 #48. */
+#project-table .row {
+  grid-template-columns: 1.2fr 0.7fr 2fr 0.9fr 0.9fr;
+}
+
+/* /projects/:id 상세의 Issue 테이블 (Title/Status/Severity/Assignee/Created, 5열) — #88/#92. */
+#issue-table .row {
+  grid-template-columns: 2fr 0.9fr 0.7fr 0.9fr 1fr;
+}
+
 /* ── Status pills ────────────────────────────────────────────────── */
 
 .status-pill {

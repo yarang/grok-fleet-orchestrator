@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Users — Fleet</title>
+  <title>New Project — Fleet</title>
   <link rel="stylesheet" href="static/styles.css" />
 </head>
 <body>
@@ -18,13 +18,13 @@
       <a href="./" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Overview</span></a>
       <a href="tasks" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1.5 1.5L8 5"/><path d="M4 12l1.5 1.5L8 11"/><path d="M4 18l1.5 1.5L8 17"/></svg><span>Tasks</span></a>
       <a href="hosts" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="7" cy="7" r="0.8" fill="currentColor" stroke="none"/><circle cx="7" cy="17" r="0.8" fill="currentColor" stroke="none"/></svg><span>Hosts</span></a>
-      <a href="projects" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span>Projects</span></a>
+      <a href="projects" class="sidebar-link active" aria-current="page"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span>Projects</span></a>
       </div>
       <div class="sidebar-group">
         <p class="sidebar-group-label">Admin</p>
       <a href="hosts/provision" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg><span>Provision</span></a>
       <a href="admin/ssh-keys" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/></svg><span>SSH Keys</span></a>
-      <a href="admin/users" class="sidebar-link active" aria-current="page"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/></svg><span>Users</span></a>
+      <a href="admin/users" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/></svg><span>Users</span></a>
       <a href="admin/activity" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2 7 4-14 2 7h6"/></svg><span>Activity</span></a>
       <a href="admin/tools" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 00-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 005.4-5.4l-2.5 2.5-2-2 2.5-2.5z"/></svg><span>Tools</span></a>
       </div>
@@ -40,42 +40,34 @@
   <!-- sidebar:end -->
 
   <main>
-    <h1 class="page-title">User Management</h1>
-    <p class="page-subtitle">Manage dashboard users and their roles.</p>
+    <h1 class="page-title">New Project</h1>
+    <p class="page-subtitle">A project groups tasks and issues under a development goal.</p>
 
-    <div id="create-panel" class="panel" style="margin-bottom:24px;display:none;">
-      <h3 style="margin:0 0 12px;font-size:15px;">Create New User</h3>
-      <form id="create-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
-        <label>Email
-          <input name="email" type="email" required placeholder="user@example.com" style="display:block;margin-top:4px;" />
+    <div class="panel" style="max-width:640px;">
+      <form id="project-form">
+        <label style="display:block;margin-bottom:16px;">
+          <span style="display:block;font-weight:600;margin-bottom:4px;">Name</span>
+          <input name="name" required type="text" placeholder="payments-migration" style="width:100%;box-sizing:border-box;" />
+          <span style="display:block;font-size:12px;color:var(--ink-muted-48);margin-top:4px;">
+            Must be unique across the fleet.
+          </span>
         </label>
-        <label>Display Name (optional)
-          <input name="username" type="text" placeholder="auto from email" style="display:block;margin-top:4px;" />
+
+        <label style="display:block;margin-bottom:20px;">
+          <span style="display:block;font-weight:600;margin-bottom:4px;">Description (optional)</span>
+          <textarea name="description" rows="3" placeholder="What is this project for?" style="width:100%;box-sizing:border-box;"></textarea>
         </label>
-        <label>Password
-          <input name="password" type="password" required minlength="8" placeholder="••••••••" style="display:block;margin-top:4px;" />
-        </label>
-        <button type="submit" class="btn btn-primary">Create</button>
-        <button type="button" class="btn" onclick="document.getElementById('create-panel').style.display='none';">Cancel</button>
+
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button type="submit" class="btn btn-primary">Create Project</button>
+          <a href="projects" class="btn">Cancel</a>
+          <span id="submit-status" style="font-size:13px;"></span>
+        </div>
       </form>
-      <p id="create-msg" style="margin:8px 0 0;font-size:13px;color:var(--badge-failed,#c0392b);display:none;"></p>
-    </div>
-
-    <div style="margin-bottom:12px;">
-      <button id="show-create-btn" class="btn btn-primary" onclick="document.getElementById('create-panel').style.display='block';this.style.display='none';">+ Add User</button>
-    </div>
-
-    <div id="user-table" class="table">
-      <div class="row header">
-        <div>Username</div><div>Email</div><div>Roles</div><div>Enabled</div><div>Last Login</div><div>Actions</div>
-      </div>
-    </div>
-    <div id="empty-state" class="empty-state" style="display:none;">
-      <h3>No users found</h3>
     </div>
   </main>
 
   <script src="static/app.js"></script>
-  <script src="static/admin-users.js"></script>
+  <script src="static/project-new.js"></script>
 </body>
 </html>
