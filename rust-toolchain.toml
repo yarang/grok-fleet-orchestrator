@@ -1,3 +1,9 @@
 [toolchain]
-channel = "stable"
+# 2026-08-25: `stable` 부동 때문에 로컬(1.97.1)과 CI(1.98.0)가 서로 다른 컴파일러로
+# 채점하는 상태가 되어 main CI가 8회 연속 실패했다. 1.98.0이 도입한 clippy lint는
+# CI에서만 나타났고 개발자는 로컬 게이트에서 재현할 수 없었다 — 게이트가 CI와 다른
+# 컴파일러를 쓰면 "로컬에서 통과했다"는 판단 자체가 성립하지 않는다.
+# 상향할 때는 이 파일과 .github/workflows/{ci,release}.yml의 toolchain 지정을
+# 반드시 같은 커밋에서 함께 올린다.
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
