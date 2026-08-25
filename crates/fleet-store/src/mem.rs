@@ -29,11 +29,11 @@ use uuid::Uuid;
 
 use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, CloseReason, EmailVerificationToken, EventEntry,
-    FleetEvent, Host, HostEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus,
-    IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId,
-    ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOutcome, User, UserId,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    FleetEvent, Host, HostEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId,
+    IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter,
+    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId,
+    TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOutcome, User,
+    UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -155,6 +155,48 @@ impl Store for MemStore {
         }
         tasks.insert(t.id, t.clone());
         Ok(())
+    }
+
+    async fn insert_task_idempotent(&self, t: &Task) -> Result<IdempotentInsert, StoreError> {
+        let mut tasks = self.tasks.lock().unwrap();
+        if tasks.contains_key(&t.id) {
+            return Err(StoreError::Conflict(format!(
+                "task already exists: {}",
+                t.id
+            )));
+        }
+
+        let Some(key) = t.idempotency_key.as_deref() else {
+            // 키가 없으면 유일성 대상이 아니다. PG의 부분 유일 인덱스가
+            // `WHERE idempotency_key IS NOT NULL`인 것과 같은 규칙 — NULL 두 개를
+            // 같은 값으로 보는 구현을 만들면 여기서만 통과하는 코드가 생긴다.
+            tasks.insert(t.id, t.clone());
+            return Ok(IdempotentInsert::Inserted);
+        };
+
+        // PG는 유일 인덱스가, 여기서는 하나의 락이 검사와 쓰기를 원자적으로
+        // 묶는다. 선형 탐색은 O(n)이지만 이 구현은 테스트 전용이고, 별도 인덱스를
+        // 두면 `with_task` 같은 직접 주입 헬퍼가 인덱스를 우회해 두 자료구조가
+        // 갈라진다 — 그쪽이 훨씬 비싼 버그다.
+        let existing = tasks
+            .values()
+            .find(|task| {
+                task.created_by == t.created_by && task.idempotency_key.as_deref() == Some(key)
+            })
+            .cloned();
+
+        match existing {
+            None => {
+                tasks.insert(t.id, t.clone());
+                Ok(IdempotentInsert::Inserted)
+            }
+            Some(existing) if existing.idempotency_payload_hash == t.idempotency_payload_hash => {
+                Ok(IdempotentInsert::Duplicate(Box::new(existing)))
+            }
+            Some(existing) => Ok(IdempotentInsert::Conflict {
+                existing_task_id: existing.id,
+            }),
+        }
     }
 
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {

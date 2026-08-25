@@ -24,11 +24,11 @@ use uuid::Uuid;
 
 use fleet_core::{
     AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry,
-    FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus,
-    IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter,
-    ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter, TransitionOutcome,
-    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    FleetEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity,
+    IssueStatus, IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project,
+    ProjectFilter, ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId,
+    TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -150,6 +150,64 @@ impl PgStore {
     /// 공통 SELECT 컬럼 목록.
     const USER_COLUMNS: &'static str =
         "id, username, email, email_verified, password_hash, enabled, created_at, last_login_at";
+
+    /// `tasks` INSERT 본체. `on_conflict`에는 호출부가 고른 **고정 문자열**만
+    /// 들어간다(빈 문자열 또는 멱등 삽입용 `ON CONFLICT ... DO NOTHING`) —
+    /// 사용자 입력이 이 자리에 닿는 경로는 없다.
+    ///
+    /// 컬럼 목록이 23개를 넘어 두 벌로 복제되면 한쪽만 고쳐지는 사고가 반드시
+    /// 나므로, `insert_task`와 `insert_task_idempotent`가 같은 SQL을 공유한다.
+    /// 반환값은 실제로 삽입된 행 수 — `DO NOTHING`이 발동하면 0이다.
+    async fn insert_task_row(&self, task: &Task, on_conflict: &str) -> Result<u64, StoreError> {
+        let priority_str = priority_to_str(task.priority);
+        let status_json = serde_json::to_value(&task.status)?;
+        let labels_json = serde_json::to_value(&task.required_labels)?;
+
+        let dep_uuids: Vec<Uuid> = task.dependency_ids.iter().map(|id| id.as_uuid()).collect();
+        let sql = format!(
+            r#"
+            INSERT INTO tasks
+                (id, prompt, cwd, model, server_hint, required_labels,
+                 max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                 thread_id, parent_task_id, project_id, dependency_ids, checkpoint_branch, skills_required,
+                 requested_profile, resolved_model, token_budget, partial_output,
+                 idempotency_key, idempotency_payload_hash)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+            {on_conflict}
+            "#,
+        );
+        let result = sqlx::query(&sql)
+            .bind(task.id.as_uuid())
+            .bind(&task.prompt)
+            .bind(task.cwd.as_ref())
+            .bind(task.model.as_ref())
+            .bind(task.server_hint.as_ref())
+            .bind(labels_json)
+            .bind(task.max_turns.map(|v| v as i32))
+            .bind(task.timeout_secs.map(|v| v as i64))
+            .bind(task.created_at)
+            .bind(&task.created_by)
+            .bind(priority_str)
+            .bind(status_json)
+            .bind(task.dispatched_at)
+            .bind(task.thread_id.as_uuid())
+            .bind(task.parent_task_id.map(|id| id.as_uuid()))
+            .bind(task.project_id.map(|id| id.as_uuid()))
+            .bind(dep_uuids)
+            .bind(task.checkpoint_branch.as_ref())
+            .bind(&task.skills_required)
+            .bind(task.routing_profile.as_deref())
+            .bind(task.resolved_model.as_deref())
+            .bind(task.token_budget.map(|v| v as i64))
+            .bind(task.partial_output.as_deref())
+            .bind(task.idempotency_key.as_deref())
+            .bind(task.idempotency_payload_hash.as_deref())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -161,49 +219,66 @@ impl Store for PgStore {
     // ── Task ───────────────────────────────────────────────────────────
 
     async fn insert_task(&self, task: &Task) -> Result<(), StoreError> {
-        let priority_str = priority_to_str(task.priority);
-        let status_json = serde_json::to_value(&task.status)?;
-        let labels_json = serde_json::to_value(&task.required_labels)?;
+        self.insert_task_row(task, "").await?;
+        Ok(())
+    }
 
-        let dep_uuids: Vec<Uuid> = task.dependency_ids.iter().map(|id| id.as_uuid()).collect();
-        sqlx::query(
-            r#"
-            INSERT INTO tasks
-                (id, prompt, cwd, model, server_hint, required_labels,
-                 max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
-                 thread_id, parent_task_id, project_id, dependency_ids, checkpoint_branch, skills_required,
-                 requested_profile, resolved_model, token_budget, partial_output)
-            VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-            "#,
+    async fn insert_task_idempotent(&self, task: &Task) -> Result<IdempotentInsert, StoreError> {
+        let Some(key) = task.idempotency_key.as_deref() else {
+            // 키가 없으면 유일 인덱스의 부분 조건(`WHERE idempotency_key IS NOT
+            // NULL`)에 애초에 걸리지 않으므로 ON CONFLICT는 절대 발동하지 않는다.
+            // 그 사실에 기대는 대신 분기를 명시해서, 인덱스 술어가 나중에 바뀌어도
+            // "키 없는 제출은 항상 새 Task"라는 계약이 코드에 남게 한다.
+            self.insert_task_row(task, "").await?;
+            return Ok(IdempotentInsert::Inserted);
+        };
+
+        // ON CONFLICT의 부분 인덱스 추론은 인덱스와 같은 술어를 요구한다.
+        let inserted = self
+            .insert_task_row(
+                task,
+                "ON CONFLICT (created_by, idempotency_key) \
+                 WHERE idempotency_key IS NOT NULL DO NOTHING",
+            )
+            .await?;
+        if inserted > 0 {
+            return Ok(IdempotentInsert::Inserted);
+        }
+
+        // 삽입이 0행이라는 건 같은 키가 이미 있다는 뜻이다. 이 SELECT는 삽입
+        // 시도 뒤에 일어나므로 "먼저 조회하고 없으면 삽입"의 경합 창이 없다 —
+        // 유일 인덱스가 이미 승자를 정했고, 우리는 진 쪽에서 승자를 읽을 뿐이다.
+        let row = sqlx::query(
+            r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                      thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
+                      requested_profile, resolved_model, token_budget, partial_output,
+                      idempotency_key, idempotency_payload_hash
+               FROM tasks WHERE created_by = $1 AND idempotency_key = $2"#,
         )
-        .bind(task.id.as_uuid())
-        .bind(&task.prompt)
-        .bind(task.cwd.as_ref())
-        .bind(task.model.as_ref())
-        .bind(task.server_hint.as_ref())
-        .bind(labels_json)
-        .bind(task.max_turns.map(|v| v as i32))
-        .bind(task.timeout_secs.map(|v| v as i64))
-        .bind(task.created_at)
         .bind(&task.created_by)
-        .bind(priority_str)
-        .bind(status_json)
-        .bind(task.dispatched_at)
-        .bind(task.thread_id.as_uuid())
-        .bind(task.parent_task_id.map(|id| id.as_uuid()))
-        .bind(task.project_id.map(|id| id.as_uuid()))
-        .bind(dep_uuids)
-        .bind(task.checkpoint_branch.as_ref())
-        .bind(&task.skills_required)
-        .bind(task.routing_profile.as_deref())
-        .bind(task.resolved_model.as_deref())
-        .bind(task.token_budget.map(|v| v as i64))
-        .bind(task.partial_output.as_deref())
-        .execute(&self.pool)
+        .bind(key)
+        .fetch_optional(&self.pool)
         .await?;
 
-        Ok(())
+        // 승자가 이미 사라졌다면(그 사이의 삭제) 키는 다시 비었다. 재시도하지
+        // 않고 Conflict로도 보지 않는다 — 호출자에게 에러로 알려서, 조용히
+        // 중복 Task를 만들거나 없는 Task의 id를 돌려주는 일이 없게 한다.
+        let Some(row) = row else {
+            return Err(StoreError::Conflict(format!(
+                "idempotency key '{key}' for '{}' vanished between insert and lookup",
+                task.created_by
+            )));
+        };
+
+        let existing = row_to_task(row)?;
+        if existing.idempotency_payload_hash == task.idempotency_payload_hash {
+            Ok(IdempotentInsert::Duplicate(Box::new(existing)))
+        } else {
+            Ok(IdempotentInsert::Conflict {
+                existing_task_id: existing.id,
+            })
+        }
     }
 
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
@@ -211,7 +286,8 @@ impl Store for PgStore {
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
-                      requested_profile, resolved_model, token_budget, partial_output
+                      requested_profile, resolved_model, token_budget, partial_output,
+                      idempotency_key, idempotency_payload_hash
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -226,7 +302,8 @@ impl Store for PgStore {
             r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
-                      requested_profile, resolved_model, token_budget, partial_output
+                      requested_profile, resolved_model, token_budget, partial_output,
+                      idempotency_key, idempotency_payload_hash
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -379,7 +456,8 @@ impl Store for PgStore {
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
-                          requested_profile, resolved_model, token_budget, partial_output
+                          requested_profile, resolved_model, token_budget, partial_output,
+                      idempotency_key, idempotency_payload_hash
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -2595,6 +2673,8 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let resolved_model: Option<String> = row.try_get("resolved_model")?;
     let token_budget_raw: Option<i64> = row.try_get("token_budget")?;
     let partial_output: Option<String> = row.try_get("partial_output")?;
+    let idempotency_key: Option<String> = row.try_get("idempotency_key")?;
+    let idempotency_payload_hash: Option<String> = row.try_get("idempotency_payload_hash")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
@@ -2627,6 +2707,8 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         resolved_model,
         token_budget: token_budget_raw.map(|v| v as u64),
         partial_output,
+        idempotency_key,
+        idempotency_payload_hash,
     })
 }
 

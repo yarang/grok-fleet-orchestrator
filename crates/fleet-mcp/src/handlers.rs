@@ -181,6 +181,19 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
                 .collect()
         })
         .unwrap_or_default();
+    // 로드맵 #62 2단계 — 제출 멱등성. 빈 문자열은 키가 아니다: 클라이언트가
+    // 실수로 빈 값을 보내면 "모두가 공유하는 하나의 키"가 되어, 서로 무관한
+    // 제출들이 전부 중복으로 판정된다. `None`으로 접어 멱등성 검사를 끈다.
+    req.idempotency_key = args
+        .get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from);
+    // 이 표면에는 호출자 principal이 없다 — `ToolContext`는 capability 집합만
+    // 들고 있고(server.rs의 `McpAuthorization`), stdio 런처가 신원을 전달하지
+    // 않는다. 그래서 모든 MCP 제출이 `created_by = "mcp"` 한 버킷을 공유하고,
+    // 멱등성 키 네임스페이스도 그 버킷 단위다(마이그레이션 024 참고).
     req.created_by = "mcp".to_string();
 
     let task = Task::from_request(req);
@@ -202,10 +215,21 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
                 .flatten()
                 .map(|t| phase_str(&t.status))
                 .unwrap_or("dispatched");
+            // 멱등성 키가 기존 Task를 되살렸다면 submit()은 우리가 만든 id가
+            // 아니라 그 Task의 id를 돌려준다. 그 사실을 클라이언트에게 알린다 —
+            // 모르면 "방금 새 작업을 시작했다"고 오해하고, 이미 완료된 작업의
+            // 상태를 새 작업의 진행으로 읽는다.
+            let deduplicated = returned_id != task_id;
             Ok(schema::tool_json(&json!({
                 "task_id": returned_id.to_string(),
                 "status": status,
-                "hint": "Poll fleet_get_task_status with the task_id to observe completion."
+                "deduplicated": deduplicated,
+                "hint": if deduplicated {
+                    "This idempotency_key already had a task; no new task was created. \
+                     Poll fleet_get_task_status with the returned task_id."
+                } else {
+                    "Poll fleet_get_task_status with the task_id to observe completion."
+                }
             })))
         }
         Err(e) => {

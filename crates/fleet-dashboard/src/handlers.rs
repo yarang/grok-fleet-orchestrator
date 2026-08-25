@@ -442,6 +442,12 @@ pub struct SubmitTaskForm {
     /// 상속한다.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// 제출 멱등성 키 (로드맵 #62 2단계). 같은 사용자가 같은 키로 같은
+    /// 페이로드를 다시 보내면 새 Task를 만들지 않고 기존 Task를 돌려준다.
+    /// 같은 키에 다른 페이로드가 오면 409로 거절한다. 비우면 멱등성 검사
+    /// 없음(기존 동작 그대로).
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     #[serde(default)]
     pub csrf_token: String,
 }
@@ -461,6 +467,13 @@ pub struct SubmitTaskForm {
 /// `dispatched: false`이지만 `warning` 필드는 없다(진짜 에러가 아니라 정상적인
 /// "재시도 예약됨" 상태이기 때문). `warning` 필드 유무로 "실패"와 "재시도 중"을
 /// 구분해야 한다.
+///
+/// 로드맵 #62 2단계: 응답에 `deduplicated: bool`이 항상 포함된다. `true`면
+/// `idempotency_key`가 기존 제출과 일치해 **새 실행이 일어나지 않았고**,
+/// `task_id`는 최초 작업의 id다. 이때 그 작업은 이미 `Completed`/`Failed`일 수
+/// 있으므로 `dispatched: false` + `warning` 없음 조합이 나오는데, 위 문단의
+/// "재시도 예약됨"과 겉모습이 같다 — **`deduplicated`를 먼저 확인해야** 두
+/// 상태를 구분할 수 있다. 같은 키에 다른 페이로드가 오면 409 Conflict다.
 pub async fn submit_task_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -537,8 +550,21 @@ pub async fn submit_task_api(
         created_by: principal.user.username.clone(),
         parent_task_id: None, // inherit_from_parent가 아래서 채운다.
         project_id: explicit_project_id,
+        // 빈 문자열은 키가 아니다 — HTML 폼은 비어 있는 입력도 `""`로
+        // 보내므로, 접지 않으면 키를 쓰지 않는 모든 제출이 `""` 하나를
+        // 공유해 서로를 중복으로 판정한다.
+        idempotency_key: form
+            .idempotency_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from),
         ..Default::default()
     });
+    // 주의: 페이로드 해시는 `from_request` 시점, 즉 아래 `inherit_from_parent`
+    // **이전**의 요청 값으로 계산된다. 이것이 옳다 — 해시가 식별하는 것은
+    // "클라이언트가 보낸 제출"이고, 상속은 그 제출과 부모로부터 결정되는
+    // 파생값이다. 같은 폼을 두 번 보내면 상속 결과도 같으므로 해시도 같다.
     if let Some(parent) = &parent_task {
         task.inherit_from_parent(parent);
     }
@@ -565,6 +591,16 @@ pub async fn submit_task_api(
 
     match dispatcher.submit(task).await {
         Ok(id) => {
+            // 로드맵 #62 2단계: `submit()`이 멱등성 키로 중복을 흡수하면 **최초**
+            // 작업 id를 돌려준다 — 방금 만든 `task_id`가 아니라. 그 차이가
+            // 곧 "중복이었다"는 신호이므로 Dispatcher API를 넓히지 않고 여기서
+            // 판정한다.
+            //
+            // 이 플래그가 없으면 신호가 거짓이 된다: 이미 `Completed`인 작업을
+            // 되돌려준 경우 아래 `actually_dispatched`는 false가 되고 `warning`
+            // 필드는 없는데, 위 문서가 그 조합을 "재시도 예약됨"으로 정의한다.
+            // 끝난 작업을 "재시도 대기 중"으로 보고하는 셈이다.
+            let deduplicated = id != task_id;
             // 로드맵 #38: 재시도가 활성화된 배포에서는 submit()이 워커 선택
             // 실패/CircuitOpen에서도 Ok를 반환할 수 있다 — 이 경우 작업은
             // 아직 Pending(백그라운드 재시도 대기)이므로 `dispatched: true`를
@@ -580,8 +616,20 @@ pub async fn submit_task_api(
             Ok(Json(serde_json::json!({
                 "task_id": id,
                 "dispatched": actually_dispatched,
+                "deduplicated": deduplicated,
             })))
         }
+        // 멱등성 충돌만 4xx다. 이 경로에서는 Task 행이 **생성되지 않았고**,
+        // 클라이언트가 고쳐야 할 것이 분명하다(키를 바꾸거나 원래 페이로드로
+        // 보낸다) — 아래 일반 분기의 `200 + warning`은 "Task는 만들어졌지만
+        // 디스패치가 미뤄졌다"는 뜻이라 여기에 쓰면 거짓말이 된다.
+        Err(fleet_scheduler::DispatchError::IdempotencyConflict {
+            key,
+            existing_task_id,
+        }) => Err(ApiError::Conflict(format!(
+            "idempotency key '{key}' was already used with a different payload \
+             (existing task {existing_task_id})"
+        ))),
         Err(e) => {
             debug!(%task_id, error = %e, "dashboard task submission did not dispatch immediately");
             Ok(Json(serde_json::json!({

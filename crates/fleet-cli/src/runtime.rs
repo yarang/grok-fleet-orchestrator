@@ -1489,6 +1489,13 @@ async fn run_tasks_submit(
     });
     let task_id = task.id;
 
+    // 로드맵 #62 2단계 — 이 경로는 의도적으로 멱등하지 않다. CLI에는
+    // `--idempotency-key` 인자가 없고, 사람이 터미널에서 한 번 실행하는
+    // 호출이라 "timeout 후 자동 재시도"라는 시나리오 자체가 없다. 채울 사람이
+    // 없는 인자를 미리 만들지 않는다 — 실제로 재시도하는 클라이언트(MCP/HTTP)가
+    // 생기면 그때 붙인다. 키가 `None`이므로 `insert_task_idempotent`를 써도
+    // 결과는 같지만, 멱등성을 제공하지 않는다는 사실이 호출부에 드러나도록
+    // `insert_task`를 그대로 쓴다.
     store
         .insert_task(&task)
         .await

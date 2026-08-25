@@ -276,6 +276,10 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "type": "string",
                         "format": "uuid",
                         "description": "Project boundary for this task (optional). Stored now; policy enforcement arrives with the Project control-plane feature."
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "description": "Client-chosen key making this submit idempotent (optional). Resending the same key with the same payload returns the existing task instead of creating a duplicate — use it when a call may time out and be retried. Reusing the key with a different payload is rejected. Note: all MCP submissions share one key namespace per orchestrator, so pick keys that are unlikely to collide (e.g. include a UUID)."
                     }
                 },
                 "required": ["prompt"]

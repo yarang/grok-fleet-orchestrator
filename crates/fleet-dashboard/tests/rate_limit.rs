@@ -143,6 +143,13 @@ impl Store for AttemptStore {
 
     // ── 이하 트레이트 필수 메서드 (본 테스트에서 미사용) ──────────────
 
+    async fn insert_task_idempotent(
+        &self,
+        _: &Task,
+    ) -> Result<fleet_core::IdempotentInsert, StoreError> {
+        Ok(fleet_core::IdempotentInsert::Inserted)
+    }
+
     async fn insert_task(&self, _task: &Task) -> Result<(), StoreError> {
         unimplemented!()
     }

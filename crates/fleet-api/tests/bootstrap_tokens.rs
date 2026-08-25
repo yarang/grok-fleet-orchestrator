@@ -637,6 +637,13 @@ struct BsStore {
 
 #[async_trait]
 impl Store for BsStore {
+    async fn insert_task_idempotent(
+        &self,
+        _: &Task,
+    ) -> Result<fleet_core::IdempotentInsert, StoreError> {
+        Ok(fleet_core::IdempotentInsert::Inserted)
+    }
+
     async fn insert_task(&self, _: &Task) -> Result<(), StoreError> {
         unimplemented!()
     }

@@ -100,7 +100,41 @@ pub trait Store: Send + Sync {
     // ── Task ───────────────────────────────────────────────────────
 
     /// 작업을 저장소에 삽입. ID 충돌 시 에러.
+    ///
+    /// **멱등성 키를 존중하지 않는다.** 클라이언트가 `idempotency_key`를 붙였더라도
+    /// 이 메서드는 그대로 삽입을 시도하며, 키가 이미 쓰였다면 유일 인덱스에
+    /// 걸려 [`StoreError::Conflict`]가 난다. 제출 경로는
+    /// [`Store::insert_task_idempotent`]를 쓴다.
     async fn insert_task(&self, task: &Task) -> Result<(), StoreError>;
+
+    /// 제출 멱등성을 존중하며 작업을 삽입한다 (로드맵 #62 2단계).
+    ///
+    /// `task.idempotency_key`가 `None`이면 [`Store::insert_task`]와 같고 항상
+    /// [`IdempotentInsert::Inserted`]다. `Some`이면 `(created_by, idempotency_key)`가
+    /// 이미 존재하는지 보고, 존재하면 저장된 페이로드 해시를 비교해
+    /// [`IdempotentInsert::Duplicate`](같은 요청의 재시도)와
+    /// [`IdempotentInsert::Conflict`](키 재사용)를 가른다.
+    ///
+    /// ## 왜 호출부가 아니라 저장소에서 강제하는가
+    ///
+    /// 프로덕션의 `insert_task` 호출 경로는 세 갈래이고 하나의 깔때기를 지나지
+    /// 않는다 — `Dispatcher::submit`, `fleet-cli`의 직접 삽입, 그리고 MCP
+    /// `handle_dispatch_task`(이건 dispatcher를 경유한다). 호출부에서 "먼저
+    /// 조회하고 없으면 삽입"을 하면 (a) 세 곳이 드리프트하고 (b) 조회와 삽입
+    /// 사이에 다른 프로세스가 끼어드는 창이 그대로 남는다. 유일 인덱스가 그
+    /// 창을 닫는 유일한 지점이므로, 판정도 같은 자리에서 한다.
+    ///
+    /// ## 유일성 스코프의 한계
+    ///
+    /// 설계 정본(`docs/architecture/tasks/execution-consistency.md`)은 "동일
+    /// principal, 동일 key"라고 쓰지만, 오늘 코드에 principal이 없다. MCP 제출은
+    /// 전부 `created_by = "mcp"` 한 버킷을 공유하므로, 이 스코프는 MCP 클라이언트
+    /// 단위가 아니라 오케스트레이터 단위다. 마이그레이션 024 주석과 로드맵 #62
+    /// 행에 같은 내용이 적혀 있다.
+    async fn insert_task_idempotent(
+        &self,
+        task: &Task,
+    ) -> Result<fleet_core::IdempotentInsert, StoreError>;
 
     /// 작업 ID로 조회. 없으면 `None`.
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError>;

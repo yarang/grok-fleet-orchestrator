@@ -2659,3 +2659,166 @@ async fn every_sidebar_page_links_to_projects() {
         );
     }
 }
+
+// ── 로드맵 #62 2단계 게이트 3: 대시보드 HTTP 표면의 멱등성 ────────────────
+//
+// UI에는 `idempotency_key` 입력 컨트롤이 없다(브라우저 클릭으로는 이 코드에
+// 도달할 수 없다) — 이 필드는 JSON/폼 API 소비자를 위한 것이다. 따라서 검증도
+// HTTP 수준에서 한다. `spawn_dispatcher_server_with_store`는 실제 axum 서버와
+// 실제 `Dispatcher`를 띄우므로, 이 두 테스트는 라우팅·CSRF·핸들러·디스패처·
+// store를 관통하는 진짜 왕복이다.
+
+/// 같은 키·같은 페이로드로 두 번 제출하면 두 번 다 200이고 **같은 task_id**이며,
+/// 두 번째 응답은 `deduplicated: true`로 표시된다. 행은 하나만 남는다.
+#[tokio::test]
+async fn submit_task_with_same_idempotency_key_returns_the_same_task() {
+    let worker = sample_worker("idem-w", WorkerStatus::Online);
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let form = [
+        ("prompt", "build the thing"),
+        ("csrf_token", TEST_CSRF),
+        ("idempotency_key", "dash-once"),
+    ];
+
+    let first = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &form,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(first.status(), 200);
+    let first: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(
+        first["deduplicated"], false,
+        "최초 제출은 중복이 아니다: {first}"
+    );
+
+    let second = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &form,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        second.status(),
+        200,
+        "같은 페이로드 재제출은 에러가 아니라 흡수다"
+    );
+    let second: serde_json::Value = second.json().await.unwrap();
+
+    assert_eq!(
+        second["task_id"], first["task_id"],
+        "재제출은 최초 task_id를 돌려줘야 한다"
+    );
+    assert_eq!(
+        second["deduplicated"], true,
+        "중복임을 명시해야 한다 — 그렇지 않으면 `dispatched: false` + warning 없음이 \
+         '재시도 예약됨'으로 오독된다: {second}"
+    );
+
+    let tasks = store
+        .list_tasks(&fleet_core::TaskFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "행은 하나여야 한다: {tasks:?}");
+}
+
+/// 같은 키에 **다른** 페이로드가 오면 409 Conflict이고, 두 번째 행은 생기지 않는다.
+/// 이 경로만이 이 핸들러에서 4xx다 — 나머지 디스패치 실패는 행이 이미 존재하므로
+/// `200 + dispatched:false + warning`이다.
+#[tokio::test]
+async fn submit_task_with_conflicting_payload_returns_409() {
+    let worker = sample_worker("idem-w2", WorkerStatus::Online);
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let first = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "build the thing"),
+            ("csrf_token", TEST_CSRF),
+            ("idempotency_key", "dash-once"),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(first.status(), 200);
+
+    let conflicting = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "delete the thing"),
+            ("csrf_token", TEST_CSRF),
+            ("idempotency_key", "dash-once"),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        conflicting.status(),
+        409,
+        "같은 키에 다른 페이로드는 409여야 한다"
+    );
+
+    let tasks = store
+        .list_tasks(&fleet_core::TaskFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.len(),
+        1,
+        "거절된 제출은 행을 남기면 안 된다: {tasks:?}"
+    );
+}
+
+/// 빈 `idempotency_key`(HTML 폼이 비어 있는 입력에 대해 보내는 `""`)는 키가
+/// 아니다 — 접지 않으면 키를 쓰지 않는 모든 제출이 `""` 하나를 공유해 서로를
+/// 중복으로 판정한다. 이 회귀는 조용하고 치명적이라 명시적으로 고정한다.
+#[tokio::test]
+async fn empty_idempotency_key_does_not_deduplicate() {
+    let worker = sample_worker("idem-w3", WorkerStatus::Online);
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    for prompt in ["first thing", "second thing"] {
+        let resp = authed_post_form(
+            &client,
+            &format!("http://{}/api/tasks", server.addr),
+            &cookie,
+            &[
+                ("prompt", prompt),
+                ("csrf_token", TEST_CSRF),
+                ("idempotency_key", ""),
+            ],
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 200, "prompt={prompt}");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["deduplicated"], false,
+            "빈 문자열은 키가 아니다: {body}"
+        );
+    }
+
+    let tasks = store
+        .list_tasks(&fleet_core::TaskFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 2, "두 제출 모두 살아 있어야 한다: {tasks:?}");
+}

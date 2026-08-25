@@ -146,6 +146,13 @@ mod tests {
     pub struct NoopStore;
     #[async_trait::async_trait]
     impl fleet_store::Store for NoopStore {
+        async fn insert_task_idempotent(
+            &self,
+            _: &fleet_core::Task,
+        ) -> Result<fleet_core::IdempotentInsert, fleet_store::StoreError> {
+            Ok(fleet_core::IdempotentInsert::Inserted)
+        }
+
         async fn insert_task(&self, _: &fleet_core::Task) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }

@@ -1475,3 +1475,48 @@ last_verified: "2026-08-15"
 - **작업 트리 동시 편집 사고**: 진단 도중 `git status`가 9개 파일 `+348/-48`로 더러워졌고 `fleet-scheduler`가 E0061 6건으로 컴파일되지 않았다. 원인은 결함이 아니라 **다른 세션(`[macstudio]grok-fleet-orchestrator 로드맵 진행`)이 같은 작업 트리에 `#62` 리팩터를 쓰고 있었던 것**이다(mtime 19:30~19:37, 당시 19:37). 아무것도 되돌리지 않고 빌드를 중단했다 — 공유 `target/`을 통해 서로의 증분 빌드를 무효화하기 때문이다. 그 세션은 이후 `76e4f81`로 커밋·푸시를 마쳤다. **한 작업 트리에 두 세션이 붙으면 빌드 산출물과 `git status`가 공유 가변 상태가 된다.**
 - 검증: CI run `32837011249`(`3238c65`)와 `32841344564`(`76e4f81`) 두 실행 모두 같은 4건으로 실패 — flaky가 아니라 재현되는 실패다. `Shellcheck install/uninstall` 잡은 두 실행 모두 성공.
 - **다음 작업으로 넘긴다**: 4건의 수정. 순서와 근거는 인계 프롬프트에 있다.
+
+## 2026-08-26 — feat — `#62` 2단계: 클라이언트 멱등성(정본 게이트 3), 그리고 "행이 중복되지 않음"과 "실행이 중복되지 않음"의 차이
+
+- 유형: `feat`
+- **무엇을 했나**: [실행 일관성](architecture/tasks/execution-consistency.md) 정본 게이트 10개 중 **3번("같은 idempotency key로 재제출하면 새 실행을 만들지 않고 기존 결과를 돌려준다")** 을 닫았다. 1단계(`76e4f81`)가 Task의 상태 칸을 CAS로 잠갔다면, 2단계는 **제출 자체**를 잠근다.
+- **왜 게이트 3만 골랐나**: 남은 게이트 4~10은 전부 `TaskAttempt` 엔티티나 effect ledger를 전제한다. 게이트 3만이 그 기계장치 없이 닫힌다 — 필요한 것은 요청에 붙는 키 하나와 그것을 강제하는 유니크 제약뿐이다.
+
+- **설계 결정과 근거**:
+
+  | 결정 | 왜 |
+  |---|---|
+  | 유니크 범위를 `(created_by, idempotency_key)`로 잡았다 | 정본은 "동일 principal"이라고 쓰지만 **MCP 표면에는 principal이 없다** — stdio JSON-RPC 루프이고 인가는 `FLEET_MCP_CAPABILITIES`만 본다. 그래서 `created_by`가 `"mcp"`로 하드코딩된다. 채울 수 없는 `principal_id` 칼럼을 미리 만드는 대신 `created_by`로 범위를 잡고, 한계를 세 곳(마이그레이션 024 헤더, `Store::insert_task_idempotent` doc, MCP 도구 스키마 설명)에 적어 두었다. **같은 오케스트레이터의 모든 MCP 제출이 하나의 키 네임스페이스를 공유한다**는 뜻이다. `#93`의 게이트가 같은 표면에서 **같은 principal 부재 문제**를 기록하고 있다 — 하나로 묶어 푸는 것이 맞다 |
+  | 페이로드 해시를 길이 접두·필드 명시·버전 태그로 직접 만들었다 | `serde` 직렬화 바이트를 해싱하면 필드 순서·표현 변경이 조용히 해시를 바꿔 과거 키를 전부 충돌로 만든다. 길이 접두가 없으면 `prompt="ab"`와 `prompt="a", cwd="b"`가 같은 해시를 갖는다 — 이 경계 사례를 테스트로 고정했다 |
+  | 라우터가 채우는 필드(`resolved_model`, `token_budget`, `routing_profile`)를 해시에서 뺐다 | 해시가 식별하는 것은 **클라이언트가 보낸 제출**이다. 라우팅은 그 제출로부터 결정되는 파생값이므로 포함하면 라우터 휴리스틱이 바뀔 때마다 재시도가 충돌로 변한다. 대시보드의 `inherit_from_parent`도 같은 이유로 해시 계산 **이후**에 적용된다 |
+  | 거절을 `Ok(Conflict)`로 모델링했다 | 1단계 `TransitionOutcome`과 같은 근거 — 재제출은 장애가 아니라 정상적인 클라이언트 동작이다 |
+  | `IdempotentInsert`에 `PartialEq`를 파생하지 않았다 | `Task`가 `PartialEq`가 아니라 `Box<Task>` 비교에서 E0369가 난다. 대신 `inserted() -> bool`을 뒀다 |
+  | 빈 문자열을 키에서 접었다 | HTML 폼은 비어 있는 입력도 `""`로 보낸다. 접지 않으면 **키를 쓰지 않는 모든 제출이 `""` 하나를 공유해 서로를 중복으로 판정한다.** 조용하고 치명적인 회귀라 테스트로 명시 고정했다 |
+  | `fleet-cli`는 비멱등으로 남겼다 | 로컬 CLI에는 timeout 후 재시도하는 클라이언트가 없다. `runtime.rs:1493`에 주석만 남기고 `insert_task`를 계속 호출한다 |
+
+- **핵심 교훈 — store 테스트 6건은 게이트를 증명하지 못한다**: `fleet-store/tests/task_idempotency.rs`가 증명하는 것은 **행이 중복되지 않음**이다. 게이트가 요구하는 것은 **실행이 중복되지 않음**이고, 그 계약은 `Dispatcher::submit`의 조기 반환에만 존재한다. 처음에는 store 테스트만 있었는데, 그 상태에서 누군가 `IdempotentInsert` match를 `append_event` **아래로** 옮겨도 6건이 전부 초록으로 남는다. 그래서 디스패처 테스트 2건을 추가하고 **뮤테이션으로 값을 증명했다**:
+
+  | 뮤테이션 | 결과 |
+  |---|---|
+  | `return Ok(existing.id)` 제거(아래로 흘림) | `duplicate_submit_...`이 `NoWorker`로 실패 — 워커 없는 픽스처(`setup_no_workers(0)`)를 쓴 것이 의도적이다. 중복 경로가 새면 반환값만으로 드러난다 |
+  | 조기 반환은 유지하되 `append_event`를 그 **앞**에 삽입 | **이벤트 수 단언만이** 잡았다(`left: 0, right: 1`). 다른 모든 단언과 store 테스트 6건은 이 변형에서 초록이다 — 행은 여전히 하나이므로 |
+
+- **대시보드 응답에 `deduplicated`를 추가했다**: MCP에는 이미 있었지만 대시보드에는 없었다. 없으면 **신호가 거짓이 된다** — 이미 `Completed`인 중복을 돌려주면 핸들러의 `actually_dispatched`가 false가 되고 `warning` 필드는 없는데, 같은 함수의 doc 주석이 **바로 그 조합을 "재시도 예약됨"으로 정의한다**(`#38`). 끝난 작업을 "재시도 대기 중"으로 보고하는 셈이었다. Dispatcher API를 넓히지 않고 `id != task_id`로 판정한다 — `submit()`이 중복을 흡수하면 최초 id를 돌려주므로 그 차이 자체가 신호다. 제출 **전** 단계(권한·CSRF·project admission)는 전부 읽기 전용임을 확인했다 — 중복 판정 전에 감사 행이나 카운터가 남는 경로는 없다.
+
+- **검증 한계**:
+
+  | 무엇 | 내용 |
+  |---|---|
+  | 대시보드 UI에는 이 필드의 입력 컨트롤이 없다 | `idempotency_key`는 JSON/폼 API 소비자를 위한 것이라 **브라우저 클릭으로는 이 코드에 도달할 수 없다.** 그래서 브라우저 왕복 대신 HTTP 수준에서 검증했다 — `spawn_dispatcher_server_with_store`가 실제 axum 서버와 실제 `Dispatcher`를 띄우므로 라우팅·CSRF·핸들러·디스패처·store를 관통하는 진짜 왕복이다. curl 수동 확인보다 강하다(CI에서 반복된다) |
+  | 동시 제출 부하에서 검증되지 않았다 | 테스트는 재제출을 **순차로** 겹친다. 두 요청이 정확히 같은 순간 같은 키로 들어오는 경우의 원자성은 Postgres 부분 유니크 인덱스 + `ON CONFLICT DO NOTHING`이 보장하는 것이지 이 테스트가 증명하는 것이 아니다. MemStore는 단일 lock 아래 O(n) 스캔으로 같은 의미를 흉내내며, 이쪽은 부하 특성이 다르다 |
+  | `ON CONFLICT`의 부분 인덱스 추론 | Postgres는 부분 유니크 인덱스를 추론하려면 `ON CONFLICT` 절에 **술어를 그대로 반복**해야 한다. 빠뜨리면 런타임에 "no unique or exclusion constraint matching"으로 죽는다 — 실제 PostgreSQL 실행으로만 잡히고 MemStore 통과로는 보이지 않는다 |
+
+- **환경 결함 2건(다음 에이전트가 그대로 밟는다)**:
+
+  | 증상 | 원인과 조치 |
+  |---|---|
+  | `brew services start postgresql@16` → `Bootstrap failed: 5: Input/output error`, `pg_ctl start` → `FATAL: postmaster became multithreaded during startup` / `HINT: Set the LC_ALL environment variable to a valid locale.` | 로케일 미설정. **`export LC_ALL=C`** 후 `pg_ctl -D /opt/homebrew/var/postgresql@16 start`로 기동된다 |
+  | `fleet-mcp/tests/cross_client.rs` 14건 중 13건이 `DATABASE_URL` 아래에서 실패, 표면 패닉은 `no initialize response`(무관한 메시지) | 단일 테스트로 좁혀서 진짜 원인을 봤다: `migration 24 was previously applied but is missing in the resolved migrations`. 이 스위트는 미리 빌드된 `target/debug/fleet`을 spawn하는데 `sqlx::migrate!`는 마이그레이션 파일을 **컴파일 시점에** 박아 넣는다 — 낡은 바이너리는 023까지만 알고 DB에는 024가 적용돼 있었다. **`cargo build -p fleet-cli --all-features`** 로 해소. 제품 결함이 아니다. 마이그레이션을 추가하는 사람은 누구나 이걸 밟는다 |
+
+- **검증**: `rustc 1.98.0`(고정과 일치), `cargo fmt --all -- --check` 통과, clippy 2종(`acp mtls` / `--no-default-features`, 둘 다 `RUSTFLAGS="-D warnings"` + `-- -D warnings`) 경고 0, `env -u DATABASE_URL cargo test --workspace` 실패 0, 그리고 `DATABASE_URL`을 물린 5개 크레이트(`fleet-store`·`fleet-api`·`fleet-scheduler`·`fleet-mcp`·`fleet-dashboard`) `--test-threads=1` 직렬 재실행 전부 통과. 마이그레이션 024가 실제로 적용되는 것과 스키마 객체를 직접 확인했다 — `idx_tasks_idempotency UNIQUE, btree (created_by, idempotency_key) WHERE idempotency_key IS NOT NULL`, `CHECK ((idempotency_key IS NULL) = (idempotency_payload_hash IS NULL))`.
+- **미룬 것**: 정본 게이트 4~10(`TaskAttempt` 엔티티, effect ledger, 이전 control epoch 이벤트 거부, 비가역 tool effect 재실행 금지). 이유는 2026-08-25 1단계 항목의 표와 동일하며 그대로 유효하다. principal 부재는 `#93`과 함께 풀어야 한다.

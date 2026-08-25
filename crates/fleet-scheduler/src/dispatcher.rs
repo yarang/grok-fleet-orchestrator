@@ -11,8 +11,8 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use fleet_core::{
-    CircuitState, FailureKind, FleetEvent, Task, TaskFailure, TaskId, TaskPhase, TaskStatus,
-    TransitionOutcome, WorkerId,
+    CircuitState, FailureKind, FleetEvent, IdempotentInsert, Task, TaskFailure, TaskId, TaskPhase,
+    TaskStatus, TransitionOutcome, WorkerId,
 };
 use fleet_transport::{DispatchRequest, TransportError, WorkerEvent};
 use tracing::{info, warn};
@@ -291,12 +291,38 @@ impl Dispatcher {
             task.token_budget = Some(decision.token_budget);
         }
 
-        // 1. Store에 작업 저장
-        self.state
+        // 1. Store에 작업 저장 — 클라이언트 멱등성 키를 존중한다 (로드맵 #62 2단계).
+        //
+        // `Duplicate`면 **여기서 즉시 반환한다.** 아래 어느 것도 실행하면 안
+        // 된다: TaskCreated 이벤트(일어나지 않은 일을 주장하게 된다), 의존성
+        // 검사, 워커 선택, dispatch, RUNNING 게이지 증가. 불리언을 만들어
+        // 나머지 흐름에 실어 보내면 그중 하나가 반드시 빠진다.
+        let outcome = self
+            .state
             .store
-            .insert_task(&task)
+            .insert_task_idempotent(&task)
             .await
             .map_err(|e| DispatchError::Store(e.to_string()))?;
+        match outcome {
+            IdempotentInsert::Inserted => {}
+            IdempotentInsert::Duplicate(existing) => {
+                tracing::info!(
+                    task_id = %existing.id,
+                    key = %task.idempotency_key.as_deref().unwrap_or("?"),
+                    "duplicate submit — returning the existing task without dispatching"
+                );
+                // 반환되는 Task는 이미 Completed/Failed일 수 있다. "timeout 후
+                // 같은 키로 재호출"이 정확히 이 게이트가 막으려는 시나리오이고,
+                // 그때 최초 제출은 대개 이미 끝나 있다.
+                return Ok(existing.id);
+            }
+            IdempotentInsert::Conflict { existing_task_id } => {
+                return Err(DispatchError::IdempotencyConflict {
+                    key: task.idempotency_key.clone().unwrap_or_default(),
+                    existing_task_id,
+                });
+            }
+        }
 
         // 2. TaskCreated 이벤트
         let _ = self
@@ -884,6 +910,21 @@ pub enum DispatchError {
         current: &'static str,
     },
 
+    /// 같은 멱등성 키가 **다른 페이로드**로 이미 쓰였다 (로드맵 #62 2단계).
+    /// 재시도해서는 안 된다 — 키를 바꾸거나 원래 페이로드로 보내야 한다.
+    /// HTTP 표면은 이 에러를 409 Conflict로 매핑한다.
+    ///
+    /// 기존 Task의 프롬프트나 결과는 담지 않는다. 같은 `created_by` 버킷을
+    /// 여러 호출자가 공유할 수 있어(마이그레이션 024 참고) 키를 재사용한 쪽이
+    /// 그 Task의 소유자라는 보장이 없다.
+    #[error(
+        "idempotency key '{key}' already used with a different payload (task {existing_task_id})"
+    )]
+    IdempotencyConflict {
+        key: String,
+        existing_task_id: TaskId,
+    },
+
     /// 이 인스턴스가 지금 control plane lease를 쥐고 있지 않다(로드맵
     /// `#63` 불변식 2). Cold Standby거나 갱신에 실패해 fenced됐다 —
     /// 재시도는 안전하지만(Reconciler가 다음 tick에 다시 시도), 지금 이
@@ -1265,6 +1306,197 @@ mod tests {
                 .iter()
                 .any(|c| c.chunk.contains("hello from worker")),
             "output must still be buffered while fenced: {output:?}"
+        );
+    }
+
+    // ── 로드맵 #62 2단계 게이트 3: 클라이언트 멱등성 ────────────────────
+    //
+    // `task_idempotency.rs`(fleet-store)는 **행이 중복되지 않음**을 증명한다.
+    // 그러나 게이트가 실제로 요구하는 것은 **실행이 중복되지 않음**이다 —
+    // 그 계약은 `submit()`의 조기 반환에만 존재한다. 아래 두 테스트가 없으면
+    // 누군가 `IdempotentInsert` match를 `append_event`/워커 선택 **아래로**
+    // 옮겨도 store 테스트는 전부 초록으로 남는다.
+    //
+    // 워커가 없는 상태(`setup_no_workers(0)`)를 쓰는 것이 의도적이다: 중복
+    // 경로가 아래로 새면 `submit()`은 `NoWorker`로 실패하므로, 조기 반환이
+    // 깨진 사실이 반환값만으로도 드러난다. 이벤트 수 assertion은 그보다 한
+    // 단계 더 앞을 지킨다 — `append_event`는 워커 로직보다 먼저 실행되므로,
+    // match를 그 사이로 옮기는 변경은 오직 이 assertion만이 잡는다.
+
+    /// 같은 키·같은 payload로 재제출하면 최초 작업 id를 그대로 돌려주고,
+    /// 이벤트를 쌓지 않으며, 두 번째 행을 만들지 않는다.
+    #[tokio::test]
+    async fn duplicate_submit_returns_the_original_without_dispatching() {
+        use fleet_core::{TaskFilter, TaskResult, TaskStatus, WorkerId};
+
+        let (state, dispatcher) = setup_no_workers(0);
+        let request = TaskRequest {
+            prompt: "build the thing".into(),
+            created_by: "alice".into(),
+            idempotency_key: Some("submit-once".into()),
+            ..Default::default()
+        };
+
+        // 최초 제출은 이미 성공했고 **완료까지 됐다**고 가정한다 — timeout 후
+        // 같은 키로 재호출하는 것이 이 게이트가 막으려는 바로 그 시나리오이고,
+        // 그 시점의 최초 제출은 대개 이미 끝나 있다.
+        let first = Task::from_request(request.clone());
+        let first_id = first.id;
+        assert!(
+            state
+                .store
+                .insert_task_idempotent(&first)
+                .await
+                .expect("first insert")
+                .inserted(),
+            "fixture 자체가 중복이면 테스트가 무의미하다"
+        );
+        state
+            .store
+            .update_task_status(
+                first_id,
+                &TaskStatus::Completed(TaskResult {
+                    output: "done".into(),
+                    exit_code: 0,
+                    duration_secs: 1.0,
+                    token_usage: None,
+                    worker_id: WorkerId::new(),
+                    finished_at: chrono::Utc::now(),
+                }),
+            )
+            .await
+            .expect("update_task_status");
+
+        let events_before = state
+            .store
+            .list_events(0, 1000)
+            .await
+            .expect("events")
+            .len();
+
+        let retry = Task::from_request(request);
+        let retry_id = retry.id;
+        assert_ne!(retry_id, first_id, "재제출은 새 id를 들고 온다");
+
+        let returned = dispatcher
+            .submit(retry)
+            .await
+            .expect("중복 제출은 성공으로 반환되어야 한다 (워커가 없어도)");
+
+        assert_eq!(
+            returned, first_id,
+            "호출자는 최초 작업 id를 받아야 한다 — 새로 만든 id가 아니라"
+        );
+        let events_after = state
+            .store
+            .list_events(0, 1000)
+            .await
+            .expect("events")
+            .len();
+        assert_eq!(
+            events_before, events_after,
+            "중복 제출은 이벤트를 하나도 쌓으면 안 된다 (TaskCreated는 일어나지 않은 일을 주장하게 된다)"
+        );
+        assert!(
+            state
+                .store
+                .get_task(retry_id)
+                .await
+                .expect("get_task")
+                .is_none(),
+            "재제출용 id로는 행이 생기면 안 된다"
+        );
+        assert_eq!(
+            state
+                .store
+                .list_tasks(&TaskFilter::default())
+                .await
+                .expect("list_tasks")
+                .len(),
+            1,
+            "행은 여전히 하나여야 한다"
+        );
+    }
+
+    /// 같은 키에 **다른** payload가 오면 거절하고, 행도 이벤트도 남기지 않는다.
+    #[tokio::test]
+    async fn conflicting_payload_submit_is_rejected_and_creates_nothing() {
+        use fleet_core::TaskFilter;
+
+        let (state, dispatcher) = setup_no_workers(0);
+        let first = Task::from_request(TaskRequest {
+            prompt: "build the thing".into(),
+            created_by: "alice".into(),
+            idempotency_key: Some("submit-once".into()),
+            ..Default::default()
+        });
+        let first_id = first.id;
+        state
+            .store
+            .insert_task_idempotent(&first)
+            .await
+            .expect("first insert");
+
+        let events_before = state
+            .store
+            .list_events(0, 1000)
+            .await
+            .expect("events")
+            .len();
+
+        let conflicting = Task::from_request(TaskRequest {
+            prompt: "delete the thing".into(),
+            created_by: "alice".into(),
+            idempotency_key: Some("submit-once".into()),
+            ..Default::default()
+        });
+        let conflicting_id = conflicting.id;
+
+        let err = dispatcher
+            .submit(conflicting)
+            .await
+            .expect_err("같은 키에 다른 payload는 거절되어야 한다");
+        match err {
+            DispatchError::IdempotencyConflict {
+                ref key,
+                existing_task_id,
+            } => {
+                assert_eq!(key, "submit-once");
+                assert_eq!(
+                    existing_task_id, first_id,
+                    "호출자가 충돌 상대를 찾아갈 수 있어야 한다"
+                );
+            }
+            other => panic!("expected IdempotencyConflict, got {other:?}"),
+        }
+
+        assert_eq!(
+            state
+                .store
+                .list_events(0, 1000)
+                .await
+                .expect("events")
+                .len(),
+            events_before,
+            "거절된 제출은 이벤트를 남기면 안 된다"
+        );
+        assert!(
+            state
+                .store
+                .get_task(conflicting_id)
+                .await
+                .expect("get_task")
+                .is_none(),
+            "거절된 제출은 행을 남기면 안 된다"
+        );
+        assert_eq!(
+            state
+                .store
+                .list_tasks(&TaskFilter::default())
+                .await
+                .expect("list_tasks")
+                .len(),
+            1
         );
     }
 }

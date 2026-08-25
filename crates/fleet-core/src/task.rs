@@ -69,6 +69,157 @@ pub struct TaskRequest {
     /// 할당된 최대 토큰 예산 (Soft-Landing 기준).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    /// 클라이언트가 부여한 제출 멱등성 키 (로드맵 #62 2단계).
+    ///
+    /// `None`이면 멱등성 검사를 하지 않는다 — 매 제출이 새 Task다. `Some`이면
+    /// `(created_by, idempotency_key)`가 저장소에서 유일하며, 같은 키의 재요청은
+    /// 페이로드 해시가 같을 때 기존 Task를 그대로 돌려주고 다를 때 거절된다.
+    /// 자세한 계약은 [`Self::payload_hash`] 참고.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// [`TaskRequest::payload_hash`]가 쓰는 인코딩 버전.
+///
+/// 해시에 포함되는 필드 집합이나 인코딩이 바뀌면 이 값을 올린다 — 그러면 이전
+/// 버전으로 저장된 해시와 절대 같아질 수 없으므로, "포맷이 바뀌었는데 우연히
+/// 같은 해시가 나와 다른 요청을 중복으로 판정"하는 경로가 사라진다. 대신 배포
+/// 경계에서 같은 키의 재요청이 409로 거절될 수 있다(의도된 안전한 실패).
+const PAYLOAD_HASH_VERSION: &str = "fleet.task.payload.v1";
+
+impl TaskRequest {
+    /// 제출 페이로드의 안정된 SHA-256 해시(hex).
+    ///
+    /// ## 왜 serde 직렬화를 쓰지 않는가
+    ///
+    /// `serde_json::to_vec(self)`는 구조체 필드 순서에 의존한다. 누군가 필드를
+    /// 재배치하거나 `skip_serializing_if`를 바꾸면 **컴파일도 테스트도 통과한 채로**
+    /// 기존 Task의 해시가 전부 달라진다 — 그 순간 모든 재제출이 409가 된다.
+    /// 그래서 필드를 하나씩 명시적으로 먹인다: 해시에 무엇이 들어가는지가 코드에
+    /// 드러나고, 필드를 추가하면 이 함수를 고칠 수밖에 없다.
+    ///
+    /// ## 왜 길이를 앞에 붙이는가
+    ///
+    /// 구분자만 쓰면 `prompt="ab", cwd=None`과 `prompt="a", cwd=Some("b")`가 같은
+    /// 바이트열이 될 수 있다. 각 조각 앞에 길이(u64 LE)를 넣으면 경계가 모호해지지
+    /// 않는다.
+    ///
+    /// ## 왜 목록을 정렬하는가
+    ///
+    /// `required_labels`/`dependency_ids`/`skills_required`는 모두 **집합**으로
+    /// 소비된다 — 셀렉터는 "요구 라벨을 전부 가진 워커"를, DAG는 "선행 작업이 전부
+    /// 완료"를 볼 뿐 순서를 보지 않는다. 정렬하지 않으면 `HashSet`을 순회해 요청을
+    /// 만드는 클라이언트가 같은 논리적 재제출에서 다른 해시를 만들어내고, 중복
+    /// Task가 조용히 생긴다.
+    ///
+    /// ## 무엇이 빠지는가
+    ///
+    /// `created_by`는 유일성 키의 다른 절반이므로 해시에 넣지 않는다(넣으면 같은
+    /// 정보를 두 번 건다). `resolved_model`/`token_budget`은 라우터가 채우는
+    /// 값이라 클라이언트 의도가 아니다 — 이 함수가 `Task`가 아니라 `TaskRequest`에
+    /// 사는 이유이기도 하다. `Dispatcher::submit`의 라우팅 블록이 뒤에서 무엇을
+    /// 채우든 해시에 닿을 수 없다.
+    pub fn payload_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+
+        // 길이 접두사를 붙여 조각 경계를 명확히 한다. 클로저 대신 함수를 쓰는
+        // 이유는 `hasher`를 마지막에 `finalize`로 소비해야 하기 때문 — 클로저가
+        // 가변 차용을 붙잡고 있으면 그게 불가능하다.
+        fn feed(hasher: &mut Sha256, bytes: &[u8]) {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+
+        let mut hasher = Sha256::new();
+        feed(&mut hasher, PAYLOAD_HASH_VERSION.as_bytes());
+        feed(
+            &mut hasher,
+            self.project_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        feed(&mut hasher, self.prompt.as_bytes());
+        feed(
+            &mut hasher,
+            self.cwd.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.model.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.server_hint.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.max_turns
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.timeout_secs
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            match self.priority {
+                TaskPriority::Low => "low",
+                TaskPriority::Normal => "normal",
+                TaskPriority::High => "high",
+            }
+            .as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.parent_task_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.routing_profile
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+
+        let mut labels = self.required_labels.clone();
+        labels.sort_unstable();
+        labels.dedup();
+        feed(&mut hasher, &(labels.len() as u64).to_le_bytes());
+        for label in &labels {
+            feed(&mut hasher, label.as_bytes());
+        }
+
+        let mut deps: Vec<String> = self
+            .dependency_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        deps.sort_unstable();
+        deps.dedup();
+        feed(&mut hasher, &(deps.len() as u64).to_le_bytes());
+        for dep in &deps {
+            feed(&mut hasher, dep.as_bytes());
+        }
+
+        let mut skills = self.skills_required.clone();
+        skills.sort_unstable();
+        skills.dedup();
+        feed(&mut hasher, &(skills.len() as u64).to_le_bytes());
+        for skill in &skills {
+            feed(&mut hasher, skill.as_bytes());
+        }
+
+        hex::encode(hasher.finalize())
+    }
 }
 
 /// 작업 엔티티 (Store에 영속화되는 형태).
@@ -139,6 +290,18 @@ pub struct Task {
     /// 예산 초과(Hard Abort) 시 보존된 중간 git diff 또는 요약.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_output: Option<String>,
+    /// 제출 시 클라이언트가 부여한 멱등성 키 (로드맵 #62 2단계).
+    /// `(created_by, idempotency_key)`가 저장소에서 유일하다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// 제출 시점 페이로드의 [`TaskRequest::payload_hash`] 값.
+    ///
+    /// `idempotency_key`와 항상 함께 채워지고 함께 비어 있다 — 키 없이 해시만
+    /// 남는 행은 비교할 상대가 없어 아무 의미가 없다. 같은 키의 재요청이
+    /// 도착했을 때 "같은 요청의 재시도"인지 "키를 재사용한 다른 요청"인지
+    /// 가르는 값이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_payload_hash: Option<String>,
 }
 
 impl Task {
@@ -151,6 +314,11 @@ impl Task {
     /// 부모 조회 자체는 할 수 없다.
     pub fn from_request(req: TaskRequest) -> Self {
         let id = TaskId::new();
+        // 해시는 키가 있을 때만 계산해서 붙인다. 키 없는 제출에 해시만 채워
+        // 두면 아무도 읽지 않는 컬럼이 생긴다 — "채울 방법이 없는 것은 미리
+        // 만들지 않는다"에 어긋나고, 나중에 이 컬럼이 유일성 판정에 쓰인다고
+        // 오해할 여지도 남는다.
+        let idempotency_payload_hash = req.idempotency_key.as_ref().map(|_| req.payload_hash());
         Self {
             id,
             prompt: req.prompt,
@@ -176,6 +344,8 @@ impl Task {
             resolved_model: req.resolved_model,
             token_budget: req.token_budget,
             partial_output: None,
+            idempotency_key: req.idempotency_key,
+            idempotency_payload_hash,
         }
     }
 
@@ -381,6 +551,56 @@ impl TransitionOutcome {
     /// 일을 주장하게 된다.
     pub fn applied(self) -> bool {
         matches!(self, TransitionOutcome::Applied)
+    }
+}
+
+/// 멱등성 키가 붙은 Task 삽입의 결과 (로드맵 #62 2단계).
+///
+/// `TransitionOutcome`과 같은 이유로 `Duplicate`/`Conflict`를 `Err`이 아니라
+/// `Ok`의 값으로 표현한다 — 둘 다 저장소가 정상적으로 관측한 결과이지 장애가
+/// 아니다. 다만 호출자가 갈라야 하는 후속 동작이 셋 다 다르다:
+/// `Inserted`만 dispatch와 `TaskCreated` 이벤트로 이어지고, `Duplicate`는
+/// 아무것도 하지 않은 채 기존 Task를 돌려주며, `Conflict`는 클라이언트에게
+/// 409로 알린다.
+///
+/// `PartialEq`를 파생하지 않는다 — `Task`가 `PartialEq`가 아니고, 이 enum 하나를
+/// 위해 Task 전체에 구조적 동등성을 부여하면 "두 Task가 같다"가 무엇을 뜻하는지에
+/// 대한 답을 코드 전체에 강요하게 된다. 비교가 필요한 자리에서는 `matches!`나
+/// 아래 접근자를 쓴다.
+#[derive(Debug, Clone)]
+pub enum IdempotentInsert {
+    /// 새 Task가 저장됐다. 멱등성 키가 없는 제출도 항상 이 결과다.
+    Inserted,
+    /// 같은 `(created_by, idempotency_key)`에 **같은 페이로드 해시**를 가진
+    /// Task가 이미 있다 — 같은 요청의 재시도다. 아무것도 쓰지 않았고, 담긴
+    /// Task는 기존 행이다.
+    ///
+    /// 이 Task의 상태는 `Pending`이 아닐 수 있다. 최초 제출이 이미 완료됐거나
+    /// 실패한 뒤 클라이언트가 재시도하는 것이 정확히 이 게이트가 막으려는
+    /// 시나리오(timeout 후 재호출)이기 때문이다. 응답을 만드는 쪽은 "방금
+    /// 만들어진 Pending Task"를 가정하면 안 된다.
+    ///
+    /// `Box`로 감싼 이유는 `Task`가 큰 구조체라 그대로 넣으면 `Inserted`
+    /// 하나를 돌려줄 때도 enum 전체 크기를 지불하기 때문이다
+    /// (`clippy::large_enum_variant`).
+    Duplicate(Box<Task>),
+    /// 같은 키에 **다른 페이로드 해시**를 가진 Task가 이미 있다 — 키가
+    /// 재사용됐다. 아무것도 쓰지 않았다.
+    ///
+    /// 기존 Task 전체가 아니라 id만 돌려준다: 키를 재사용한 클라이언트가 그
+    /// Task의 소유자라는 보장이 없으므로(같은 `created_by` 버킷을 여러 호출자가
+    /// 공유할 수 있다 — 마이그레이션 024 주석 참고), 프롬프트나 결과를 그대로
+    /// 흘리면 안 된다.
+    Conflict { existing_task_id: TaskId },
+}
+
+impl IdempotentInsert {
+    /// 이 삽입으로 실제 새 Task가 저장됐는가.
+    ///
+    /// `TransitionOutcome::applied`와 같은 역할이다 — dispatch나 `TaskCreated`
+    /// 이벤트처럼 "새 작업이 생겼다"를 전제로 하는 후속 동작을 이 값으로 가드한다.
+    pub fn inserted(&self) -> bool {
+        matches!(self, IdempotentInsert::Inserted)
     }
 }
 
@@ -893,5 +1113,82 @@ mod tests {
     #[test]
     fn pending_has_no_predecessors() {
         assert!(TaskPhase::allowed_predecessors(TaskPhase::Pending).is_empty());
+    }
+
+    // ── payload hash (로드맵 #62 stage 2, 게이트 3) ──────────────────────
+
+    fn hashed(f: impl FnOnce(&mut TaskRequest)) -> String {
+        let mut req = TaskRequest {
+            prompt: "build".into(),
+            created_by: "alice".into(),
+            ..Default::default()
+        };
+        f(&mut req);
+        req.payload_hash()
+    }
+
+    #[test]
+    fn payload_hash_is_stable_for_identical_requests() {
+        assert_eq!(hashed(|_| {}), hashed(|_| {}));
+    }
+
+    /// 두 필드가 붙어 있으면 `prompt="ab", cwd=None`과 `prompt="a",
+    /// cwd=Some("b")`가 같은 바이트열이 된다. 길이 접두사가 그걸 막는다.
+    #[test]
+    fn payload_hash_separates_adjacent_fields() {
+        let merged = hashed(|r| r.prompt = "ab".into());
+        let split = hashed(|r| {
+            r.prompt = "a".into();
+            r.cwd = Some("b".into());
+        });
+        assert_ne!(merged, split, "필드 경계가 해시에 반영돼야 한다");
+    }
+
+    /// 라벨·의존성·스킬은 집합으로 소비된다. HashSet을 순회해서 넘기는
+    /// 클라이언트가 같은 제출을 매번 다르게 해시하면, 재전송이 중복으로 통과해
+    /// 버린다 — 정렬이 그 구멍을 막는다.
+    #[test]
+    fn payload_hash_ignores_set_ordering() {
+        let forward = hashed(|r| r.required_labels = vec!["gpu".into(), "linux".into()]);
+        let reverse = hashed(|r| r.required_labels = vec!["linux".into(), "gpu".into()]);
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn payload_hash_reflects_set_contents() {
+        let one = hashed(|r| r.required_labels = vec!["gpu".into()]);
+        let two = hashed(|r| r.required_labels = vec!["gpu".into(), "linux".into()]);
+        assert_ne!(one, two);
+    }
+
+    /// 라우터가 채우는 필드는 클라이언트 의도가 아니다. 여기에 반응하면 같은
+    /// 재전송이 라우팅 결과에 따라 409로 튕긴다.
+    #[test]
+    fn payload_hash_ignores_router_filled_fields() {
+        let bare = hashed(|_| {});
+        let routed = hashed(|r| {
+            r.resolved_model = Some("grok-4".into());
+            r.token_budget = Some(100_000);
+        });
+        assert_eq!(bare, routed);
+    }
+
+    /// 해시는 키가 있을 때만 붙는다 — 아무도 읽지 않는 컬럼을 만들지 않는다.
+    #[test]
+    fn hash_is_attached_only_with_a_key() {
+        let without = Task::from_request(TaskRequest {
+            prompt: "build".into(),
+            ..Default::default()
+        });
+        assert!(without.idempotency_key.is_none());
+        assert!(without.idempotency_payload_hash.is_none());
+
+        let with = Task::from_request(TaskRequest {
+            prompt: "build".into(),
+            idempotency_key: Some("k".into()),
+            ..Default::default()
+        });
+        assert_eq!(with.idempotency_key.as_deref(), Some("k"));
+        assert!(with.idempotency_payload_hash.is_some());
     }
 }
