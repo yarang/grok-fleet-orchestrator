@@ -59,6 +59,15 @@ async fn spawn_server() -> Option<tokio::process::Child> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .env("RUST_LOG", "error")
+        // stdio MCP는 capability allow-list 없이 기동을 거부한다(fail-closed).
+        // 이걸 주지 않으면 서버가 즉시 죽고 모든 테스트가 "no initialize
+        // response"로 실패한다 — 실제로 CI에서 그 상태였고, clippy가 먼저
+        // 깨져 test 단계까지 가지 않아 드러나지 않았다.
+        .env(
+            "FLEET_MCP_CAPABILITIES",
+            "task:create,task:read,task:list,task:output,task:cancel,\
+             worker:list,worker:register,dashboard:view,metrics:view",
+        )
         .spawn()
         .ok()?;
 
@@ -244,9 +253,11 @@ async fn cursor_string_id_initialize() {
     assert!(resp["result"]["protocolVersion"].is_string());
 }
 
-/// tools/list 응답 형태 검증 — 사양 요구사항:
-/// - result는 배열이어야 함 (키 이름 `tools` 아님 — 사양은 result 자체가 배열)
-/// - 각 도구는 name, description, inputSchema 필드 포함
+/// tools/list 응답 형태 검증 — MCP `2024-11-05` `ListToolsResult` 요구사항:
+/// - result는 `{ "tools": [...] }` 객체 (배열을 그대로 내보내면 표준 클라이언트가
+///   응답을 인식하지 못해 요청이 타임아웃한다 — 이 테스트가 한때 배열을 단언했고,
+///   그래서 초록불인 채로 어떤 실제 MCP 클라이언트도 붙지 못했다)
+/// - 각 도구는 `name`, `description`, `inputSchema`(camelCase) 필드 포함
 #[tokio::test]
 async fn gemini_cli_tools_list_shape() {
     let Some(mut fx) = ServerFixture::start().await else {
@@ -269,9 +280,14 @@ async fn gemini_cli_tools_list_shape() {
     let resp = read_response_for_id(&mut reader, &json!(2))
         .await
         .expect("no tools/list response");
-    let tools = resp["result"]
+    assert!(
+        resp["result"].is_object(),
+        "tools/list result must be a ListToolsResult object, got: {}",
+        resp["result"]
+    );
+    let tools = resp["result"]["tools"]
         .as_array()
-        .expect("tools/list result must be array");
+        .expect("tools/list result.tools must be array");
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"fleet_dispatch_task"), "names: {names:?}");
@@ -284,8 +300,12 @@ async fn gemini_cli_tools_list_shape() {
     for t in tools {
         assert!(t["name"].is_string(), "tool name missing");
         assert!(t["description"].is_string(), "tool description missing");
-        assert!(t["input_schema"].is_object(), "input_schema must be object");
-        assert_eq!(t["input_schema"]["type"], "object");
+        assert!(t["inputSchema"].is_object(), "inputSchema must be object");
+        assert_eq!(t["inputSchema"]["type"], "object");
+        assert!(
+            t.get("input_schema").is_none(),
+            "snake_case input_schema must not appear on the wire"
+        );
     }
 }
 
@@ -398,6 +418,49 @@ async fn unknown_tool_returns_error() {
         .as_str()
         .unwrap()
         .contains("nonexistent_tool"));
+}
+
+/// 카탈로그에 **있지만** 이 launcher의 capability로는 허용되지 않는 도구 —
+/// `-32600`(invalid_request)이어야 한다.
+///
+/// 위 `unknown_tool_returns_error`와 짝으로 읽어야 하는 테스트다. 그 테스트만
+/// 있으면 "권한 게이트를 통째로 제거"해도 초록불이 된다. 두 케이스가 **서로 다른
+/// 코드**로 갈린다는 것이 실제 계약이다 — 없는 도구는 `-32601`, 있지만 권한이
+/// 없는 도구는 `-32600`.
+#[tokio::test]
+async fn known_but_unpermitted_tool_returns_invalid_request() {
+    let Some(mut fx) = ServerFixture::start().await else {
+        eprintln!("skipping");
+        return;
+    };
+    let mut stdin = fx.stdin.take().unwrap();
+    let stdout = fx.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    standard_initialize(&mut stdin, &mut reader, json!(1)).await;
+
+    // fixture의 capability 집합에는 `token:list`가 없다.
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "fleet_list_bootstrap_tokens",
+            "arguments": {}
+        }
+    });
+    write_line(&mut stdin, &req).await.unwrap();
+    let resp = read_response_for_id(&mut reader, &json!(2))
+        .await
+        .expect("no response");
+
+    let err = resp
+        .get("error")
+        .expect("unpermitted tool must return error");
+    assert_eq!(
+        err["code"], -32600,
+        "known-but-unpermitted must stay invalid_request, not method_not_found"
+    );
 }
 
 /// 잘못된 JSON-RPC 버전 — invalid_request 에러.

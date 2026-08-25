@@ -30,8 +30,13 @@ CLI 사용법과 설정 파일 형식은 이 디렉터리의 범위가 아니다
 
 ## Roadmap에 등록된 제안 계약
 
-아래 문서는 현재 호출 가능한 기능이 아니다. 연결된 Roadmap 항목과 활성화 게이트가 충족되기
-전에는 wire contract가 승인된 것으로 보거나 클라이언트 호환성 약속·운영 절차로 사용하지 않는다.
+아래 문서의 계약은 **전부 또는 일부가** 아직 호출 가능한 기능이 아니다. 어느 부분이 실제로
+동작하는지는 각 문서의 `implementation` 값과 그 문서가 지목하는 정본을 따른다 — 예를 들어
+Project 계약의 MCP 도구 세 개(`fleet_create_project`, `fleet_list_projects`,
+`fleet_delete_project`)는 [MCP 도구 계약](./mcp-tools.md)이 현재 도구 표면으로 정본화했지만,
+같은 문서의 PATCH·host/worker 배정은 여전히 제안 상태다. 연결된 Roadmap 항목과 활성화 게이트가
+충족되지 않은 부분은 wire contract가 승인된 것으로 보거나 클라이언트 호환성 약속·운영 절차로
+사용하지 않는다.
 
 | 계약 | 소비자 | Roadmap | 구현 상태 |
 |---|---|---|---|

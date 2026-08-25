@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/mcp-tools.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-25"
 last_verified_commit: "working-tree"
 owners: ["fleet-mcp"]
 ---
@@ -23,10 +23,33 @@ handler 테스트를 기준으로 한다.
 `-32601`, invalid params `-32602`, internal `-32603`을 사용한다. 도구의 논리적 실패는
 정상 JSON-RPC 응답 안에서 `isError: true`로 반환된다.
 
+`tools/call`에서 **존재하지 않는 도구와 권한 없는 도구는 서로 다른 코드로 갈린다.**
+카탈로그(`all_tools()`)에 없는 이름은 `-32601`(method not found), 카탈로그에는 있지만
+이 launcher의 `FLEET_MCP_CAPABILITIES`가 허용하지 않은 도구는 `-32600`(invalid request)
+이다. 둘을 하나로 뭉치면 호출자가 오타와 권한 부족을 구분할 수 없어 어느 쪽을 고쳐야
+하는지 알 수 없다. 존재 여부가 드러나는 것은 의도된 것이다 — 근거는 이 문서가 카탈로그를
+싣고 있다는 사실이 아니라, `tools/list`가 **같은 비인증 채널로** 이미 그 launcher의 전체 부여
+집합을 열거한다는 것이다. 따라서 `-32600`이 추가로 흘리는 정보는 "받지 못한 capability에 속한
+도구가 카탈로그에 있다"뿐이며, 이를 감추려면 `tools/list`부터 바꿔야 한다.
+
+존재 판정의 정본은 `all_tools()` 카탈로그이지 `required_permission()`이 아니다. 후자는
+`fleet_transition_issue`처럼 **존재하지만** 요구 capability가 인자에 따라 달라지는 도구에도
+`None`을 반환하므로, `None`을 "없는 도구"로 읽으면 오판한다.
+
+**응답 envelope는 MCP 사양이 정본이며 camelCase다.** `tools/list`의 `result`는
+`{ "tools": [ { "name", "description", "inputSchema" } ] }` 객체이고, `tools/call`의
+`result`는 `{ "content": [ { "type": "text", "text": … } ] }`다. 이 형태는 취향 문제가
+아니라 상호운용의 전제다 — 표준 MCP 클라이언트(SDK)는 응답을 `ListToolsResult`
+스키마로 검증하고, 통과하지 못한 응답은 **자기가 기다리던 응답으로 인정하지 않는다**.
+그래서 형태가 틀리면 오류가 아니라 요청 타임아웃으로 나타나고, client 쪽에는 "연결은
+됐는데 도구가 0개"로 보인다(2026-08-25에 실제로 그 상태였다 — `result`를 배열로,
+필드를 `input_schema`로 내보내고 있었고, `cross_client.rs`의 형태 검증 테스트가 그
+잘못된 형태를 "사양"으로 단언하고 있어 드러나지 않았다).
+
 ## 범위
 
 - MCP stdio transport와 `tools/list`, `tools/call`의 Fleet 구현
-- Task, Worker, Host, bootstrap token 관련 도구의 입력·출력 스키마
+- Task, Worker, Host, bootstrap token, Project, Issue 관련 도구의 입력·출력 스키마
 - MCP 호출의 인증·권한 경계
 
 HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MCP 상세 문서는 삭제됐으며,
@@ -48,9 +71,23 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_reset_worker_breaker` | Worker 식별자 | circuit breaker reset 결과 |
 | `fleet_list_bootstrap_tokens` | 입력 없음 | token 메타데이터 목록 |
 | `fleet_revoke_bootstrap_token` | `token_id` | revoke 결과 |
+| `fleet_create_project` | `name`, 선택 `description` | 생성된 Project |
+| `fleet_list_projects` | 선택 limit, offset | Project 목록 |
+| `fleet_delete_project` | `project_id` | 삭제 결과 |
+| `fleet_list_issues` | 선택 `project_id`, `status`, `open_only` | Issue 목록 |
+| `fleet_create_issue` | `project_id`, `title`, 선택 `body`, `severity`, labels | 생성된 Issue |
+| `fleet_transition_issue` | `issue_id`, `status`, 선택 `close_reason` | 전이 결과 |
+| `fleet_comment_issue` | `issue_id`, `body` | 등록된 코멘트 |
 
-Project와 Agent 관리 도구는 제안 계약일 뿐 현재 `tools/list`에 포함되지 않는다. 새 도구는
-여기 표, `tools/list` schema, handler 테스트를 한 변경으로 갱신한다.
+이 표는 `all_tools()`의 **전체 카탈로그**다. 특정 launcher가 실제로 `tools/list`에
+내보내는 것은 그 launcher의 `FLEET_MCP_CAPABILITIES`가 허용한 부분집합이다 — 예를 들어
+Project·Issue 도구는 `project:*`/`issue:*` capability를 부여하지 않은 launcher에서는 보이지
+않는다. 도구별 요구 capability의 정본은 **둘**이다: 대부분은 `server.rs`의
+`required_permission`이 정하지만, `fleet_transition_issue`만은 요구 capability가 목표 상태에
+따라 달라지므로 `fleet-core`의 `required_capability_for_transition`이 정본이고
+`required_permission`은 그 도구에 `None`을 반환한다(위 "전송과 오류" 절 참고).
+AgentTemplate 관리 도구는 아직 제안 계약일 뿐 구현돼 있지 않다(로드맵 `#92`, `#86` 선행).
+새 도구는 여기 표, `tools/list` schema, handler 테스트를 한 변경으로 갱신한다.
 
 ## 보안 상태
 

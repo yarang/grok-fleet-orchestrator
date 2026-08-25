@@ -1150,3 +1150,145 @@ last_verified: "2026-08-15"
   - 하위 CLI의 base URL 이어붙이기 규칙은 외부 구현이라 위 두 갈래 중 어느 쪽인지 정하지 못했다. **경로 A 채택 전 대상 CLI로 1회 실요청 검증이 필수다.**
   - `llm-gateway.md`의 `verification: code-checked`는 **Fleet 쪽 진술에만** 해당한다. OpenRouter 라우트 표는 코드가 아니라 2026-08-25의 외부 네트워크 관측이며, 정책의 `verification` 어휘에는 외부 관측을 가리키는 값이 없다. 공급자가 라우트를 바꾸면 무효가 된다.
 
+## 2026-08-25 — lint — MCP `tools/list` wire 포맷이 사양과 달라 도구가 0개로 보이던 결함
+
+- 유형: `lint`(정합성 수정) + `verification`
+- **증상은 "연결됨, 도구 0개"였다.** 로컬 `.mcp.json`으로 orchestrator 호스트에 SSH stdio로
+  붙였을 때 `initialize`는 성공하는데 도구가 하나도 보이지 않았다. raw JSON-RPC를 파이프로
+  넣어 보면 서버는 멀쩡히 응답을 돌려주므로 **이 방식으로는 결함이 보이지 않는다**.
+  표준 MCP SDK(`@modelcontextprotocol/sdk`) client로 같은 명령을 물려 `listTools()`를
+  호출해서야 정체가 드러났다 — `McpError -32001: Request timed out`.
+- **원인은 두 군데였고 둘 다 MCP `2024-11-05` 사양 위반이다**:
+  1. `tools/list`의 `result`를 `ListToolsResult` 객체(`{ "tools": [...] }`)가 아니라
+     **배열 그대로** 내보내고 있었다(`fleet-mcp/src/server.rs`).
+  2. 도구 메타데이터 필드를 `inputSchema`가 아니라 Rust 필드명 그대로 **`input_schema`**로
+     내보내고 있었다(`fleet-mcp/src/schema.rs`의 `ToolInfo`).
+- **왜 오류가 아니라 타임아웃으로 나타나는가**가 이 항목의 핵심이다. 표준 SDK는 응답을
+  result 스키마로 검증하고, **통과하지 못한 응답을 자기가 기다리던 응답으로 인정하지
+  않는다**. 그래서 서버는 정상 응답을 보내고 client는 영원히 기다린다. 서버 로그에도,
+  JSON-RPC error 코드에도 아무 흔적이 없다.
+- **회귀 테스트가 있었는데 잘못된 형태를 "사양"으로 단언하고 있었다.**
+  `cross_client.rs::gemini_cli_tools_list_shape`가 `result`가 배열이고 필드가
+  `input_schema`인 것을 assert하고 있었다 — 즉 이 테스트는 결함을 잡는 대신 **고정**하고
+  있었다. 사양 쪽으로 뒤집고, `input_schema` 키가 wire에 나오지 않는다는 negative
+  assertion을 추가했다.
+- **그 테스트는 어디서도 실행된 적이 없다.** 두 겹의 이유가 겹쳐 있었다:
+  - 로컬에서는 `DATABASE_URL`이 없으면 `spawn_server()`가 `None`을 반환해 **조용히 skip**
+    한다. `cargo test -p fleet-mcp`가 `0.00s`에 초록으로 끝나므로 skip과 pass가 종료
+    코드로 구분되지 않는다(`--nocapture | grep -c skipping` = 13).
+  - CI는 `DATABASE_URL`을 주지만 `FLEET_MCP_CAPABILITIES`를 주지 않는다. stdio MCP는 이
+    값 없이 기동을 거부하므로(fail-closed) 12건이 전부 "no initialize response"로 실패할
+    상태였다. 다만 CI가 그 앞 clippy 단계에서 먼저 실패해 test 단계까지 가지 않아
+    드러나지 않았다(`main` 최근 5회 전부 red).
+  → 이번에 fixture가 직접 `FLEET_MCP_CAPABILITIES`를 주도록 고쳤다. **13 skip → 12 pass**로
+  바뀌었고, 이제 이 테스트는 실제로 형태를 검증한다.
+- **`GET /api/tools`(dashboard)는 일부러 건드리지 않았다.** `fleet-dashboard/src/handlers.rs`
+  는 `all_tools()`를 읽되 `"input_schema"` 키를 직접 조립한다 — serde rename의 영향을 받지
+  않으며, 이쪽은 MCP가 아니라 dashboard 자신의 HTTP 계약이다.
+- 변경 파일: [`crates/fleet-mcp/src/schema.rs`](../crates/fleet-mcp/src/schema.rs),
+  [`crates/fleet-mcp/src/server.rs`](../crates/fleet-mcp/src/server.rs),
+  [`crates/fleet-mcp/tests/cross_client.rs`](../crates/fleet-mcp/tests/cross_client.rs),
+  [`docs/contracts/mcp-tools.md`](contracts/mcp-tools.md)(응답 envelope 정본 명문화 +
+  도구 표를 `all_tools()` 전체 카탈로그 19개로 동기화 — Project·Issue 도구 7개가 표에서
+  누락돼 있었고 "제안 계약일 뿐"이라는 낡은 문장이 남아 있었다),
+  [`docs/deployment/mcp-clients.md`](deployment/mcp-clients.md)(연결 검증을 "등록 여부"가
+  아니라 "`tools/list`가 실제로 도구를 반환하는지"로 재정의, 호스트 바이너리 최소 빌드
+  요구 명시, Antigravity CLI 항목의 과잉 주장 정정).
+- 검증: `cargo fmt --all -- --check` 통과 · clippy 2종(`acp mtls` / `--no-default-features`)
+  각각 `-D warnings`로 exit 0 · `cross_client` 12 pass · 로컬 빌드 바이너리에 SDK client를
+  물려 `LIST OK, count = 9`(launcher capability allow-list가 허용한 부분집합)와
+  `inputSchema.type = "object"` 확인.
+- **검증 한계**:
+  - **수정된 바이너리는 아직 orchestrator 호스트에 배포되지 않았다.**
+    `/usr/local/bin/fleet`은 여전히 2026-08-22 빌드이므로, `.mcp.json`을 넣고 Claude Code를
+    재시작해도 client에는 **여전히 도구가 0개로 보인다.** 실제 수용 검증은 SSH 전 경로
+    (`ssh … sudo -u fleet /usr/local/bin/fleet-mcp-launch.sh`, `--transport acp`)로 다시
+    해야 하며, 로컬 `--transport mock` 결과가 이를 대신하지 못한다.
+  - `unknown_tool_returns_error` 1건은 여전히 FAILED다. **이번 변경과 무관한 사전 존재
+    결함**으로, `required_permission()`이 모르는 이름에 `None`을 돌려주면 `permits_tool`이
+    false가 되어 unknown-tool 분기(`-32601`)에 닿기 전에 `-32600`으로 끊긴다. 위
+    2026-08-25 포맷 항목에서도 같은 건이 사전 존재로 기록돼 있다(`task_78be5260`).
+
+## 2026-08-25 — ingest — MCP 호스트 배포, capability 전체 개방, `tools/call` 오류 코드 계약
+
+- 유형: `ingest`(배포·계약 정본화) + `verification`
+- 위 `lint` 항목이 남긴 검증 한계 중 **`unknown_tool_returns_error` 실패를 해소**했다.
+  Antigravity CLI(`agy`) 경로는 **여전히 미확인**이다(아래 검증 한계 참조).
+- **`tools/call`의 오류 코드를 갈랐다(`-32601` vs `-32600`).** 사전 존재 결함을 "테스트
+  기대값을 현실에 맞춘다"가 아니라 **구현을 사양 쪽으로 고치는** 방향으로 결정했다.
+  `handle_tools_call`이 권한 게이트보다 **존재 여부를 먼저** 판정한다 — 카탈로그에 없는
+  이름은 `dispatch_tool`의 fallback이 `-32601`로 답하고, 있지만 이 launcher의 capability가
+  허용하지 않는 도구만 `-32600`으로 끊는다. 둘을 뭉치면 호출자가 오타와 권한 부족을
+  구분할 수 없어 어느 쪽을 고쳐야 하는지 알 수 없다.
+  - **존재 판정의 오라클을 `all_tools()` 카탈로그로 잡은 것이 핵심이다.** 더 직관적인
+    선택인 `required_permission()`은 **틀린다** — `fleet_transition_issue`처럼 존재하지만
+    요구 capability가 인자(목표 상태)에 따라 달라지는 도구에도 `None`을 반환하므로,
+    `None`을 "없는 도구"로 읽는 순간 오판한다. 실제로 기존 코드가 그 경로였다.
+  - **짝 테스트를 함께 넣었다**(`known_but_unpermitted_tool_returns_invalid_request`).
+    `-32601` 테스트만 있으면 **권한 게이트를 통째로 삭제해도 초록불**이 된다. 두 케이스가
+    서로 다른 코드로 갈린다는 것이 실제 계약이고, 그건 테스트 두 개로만 표현된다.
+  - 정보 노출 판단: 존재 여부가 드러나지만 전체 카탈로그는 이미
+    [MCP 도구 계약](contracts/mcp-tools.md)에 공개돼 있고 노출 통제는 `tools/list`가
+    하므로, 이 변경으로 실제로 넓어지는 권한은 없다.
+- **호스트 바이너리를 재빌드·교체했다(`oci-yarangdev-arm1`).** 공개 릴리스를 만들지 않는
+  경로를 골랐다.
+  - `release.yml`은 aarch64 tarball을 만들지만 `release` job이 `draft: false`로 **공개
+    GitHub Release를 게시**한다(저장소가 public). 호스트 바이너리 하나를 갈아끼우는 데
+    공개 게시를 끼워 넣을 이유가 없어 배제했다.
+  - 호스트에는 cargo도 소스도 없다. 로컬 macOS에서 `cargo-zigbuild`로
+    `aarch64-unknown-linux-gnu.2.35` 크로스 빌드(2분 2초). glibc 하한을 target triple에
+    박는 이유는 호스트가 2.39이기 때문이다.
+  - **이 경로가 성립하는 전제는 "컴파일타임 sqlx 매크로 0건"이다** — `query!` 계열을 쓰지
+    않아 빌드에 살아 있는 `DATABASE_URL`이 필요 없다. 매크로를 도입하는 순간 이 경로는
+    막히고 호스트나 CI에서 빌드해야 한다. 절차와 함께 정본에 적었다.
+  - **교체 전에 스테이징 검증을 했다**: `/tmp/fleet-new`로 올리고 `/usr/local/bin`을 전혀
+    건드리지 않는 임시 launcher로 먼저 `tools/list`를 확인한 뒤에야 교체했다. 실행 중인
+    바이너리는 덮어쓸 수 없으므로(`Text file busy`) `install`로 새 inode를 만든다.
+  - 백업: `/usr/local/bin/fleet.bak-20260825T065838Z`,
+    `/etc/fleet/fleet.env.bak-20260825T065441Z`.
+- **`FLEET_MCP_CAPABILITIES`를 19개 도구 전체로 개방했다**(운영자 결정). 다만 값만 늘리지
+  않고 **같은 파일에서 권한을 제어할 수 있게** 만들었다 — 각 capability가 어떤 도구를
+  여는지, 그리고 주의가 필요한 항목 4개와 **그 사유**(`token:revoke`·`project:delete`는
+  되돌릴 수 없음, `worker:delete`는 HTTP에서 같은 이름이 워커 삭제 권한이라는 transport 간
+  의미 충돌, `issue:approve_agent_work`는 Agent 자동 착수의 승인 관문)를 주석으로 함께
+  적었다. 네 항목을 "되돌릴 수 없음" 하나로 묶지 않은 것은 의도다 — 사유가 다르면 좁힐 때의
+  우선순위도 다르기 때문이다. 권한을 좁히는 일이
+  "코드를 읽어야 아는 일"이 아니라 **그 줄에서 항목을 지우는 편집**이 되도록 한 것이 의도다.
+  - `fleet_transition_issue`는 요구 capability가 목표 상태마다 다르므로(`issue:update` /
+    `issue:close` / `issue:reopen` / `issue:approve_agent_work`) 단일 스위치가 아니다.
+    4종을 전부 지우면 도구가 사라지고, 일부만 남기면 남긴 전이만 수행된다.
+  - **서비스 재기동이 필요 없다.** launcher가 MCP 세션마다 `fleet serve`를 새로 띄우므로
+    다음 세션부터 적용된다. `fleet.service`는 HTTP·dashboard 쪽 프로세스다.
+- 검증(전부 이번 트리·이번 호스트에서 실행):
+  - 게이트 3종 통과 — `cargo fmt --all -- --check`, clippy `--features "acp mtls"`,
+    clippy `--no-default-features`(둘 다 `-D warnings`, exit 0).
+  - `cross_client` **14 passed / 0 failed**(사전 존재 실패 해소 + 짝 테스트 1건 추가).
+  - env 편집 후 키 개수 13→13, 모드·소유(`0640 root:fleet`) 보존 확인.
+  - 재기동 후 헬스가 교체 전과 **동일**(`8081 → 404`, `8082 → 303`), `NRestarts=0`,
+    `journalctl`에 warning 이상 없음.
+  - **최종 수용은 `.mcp.json`이 쓰는 실제 경로 그대로 했다** — `ssh … sudo -u fleet
+    /usr/local/bin/fleet-mcp-launch.sh`에 표준 MCP SDK client를 물려 `LIST OK, count = 19`.
+    이어서 `tools/call`도 확인했다(`fleet_list_projects`, `fleet_list_workers` 둘 다
+    `isError=false`에 실데이터). `tools/list`만으로는 `CallToolResult` 형태를 검증하지
+    못하기 때문이다 — 위 `lint` 항목이 정확히 그런 종류의 형태 결함이었다.
+  - 호스트 임시 파일(`/tmp/fleet-new`, `/tmp/fleet-mcp-launch-test.sh`) 정리 완료.
+- 변경 파일: [`crates/fleet-mcp/src/server.rs`](../crates/fleet-mcp/src/server.rs),
+  [`crates/fleet-mcp/tests/cross_client.rs`](../crates/fleet-mcp/tests/cross_client.rs),
+  [MCP 도구 계약](contracts/mcp-tools.md)(오류 코드 계약 명문화),
+  [MCP 클라이언트 연결](deployment/mcp-clients.md)(재빌드·교체 절차와 capability 운영 절
+  신설). 호스트 측 변경(`/etc/fleet/fleet.env`, `/usr/local/bin/fleet`)은 저장소 추적
+  대상이 아니다.
+- **검증 한계**:
+  - **Antigravity CLI(`agy`) 경로는 여전히 `tools/list` 성공을 확인하지 않았다.** 서버 쪽
+    결함이 사라졌으므로 이제 성공할 것으로 보이지만, 실제로 재확인한 것은 표준 MCP SDK
+    client의 SSH stdio 경로뿐이다.
+  - **개방한 19개 중 실제로 호출해 본 것은 2개다.** 파괴적 도구(`fleet_delete_project`,
+    `fleet_revoke_bootstrap_token`)는 의도적으로 호출하지 않았으므로, 그 핸들러들이 정상
+    동작한다는 증거는 이번에 얻지 못했다. 개방했다는 것과 검증했다는 것은 다르다.
+  - **CI는 여전히 red다.** clippy 드리프트(`fleet-api`의 `chunks_exact`,
+    `agent-client-protocol-test`의 `unused_async`, `fleet-dashboard`의 `large_err` ×4)로
+    최근 5개 run이 전부 실패다. 로컬 stable(1.97.1)에서는 재현되지 않으므로 CI의 toolchain
+    해석 차이로 보이며, 정확한 원인은 이번 작업에서 규명하지 않았다 — 별건이다.
+  - 작업 중 `oci-yarang-arm2`에서 **SSH host key 변경 경고**를 받았다. 우회하지 않았고
+    원인도 확인하지 않았다. 이 저장소와 무관하지만 확인이 필요하다.
+

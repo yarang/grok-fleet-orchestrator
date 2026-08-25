@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
@@ -229,13 +229,20 @@ impl McpServer {
                 Ok(Value::Null)
             }
 
-            "tools/list" => Ok(serde_json::to_value(
-                all_tools()
-                    .into_iter()
-                    .filter(|tool| self.authorization.permits_tool(tool.name))
-                    .collect::<Vec<_>>(),
-            )
-            .map_err(|e| JsonRpcError::internal(format!("failed to serialize tool list: {e}")))?),
+            // MCP `ListToolsResult`는 `{ "tools": [...] }` 객체다. 배열을 그대로
+            // 내보내면 표준 클라이언트가 응답을 인식하지 못한다(schema.rs `ToolInfo` 참고).
+            "tools/list" => {
+                let tools = serde_json::to_value(
+                    all_tools()
+                        .into_iter()
+                        .filter(|tool| self.authorization.permits_tool(tool.name))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| {
+                    JsonRpcError::internal(format!("failed to serialize tool list: {e}"))
+                })?;
+                Ok(json!({ "tools": tools }))
+            }
 
             "tools/call" => self.handle_tools_call(&req.params).await,
 
@@ -262,7 +269,25 @@ impl McpServer {
 
         let arguments = obj.get("arguments").cloned().unwrap_or(Value::Null);
 
-        if !self.authorization.permits_tool(name) {
+        // 권한 게이트보다 **존재 여부**를 먼저 판정한다. 카탈로그에 아예 없는
+        // 이름까지 "권한 없음"(-32600)으로 뭉뚱그리면 호출자 입장에서 오타와
+        // 권한 부족이 구분되지 않아, 어느 쪽을 고쳐야 하는지 알 수 없다.
+        // 모르는 이름은 아래 `dispatch_tool`의 fallback이 `-32601`
+        // (method_not_found)로 답한다.
+        //
+        // 존재 판정의 정본은 `all_tools()` 카탈로그다 — `required_permission()`을
+        // 쓰면 안 된다. 그 함수는 `fleet_transition_issue`처럼 **존재하지만**
+        // 요구 capability가 인자에 따라 달라지는 도구에도 `None`을 반환하므로,
+        // `None`을 "없는 도구"로 읽는 순간 오판한다.
+        //
+        // 존재 여부가 드러나는 것을 감수하는 근거는 문서가 아니라 **같은 채널의
+        // 관측 가능한 사실**이다. `tools/list`가 이미 이 launcher에 부여된 전체
+        // 집합을 같은 비인증 stdio로 열거하므로, `-32600`이 추가로 흘리는 정보는
+        // "내가 받지 못한 capability에 속한 도구가 카탈로그에 있다"뿐이다. 이를
+        // 감추기로 정한다면 `tools/list`부터 바꿔야 하며, 이 분기만 뭉뚱그리는
+        // 것은 은닉이 아니라 진단 정보만 잃는 선택이다.
+        let known = all_tools().iter().any(|tool| tool.name == name);
+        if known && !self.authorization.permits_tool(name) {
             return Err(JsonRpcError::invalid_request(
                 "tool is not permitted for this MCP launcher",
             ));

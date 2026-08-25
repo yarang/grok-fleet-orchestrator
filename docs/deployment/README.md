@@ -20,6 +20,7 @@ owners: ["deployment"]
 2. 운영 장애: troubleshooting → backup-recovery
 3. 공개 경계 변경: topology → reverse-proxy → configuration
 4. LLM gateway: litellm-gateway → reverse-proxy → configuration
+5. MCP client 연결·권한 조정: mcp-clients → (도구 계약은 [`contracts/mcp-tools.md`](../contracts/mcp-tools.md))
 
 | 문서 | 상태 | 역할 |
 |---|---|---|
@@ -32,7 +33,7 @@ owners: ["deployment"]
 | [`reverse-proxy.md`](./reverse-proxy.md) | 🟡 부분 구현 | Nginx TLS·trusted proxy·공개 endpoint 경계 |
 | [`topology.md`](./topology.md) | 🔵 사본·부분 구현 | Architecture 정본을 배포 관점으로 요약한 토폴로지·신뢰 경계 |
 | [`litellm-gateway.md`](./litellm-gateway.md) | 🟢 Runbook·부분 구현 | liteLLM 준비·기동·검증·rollback과 Worker 경유 확인 |
-| [`mcp-clients.md`](./mcp-clients.md) | 🟡 부분 구현 | Claude Code·Antigravity CLI stdio 연결, Gemini CLI 단종 안내, ChatGPT 미지원 사유 |
+| [`mcp-clients.md`](./mcp-clients.md) | 🟡 부분 구현 | Claude Code·Antigravity CLI stdio 연결과 도구 노출 검증, 호스트 바이너리 교체(`install.md`의 checksum 경로에 대한 승인된 예외), `FLEET_MCP_CAPABILITIES` 운영, Gemini CLI 단종 안내, ChatGPT 미지원 사유 |
 
 ## 인접 정본
 

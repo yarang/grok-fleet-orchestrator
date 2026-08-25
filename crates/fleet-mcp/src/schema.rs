@@ -216,14 +216,23 @@ pub fn tool_json<T: Serialize>(value: &T) -> Value {
 // ═══════════════════════════════════════════════════════════════════════
 
 /// `tools/list` 응답용 도구 메타데이터 하나.
+///
+/// wire 필드명은 MCP `2024-11-05`의 `Tool`이 정본이라 **camelCase**다
+/// (`inputSchema`). Rust 필드명(`input_schema`)을 그대로 내보내면 표준 MCP
+/// 클라이언트의 `ListToolsResult` 검증에 걸려 도구가 하나도 노출되지 않는다 —
+/// 서버는 응답을 보내지만 클라이언트가 그 응답을 인식하지 못해 요청이 타임아웃한다.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub name: &'static str,
     pub description: &'static str,
     pub input_schema: Value,
 }
 
-/// Phase 1에서 지원하는 도구 3개의 메타데이터.
+/// 이 서버가 제공하는 전체 도구 카탈로그.
+///
+/// 실제로 `tools/list`에 나오는 것은 이 중 launcher의
+/// `FLEET_MCP_CAPABILITIES` allow-list가 허용한 부분집합이다.
 pub fn all_tools() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
