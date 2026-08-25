@@ -340,3 +340,28 @@
   시점 `age < 6s`). MCP `initialize`/`tools/list`가 primary에 붙어 `fleet_dispatch_task`
   등 9개 도구를 정상 반환하는 것까지 확인했다 — 아직 실제 task는 dispatch하지 않음
   (Claude Code 세션 재시작 후 `.mcp.json` 로드가 필요, 다음 단계).
+
+### 2026-08-25 — primary MCP launcher `FLEET_MCP_CAPABILITIES` 전체 개방과 백업 2건 등재
+
+- **값 변경(신규 시크릿 아님, 기존 등재 항목의 값 변경)**: `oci-yarangdev-arm1`의
+  `/etc/fleet/fleet.env`에서 `FLEET_MCP_CAPABILITIES`가 9개에서 **22개(19개 도구 전체
+  노출)**로 확대됐다. 운영자 결정이며, 값만 늘리지 않고 같은 파일 주석에 capability →
+  도구 매핑과 주의 항목의 **사유**를 함께 적어 권한을 좁히는 일이 "코드를 읽어야 아는 일"이
+  아니라 그 줄에서 항목을 지우는 편집이 되게 했다.
+- **주의 항목 4개와 그 사유(분류 축이 둘이다)**: `token:revoke`·`project:delete`는 되돌릴 수
+  없다. `worker:delete`는 MCP에서 여는 도구(`fleet_reset_worker_breaker`)가 되돌릴 수 있으며
+  주의 사유는 **같은 이름이 HTTP에서는 워커 삭제 권한**이라는 transport 간 의미 충돌이다.
+  `issue:approve_agent_work`는 **Agent 자동 착수의 승인 관문**이다.
+- **정본과의 충돌을 예외로 명시했다**: `crates/fleet-core/src/auth.rs`의
+  `IssueApproveAgentWork`와 [Issue 추적](../architecture/issues.md)은 이 전이를 "사람만"으로
+  정의한다. MCP stdio에는 호출 principal이 없으므로 부여하면 사실상 LLM이 수행한다. 오늘
+  무해한 이유는 로드맵 `#93`이 미구현이라 `ReadyForAgent`가 표식에 그치기 때문이며, 그 전제는
+  `#93` 구현과 동시에 무너진다. 세 정본(코드 doc comment, 아키텍처 문서, 호스트 주석)에 예외를
+  적고 **`#93`의 선행 게이트로 재검토를 등재**해 무장 시점에 강제로 걸리게 했다.
+- **백업 artifact 2건 등재**(둘 다 primary, 원본과 동일한 소유자·권한으로 `cp -a`):
+  - `/etc/fleet/fleet.env.bak-20260825T065441Z` — capability 확대 직전 (`rw-r-----`, root:fleet).
+    **`DATABASE_URL`·`FLEET_API_TOKENS`·`FLEET_GMAIL_APP_PASS`를 그대로 담고 있다.**
+  - `/usr/local/bin/fleet.bak-20260825T065838Z` — 바이너리 교체 직전 (시크릿 없음).
+  - 같은 날 주석 추가로 `fleet.env.bak-<TS>`가 하나 더 생성됐다(내용은 확대 후 값과 동일).
+- **미조치**: 위 `.bak` 파일들에 회수 기한이 없다. 시크릿을 담은 사본이 무기한 남는 것은
+  이 registry가 관리해야 할 표면이므로, 정리 정책은 별건으로 남긴다.

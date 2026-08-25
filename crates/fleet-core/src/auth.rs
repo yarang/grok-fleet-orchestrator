@@ -445,6 +445,14 @@ pub enum PermissionKind {
     /// `Triaged → ReadyForAgent` 전이 — **Agent 자동 착수의 유일한 인가
     /// 지점**(`#93`). 사람만 가질 수 있으며 Agent/Worker에게는 어떤 경로로도
     /// 부여하지 않는다. 자동 작업 생성의 관문이므로 반드시 별도 capability다.
+    ///
+    /// **승인된 예외 하나(2026-08-25, 운영자 결정).** MCP stdio launcher
+    /// (`FLEET_MCP_CAPABILITIES`)가 이 capability를 부여받아 있으며, 그 표면에는
+    /// 호출 principal이 없으므로 사실상 LLM이 이 전이를 수행할 수 있다. 오늘
+    /// 무해한 이유는 `#93`이 미구현이어서 `ReadyForAgent`가 표식에 그치기
+    /// 때문이고, 그 전제는 `#93` 구현과 동시에 무너진다. 그래서 Roadmap `#93`의
+    /// 선행 게이트에 "착수 전 MCP stdio의 이 capability 재검토"를 등재했다.
+    /// 위 문장을 무조건적 불변식으로 읽으면 안 된다.
     #[serde(rename = "issue:approve_agent_work")]
     IssueApproveAgentWork,
     #[serde(rename = "issue:close")]

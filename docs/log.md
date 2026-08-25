@@ -1292,3 +1292,74 @@ last_verified: "2026-08-15"
   - 작업 중 `oci-yarang-arm2`에서 **SSH host key 변경 경고**를 받았다. 우회하지 않았고
     원인도 확인하지 않았다. 이 저장소와 무관하지만 확인이 필요하다.
 
+## 2026-08-25 — lint — 도메인 에이전트 4종 판정으로 잡은 정본 결함과 `issue:approve_agent_work` 예외의 명문화
+
+- 유형: `lint` + `verification`
+- **배경**: 세션이 단독 소유가 되면서 미커밋 트리 10개 파일을 커밋 가능한 상태로 만드는
+  작업을 시작했다. 혼자 훑는 대신 도메인별 판정자를 `.claude/agents/`에 정의해
+  (`expert-rust-gate`, `expert-git-history`, `expert-docs-canon`, `expert-security`) 각자
+  자기 정본만 근거로 판정하게 했다. 이 항목은 그중 문서·보안 판정의 결과다.
+- **가장 값진 결과는 "에이전트가 옳았다"가 아니라 "에이전트의 진단은 옳고 처방은 틀렸다"였다.**
+  문서 판정자가 `deployment/mcp-clients.md`(되돌릴 수 없는 항목 3개)와 `docs/log.md`(4개)의
+  불일치를 잡아냈고, 긴 쪽을 참으로 가정해 "짧은 쪽에 `worker:delete`를 추가"를 권고했다.
+  세 번째 소스인 호스트 `/etc/fleet/fleet.env` 주석을 실제로 열어 보니 **둘 다 틀렸다** —
+  호스트는 주의 항목 4개를 **두 축**으로 나눠 적고 있었고(`token:revoke`·`project:delete`만
+  되돌릴 수 없음, `worker:delete`는 transport 간 이름 충돌, `issue:approve_agent_work`는 승인
+  관문), `fleet_reset_worker_breaker`는 되돌릴 수 있으므로 권고대로 고쳤다면 정본에 **거짓을**
+  심을 뻔했다. 불일치가 발견된 지점과 정답이 있는 지점은 대개 다르다.
+- **차단 결함으로 판정해 고친 문서 결함**(전부 이번 diff가 만들었거나 이번 diff가 드러낸 것):
+  - `contracts/mcp-tools.md`가 자기모순이었다. 33~35행은 "존재 판정의 정본은 `all_tools()`이지
+    `required_permission()`이 아니다"라고 적으면서, 81~82행은 "도구별 요구 capability는
+    `required_permission`이 정본"이라고 단정했다. 코드가 33~35행 편이다 — `permits_tool`이
+    `fleet_transition_issue`만 `required_capability_for_transition`으로 특례 처리한다. 요구
+    capability의 정본이 **둘**임을 명시하도록 고쳤다. 같은 문서의 범위 줄도 Project·Issue
+    도구 7개를 정본화해 놓고 "Task, Worker, Host, bootstrap token"에 머물러 있어 보정했다.
+  - `deployment/litellm-gateway.md`의 `last_verified`를 되돌렸다. 이번 변경은 교차참조 3줄이
+    전부인데 날짜를 옮겨 **Runbook 본문(docker-compose 구성·포트·버전 핀·기동/rollback 절차)을
+    재검증한 것처럼** 표시하고 있었다. 이 저장소 정본 체계에서 가장 잘 깨지는 것은 본문이
+    아니라 **문서가 자기 자신에 대해 하는 메타 주장**이다.
+  - `deployment/mcp-clients.md`의 호스트 바이너리 교체 절차가 `deployment/install.md`(정본)의
+    "버전 고정 릴리스 artifact와 checksum" 정책을 **설계상 우회**하는데 양쪽에 교차참조가
+    없었다. `authority: canonical` 둘이 같은 작업을 다르게 말하는 상태였다. 예외임을 명시하고
+    양방향 링크를 걸었다.
+  - `contracts/README.md`가 "아래 문서는 현재 호출 가능한 기능이 아니다"로 Project 계약을
+    덮는데, 같은 diff가 `fleet_create_project`/`fleet_list_projects`/`fleet_delete_project`를
+    현재 도구 표면으로 정본화해 그 문장을 거짓으로 만들었다. 부분 구현을 표현하도록 한정했다.
+- **보안 판정이 커밋 차단 하나를 냈고, 그것이 이 항목의 핵심이다.**
+  `FLEET_MCP_CAPABILITIES` 전체 개방에 `issue:approve_agent_work`가 포함됐는데, 이 capability는
+  `fleet-core/src/auth.rs`와 [Issue 추적](architecture/issues.md)이 **"사람만 가질 수 있으며
+  Agent/Worker에게는 어떤 경로로도 부여하지 않는다"**고 못박은 것이다. MCP stdio `ToolContext`에는
+  호출 principal이 없으므로 부여하면 사실상 LLM이 승인 전이를 수행한다.
+  - **오늘 악용 가능한 경로는 없다.** `#93`(Agent backlog claim)이 미구현이라 `ReadyForAgent`는
+    표식에 그치고, claim lease·`origin_issue_id` 같은 보상 통제는 아직 대상이 없다.
+    **위험은 `#93`이 구현되는 순간 무장된다.**
+  - 운영자 결정은 **유지 + 재검토 게이트 등재**였다. 권한을 유지하되, 세 정본(코드 doc
+    comment, 아키텍처 문서, 호스트 주석)에 예외를 명시하고 Roadmap `#93`에 "착수 전 MCP
+    stdio의 이 capability 재검토"를 **선행 게이트로 등재**했다. 문서를 사실과 일치시키는 것과
+    위험이 무장되는 시점에 강제로 다시 걸리게 하는 것을 동시에 만족시키는 선택이다.
+  - 대안으로 검토한 "이 항목만 제거"는 비용이 작다는 것을 코드로 확인해 두었다 —
+    `permits_tool`이 `.any()`로 노출을 판정하므로 `fleet_transition_issue`는 계속 보이고
+    나머지 3종 전이도 그대로 동작하며, 잃는 것은 `ReadyForAgent` 전이 하나뿐이다. 게이트에서
+    재검토할 때 이 사실을 다시 조사하지 않아도 되도록 남긴다.
+- **자기 코드에서 그럴듯하지만 틀린 논증을 하나 잡았다.** `server.rs`의 새 권한 분기가 존재
+  여부 노출을 정당화하며 "전체 카탈로그는 `docs/contracts/mcp-tools.md`에 공개돼 있다"를 근거로
+  들고 있었다. 이것은 **보안 속성을 문서 파일의 내용과 저장소 공개 여부에 의존시킨다** — 저장소를
+  private로 바꾸면 근거가 사라진다. 견고한 근거는 따로 있다: `tools/list`가 **같은 비인증
+  채널로** 이미 그 launcher의 전체 부여 집합을 열거하므로, `-32600`이 추가로 흘리는 정보는
+  "받지 못한 capability에 속한 도구가 카탈로그에 있다"뿐이다. 코드와 문서 양쪽을 고쳤다.
+- 변경 파일: `crates/fleet-mcp/src/server.rs`(주석), `crates/fleet-core/src/auth.rs`(doc
+  comment), `docs/contracts/mcp-tools.md`, `docs/contracts/README.md`,
+  `docs/deployment/mcp-clients.md`, `docs/deployment/install.md`,
+  `docs/deployment/litellm-gateway.md`, `docs/architecture/issues.md`,
+  `docs/roadmap/roadmap.md`, `docs/credentials/registry.md`, 이 로그.
+  호스트: `oci-yarangdev-arm1:/etc/fleet/fleet.env`(주석만, 백업 후 `0640 root:fleet`·키 13개
+  불변 확인).
+- **검증 한계**:
+  - 이 항목의 대부분은 **문서·주석 변경**이며 런타임 동작을 바꾸지 않는다. 유일한 예외인
+    `server.rs`도 주석만 고쳤다. 따라서 여기서 3종 게이트를 다시 돌려 얻는 신호는 없다 —
+    게이트 결과는 같은 트리의 코드 변경(MCP wire 포맷, `TaskPhase`)에 대해 별도로 기록한다.
+  - **`issue:approve_agent_work`를 유지하기로 한 결정은 "안전함을 확인했다"가 아니다.**
+    `#93` 미구현이라는 **시점 의존적 전제** 위에서만 무해하며, 그 전제가 깨지는 시점을
+    게이트로 표시했을 뿐이다. 게이트가 실제로 지켜지는지는 이 항목이 보장하지 못한다.
+  - 호스트 `.bak` 파일들에 회수 기한이 없다. 시크릿을 담은 사본이 무기한 남는 문제는
+    `credentials/registry.md`에 미조치로 등재했고 이번에 해소하지 않았다.

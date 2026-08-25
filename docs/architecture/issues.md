@@ -143,6 +143,15 @@ Agent는 Issue를 **읽고 착수한다.** 이것이 이 기능의 핵심이며,
 - Project 정책으로 특정 label을 자동 승인하고 싶다면 그것은 정책 revision 변경이며
   `project:policy_manage` 권한 아래 놓인다 — Agent가 얻을 수 없다.
 
+> **승인된 예외 하나(2026-08-25, 운영자 결정).** MCP stdio launcher가
+> `issue:approve_agent_work`를 부여받아 있다. 그 표면에는 호출 principal이 없으므로
+> (`FLEET_MCP_CAPABILITIES`가 노출 여부만 통제하고 호출자별 판정과 감사는 없다 —
+> [MCP 도구 계약](../contracts/mcp-tools.md)의 "보안 상태") **사실상 LLM이 이 승인 전이를 수행할
+> 수 있다.** 오늘 무해한 이유는 `#93`이 미구현이라 `ReadyForAgent`가 표식에 그치기 때문이며, 그
+> 전제는 `#93` 구현과 동시에 무너진다. 따라서 위의 "전이는 사람만"을 현재 시스템의 무조건적
+> 불변식으로 읽으면 안 된다 — 그것은 이 문서가 지향하는 설계이고, 재수렴 시점은 Roadmap `#93`의
+> 선행 게이트에 등재돼 있다.
+
 ### claim은 CAS다
 
 동시에 두 Agent가 같은 Issue를 집는 것을 막아야 한다. claim은 `(issue_id, status=ReadyForAgent,
