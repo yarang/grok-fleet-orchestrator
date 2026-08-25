@@ -1454,3 +1454,24 @@ last_verified: "2026-08-15"
   | `RUNNING_GAUGE` underflow | `Dispatcher::cancel`은 `Pending` 작업에 대해서도 `dec_running()`을 호출하는데, `inc_running()`은 dispatch 시점에만 실행되므로 0에서 `fetch_sub(1)`이 `usize::MAX`로 wrap한다. **이번 변경이 만든 것이 아니다**(기존 `cancel`도 무조건 감소시켰다). 고치지 않은 이유는 따로 있다 — **`running_count()`의 소비자가 워크스페이스에 0개**다. 이 게이지는 쓰기 전용이고 아무도 읽지 않아 결함이 관측되지 않는다. 밴드에이드(`checked_sub`)로 덮으면 "고쳤다"는 인상만 남고 회계는 여전히 틀린다. 정확한 회계에는 `Applied{previous: TaskPhase}`가 필요하고, 그건 이 게이지를 실제로 메트릭에 배선할 때 같이 결정할 일이다. 별도 항목으로 분리한다 |
 
 - **문서**: `reconcile.rs`의 모듈 주석에서 "낙관적 잠금을 하지 않기 때문에 경쟁을 막지 못한다"는 서술을 걷어내고, 5분 유예가 이제 **정합성의 근거가 아니라 되돌릴 수 있는 `Offline` 상태에서 성급하게 실패 처리하지 않기 위한 정책**으로만 남는다고 고쳐 적었다. 동시에 CAS가 닫지 **않는** 것도 명시했다 — 워커에서 실제로 완료된 작업이 여기서 `Failed`로 확정되면 그 결과물은 여전히 버려진다. 상태는 일관되지만 일은 낭비되며, 그것을 줄이는 것은 유예 시간 조정의 몫이다. 같은 파일의 dispatch 결과 `match`에 있던 catch-all 주석도 고쳤다 — "dispatch_existing이 이미 Failed로 마킹했으므로 로깅만 한다"는 서술은 새로 생긴 `DispatchError::NotPending`에 대해 **거짓**이다. NotPending은 상태를 전혀 건들지 않은 경우이며, 여기서 실패 마킹을 하면 방금 다른 writer가 정당하게 가져간 작업을 죽여 이번 변경이 닫으려던 것과 같은 종류의 경쟁을 **새로** 만든다. 코드는 이미 로깅만 하고 있었으므로 동작 변경은 없고, 주석이 그 이유를 잘못 말하고 있던 것을 바로잡았다.
+
+## 2026-08-25 — verification — 게이트 정합성 수정을 CI에서 관측: lint는 초록, 그 뒤에 가려져 있던 테스트 실패 4건
+
+- 유형: `verification`
+- **무엇을 했나**: 게이트 정합성 커밋 11개를 `origin/main`에 푸시하고(`22d9e50..3238c65`) CI 실행을 관측했다. 목적은 이 파일의 "2026-08-25 — lint — `main`의 CI 8연속 실패" 항목이 남긴 마지막 검증 한계를 닫는 것이었다.
+- **검증 한계가 닫혔다**: 러너 로그에 `Run dtolnay/rust-toolchain@stable → toolchain: 1.98.0`, `rustup toolchain install 1.98.0 --component clippy --component rustfmt`가 찍혔고, 실제 실행 경로도 `/home/runner/.rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo`였다. 액션이 명시 `toolchain` 입력을 존중한다는 것을 정적 근거(`action.yml`)가 아니라 실측으로 확인했다.
+- **lint 게이트는 목적을 달성했다**: `cargo fmt --check`, `cargo clippy (acp+mtls)`, `cargo clippy (no-default-features)` 모두 CI에서 통과했다. 8연속 실패의 직접 원인이던 clippy 3계열은 해소됐다.
+- **그러자 test 단계가 처음으로 실행되면서 실패 4건이 드러났다.** clippy가 먼저 죽던 동안 이 단계는 도달조차 하지 않았으므로, **게이트를 고치면 빨간 것이 늘어나는 것이 정상이다** — 가려져 있던 것이 드러나기 때문이다. 4건 모두 `DATABASE_URL`이 있어야만 실제로 실행되는 경로이고, 로컬 전체 스위트가 982 passed / 0 failed였던 것은 그 경로들이 조용히 통과했기 때문이다.
+
+  | 실패 | 도입 커밋 | 성격 |
+  |---|---|---|
+  | `fleet-store` `create_and_get_project_roundtrip` (`projects.rs:73`) | `1f4f913`(2026-08-24, `#48` 1단계) — 이번 푸시 **이전** | PgStore 왕복에서 `created_at`이 `…622808887Z` → `…622808Z`. Postgres `timestamptz`가 마이크로초로 절삭하는데 테스트가 나노초 값과 `assert_eq!`로 구조체 전체를 비교한다 |
+  | `fleet-scheduler` `test_circuit_breaker_sync_between_scaleout_nodes` (`scaleout_sync.rs:143`) | `df0be43`(2026-08-21, `#61`) — 이번 푸시 **이전** | LISTEN/NOTIFY 전파를 `sleep(200ms)`로 기다린 뒤 `Open`을 단언하는데 `Closed`가 나온다. 예산 기반 대기라 이 파일의 disk-cache flake와 같은 부류다 |
+  | `fleet-mcp` `gemini_cli_tools_list_shape` (`cross_client.rs:283`) | `315e3d6`(이번 푸시에 포함) | 서버가 `tools/list`를 **배열 + `input_schema`**로 반환 — `315e3d6`이 고치기 **이전**의 형태 |
+  | `fleet-mcp` `known_but_unpermitted_tool_returns_invalid_request` (`cross_client.rs:460`) | `315e3d6`(이번 푸시에 포함) | `-32600`을 기대하는데 `-32601` — 역시 `315e3d6` 이전 동작 |
+
+- **뒤 두 건은 stale 바이너리 가설이 유력하나 아직 미확정이다.** 근거 셋: (1) `cross_client.rs:42`가 `CARGO_BIN_EXE_*` 대신 `target/debug/fleet` 경로를 하드코딩한다. (2) `fleet-cli`에 `tests/`가 없다 — cargo는 **해당 패키지의 integration test나 bench가 선택될 때만** bin 타깃을 실제 바이너리로 빌드하므로, `cargo test --workspace`는 `src/main.rs`를 `--test`로만 컴파일하고 `target/debug/fleet`은 만들지 않는다. (3) CI의 `actions/cache@v6`가 `restore-keys: ${{ runner.os }}-cargo-`라는 **접두사 매칭**으로 `target/`을 복원한다. 즉 이 테스트가 실행하는 바이너리는 **아무도 갱신을 보장하지 않는 산출물**이다. 관측된 출력이 두 항목 모두 `315e3d6` 이전 동작과 정확히 일치하는 것도 이 가설과 맞는다. 로컬 재현으로 확정하려 했으나 아래 사유로 중단했다.
+- **`spawn_server()`의 조용한 skip이 이 4건을 로컬에서 감췄다**: `cross_client.rs:31`의 `database_url()`이 `None`이면 `spawn_server()`가 `None`을 반환하고 **테스트는 그대로 통과**한다. 이 파일 1176행이 이미 같은 함정을, 1028행이 같은 부류의 위험("조용히 skip되어 통과로 보이는")을 기록해 뒀다. 이번에 "SQL·DB 트레이트 변경이 없으니 `agent.md` §3.2의 DB 게이트 발동 조건이 아니다"라고 판단한 것이 이 4건을 통과시켰다 — **발동 조건을 변경 종류로 좁게 읽으면, 변경과 무관하게 이미 깨져 있던 것은 영원히 보이지 않는다.**
+- **작업 트리 동시 편집 사고**: 진단 도중 `git status`가 9개 파일 `+348/-48`로 더러워졌고 `fleet-scheduler`가 E0061 6건으로 컴파일되지 않았다. 원인은 결함이 아니라 **다른 세션(`[macstudio]grok-fleet-orchestrator 로드맵 진행`)이 같은 작업 트리에 `#62` 리팩터를 쓰고 있었던 것**이다(mtime 19:30~19:37, 당시 19:37). 아무것도 되돌리지 않고 빌드를 중단했다 — 공유 `target/`을 통해 서로의 증분 빌드를 무효화하기 때문이다. 그 세션은 이후 `76e4f81`로 커밋·푸시를 마쳤다. **한 작업 트리에 두 세션이 붙으면 빌드 산출물과 `git status`가 공유 가변 상태가 된다.**
+- 검증: CI run `32837011249`(`3238c65`)와 `32841344564`(`76e4f81`) 두 실행 모두 같은 4건으로 실패 — flaky가 아니라 재현되는 실패다. `Shellcheck install/uninstall` 잡은 두 실행 모두 성공.
+- **다음 작업으로 넘긴다**: 4건의 수정. 순서와 근거는 인계 프롬프트에 있다.
