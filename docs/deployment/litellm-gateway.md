@@ -15,6 +15,10 @@ owners: ["deployment", "operations"]
 요청 경계는 [LLM Gateway 아키텍처](../architecture/llm-gateway.md), TLS·public endpoint는
 [Reverse proxy 경계](reverse-proxy.md)가 소유한다.
 
+liteLLM은 아키텍처 정본이 정의한 **gateway dialect 계약**의 기준 구현이다. OpenRouter 같은
+OpenAI-compatible 집계 서비스는 이 gateway의 **upstream provider**로 두거나, gateway를 거치지 않는
+per-model credential(경로 B)로 직접 지정한다 — 어느 쪽을 고르는지는 아키텍처 정본이 소유한다.
+
 ![liteLLM deployment boundary](../assets/diagrams/deployment/litellm-gateway-deployment.mermaid)
 
 ## 저장소에서 검증된 자산

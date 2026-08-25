@@ -45,7 +45,7 @@ last_verified: "2026-08-17"
 | [`deployment/troubleshooting.md`](./deployment/troubleshooting.md) | 배포 증상별 증거 수집과 복구 경로 Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
 | [`deployment/reverse-proxy.md`](./deployment/reverse-proxy.md) | Nginx TLS·trusted proxy·공개 endpoint 경계 | 🟡 정본·부분 구현 | 2026-08-17 |
 | [`deployment/topology.md`](./deployment/topology.md) | Single Active Primary·Cold Standby 정본의 배포 관점 요약 | 🔵 사본·부분 구현 | 2026-08-17 |
-| [`deployment/litellm-gateway.md`](./deployment/litellm-gateway.md) | liteLLM gateway 준비·기동·검증·rollback Runbook | 🟢 정본·부분 구현 | 2026-08-17 |
+| [`deployment/litellm-gateway.md`](./deployment/litellm-gateway.md) | liteLLM gateway 준비·기동·검증·rollback Runbook | 🟢 정본·부분 구현 | 2026-08-25 |
 
 ## 도메인 3. 🔑 Worker Bootstrap & Join Auth — [`worker-bootstrap/README.md`](./worker-bootstrap/README.md)
 

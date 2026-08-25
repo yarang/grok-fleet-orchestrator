@@ -1130,3 +1130,23 @@ last_verified: "2026-08-15"
 - **검증 한계**:
   - **로컬 rustfmt는 1.9.0-stable(8bab26f4f6, 2026-07-14)이고, CI는 `dtolnay/rust-toolchain@stable`을 실행 시점에 해석한다.** CI의 stable이 더 최신이면 내 rustfmt가 만들지 않는 포맷을 요구해 fmt 검사가 그래도 실패할 수 있다. 로컬 통과를 CI 통과로 읽으면 안 된다.
   - **DB 게이트 실행 중 하네스 오류 2건을 스스로 만들었다가 잡았고, 다음 에이전트를 위해 남긴다**: (1) `cargo test -p fleet-store --test issues`는 `--all-features` 없이는 **컴파일되지 않는다** — `MemStore`가 `test-support` 피처 뒤에 있다(`lib.rs:22`). 피처를 빼면 이 바이너리만 조용히 결과 없이 지나가므로 11개 중 1개를 검증하지 않은 채 "전부 ok"로 오독하기 쉽다. (2) `FLEET_MCP_CAPABILITIES`에 존재하지 않는 이름(`task:submit`, `project:update`)을 넣었더니 fail-closed 파싱이 서버 기동을 막아 `cross_client` **12건이 전부 `initialize` 응답 없음으로 실패**했다 — 트리 회귀처럼 보였지만 전적으로 환경변수 오류였다. 정본 이름은 `fleet-core/src/auth.rs:466`의 `as_str()`이며 `task:create`/`project:read` 등이다.
+
+## 2026-08-25 — OpenRouter 적용 가능성 판정과 gateway dialect 계약의 문서화
+
+- 유형: `ingest`(정본 대규모 재작성) + `design` + `verification`
+- **질문을 다시 정의했다**: "OpenRouter를 쓸 수 있게 고칠 수 있나"로 시작했지만, 코드를 읽어 보니 Fleet에는 LLM 설정 경로가 **둘** 있었고 둘의 성격이 달랐다. 경로 A는 worker 전역 `[llm_proxy]`가 subprocess 환경변수로 팬아웃되는 gateway 경로이고, 경로 B는 `worker_credentials` 한 행이 grok `config.toml`의 `[model.<id>]`로 렌더링되는 per-model 경로다(`fleet-credentials/src/lib.rs`, `migrations/005_worker_credentials.sql`). **경로 B로는 OpenRouter가 오늘 이미 동작한다 — Rust 변경이 0줄이다**(`base_url = "https://openrouter.ai/api/v1"`, `api_backend`는 `chat_completions` 또는 `responses`, `model`은 `vendor/model`). 즉 이건 공급자 추가 문제가 아니었다.
+- **진짜 설계 결함은 따로 있었다**: `apply_llm_proxy_envs`(`fleet-worker/src/grok_process.rs:115`)는 **하나의** `gateway_url`을 OpenAI·Anthropic·Gemini·Antigravity 네 계열 환경변수로 팬아웃하면서 **그 gateway가 네 dialect를 전부 서비스한다고 가정**한다. liteLLM에는 참이지만 일반적으로 거짓이고, 이 가정은 코드에만 있고 문서 어디에도 없었다. 부분 구현 gateway를 넣으면 설정 시점에는 아무 신호가 없고 해당 dialect를 쓰는 Agent만 **요청 시점에** 실패한다. 이번에 이것을 불변식으로 승격하고, 정본에서 "liteLLM gateway"를 "dialect 계약을 만족하는 gateway"로 일반화했다(liteLLM은 기준 구현으로 강등).
+- **기억을 근거로 쓰려다 멈추고 프로브로 확인했고, 기억이 틀렸다**: 나는 "OpenRouter는 OpenAI 호환 전용"이라고 알고 있었다. 그 말이 참이면 Fleet의 `ANTHROPIC_BASE_URL` 팬아웃이 깨진 것으로 문서에 적혔을 것이다. 문서끼리도 엇갈려(API 개요는 Anthropic 지원을 언급하지 않고, 특정 문서 URL은 404) 인증 없는 POST 프로브로 라우트 존재 여부를 직접 쟀다(`401` = 존재·인증 거부, `404` = 없음). **`/api/v1/messages`는 `401`을 Anthropic 형식 error 봉투로 돌려준다 — OpenRouter는 Anthropic native dialect를 서비스한다.** Gemini `generateContent`는 `v1`·`v1beta` 모두 `404`로 실제로 없다. `authority: canonical` 문서에 기억을 적었다면 거짓을 정본으로 굳힐 뻔했다.
+- **한 번 더 걸렀다 — 긍정 주장 하나가 여전히 기억 기반이었다**: 초고는 "`gateway_url = "https://openrouter.ai/api"`로 두면 `OPENAI_*`와 `ANTHROPIC_BASE_URL`이 둘 다 올바른 경로로 해석된다"고 단정했는데, 이 중 Anthropic 쪽 근거는 "Anthropic SDK가 `/v1/messages`를 이어붙인다"는 내 기억뿐이었고 검색 결과는 오히려 `…/api/v1`을 설정하라고 말하고 있었다. 같은 프로브 기법으로 갈랐다.
+  - `/api/v1/v1/messages` → `404`
+  - `/api/messages` → `200`이지만 `content-type: text/html`, `x-matched-path: /[maker-id]/[slug]` — **API 라우트가 아니라 Next.js 마케팅 페이지**다. 상태코드만 봤다면 "존재함"으로 오독했을 자리다.
+  - 결론: OpenRouter는 `/api/v1/messages` **한 형태만** 서비스하므로 두 base 모양을 함께 허용하지 않는다. 하위 CLI가 `{base}/v1/messages`로 이으면 하나의 `gateway_url`이 두 dialect를 만족하고, `{base}/messages`로 이으면 **어떤 값으로도 동시 만족이 불가능**하다(그 경우 `OPENAI_BASE_URL`이 `…/api/v1/v1`이 되어 404). 어느 쪽인지는 외부 CLI 구현이라 이 저장소가 증명할 수 없으므로, 정본의 해당 행을 단정에서 **확인 필요**로 내리고 두 갈래를 표로 남겼다.
+- **채울 방법이 없는 것은 만들지 않았다**: 커스텀 HTTP 헤더(`HTTP-Referer`/`X-Title`), provider routing 선호, usage·cost 수집, `api_backend` 값 검증 네 가지를 유예하고 각각의 이유와 완료 조건을 정본의 유예 표에 적었다. 앞의 둘은 렌더링 대상인 grok `[model.<id>]`에 실을 슬롯이 없어 지금 칼럼을 만들면 **아무도 읽지 않는 값**이 된다. `api_backend` 검증은 별도 배경 작업(`task_e963ac6b`)으로 분리했다 — 기존 행에 집합 밖 값이 이미 들어 있을 수 있어(테스트가 `"openai"`를 통과시킨다) 엄격한 enum으로 조이면 읽기 시점 역직렬화가 깨질 수 있다.
+- **`docs/credentials/registry.md`는 일부러 건드리지 않았다.** 이 파일은 실제 배포된 secret의 메타데이터 대장인데 OpenRouter credential은 존재하지 않는다. 행을 추가하면 없는 secret을 있는 것처럼 적는 셈이다.
+- 변경 파일: [`docs/architecture/llm-gateway.md`](architecture/llm-gateway.md)(59→약 150줄로 재작성, 정본), [`docs/deployment/litellm-gateway.md`](deployment/litellm-gateway.md)(계약 참조 문단 추가), [`docs/index.md`](index.md)(날짜 동기화).
+- 검증: 두 문서의 상대 링크 전부 해석됨, 인용한 소스 경로 7개 전부 존재 확인, 문서 색인 날짜 동기화. 코드 변경이 없으므로 빌드·테스트 게이트는 이번 항목의 대상이 아니다.
+- **검증 한계**:
+  - 프로브는 **라우트 존재 여부만** 증명한다. 유효한 API key로 실제 completion을 받는 것, grok·agy가 이 endpoint로 정상 동작하는 것은 검증하지 않았다.
+  - 하위 CLI의 base URL 이어붙이기 규칙은 외부 구현이라 위 두 갈래 중 어느 쪽인지 정하지 못했다. **경로 A 채택 전 대상 CLI로 1회 실요청 검증이 필수다.**
+  - `llm-gateway.md`의 `verification: code-checked`는 **Fleet 쪽 진술에만** 해당한다. OpenRouter 라우트 표는 코드가 아니라 2026-08-25의 외부 네트워크 관측이며, 정책의 `verification` 어휘에는 외부 관측을 가리키는 값이 없다. 공급자가 라우트를 바꾸면 무효가 된다.
+

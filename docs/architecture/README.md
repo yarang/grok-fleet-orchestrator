@@ -51,7 +51,7 @@ flowchart TD
 | Task 관리 | [Task 정본](tasks/README.md) | Task 제출·의존성·취소·결과·감사는 어떻게 관리하는가? |
 | 교차 lifecycle | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) | Project·Task·Attempt·Agent 전이는 어떻게 맞물리는가? |
 | Agent 실행 | [Agent domain](agents/README.md) | 격리, provisioning, runtime, harness, tool, memory, terminal은 어떻게 분리되는가? |
-| LLM gateway | [LLM Gateway 아키텍처](llm-gateway.md) | Worker의 멀티 공급자 요청을 어떻게 중앙 gateway로 라우팅하는가? |
+| LLM gateway | [LLM Gateway 아키텍처](llm-gateway.md) | Worker의 LLM 설정을 gateway 경유(경로 A)와 per-model credential(경로 B) 중 무엇으로 둘 것이며, 경로 A의 gateway는 어떤 dialect 계약을 만족해야 하는가? |
 | Task routing | [Task 정본](tasks/README.md) | 논리 profile과 Worker 선택 정책은 무엇인가? |
 | Task 예산 | [Task 정본](tasks/README.md) | usage budget과 telemetry 제한은 어떻게 적용하는가? |
 
