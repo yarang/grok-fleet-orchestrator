@@ -14,6 +14,20 @@ members = [
     "crates/fleet-cli",
 ]
 
+# 2026-08-25: 벤더링한 공식 ACP Rust SDK를 워크스페이스 멤버에서 제외한다.
+# 이유: clippy는 member(primary) 패키지만 채점하므로, 멤버로 남겨 두면 우리가
+# 유지보수하지 않는 남의 코드의 lint가 우리 게이트를 막는다(1.98.0의
+# `unused_async_trait_impl`이 `agent-client-protocol-test`에서 게이트를 즉사시켰다).
+# 명령줄 `--exclude`는 멤버 선택 단계 필터일 뿐 멤버십을 바꾸지 않아 lint를 막지
+# 못하므로, agent.md §4의 게이트 명령을 그대로 유지하려면 매니페스트 쪽이 정답이다.
+# 부수효과: `cargo test --workspace`와 `cargo llvm-cov --workspace`가 더 이상 이
+# SDK의 테스트를 포함하지 않으므로 커버리지 수치가 한 번 내려간다. 빌드 정합성은
+# 유지된다 — SDK 크레이트들은 여전히 의존성으로 컴파일되며, 멤버에서 빠지는 것은
+# 아무도 의존하지 않는 doctest 헬퍼(`agent-client-protocol-test`)뿐이다.
+# 이 SDK를 단순 벤더링이 아니라 우리가 유지보수하는 fork로 취급하기로 하면 이
+# 경계는 잘못된 위치가 된다 — 그때는 `-test`만 겨냥한 좁은 경계로 바꾼다.
+exclude = ["vendor/agent-client-protocol-rust-sdk"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
