@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-08-15"
+last_verified: "2026-08-26"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -1520,3 +1520,72 @@ last_verified: "2026-08-15"
 
 - **검증**: `rustc 1.98.0`(고정과 일치), `cargo fmt --all -- --check` 통과, clippy 2종(`acp mtls` / `--no-default-features`, 둘 다 `RUSTFLAGS="-D warnings"` + `-- -D warnings`) 경고 0, `env -u DATABASE_URL cargo test --workspace` 실패 0, 그리고 `DATABASE_URL`을 물린 5개 크레이트(`fleet-store`·`fleet-api`·`fleet-scheduler`·`fleet-mcp`·`fleet-dashboard`) `--test-threads=1` 직렬 재실행 전부 통과. 마이그레이션 024가 실제로 적용되는 것과 스키마 객체를 직접 확인했다 — `idx_tasks_idempotency UNIQUE, btree (created_by, idempotency_key) WHERE idempotency_key IS NOT NULL`, `CHECK ((idempotency_key IS NULL) = (idempotency_payload_hash IS NULL))`.
 - **미룬 것**: 정본 게이트 4~10(`TaskAttempt` 엔티티, effect ledger, 이전 control epoch 이벤트 거부, 비가역 tool effect 재실행 금지). 이유는 2026-08-25 1단계 항목의 표와 동일하며 그대로 유효하다. principal 부재는 `#93`과 함께 풀어야 한다.
+
+## 2026-08-26 — ingest — `#96` Task 삭제와 스레드 그룹 목록 설계 확정
+
+사용자 요청("Task 삭제를 지원하고 Task 리스트를 최초 Task의 하위 목록으로 grouping")을 설계로 확정했다.
+구현은 착수하지 않았다 — 요청이 "설계하자"였고, 아래 결정들이 코드보다 먼저 정본에 있어야 한다.
+
+- **스키마가 이미 삭제 정책을 갖고 있었다.** 새로 정할 캐스케이드가 없다: `task_outputs`(001:49)·
+  `task_telemetry`(016:13)는 CASCADE, `events`(001:61)·`tasks.parent_task_id`(013:17)·
+  `issue_task_links`(023:74)는 SET NULL. `023_issues.sql`이 그 선택 근거까지 남겨 뒀다. 이것이
+  **soft delete를 배제한 이유**다 — `deleted_at` 컬럼을 두면 이 다섯 절이 전부 죽은 코드가 된다.
+
+- **삭제 판정은 선검사가 아니라 SQL 술어다.** `DELETE FROM tasks WHERE id = $1 AND status_phase =
+  ANY($2)`. 읽고-나서-지우면 그 사이에 `Dispatched → Completed`가 끼어들 수 있고(두 writer, 공유
+  트랜잭션 없음) 이는 `#62` 1단계가 CAS로 없앤 것과 **같은 종류의 TOCTOU**다. CAS를 집안 관례로
+  문서화한 바로 다음 작업에서 그 관례를 어기는 코드를 낼 수는 없다.
+
+- **`Dispatched` 삭제를 막는 이유는 정합성이 아니라 침묵이다.** 1단계 CAS 덕분에 저장소는 손상되지
+  않는다 — 워커의 늦은 완료 이벤트는 `UPDATE` 0행 → **이어지는 재조회**가 `None` → `Err(NotFound)`로
+  귀결된다(0행이면 재조회는 항상 일어난다. 거절과 부재를 구분하는 것이 그 조회의 존재 이유다).
+  문제는 디스패처의 `Err` 갈래가 `warn!` 한 줄만 남기고 이벤트를 발행하지 않는다는 것이다. 워커는
+  머신을 끝까지 태우고 그 결과는 어떤 기록도 없이 사라진다.
+
+- **삭제를 막는 유일한 것은 `Pending` 의존자다.** `dependency_ids`는 `UUID[]`이고 FK가 없어 DB가 막아
+  주지 않는다. dispatch 준비 판정은 선행 Task 조회가 `Ok(None)`이면 `ready = false`로 끝내는데, 없는
+  행은 영영 생기지 않으므로 그 의존자는 dead-letter도 timeout도 없이 `Pending`에 **영구히 갇힌다**.
+  terminal 의존자는 검사하지 않는다 — 이미 실행이 끝나 ready 판정을 다시 지나지 않고, 전부 검사하면
+  DAG가 조금만 깊어져도 삭제가 사실상 불가능해진다.
+
+- **멱등성 키는 삭제 시 해제된다.** 게이트 3의 보장은 "중복 제출은 *기존 Task를 반환한다*"이다.
+  반환할 Task가 없어진 뒤에 tombstone을 남기면 클라이언트에게 조회하면 404가 되는 id를 건네게 된다 —
+  보장을 지키는 게 아니라 더 나쁘게 깨뜨리는 것이다.
+
+- **그룹의 정체성은 루트 행이 아니라 `thread_id` 값이다.** `parent_task_id`가 `ON DELETE SET NULL`
+  이므로 "루트가 삭제된 스레드"는 가정이 아니라 도달 가능한 정상 상태다. 루트 기준으로 그룹을 잡으면
+  그 자식들은 `id != thread_id`라 루트 목록에도 없고 어느 그룹에도 못 붙어 **목록에서 통째로 증발**
+  한다. 값 기준으로 잡으면 그저 "헤더 없는 그룹"이고 특수 질의 경로가 필요 없다.
+
+- **필요한 마이그레이션은 하나뿐이고, 없어도 되는 것 셋을 확인했다.**
+
+  | 항목 | 마이그레이션 | 이유 |
+  |---|---|---|
+  | `dependency_ids` 부분 GIN | **필요** | 의존자 검사가 `@>` 포함 질의를 요구하는데 이 컬럼엔 인덱스가 없다. 저장소 전체 GIN은 `workers.labels` 하나뿐. `WHERE dependency_ids <> '{}'`로 좁힌다 — 대부분 `DEFAULT '{}'`이고, `idx_tasks_parent_task_id`가 쓰는 관례와 같다 |
+  | `PermissionKind::TaskDelete` | 불필요 | permission은 코드 정의이고 `seed_permissions`/`seed_builtin_roles`가 **매 기동** 실행되어 기존 역할까지 역채움한다 |
+  | 그룹 질의 | 불필요 | `idx_tasks_thread_id ON tasks (thread_id, created_at)`가 013에 이미 있다 — 정렬까지 맞는 복합 인덱스다 |
+  | `Deleted` 상태 | 불필요 | 삭제는 상태 전이가 아니라 레코드 제거다. 상태 다이어그램에 칸을 늘리지 않는다 |
+
+- **`task.*` 감사 액션이 하나도 없었다.** auth·user·worker·credential만 있다. `task.delete`를 새로
+  만든다 — hard delete는 행 자체를 없애므로, 분리되어 남는 `events` 행을 빼면 감사 로그가 "이 Task가
+  존재했고 누가 지웠다"를 증언하는 유일한 기록이 된다.
+
+- **의도적으로 남긴 것**:
+
+  | 무엇 | 왜 |
+  |---|---|
+  | 스레드 통째 삭제 버튼 | 삭제마다 의존자 선검사가 개별적으로 실패할 수 있다. 부분 실패 의미론을 먼저 정하지 않은 일괄 버튼은 "몇 건은 지워지고 몇 건은 남은" 상태를 사용자에게 설명하지 못한다 |
+  | `delete_task`의 `Store` 기본 구현 | `list_thread_tasks`는 `list_tasks`로부터 **유도 가능**하므로 기본 구현이 정당하고 목 스토어 4개가 재정의 없이 정확하다. 삭제는 유도 불가능하다 — 조용히 아무것도 안 하는 기본 구현은 목 스토어를 거짓말하게 만든다. 필수 메서드로 두고 6개 impl 전부가 명시적으로 답하게 한다 |
+  | 깊이 있는 들여쓰기 | `thread_id`는 평평한 키라 손자 세대도 루트와 같은 값을 갖는다. 깊이를 그리려면 `parent_task_id`를 재귀로 훑어야 하는데, 그 재귀를 피하려고 `thread_id`를 도입했다(`013_task_threads.sql`) |
+
+- **검증 한계**: 이 항목은 **설계만** 확정했다. 코드 변경이 없으므로 실행으로 증명된 것은 없다. 위
+  주장들의 근거는 전부 현재 저장소의 코드·마이그레이션 실측이다(FK 절 5개, `dispatch_ready_tasks`의
+  `ready = false` 경로, `compare_and_set_task_status`의 0행 처리, `seed_builtin_roles`의 재시드,
+  `idx_tasks_thread_id` 존재, `dependency_ids` 인덱스 부재, `audit.rs`의 `task.*` 부재). 구현 시
+  게이트는 `management.md` 삭제 계약 절 하단의 6개다.
+
+- **문서 갱신**: `architecture/tasks/management.md`(삭제 계약 절 신설, API·감사 절과 게이트 반영),
+  `architecture/tasks/execution-consistency.md`(멱등성 키 해제, 게이트 1건 추가),
+  `ui-dashboard/ui-design.md` §3.3(태스크 큐를 스레드 그룹 구조로 재설계),
+  `contracts/dashboard-api.md`(계획된 표면 절 신설 — "현재 route 표면" 표에는 넣지 않았다. 미구현
+  route를 그 표에 적으면 표 제목이 거짓이 된다), `roadmap/roadmap.md`(`#96` 등록).

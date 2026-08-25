@@ -524,34 +524,96 @@ flowchart TD
 
 **라우트**: `/tasks`  **권한**: viewer+  **스타일**: Apple tile system
 
-**목적**: 태스크 생명주기 추적, 실패 디버깅.
+**목적**: 태스크 생명주기 추적, 실패 디버깅, terminal Task 정리.
+
+#### 그룹핑 모델
+
+목록의 단위는 Task 한 건이 아니라 **스레드**다. 스레드는 `thread_id` 값 하나로 정의되고, 그 값을 가진
+모든 Task가 구성원이다. 루트(`id == thread_id`)가 헤더가 되고 나머지는 하위 목록으로 들여쓴다.
+
+그룹을 "루트 Task의 행"이 아니라 **`thread_id` 값 자체**로 정의하는 것이 이 설계의 핵심이다. 루트를
+기준으로 잡으면 루트가 삭제된 스레드의 자식들은 `id != thread_id`라 루트 목록에도 없고 어느 그룹에도
+붙지 못해 **목록에서 통째로 사라진다** — `parent_task_id`가 `ON DELETE SET NULL`이므로 이는 가정이
+아니라 도달 가능한 상태다. 값을 기준으로 잡으면 그 경우는 그저 "헤더가 없는 그룹"이고, 별도 질의
+경로가 필요 없다.
+
+| 경우 | 표시 |
+|---|---|
+| 구성원 1건(대부분의 Task) | 들여쓰기·펼침 없이 **평범한 한 행**. 자식 없는 그룹을 그룹처럼 그리지 않는다 |
+| 구성원 2건 이상 | 루트가 헤더, 나머지가 하위 목록. 헤더에 구성원 수와 집계 상태 |
+| 루트가 삭제됨 | 헤더 자리에 `(최초 태스크 삭제됨)` placeholder + 스레드 id 앞 4자리. 하위 목록은 그대로 |
+
+정렬은 스레드 안에서는 `created_at` 오름차순(대화를 읽는 순서), 스레드끼리는 **가장 최근 활동순**
+(구성원 `created_at`의 최댓값 내림차순)이다.
+
+#### 페이지네이션
+
+페이지의 단위도 스레드다. Task 단위로 `limit`/`offset`을 유지하면 한 스레드가 페이지 경계에서
+잘려 그룹의 절반만 보이는 화면이 나온다. 서버는 스레드 페이지를 고르고 그 스레드들의 구성원을
+전부 실어 보낸다 — 스레드 길이는 대화 깊이가 상한이라 페이지당 행 수는 느슨하게만 예측 가능하다.
+이 느슨함이 잘린 그룹보다 낫다는 판단이다.
+
+`idx_tasks_thread_id ON tasks (thread_id, created_at)`가 이미 존재하므로 두 질의(스레드 선정 → 구성원
+적재) 모두 인덱스를 탄다. 새 인덱스가 필요 없다.
 
 #### 레이아웃 (SVG wireframe)
 
-<svg viewBox="0 0 900 520" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
-  <rect x="20" y="20" width="860" height="480" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
+<svg viewBox="0 0 900 560" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
+  <rect x="20" y="20" width="860" height="520" rx="12" fill="#f6f6f6" stroke="#b8b8b8" />
   <rect x="40" y="40" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <text x="60" y="72" font-family="Inter, sans-serif" font-size="16" fill="#111">Tasks / filters / refresh</text>
   <rect x="40" y="112" width="820" height="56" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="40" y="188" width="280" height="250" rx="8" fill="#ffffff" stroke="#c9c9c9" />
-  <rect x="340" y="188" width="520" height="250" rx="8" fill="#ffffff" stroke="#c9c9c9" />
   <text x="60" y="144" font-family="Inter, sans-serif" font-size="14" fill="#444">Stats: pending 3 • dispatched 1 • completed 47 • failed 2</text>
-  <text x="60" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Task list</text>
-  <text x="60" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">b7e2 • arm2 • done • 14:22 • 3.4s</text>
-  <text x="60" y="296" font-family="Inter, sans-serif" font-size="13" fill="#111">a8f3 • arm2 • done • 14:21 • 4.2s</text>
-  <text x="60" y="334" font-family="Inter, sans-serif" font-size="13" fill="#111">8d33 • — • pending • 14:19 • —</text>
-  <text x="360" y="220" font-family="Inter, sans-serif" font-size="14" fill="#444">Selected task detail</text>
-  <text x="360" y="258" font-family="Inter, sans-serif" font-size="13" fill="#111">Timeline • payload • output • logs</text>
+  <rect x="40" y="188" width="380" height="330" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <rect x="440" y="188" width="420" height="330" rx="8" fill="#ffffff" stroke="#c9c9c9" />
+  <text x="60" y="216" font-family="Inter, sans-serif" font-size="14" fill="#444">Thread list</text>
+  <text x="60" y="248" font-family="Inter, sans-serif" font-size="13" fill="#111">▾ b7e2 &#183; refactor auth &#183; 3 tasks &#183; done</text>
+  <text x="82" y="274" font-family="Inter, sans-serif" font-size="12" fill="#555">b7e2 &#183; arm2 &#183; done &#183; 14:22 &#183; 3.4s</text>
+  <text x="82" y="296" font-family="Inter, sans-serif" font-size="12" fill="#555">c910 &#183; arm2 &#183; done &#183; 14:31 &#183; 2.1s</text>
+  <text x="82" y="318" font-family="Inter, sans-serif" font-size="12" fill="#555">d4a1 &#183; arm2 &#183; failed &#183; 14:44 &#183; 9.7s</text>
+  <text x="60" y="350" font-family="Inter, sans-serif" font-size="13" fill="#111">&#9656; 8d33 &#183; run migration &#183; pending</text>
+  <text x="60" y="382" font-family="Inter, sans-serif" font-size="13" fill="#111">a8f3 &#183; arm2 &#183; done &#183; 14:21 &#183; 4.2s</text>
+  <text x="60" y="414" font-family="Inter, sans-serif" font-size="13" fill="#999">▾ (최초 태스크 삭제됨) &#183; 2f7c &#183; 2 tasks</text>
+  <text x="82" y="440" font-family="Inter, sans-serif" font-size="12" fill="#555">e112 &#183; arm1 &#183; done &#183; 11:03 &#183; 1.9s</text>
+  <text x="460" y="216" font-family="Inter, sans-serif" font-size="14" fill="#444">Selected task detail</text>
+  <text x="460" y="248" font-family="Inter, sans-serif" font-size="13" fill="#111">Timeline • payload • output • logs</text>
+  <rect x="700" y="470" width="140" height="30" rx="6" fill="#ffffff" stroke="#c48a8a" />
+  <text x="722" y="490" font-family="Inter, sans-serif" font-size="12" fill="#a33">Delete (admin)</text>
 </svg>
+
+들여쓰기 한 단계만 쓴다. `thread_id`는 평평한 키라 손자 세대도 루트와 같은 값을 갖고, 깊이는 애초에
+표현되지 않는다. 깊이를 그리려면 `parent_task_id`를 재귀로 훑어야 하는데, 그 재귀를 피하려고
+`thread_id`를 도입했다(`013_task_threads.sql`).
 
 #### 인터랙션
 
-| 요소              | 동작                                                |
-| ----------------- | --------------------------------------------------- |
-| 행 클릭           | 인라인 확장(위쪽 타임라인+payload+output)           |
-| 필터 드롭다운     | URL 쿼리스트링로 동기화 (`?status=failed&worker=arm2`) |
-| ⚠ 아이콘          | 실패한 태스크 재시도 다이얼로그 (operator+)         |
-| "Export CSV"      | 현재 필터 기준                                      |
+| 요소 | 동작 |
+|---|---|
+| 그룹 헤더 클릭 | 하위 목록 펼침/접기. 구성원 1건이면 헤더가 없으므로 해당 없음 |
+| 행 클릭 | 인라인 확장(타임라인+payload+output) |
+| 필터 드롭다운 | URL 쿼리스트링으로 동기화 (`?status=failed&worker=arm2`) |
+| ⚠ 아이콘 | 실패한 태스크 재시도 다이얼로그 (operator+) |
+| 🗑 삭제 | terminal Task만, **admin 전용**. 확인 다이얼로그 필수 |
+| "Export CSV" | 현재 필터 기준 |
+
+필터가 스레드의 **일부** 구성원에만 걸리면 그 스레드는 목록에 남고, 걸린 구성원만 하위 목록에
+보이며 헤더에 `n / m 표시 중`을 적는다. 스레드를 통째로 감추면 `?status=failed`가 실패한 이어가기를
+품은 스레드를 통째로 지워 실패 디버깅이라는 이 페이지의 목적을 정면으로 깬다.
+
+#### 삭제 UI 계약
+
+- 삭제 버튼은 terminal Task 행에만, `task:delete`를 가진 principal에게만 그린다. 권한이 없으면 버튼
+  자체를 렌더하지 않는다(기존 `hideNewTaskIfNoPermission` 관례).
+- 확인 다이얼로그는 **함께 사라지는 것을 명시한다**: 출력과 telemetry는 삭제되고, 이벤트 로그는
+  분리된 채 남으며, 자식 태스크는 살아남되 부모 연결이 끊긴다. 멱등성 키가 해제되어 재사용
+  가능해진다는 것도 적는다.
+- 거부 응답은 이유를 구분해 보여 준다: 비terminal(먼저 취소하세요) / `Pending` 의존자 존재(의존
+  태스크 id 나열) / 권한 없음.
+- 스레드 통째 삭제는 **이번 범위에서 제외한다.** 삭제마다 의존자 선검사가 개별적으로 실패할 수
+  있어 부분 실패 의미론을 먼저 정해야 하고, 그 계약이 없는 일괄 버튼은 "몇 건은 지워지고 몇 건은
+  남은" 상태를 사용자에게 설명하지 못한다.
+
+계약의 정본은 [Task Management 설계](../architecture/tasks/management.md)의 삭제 계약 절이다.
 
 ---
 

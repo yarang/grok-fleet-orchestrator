@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/dashboard-api.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-26"
 last_verified_commit: "working-tree"
 owners: ["fleet-dashboard"]
 ---
@@ -42,6 +42,35 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/ssh-keys`, `/api/ssh-keys/{name}` | GET, POST, DELETE | `HostProvision` | 프로비저닝용 SSH 비밀키 관리 |
 | `/api/hosts/provision` | POST | `HostProvision` | 원격 host provisioning 요청 |
 | `/api/users/resend-verification` | POST | public; 현재 rate limit 없음 | 인증 전 이메일 재전송 |
+
+## 계획된 표면 — Task 삭제와 스레드 목록 (`#96`)
+
+아래는 아직 **구현되지 않았다**. 위 표는 실제 route만 담으므로 여기에 분리해 둔다.
+
+| route | method | 필요 permission | 목적 |
+|---|---|---|---|
+| `/api/tasks/{id}` | DELETE | `TaskDelete` | terminal Task 삭제 |
+| `/api/task-threads` | GET | `TaskList` | 스레드 단위 페이지 — 구성원 포함 |
+
+`DELETE /api/tasks/{id}`의 응답 코드는 다음과 같이 구분한다. 셋을 뭉뚱그리면 UI가 "먼저 취소하세요"와
+"의존 태스크를 먼저 정리하세요"를 같은 문구로 보여 주게 되고, 사용자는 어느 쪽도 해결할 수 없다.
+
+| 상황 | 코드 | envelope `code` |
+|---|---|---|
+| 삭제됨 | 204 | — |
+| 행이 없음 | 404 | `not_found` |
+| terminal이 아님 | 409 | `conflict` |
+| `Pending` 의존자가 있음 | 409 | `conflict` (메시지에 의존자 id 나열) |
+| permission 없음 | 403 | `forbidden` |
+
+terminal 여부와 부재는 `DELETE ... AND status_phase = ANY($2)`의 0행으로 함께 나타나므로, 404와 409를
+가르려면 0행일 때만 행 존재를 한 번 더 조회한다. `compare_and_set_task_status`가 거절과 부재를
+구분하려고 쓰는 것과 같은 형태이며, 그 조회는 판정이 아니라 **보고**를 위한 것이다.
+
+`GET /api/task-threads`는 기존 `/api/tasks/{id}/thread`(단일 스레드 조회, 구현됨)와 다르다. 후자는 id
+하나를 스레드로 확장하고, 전자는 스레드들을 페이지 단위로 고른다. 계약과 그룹핑 규칙은
+[UI 설계](../ui-dashboard/ui-design.md)의 태스크 큐 절, 삭제 계약은
+[Task Management](../architecture/tasks/management.md)가 정본이다.
 
 ## 오류와 mutation 경계
 

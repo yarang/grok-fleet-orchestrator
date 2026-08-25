@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/tasks/execution-consistency.md"
-last_verified: "2026-08-16"
+last_verified: "2026-08-26"
 ---
 
 # 태스크 실행 일관성, 재시도 및 멱등성
@@ -168,6 +168,11 @@ MCP와 HTTP task submit은 `idempotency_key`와 payload hash를 받는다. 동�
 동일 key, 동일 hash의 재요청은 기존 Task를 반환한다. 같은 key에 다른 payload가 오면
 409 Conflict로 거부한다.
 
+Task를 삭제하면 그 key는 **해제되어 재사용 가능해진다**. 이 보장의 내용은 "중복 제출은 *기존 Task를
+반환한다*"이므로, 반환할 Task가 없어진 뒤에 tombstone을 남겨 두면 클라이언트에게 조회하면 404가 되는
+id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 깨뜨리는 것이다. 삭제 계약은
+[`management.md`](management.md)가 정본이다.
+
 ## 취소·timeout·redrive
 
 - cancel과 timeout은 process 중단 요청일 뿐 effect rollback 요청이 아니다.
@@ -191,3 +196,4 @@ MCP와 HTTP task submit은 `idempotency_key`와 payload hash를 받는다. 동�
   해소되며, 미해소 상태로 Project archive가 진행되지 않는 테스트
 - provider 조회 불가 `Started` effect가 `PartiallyApplied`로 끝나며 성공·자동 retry하지 않는 테스트
 - cancel/timeout이 effect ledger를 우회해 `Cancelled`로만 확정되지 않는 테스트
+- Task 삭제 후 같은 idempotency key의 재제출이 새 Task를 만드는 테스트
