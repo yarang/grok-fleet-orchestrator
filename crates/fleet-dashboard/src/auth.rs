@@ -97,6 +97,13 @@ impl AuthPrincipal {
 /// 4. 사용자 + 권한 로드
 /// 5. 활성화 여부 확인
 /// 6. AuthPrincipal Extension 주입
+#[allow(
+    clippy::result_large_err,
+    reason = "axum 핸들러·미들웨어의 반환 타입은 `IntoResponse` 바운드에 묶여 있고, \
+axum-core에는 `impl IntoResponse for Box<T>` 제네릭 구현이 없어 Err를 Box로 감쌀 수 없다. \
+게다가 이 Result는 요청당 최대 한 번 구성되어 곧바로 IntoResponse로 소비되므로, 이 lint가 \
+겨냥하는 비용(큰 Err를 여러 스택 프레임에 걸쳐 이동시키는 것) 자체가 발생하지 않는다."
+)]
 pub async fn require_session(
     State(state): State<Arc<DashboardState>>,
     cookies: CookieJar,

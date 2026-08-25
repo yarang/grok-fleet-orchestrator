@@ -1969,6 +1969,13 @@ pub async fn login_page(
 /// 성공: 쿠키 설정 + `/` 리다이렉트.
 /// 실패: 401 + login.html 재렌더 (에러 메시지 포함).
 #[tracing::instrument(skip(state, jar, headers, form), fields(email = %form.email))]
+#[allow(
+    clippy::result_large_err,
+    reason = "axum 핸들러·미들웨어의 반환 타입은 `IntoResponse` 바운드에 묶여 있고, \
+axum-core에는 `impl IntoResponse for Box<T>` 제네릭 구현이 없어 Err를 Box로 감쌀 수 없다. \
+게다가 이 Result는 요청당 최대 한 번 구성되어 곧바로 IntoResponse로 소비되므로, 이 lint가 \
+겨냥하는 비용(큰 Err를 여러 스택 프레임에 걸쳐 이동시키는 것) 자체가 발생하지 않는다."
+)]
 pub async fn login(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -2137,6 +2144,13 @@ pub async fn login(
 ///
 /// CSRF 보호: JS에서 `X-CSRF-Token` 헤더로 CSRF 토큰을 전송해야 함.
 /// (세션 쿠키는 SameSite::Lax이지만 defense-in-depth로 이중 검증.)
+#[allow(
+    clippy::result_large_err,
+    reason = "axum 핸들러·미들웨어의 반환 타입은 `IntoResponse` 바운드에 묶여 있고, \
+axum-core에는 `impl IntoResponse for Box<T>` 제네릭 구현이 없어 Err를 Box로 감쌀 수 없다. \
+게다가 이 Result는 요청당 최대 한 번 구성되어 곧바로 IntoResponse로 소비되므로, 이 lint가 \
+겨냥하는 비용(큰 Err를 여러 스택 프레임에 걸쳐 이동시키는 것) 자체가 발생하지 않는다."
+)]
 pub async fn logout(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -3013,6 +3027,13 @@ pub async fn bootstrap_page(
 
 /// POST /bootstrap — OTP 검증 + 첫 관리자 생성 + 자동 로그인.
 #[tracing::instrument(skip(state, jar, headers, form), fields(email = %form.email))]
+#[allow(
+    clippy::result_large_err,
+    reason = "axum 핸들러·미들웨어의 반환 타입은 `IntoResponse` 바운드에 묶여 있고, \
+axum-core에는 `impl IntoResponse for Box<T>` 제네릭 구현이 없어 Err를 Box로 감쌀 수 없다. \
+게다가 이 Result는 요청당 최대 한 번 구성되어 곧바로 IntoResponse로 소비되므로, 이 lint가 \
+겨냥하는 비용(큰 Err를 여러 스택 프레임에 걸쳐 이동시키는 것) 자체가 발생하지 않는다."
+)]
 pub async fn bootstrap(
     State(state): State<Arc<DashboardState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
