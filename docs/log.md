@@ -1589,3 +1589,41 @@ last_verified: "2026-08-26"
   `ui-dashboard/ui-design.md` §3.3(태스크 큐를 스레드 그룹 구조로 재설계),
   `contracts/dashboard-api.md`(계획된 표면 절 신설 — "현재 route 표면" 표에는 넣지 않았다. 미구현
   route를 그 표에 적으면 표 제목이 거짓이 된다), `roadmap/roadmap.md`(`#96` 등록).
+
+## 2026-08-26 — lint — `#96` 설계의 근거 두 곳을 실측과 대조해 정정
+
+이전 항목("`#96` Task 삭제와 스레드 그룹 목록 설계 확정")의 두 주장을 코드·스키마 재실측으로
+점검한 결과 둘 다 과장이었다. 커밋 없이 문서만 고친다.
+
+- **`events` 보존 주장이 근거보다 강했다.** `001_init.sql`을 다시 읽으니 `events.task_id`는
+  `ON DELETE SET NULL`만 있고 `task_label` 같은 라벨 컬럼이 없다 — `issue_task_links.task_label`,
+  `audit_log.actor_label` 관례는 011·023에서 생겼고 001에는 소급되지 않았다. 그래서 삭제된 Task의
+  `events` 행은 "보존되어 분리"가 아니라 **익명으로 남는다**: 사건의 존재는 남지만 어느 Task의
+  사건이었는지는 잃는다. `management.md`의 캐스케이드 표·설명과 `#96` 감사 논거("`events`를 빼면
+  감사가 유일한 기록")를 이 사실에 맞춰 고쳤다 — 오히려 주장은 더 강해진다: `events`를 뺀 나머지가
+  아니라, **예외 없이** `task.delete` 감사 이벤트가 유일한 식별 가능 기록이다. 라벨 컬럼 추가는
+  범위 밖으로 남긴다(append-only 로그의 과거 행을 채울 방법이 없고, 새 라벨은 쓰기 경로 변경을
+  요구하는 별도 결정이다 — 채울 방법이 없는 컬럼을 미리 만들지 않는다는 원칙과 같다).
+
+- **부분 GIN 인덱스가 계획한 질의에서 실제로 쓰이는지 확인하지 않았다.** `idx_tasks_parent_task_id
+  WHERE parent_task_id IS NOT NULL`을 전례로 들었지만, 그 인덱스가 쓰이는 이유는 `parent_task_id =
+  $1`이 `IS NOT NULL`을 **동등 비교로** 함의한다는 걸 planner가 증명할 수 있어서다. 배열 포함
+  (`dependency_ids @> ARRAY[$1]`)은 이 추론 규칙에 없다 — `dependency_ids <> '{}'` 조건을 질의에
+  같이 쓰지 않으면 planner가 인덱스 조건을 증명하지 못해 시퀀셜 스캔으로 떨어지고, 인덱스를 추가한
+  목적 자체가 무효화된다. `management.md`에 의존자 조회 질의를 `WHERE status_phase = 'pending' AND
+  dependency_ids <> '{}' AND dependency_ids @> ARRAY[$1]::uuid[]` 형태로 명시해, 구현자가 두 번째
+  조건만 쓰고 인덱스를 조용히 잃는 경로를 막았다.
+
+- **부기 정정**: `management.md`의 `verification` 필드가 `design-reviewed`였는데, 근거가 전부
+  코드·스키마 실측(FK 절, CAS 0행 경로, 인덱스 존재 여부, `audit.rs`)이라 `dashboard-api.md`와 같은
+  등급인 `code-checked`로 고쳤다. `roadmap.md` `#96`의 상태 토큰 "설계 완료"는
+  [Roadmap 도메인](./roadmap/README.md)이 정의한 값 집합에 없어 "설계 확정·구현 대기"로 바꿨고,
+  `roadmap.md` 자체의 `last_verified`가 `#96` 등록 이전 날짜(2026-08-18)로 남아 있던 것도 갱신했다.
+  `dashboard-api.md`의 `last_verified_commit`은 `working-tree`였는데 이미 `0b641c7`로 커밋된
+  내용이므로 실제 커밋 해시로 채웠다.
+
+- **검증 한계**: 이번에도 코드 변경은 없다. 두 정정 모두 마이그레이션·쿼리를 실행해 planner의 실제
+  계획(`EXPLAIN`)을 확인한 것이 아니라 Postgres 문서화된 추론 규칙에 근거한 서면 판단이다. 구현
+  단계에서 `EXPLAIN (ANALYZE)`로 인덱스가 실제로 쓰이는지 확인하는 항목을 완료 게이트에 아직
+  추가하지 않았다 — `management.md` 게이트 목록은 결과(거부/허용) 테스트만 요구하고 실행 계획
+  검증은 요구하지 않는다.

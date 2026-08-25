@@ -5,7 +5,7 @@ implementation: partial
 verification: code-checked
 source: "docs/contracts/dashboard-api.md"
 last_verified: "2026-08-26"
-last_verified_commit: "working-tree"
+last_verified_commit: "0b641c7"
 owners: ["fleet-dashboard"]
 ---
 
