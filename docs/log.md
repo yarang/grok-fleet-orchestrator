@@ -934,7 +934,7 @@ last_verified: "2026-08-15"
 - **healthcheck**: `postgres`/`orchestrator`엔 있었는데 `litellm`엔 없었다. 이미지의 실제 Dockerfile을 조회해 최종 런타임이 Chainguard `wolfi-base` 기반이고 `curl`/`wget`이 설치돼 있지 않음을 먼저 확인했다 — 관례적인 `curl` 기반 healthcheck를 그대로 썼다면 이미지에 없는 바이너리를 호출해 항상 unhealthy로 빠졌을 것이다. 대신 이미지에 이미 있는 `python3`(stdlib `urllib`)로 liteLLM 공식 문서로 확인한 `/health/readiness`(인증 불필요, DB 연결까지 확인)를 호출한다. `orchestrator`의 `depends_on.litellm.condition`도 `service_started`(컨테이너 기동만 확인)에서 `service_healthy`(healthcheck 통과까지 대기)로 바꿔, 오케스트레이터의 첫 dispatch가 gateway 준비 전 connection-refused로 실패할 여지를 없앴다.
 - **비공개 기본 bind**: `"4000:4000"`(모든 호스트 인터페이스에 publish)을 `"127.0.0.1:4000:4000"`으로 바꿨다 — liteLLM master key가 유출되면 등록된 모든 LLM 공급자 API 키를 대신 소비당할 수 있어, 위험도가 orchestrator API 노출보다 크다고 판단했다.
 - **검증 한계를 명시적으로 기록한다**: 이 작업 환경에는 docker/docker compose가 설치돼 있지 않아, 실제 컨테이너를 기동해 healthcheck 통과·포트 bind·`depends_on` 순서를 동적으로 재현하는 검증은 하지 못했다. 대신 `python3 -c "import yaml; yaml.safe_load(...)"`로 두 YAML 파일의 문법 오류가 없음을 정적으로 확인했고, image 태그(GitHub releases + GHCR 태그 목록)·health 엔드포인트 경로와 인증 요구사항(공식 문서)·base 이미지의 바이너리 구성(실제 Dockerfile)은 각각 업스트림을 직접 조회해 교차 확인했다 — 이 저장소 코드를 실제로 실행해 확인한 `#82`~`#85`(실제 SSH 서버·TLS handshake)와는 확증 등급이 다르다는 점을 그대로 남겨 둔다. docker가 있는 환경에서 `docker compose up -d litellm` → `docker compose ps`로 healthy 전이와 `orchestrator`의 대기를 실제로 재검증하는 걸 권장한다.
-- 문서: [litellm-gateway.md](docs/deployment/litellm-gateway.md)의 "저장소에서 검증된 자산" 표와 "시작 전"/"기동과 검증" 절을 갱신해 네 항목이 기본값으로 이미 반영돼 있음을 명시했다.
+- 문서: [litellm-gateway.md](deployment/litellm-gateway.md)의 "저장소에서 검증된 자산" 표와 "시작 전"/"기동과 검증" 절을 갱신해 네 항목이 기본값으로 이미 반영돼 있음을 명시했다.
 
 ## 2026-08-23 — `#70`(부분) 실패 원인별 metric 분해와 `FailureKind` 죽은 코드 제거
 
@@ -1363,3 +1363,49 @@ last_verified: "2026-08-15"
     게이트로 표시했을 뿐이다. 게이트가 실제로 지켜지는지는 이 항목이 보장하지 못한다.
   - 호스트 `.bak` 파일들에 회수 기한이 없다. 시크릿을 담은 사본이 무기한 남는 문제는
     `credentials/registry.md`에 미조치로 등재했고 이번에 해소하지 않았다.
+
+## 2026-08-25 — lint — `main`의 CI 8연속 실패: 증상은 clippy lint 3계열, 원인은 게이트 정합성 결함 2건
+
+- 유형: `lint` + `verification`
+- **무엇을 했나**: `main`의 CI가 8회 연속 실패하는 동안 `agent.md` §4의 로컬 게이트 3개는 계속 `exit 0`을 반환했다. 게이트 명령은 CI와 같았고, **게이트가 도는 환경**이 달랐다. 증상(clippy lint)이 아니라 그 비대칭을 먼저 고쳤다.
+- **근본 원인 2건**:
+
+  | 결함 | 상태 | CI 실제 | 결과 |
+  |---|---|---|---|
+  | 툴체인 부동 | `rust-toolchain.toml`이 `channel = "stable"`, CI도 `dtolnay/rust-toolchain@stable` | 실행 시점 해석 → 1.98.0 | 로컬 1.97.1 / CI 1.98.0. 1.98.0이 도입한 lint는 **CI에서만** 나타나고 로컬에서 재현 불가 |
+  | RUSTFLAGS 비대칭 | `agent.md` 게이트가 걸지 않음 | `ci.yml:14`의 workflow-level `env`가 **전 잡**에 `-D warnings` | `-- -D warnings`와 겹치지 않는다 — 후자는 clippy lint에만, 전자는 rustc 경고 전체에 걸리고 `test`·`coverage` 잡에도 적용된다 |
+
+  양쪽을 `1.98.0`에 고정했다. `rust-toolchain.toml`만으로는 부족하다 — dtolnay 액션은 브랜치명을 기본 toolchain으로 쓰고 이 파일을 읽지 않으므로 `ci.yml` 3곳과 `release.yml` 1곳에 `toolchain` 입력을 명시했다. 액션 정의를 직접 확인해 근거를 세웠다 — `stable` ref의 `action.yml`에는 `toolchain` 입력이 `required: false, default: stable`로 선언돼 있고, 브랜치명은 그 **기본값으로만** 들어간다. 즉 입력을 명시하면 브랜치 태그를 그대로 두어도 해석 결과가 고정된다. §4.3에는 `rustc --version`과 `export RUSTFLAGS="-D warnings"`를 게이트의 일부로 명시했다.
+
+  이 파일에 2026-08-25 자로 같은 결함이 두 번 기록된다. 앞의 것은 목록에서 `cargo fmt`가 빠져서(목록이 **짧아서**), 이번 것은 명령이 같아도 **실행 환경이 달라서**다. 드러난 자리만 다를 뿐 같은 결함이다.
+- **벤더 경계**: clippy는 member(primary) 패키지만 채점한다. 벤더링한 공식 ACP Rust SDK가 워크스페이스 멤버라서, 우리가 유지보수하지 않는 코드의 lint(`unused_async_trait_impl`, `agent-client-protocol-test/src/lib.rs:14`)가 게이트를 즉사시켰다. 명령줄 `--exclude`는 이걸 풀지 못한다 — 멤버 **선택 단계 필터**일 뿐 멤버십을 바꾸지 않아 clippy가 여전히 primary로 채점한다(합성 워크스페이스 실측: `--exclude` exit 101, `[workspace] exclude` exit 0). 매니페스트 쪽 수정이라 §4의 게이트 명령 3개가 바이트 단위로 유지되는 이점도 있다.
+  - 멤버 **15 → 11**(정확히 `crates/` 11개). `agent-client-protocol`·`-derive`·`-http`·`-schema`는 `Cargo.lock`에 남아 의존성으로 계속 컴파일된다. 빠지는 것은 아무도 의존하지 않는 doctest 헬퍼 `-test`뿐이다.
+  - **부수효과를 미리 기록한다**: `cargo test --workspace`(`ci.yml:66,103`)와 `cargo llvm-cov --workspace`(`ci.yml:177`)가 더 이상 이 SDK의 테스트를 포함하지 않으므로 **커버리지 수치가 한 번 내려간다.** 나중에 원인 불명의 변동으로 보이지 않게 남긴다.
+  - 부수 발견: `Cargo.lock`이 413줄 줄었고, 그 과정에서 워크스페이스가 **axum을 두 버전(우리 0.7.9, 벤더 0.8.9) 동시에** 잠그고 있었다는 사실이 드러났다. 0.8.9 계열(`axum-core` 0.5.6, `axum-macros`, `tower-http`, `tokio-tungstenite`, `windows-*`)이 함께 빠졌다. 우리 크레이트는 전부 0.7.9를 쓴다.
+- **lint 3계열은 그 다음에 고쳤다**:
+  - `chunks_exact_to_as_chunks` — **사이트가 2곳이었다.** `fleet-api/src/handlers.rs:1167`과 `fleet-cli/src/token.rs:289`. clippy는 첫 실패 크레이트에서 abort하므로 red gate는 `fleet-api`만 보여준다. 워크스페이스를 직접 grep하지 않았으면 하나를 남긴 채 "고쳤다"고 판단했을 것이다.
+  - `result_large_err` ×4 (`fleet-dashboard/src/auth.rs:101`, `handlers.rs:1973/2148/3031`, Err 크기 128/224/232/232B) — 함수별 `#[allow(..., reason = ...)]`.
+    - **이 저장소의 기존 대응은 억제가 아니라 수정이었다**: `fleet-provisioner/src/error.rs:63`은 같은 lint를 `source: Box<StepError>`로 해소하고 그 이유를 doc comment에 적어 둔다. 그래서 여기서 `#[allow]`을 고르려면 **그 선례가 왜 적용되지 않는지**를 먼저 보여야 한다: provisioner의 Err는 평범한 `enum`이라 Box로 감싸도 되지만, axum 핸들러의 반환 타입은 `IntoResponse` 바운드에 묶여 있고 axum-core 0.4.5에는 `impl IntoResponse for Box<T>` 제네릭 구현이 없다(`Box<str>`·`Box<[u8]>`만 있다). 게다가 이 `Result`는 요청당 최대 한 번 구성되어 곧바로 `IntoResponse`로 소비되므로, lint가 겨냥하는 비용(큰 Err를 여러 스택 프레임에 걸쳐 이동시키는 것) 자체가 발생하지 않는다. Err 구성 지점도 18곳이다. `clippy.toml`의 임계값 조정은 **우리 코드 채점을 약화**시키므로 택하지 않았다 — 남의 코드를 대상에서 빼는 벤더 경계와는 성격이 다르다. 관례 변경이다: 직전까지 `crates/` 아래 bare `#[allow]`이 45개, lint 어트리뷰트의 `reason =`은 0개였다.
+  - `unused_async_trait_impl` — 벤더 경계로 해소.
+- **판정 중 정정한 것 2건**(도메인 에이전트 판정을 액면 그대로 받지 않은 결과):
+  - 고쳐야 할 사이트 총계가 6이 아니라 **7**이었다 — `chunks_exact`가 1곳이 아니라 2곳(위 `fleet-cli`)이어서, 2+4+1이다. 판정 자신이 "red gate는 첫 실패 계열만 보여준다"고 적어 놓고 그 함정에 걸렸다. 계열이 3종으로 닫힌다는 증명은 `-A` 억제 후 `EXIT=0` 방식이라 그대로 유효하다.
+  - "`as_chunks`는 MSRV 여유가 0이므로 신중해야 한다"는 경고는 사실이지만, **이 변경이 그 상태를 만드는 것이 아니다.** `fleet-worker/src/join.rs:271`이 이미 `as_chunks::<3>()`를 쓰고 있어 MSRV는 이전부터 이 기능에 묶여 있었다. 즉 같은 함수 세 사본 사이의 드리프트를 되돌린 것이다.
+- **테스트 없는 프로덕션 경로 1건을 메웠다**: `fleet-api`의 `base64url`은 관리자 부트스트랩 토큰(`app.rs:1056`의 `fat_` 토큰)을 만드는 경로에 있는데 단위 테스트가 0개였다(같은 함수의 다른 두 사본에는 RFC 4648 벡터 테스트가 있었다). 무테스트 상태로 인코딩 함수를 고치지 않기 위해 **테스트를 먼저 넣고 통과를 확인한 뒤** 재작성하고 다시 확인했다. 순서를 뒤집었다면 테스트는 "새 구현이 스스로에 대해 일관적"임만 증명했을 것이다. 추가한 것: RFC 4648 §10 벡터 7개(나머지 길이 0/1/2 전 경로), URL-safe 알파벳(`-_` 사용·`+/` 미사용), `0..=48`바이트 길이 `= ceil(4n/3)`과 32바이트 → 43자.
+- **같은 함수가 세 벌 존재한다는 사실 자체는 후속 작업으로 분리했다**(`fleet-api`/`fleet-cli`/`fleet-worker`). 이번 사건이 그 중복의 비용을 이미 청구했다 — 세 사본이 드리프트해서 lint를 두 번 고쳐야 했고, 테스트 보유도 갈렸다.
+- **`agent.md` §3의 `cargo test`를 돌리다가 flake 하나의 기전을 다시 규명했다**(커밋 `d93c7e0`): `fleet-worker`의 `registration::tests::disk_cache_get_or_schedule_refresh_populates_background`. 이 파일의 "2026-08-25 — `main`의 CI fmt 게이트 복구, 그리고 게이트 목록을 CI와 일치시킴" 항목이 "환경적 타이밍 예산" 문제로 분류해 둔 그 테스트인데, **분류는 맞았고 기전은 틀렸다.**
+  - 격리·단일 스레드에서 5회 중 2회 실패했다. 간헐적 경합이라면 이 재현율이 나오지 않는다.
+  - 계측 결과: 이 테스트가 프로세스 안에서 유발하는 `Disks::new_with_refreshed_list()`의 **첫** 호출이 12.9초, 2회차 이후는 30ms였다. 테스트 예산은 100회 × 100ms = **정확히 10초**였다. 즉 경합이 아니라 **예산 < 비용**의 결정적 구조이고, 그래서 성공한 실행도 전부 10.27초가 걸렸다(값이 예산 경계 직전에 도착).
+  - 프로덕션 코드의 doc comment(`collect_disk_free_mb`)가 이미 "수 초가 소요될 수 있음(macOS autofs 마운트 타임아웃)"이라고 예고하고 있었다. 테스트가 **자기 모듈이 문서화한 기대치보다 좁은 예산**을 쓰고 있었던 것이다.
+  - 예산을 30초로 올리고 근거를 테스트 주석에 적었다. 값이 도착하면 즉시 break하므로 빠른 환경에서 이 상수는 비용이 아니다. 같은 조건 5/5 통과.
+  - 이 규명은 별도 크레이트에서 같은 호출을 재보다가 **한 번 기각됐다** — 스탠드얼론 프로브에서는 메인 스레드·`spawn_blocking`·`std::thread` 전부 30~76ms였다. "느린 건 blocking 풀 스레드 때문"이라는 가설이 여기서 죽었고, 계측을 테스트 바이너리 **안으로** 옮기고 나서야 "첫 호출만 느리다"가 드러났다. 바깥에서 잰 수치로 안을 추론하지 않는다.
+- 검증(전부 CI와 같은 형태 — `rustc 1.98.0 (88d9e12ae 2026-08-18)` + `RUSTFLAGS="-D warnings"` — 로 실행하고 exit 코드를 변수로 직접 받았다):
+  `cargo fmt --all -- --check` **exit 0** · `cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings` **exit 0** · `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` **exit 0**, 세 출력 모두 `^error|^warning` 0줄.
+  **캐시가 더운 exit 0은 증적으로 쓰지 않았다.** 첫 실행에서 clippy 두 게이트가 0.89초·0.30초에 끝난 것이 눈에 걸렸다 — cargo가 fingerprint를 fresh로 판정해 진단을 **다시 내보내지 않은** 상태였다. exit 0 자체는 건전하지만(cargo는 같은 플래그로 성공한 유닛만 fresh로 표시한다) "lint를 돌렸다"는 주장은 성립하지 않는다. `crates/` 아래 `.rs` 143개의 mtime을 무효화하고 다시 돌려, 두 게이트 모두 멤버 11개에 `Checking`이 찍히는 것을 확인한 뒤의 결과가 위 숫자다.
+  `cargo test --workspace --features "acp mtls" -- --test-threads=1` **exit 0** — 테스트 바이너리 55개 + doc-test 10회, `test result` 65줄 전부 `ok`, **982 passed / 0 failed / 4 ignored**. 위 flake 수정 후의 수치다(수정 전에는 `fleet-worker --lib`가 71 passed / 1 failed, 이후 72 passed). `0 passed`로 지나간 바이너리는 `e2e_with_real_grok.rs` 하나뿐이고 2건 모두 `#[ignore]`(실제 Grok API 필요)로, **피처가 빠져 조용히 건너뛴 것이 아니다** — 이 파일의 앞선 항목이 경고한 함정이라 명시적으로 확인했다. `fleet-store`의 DB-gated 스위트도 `issues.rs` 14건 · `projects.rs` 8건으로 실제 채점됐다(워크스페이스 피처 통합으로 `test-support`가 켜진다).
+  `cargo metadata --no-deps`로 멤버가 정확히 `crates/` 11개(`fleet-api`, `fleet-cli`, `fleet-core`, `fleet-credentials`, `fleet-dashboard`, `fleet-mcp`, `fleet-provisioner`, `fleet-scheduler`, `fleet-store`, `fleet-transport`, `fleet-worker`)임을 확인했다. 툴체인 고정이 실제로 먹었는지도 확인했다 — 인자 없는 `rustc --version`이 1.97.1 → 1.98.0으로 바뀌었다.
+- **검증 한계**:
+  - **`${PIPESTATUS[0]}`로 exit 코드를 찍던 첫 시도는 빈 값을 남겼다.** 이 셸은 zsh이고 `PIPESTATUS`는 bash-ism이다(zsh는 소문자 `$pipestatus`). 그래서 게이트 로그가 **초록으로 보이면서 exit 코드는 기록하지 않은** 상태였다 — 이 항목의 주제(게이트가 자기 자신에 대해 거짓 신호를 낸다)와 정확히 같은 종류의 사고다. 파이프 없이 `$?`를 변수로 받아 다시 돌렸다. 다음 에이전트는 게이트 스크립트에 `PIPESTATUS`를 쓰지 않는다.
+  - **게이트를 감싸는 셸 배관에서 같은 종류의 거짓 신호가 두 번 더 나왔다.** (1) `until ! pgrep -f "cargo test --workspace"`로 만든 대기 루프가 **자기 자신의 명령줄**과 매치돼 영원히 끝나지 않았다 — `pgrep -f`에 넘기는 패턴이 그 패턴을 담은 스크립트와 겹치면 안 된다. `pgrep -x cargo`처럼 실행 파일 이름으로 좁힌다. (2) `cargo test … 2>&1 | grep "^PROBE"`가 컴파일 에러를 통째로 삼켜, 출력 0줄이 "아직 실행 중"으로 오독됐다. 게이트 출력은 파일로 받고 **그 다음에** 필터한다. 위 `PIPESTATUS` 건과 함께, 이 항목의 주제는 게이트 명령 자체만이 아니라 **게이트를 관찰하는 배관**까지다.
+  - **DB 게이트(`DATABASE_URL` 주입)는 다시 돌리지 않았다.** 이번 변경에 SQL 쿼리나 DB 트레이트 수정이 없어 `agent.md` §3.2의 발동 조건에 해당하지 않는다. 해당 경로의 최신 증적은 이 파일의 "2026-08-25 — `#58` 후속: Project 경계 술어 추출, 그리고 `main`의 CI fmt 게이트 실패 발견"과 "2026-08-25 — `main`의 CI fmt 게이트 복구, 그리고 게이트 목록을 CI와 일치시킴" 두 항목이다.
+  - **벤더 SDK의 테스트는 이제 `cargo test --workspace`·`cargo llvm-cov --workspace`가 채점하지 않는다.** 우리가 그 코드를 유지보수하지 않으므로 의도된 것이지만, upstream을 당겨올 때 회귀를 우리 스위트가 잡아 주지 않는다는 뜻이기도 하다. 이 SDK를 유지보수하는 fork로 바꾸는 순간 경계를 `-test` 하나로 좁혀야 한다(그 신호를 `Cargo.toml` 주석에 적어 뒀다).
+  - **CI 러너에서 1.98.0이 실제로 설치되는 것은 아직 관측하지 못했다.** 액션이 `toolchain` 입력을 존중한다는 것은 `action.yml`에서 확인했지만(위), 실제 워크플로 실행 로그의 `rustc --version`은 다음 CI 실행에서만 보인다. 로컬에서 직접 확인한 것은 `rust-toolchain.toml` 쪽 효과뿐이다.
