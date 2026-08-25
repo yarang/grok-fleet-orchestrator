@@ -334,6 +334,13 @@ pub enum PermissionKind {
     TaskRead,
     #[serde(rename = "task:output")]
     TaskOutput,
+    /// terminal(Completed/Failed/Cancelled) Task 영구 삭제(`#96`). admin
+    /// 전용 — Operator/Viewer 기본 역할에는 부여하지 않는다. `Admin =>
+    /// PermissionKind::all()`이므로 이 카탈로그에 존재하는 것만으로 admin은
+    /// 자동으로 이 권한을 얻는다; Operator/Viewer 목록에 추가하지 않는 것이
+    /// 유일한 차단 지점이다.
+    #[serde(rename = "task:delete")]
+    TaskDelete,
     // 워커
     #[serde(rename = "worker:list")]
     WorkerList,
@@ -479,6 +486,7 @@ impl PermissionKind {
             Self::TaskCancel => "task:cancel",
             Self::TaskRead => "task:read",
             Self::TaskOutput => "task:output",
+            Self::TaskDelete => "task:delete",
             Self::WorkerList => "worker:list",
             Self::WorkerRegister => "worker:register",
             Self::WorkerDelete => "worker:delete",
@@ -526,6 +534,7 @@ impl PermissionKind {
             Self::TaskCancel,
             Self::TaskRead,
             Self::TaskOutput,
+            Self::TaskDelete,
             Self::WorkerList,
             Self::WorkerRegister,
             Self::WorkerDelete,

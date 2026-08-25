@@ -2822,3 +2822,412 @@ async fn empty_idempotency_key_does_not_deduplicate() {
         .unwrap();
     assert_eq!(tasks.len(), 2, "두 제출 모두 살아 있어야 한다: {tasks:?}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Task 삭제 + 스레드 목록 (로드맵 #96)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// terminal(Cancelled) Task는 204로 지워지고, 스토어에서 실제로 사라진다.
+#[tokio::test]
+async fn delete_task_removes_a_terminal_task() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let mut task = Task::from_request(fleet_core::TaskRequest {
+        prompt: "done already".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    task.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&task).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, task.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let remaining = store.get_task(task.id).await.unwrap();
+    assert!(
+        remaining.is_none(),
+        "deleted task must be gone from the store"
+    );
+}
+
+/// Pending(비종결) Task는 삭제가 거절된다 — 409, 스토어에는 그대로 남는다.
+#[tokio::test]
+async fn delete_task_rejects_a_non_terminal_task() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let task = Task::from_request(fleet_core::TaskRequest {
+        prompt: "still pending".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&task).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, task.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 409);
+
+    let still_there = store.get_task(task.id).await.unwrap();
+    assert!(
+        still_there.is_some(),
+        "a rejected delete must not remove the task"
+    );
+}
+
+/// 존재하지 않는 Task id는 404.
+#[tokio::test]
+async fn delete_task_unknown_id_returns_404() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, TaskId::new()),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+/// terminal이어도, 아직 Pending인 다른 Task가 이것을 dependency로 걸고
+/// 있으면 삭제가 막힌다 — 409, 본문에 의존하는 task id가 언급된다.
+#[tokio::test]
+async fn delete_task_blocked_by_pending_dependents() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let mut blocker = Task::from_request(fleet_core::TaskRequest {
+        prompt: "the one everyone depends on".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    blocker.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&blocker).await.unwrap();
+
+    let dependent = Task::from_request(fleet_core::TaskRequest {
+        prompt: "waiting on blocker".into(),
+        created_by: "test".into(),
+        dependency_ids: vec![blocker.id],
+        ..Default::default()
+    });
+    store.insert_task(&dependent).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, blocker.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains(&dependent.id.to_string()),
+        "409 body must name the blocking dependent: {body}"
+    );
+
+    let still_there = store.get_task(blocker.id).await.unwrap();
+    assert!(still_there.is_some());
+}
+
+/// `TaskDelete` 권한이 없으면 403 — terminal 여부와 무관하게 권한이 먼저 걸린다.
+#[tokio::test]
+async fn delete_task_requires_task_delete_permission() {
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::TaskList]).await;
+    let store = Arc::new(store) as Arc<dyn Store>;
+
+    let mut task = Task::from_request(fleet_core::TaskRequest {
+        prompt: "irrelevant".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    task.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&task).await.unwrap();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(store.clone(), pool, None));
+    let app = build_dashboard_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = reqwest::Client::new();
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{addr}/api/tasks/{}", task.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let still_there = store.get_task(task.id).await.unwrap();
+    assert!(still_there.is_some());
+}
+
+/// CSRF 헤더 없이는 삭제도 거절된다 — 다른 뮤테이션과 같은 게이트를 탄다.
+#[tokio::test]
+async fn delete_task_without_csrf_header_is_rejected() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let mut task = Task::from_request(fleet_core::TaskRequest {
+        prompt: "should survive".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    task.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&task).await.unwrap();
+
+    let resp = client
+        .delete(format!("http://{}/api/tasks/{}", server.addr, task.id))
+        .header(
+            "cookie",
+            format!("fleet_session={cookie}; fleet_csrf={TEST_CSRF}"),
+        )
+        // 의도적으로 x-csrf-token 헤더를 생략.
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let still_there = store.get_task(task.id).await.unwrap();
+    assert!(still_there.is_some());
+}
+
+/// `GET /api/task-threads`는 Task 단위가 아니라 스레드 단위로 묶어서 반환한다.
+/// 루트+답장 한 쌍이 한 스레드로 묶이고, 독립 Task는 자기 혼자만 있는
+/// 스레드로 별도 항목이 된다.
+#[tokio::test]
+async fn list_task_threads_groups_by_thread_id() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let root = Task::from_request(fleet_core::TaskRequest {
+        prompt: "root of a thread".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&root).await.unwrap();
+
+    let mut reply = Task::from_request(fleet_core::TaskRequest {
+        prompt: "a reply".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    reply.inherit_from_parent(&root);
+    store.insert_task(&reply).await.unwrap();
+
+    let solo = Task::from_request(fleet_core::TaskRequest {
+        prompt: "a standalone task".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&solo).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::GET,
+        &format!("http://{}/api/task-threads", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let threads = body["threads"].as_array().unwrap();
+    assert_eq!(
+        threads.len(),
+        2,
+        "root+reply와 solo, 두 스레드여야 한다: {threads:?}"
+    );
+
+    let thread_with_root = threads
+        .iter()
+        .find(|t| t["thread_id"] == root.id.to_string())
+        .expect("root의 스레드가 있어야 한다");
+    assert_eq!(thread_with_root["root"]["id"], root.id.to_string());
+    let members = thread_with_root["members"].as_array().unwrap();
+    assert_eq!(
+        members.len(),
+        2,
+        "root+reply 둘 다 멤버여야 한다: {members:?}"
+    );
+
+    let thread_with_solo = threads
+        .iter()
+        .find(|t| t["thread_id"] == solo.id.to_string())
+        .expect("solo의 스레드가 있어야 한다");
+    assert_eq!(thread_with_solo["members"].as_array().unwrap().len(), 1);
+}
+
+/// 루트 Task가 삭제된 스레드는 `root`가 `null`이 되지만, 남은 멤버(답장)는
+/// 여전히 그 스레드에 묶여서 조회된다 — `parent_task_id`의
+/// `ON DELETE SET NULL`과 달리 `thread_id`는 건드리지 않는다는 설계
+/// 그대로다(`ui-design.md` §3.3).
+#[tokio::test]
+async fn list_task_threads_survives_a_deleted_root() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let mut root = Task::from_request(fleet_core::TaskRequest {
+        prompt: "will be deleted".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    root.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&root).await.unwrap();
+
+    let mut reply = Task::from_request(fleet_core::TaskRequest {
+        prompt: "outlives its root".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    reply.inherit_from_parent(&root);
+    store.insert_task(&reply).await.unwrap();
+
+    let outcome = store.delete_task(root.id).await.unwrap();
+    assert_eq!(outcome, fleet_core::TaskDeleteOutcome::Deleted);
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::GET,
+        &format!("http://{}/api/task-threads", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let threads = body["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 1);
+    assert!(
+        threads[0]["root"].is_null(),
+        "deleted root must serialize as a null root: {:?}",
+        threads[0]
+    );
+    let members = threads[0]["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["id"], reply.id.to_string());
+}
+
+/// 삭제 계약 완료 게이트 6번째: 삭제 성공·거부 모두 `task.delete` 감사
+/// 이벤트를 남긴다 (docs/architecture/tasks/management.md "삭제 계약의
+/// 완료 게이트").
+#[tokio::test]
+async fn delete_task_records_a_task_delete_audit_event_on_success_and_rejection() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let mut deletable = Task::from_request(fleet_core::TaskRequest {
+        prompt: "will be deleted".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    deletable.status = fleet_core::TaskStatus::Cancelled {
+        reason: "test setup".into(),
+        cancelled_at: Utc::now(),
+    };
+    store.insert_task(&deletable).await.unwrap();
+
+    let pending = Task::from_request(fleet_core::TaskRequest {
+        prompt: "still pending".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&pending).await.unwrap();
+
+    let ok_resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, deletable.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(ok_resp.status(), 204);
+
+    let rejected_resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/tasks/{}", server.addr, pending.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(rejected_resp.status(), 409);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::TASK_DELETE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        2,
+        "성공 1건 + 거부 1건, task.delete 감사 이벤트가 정확히 둘이어야 한다: {events:?}"
+    );
+
+    let success_event = events
+        .iter()
+        .find(|e| e.target_id.as_deref() == Some(&deletable.id.to_string()))
+        .expect("삭제 성공에 대한 감사 이벤트가 있어야 한다");
+    assert_eq!(success_event.outcome, fleet_core::AuditOutcome::Success);
+    assert_eq!(success_event.target_type.as_deref(), Some("task"));
+
+    let rejected_event = events
+        .iter()
+        .find(|e| e.target_id.as_deref() == Some(&pending.id.to_string()))
+        .expect("삭제 거부에 대한 감사 이벤트가 있어야 한다");
+    assert_eq!(rejected_event.outcome, fleet_core::AuditOutcome::Failure);
+}

@@ -184,6 +184,9 @@ impl Store for AttemptStore {
     ) -> Result<(), StoreError> {
         unimplemented!()
     }
+    async fn delete_task(&self, _id: TaskId) -> Result<fleet_core::TaskDeleteOutcome, StoreError> {
+        unimplemented!()
+    }
     async fn upsert_worker(&self, _worker: &Worker) -> Result<(), StoreError> {
         unimplemented!()
     }

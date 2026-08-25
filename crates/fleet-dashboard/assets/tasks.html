@@ -43,7 +43,7 @@
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
       <div>
         <h1 class="page-title">Task Queue</h1>
-        <p class="page-subtitle">All tasks across the fleet, newest first.</p>
+        <p class="page-subtitle">All tasks across the fleet, grouped by thread, most recent activity first.</p>
       </div>
       <a href="tasks/new" id="new-task-link" class="btn btn-primary" style="white-space:nowrap;">+ New Task</a>
     </div>
@@ -73,6 +73,7 @@
         <div class="sortable" data-sort-key="tokens">Tokens</div>
         <div class="sortable" data-sort-key="duration_secs">Duration</div>
         <div class="sortable" data-sort-key="created_at">Created</div>
+        <div></div>
       </div>
     </div>
     <div id="empty-state" class="empty-state" style="display:none;">

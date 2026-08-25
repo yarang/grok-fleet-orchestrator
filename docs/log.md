@@ -1627,3 +1627,109 @@ last_verified: "2026-08-26"
   단계에서 `EXPLAIN (ANALYZE)`로 인덱스가 실제로 쓰이는지 확인하는 항목을 완료 게이트에 아직
   추가하지 않았다 — `management.md` 게이트 목록은 결과(거부/허용) 테스트만 요구하고 실행 계획
   검증은 요구하지 않는다.
+
+## 2026-08-26 — lint — `#96` 구현 착수 중 `events` 보존 판정을 다시 정정
+
+바로 위 항목("`#96` 설계의 근거 두 곳을 실측과 대조해 정정")에서 "삭제된 Task의 `events` 행은
+익명으로 남는다"고 고쳤는데, 이번엔 그 정정 자체가 틀렸다. `delete_task`를 구현하며
+`list_events`(`crates/fleet-store/src/postgres.rs`)를 실제로 읽어 보니, 이 메서드는
+`SELECT seq, payload FROM events ...`만 실행하고 `payload` JSONB를 역직렬화해 `FleetEvent`를
+복원한다 — `task_id` **컬럼**은 아예 조회하지 않는다. `FleetEvent`의 `TaskCreated`/`TaskDispatched`/
+`TaskProgress`/`TaskCompleted`/`TaskFailed`/`TaskCancelled` variant는 모두 `task_id: TaskId`를 필수
+직렬화 필드로 갖고 있고(`crates/fleet-core/src/events.rs`), 이 값은 `payload` JSONB 안에 그대로
+박혀 있다. Task를 삭제해도 `ON DELETE SET NULL`이 건드리는 것은 `events.task_id` **컬럼**뿐이고,
+`payload` JSONB 내용은 어떤 FK 액션으로도 바뀌지 않는다. 그리고 `task_id` 컬럼을 조회 조건으로
+쓰는 코드는 워크스페이스 어디에도 없다(grep으로 확인) — 그 컬럼은 사실상 write-only다.
+
+즉 실제 동작은: **신원은 잃지 않는다.** SET NULL이 지우는 것은 인덱싱/조인 전용 컬럼 하나뿐이고,
+`payload`를 읽으면 어느 Task의 사건이었는지 그대로 복원된다. 다만 `task_id` 컬럼이 NULL이라
+인덱스를 타는 조회는 불가능하므로, "그 정보를 실용적으로 조회할 수 있는가"라는 관점에서는 여전히
+감사 로그(`actor`/`target`이 인덱스가 있는 자리에 남는다)가 유일한 경로다 — "정보가 아예 없다"와
+"정보는 있지만 인덱스 없이는 스캔해야 찾는다"는 서로 다른 주장이며, `management.md`·`roadmap.md`의
+캐스케이드 표·감사 논거·완료 게이트 문구를 이 구분에 맞춰 다시 고쳤다. `#96` 설계를 위해 작성한
+`crates/fleet-core/src/audit.rs`의 `action::TASK_DELETE` 문서 주석과
+`crates/fleet-store/src/postgres.rs`의 `delete_task` 구현 주석도 커밋 전에 같이 고쳤다 — 잘못된
+주장이 코드 주석으로 굳어지기 전에 잡았다.
+
+**이 항목 자체가 기록해 둘 교훈이다**: 같은 하루에 같은 주장을 두 번 고쳤고, 두 번째 교정이 첫 번째
+교정을 도로 뒤집었다. 첫 정정(스키마 DDL만 읽음)은 컬럼 존재 여부만 확인하고 그 컬럼이 실제로 읽히는
+경로가 있는지는 확인하지 않은 채 "익명"이라고 결론 내렸다 — 스키마 레벨 사실(라벨 컬럼 없음)에서
+런타임 레벨 결론(신원 손실)으로 건너뛴 것이 오류였다. 스키마만 보고 데이터 보존 여부를 판정하지
+않고, 그 컬럼을 실제로 쓰는 읽기 경로(`list_events`)까지 확인해야 한다는 것이 이번에 다시 확인된
+교훈이다.
+
+**검증 한계**: 여전히 코드는 실행하지 않았다 — `list_events`의 SQL과 `FleetEvent`의 필드 정의를
+읽고 정적으로 추론한 결론이다. `delete_task` 구현이 끝나면 완료 게이트의 통합 테스트가 실제로
+Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실행으로 확인해야 이 결론이
+최종적으로 검증된다.
+
+## 2026-08-26 — verification — `#96` 실행 검증: 게이트 4종 전부 통과, `events.payload` 보존 결론이 실행으로 확정됨
+
+- 유형: `verification`
+- **무엇을 했나**: 바로 위 항목이 정적 추론으로 남긴 결론("`delete_task` 구현이 끝나면 완료 게이트의
+  통합 테스트가 실제로 Task를 지운 뒤 `events`를 읽어 확인해야 한다")을 실행으로 닫았다. 이미 작업
+  트리에 구현돼 있던 `#96`의 backend(`Store::delete_task`/`list_task_threads`, 대시보드 핸들러·라우트,
+  migration 025)와 frontend(스레드 그룹 목록 UI)를 대상으로 표준 4종 게이트를 실제로 실행했다.
+- **DB 게이트 하네스 함정을 다시 밟지 않았다**: 새로 `createdb`한 빈 DB로 시작해 `PgStore::migrate()`가
+  001부터 025까지 전부를 처음부터 적용하게 했고(스키마가 이미 025까지 존재하는 DB를 재사용했다면
+  이 신규 마이그레이션이 실제로 처음부터 실행되는지 확인하지 못했을 것이다), 2026-08-24 항목이 기록한
+  "이 저장소 DB 테스트 하네스의 기존 특성"(11~이제 14개 DB-gated 바이너리가 같은 Postgres를
+  `TRUNCATE ... CASCADE`로 공유해 병렬 실행 시 경합)을 그대로 따라 매 크레이트의 모든 테스트 바이너리를
+  `--test-threads=1`로, 바이너리별 별도 프로세스로 격리 실행했다. 격리 없이 `cargo test -p fleet-store
+  --features test-support`를 한 번에 돌렸을 때는 실제로 `admin_token_rotation`의
+  `rotate_invalidates_previous_digest_and_activates_new_one`이 `NotFound` panic으로 실패했다 — `#96`과
+  무관한, 문서화된 하네스 특성의 재현이다. 격리 실행에서는 fleet-store 14개 바이너리 전부 `ok`.
+- **결과 — 4종 게이트 전부 초록**:
+  - `rustc --version` → `1.98.0`, `rust-toolchain.toml`의 고정 채널과 일치.
+  - `RUSTFLAGS="-D warnings"` 아래 `cargo fmt --all -- --check` → 통과.
+  - `cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings` → 경고 0.
+  - `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` → 경고 0.
+  - `cargo test --workspace`(DB 미주입) → 68개 테스트 스위트 전부 `ok`, 실패 0.
+  - `DATABASE_URL` 주입 후 `--test-threads=1` 격리 실행: `fleet-store` 14 바이너리, `fleet-api` 14,
+    `fleet-scheduler` 2, `fleet-mcp` 1(`cargo build -p fleet-cli --all-features`로 먼저 재빌드 —
+    2026-08-25 항목이 남긴 "낡은 `target/debug/fleet` 바이너리" 함정 재확인·회피), `fleet-dashboard` 2 —
+    전부 `ok`. 2026-08-25 항목이 CI에서 관측한 4건의 실패 중 `scaleout_sync`(LISTEN/NOTIFY 타이밍)와
+    `cross_client.rs` 2건(stale-binary 가설)은 이번 로컬 실행에서 **재현되지 않았다** — 둘 다 `ok`였다.
+    stale-binary 가설이 맞았다는 뜻일 수도, 다른 조건(로컬 macOS vs CI 컨테이너, 매번 새로 빌드한
+    바이너리)이 달라 우연히 안 걸렸다는 뜻일 수도 있다 — 이번 실행은 그 3건이 `#96`과 무관함만
+    확인했을 뿐, CI에서 실제로 고쳐졌는지는 검증하지 않았다. 나머지 1건(`projects.rs`의
+    `create_and_get_project_roundtrip`, 이번 실행 범위인 fleet-store 게이트에 포함됨)은 위 두 건과
+    같은 급으로 취급하면 안 된다 — 이건 원인 불명의 flake가 아니라 이 파일 1468행이 이미 근본 원인을
+    특정해 둔 결함이다: `project.rs:87`의 `Utc::now()`는 나노초 정밀도를 만드는데 Postgres
+    `timestamptz`는 마이크로초로 저장하고, 테스트는 왕복값과 원본을 `assert_eq!`로 구조체 전체
+    비교한다. 이번 통과는 그 나노초 하위 자리가 이번엔 우연히 0이었거나(혹은 이 머신의 시계 해상도가
+    마이크로초 단위라 애초에 그 자리가 항상 0이거나) — 둘 중 어느 쪽인지 이번 실행에서 확인하지
+    않았다. 어느 쪽이든 코드(`project.rs:87`, `projects.rs:73`)는 그대로이므로 이 결함 자체가 고쳐진
+    것은 아니고, 로컬에서 통과했다는 사실이 CI 재발 여부에 대해 증거가 되지도 않는다.
+- **`events.payload` 보존 결론이 실행으로 확정됐다**: `crates/fleet-store/tests/task_delete.rs`의
+  `delete_task_cascades_outputs_and_telemetry_and_nulls_event_task_id_column`이 실제 PgStore로 Task를
+  지운 뒤 `SELECT task_id, payload FROM events WHERE payload->>'task_id' = $1`로 재조회해
+  `task_id` 컬럼은 `None`(`ON DELETE SET NULL`), `payload.task_id`는 원본 UUID 그대로임을 함께
+  단언하며 통과했다. 이로써 이 파일의 두 항목 전(0826 초판 → 정정)이 정적 추론으로 도달한 결론이
+  이번에 실제 실행으로 재확인됐다 — 세 번째 판정이 아니라 앞선 정정을 실행이 뒷받침한 것이다.
+- **완료 게이트 6개와 테스트의 대응을 직접 확인했다**(`docs/architecture/tasks/management.md` "구현
+  순서와 검증 게이트" 절): ① 비terminal 거부가 0행 판정임 → `delete_task_rejects_a_non_terminal_task`
+  + PgStore `delete_task`가 선검사 없이 단일 `DELETE ... AND status_phase = ANY($2)`로 구현된 것을
+  코드로 확인. ② Pending 의존자 차단/terminal 허용 → `delete_task_blocked_by_pending_dependents` +
+  `delete_task_removes_a_terminal_task`. ③ 루트 삭제 후 자식 `parent_task_id` NULL·`thread_id` 유지·
+  스레드 생존 → `task_delete.rs`의 게이트 3 테스트 + `dashboard_api.rs`의
+  `list_task_threads_survives_a_deleted_root`. ④ `events`/`task_outputs`/`task_telemetry` 캐스케이드 →
+  위 문단. ⑤ 비admin 403 → `delete_task_requires_task_delete_permission`. ⑥ 성공·거부 감사 →
+  `delete_task_records_a_task_delete_audit_event_on_success_and_rejection`. 여섯 게이트 모두 이름이
+  일치하는 테스트가 있고 전부 통과했다.
+- **`fleet serve`를 백그라운드로 띄울 때의 운영 함정 2건을 새로 발견해 기록한다** (제품 결함이 아니라
+  이 실행 환경 한정 함정이지만, 다음에 브라우저로 대시보드를 검증할 에이전트가 반복해서 밟을 것이다):
+  1. `FLEET_MCP_CAPABILITIES`가 비어 있거나 인식 못 하는 토큰을 담고 있으면(`McpAuthorization::
+     from_environment`가 fail-closed) MCP 컴포넌트가 즉시 죽는데, `fleet serve`는 MCP와 대시보드를
+     같은 join된 future로 묶어 실행해서 **대시보드까지 함께 죽는다** — 대시보드 로그에 "listening"이
+     찍힌 뒤에도. 동작하는 값은 `crates/fleet-mcp/tests/cross_client.rs:67`에 있다.
+  2. 유효한 capability 값을 줘도, `nohup cmd &`로 백그라운드 실행하면 자식 프로세스의 stdin이
+     `/dev/null`이 되어 MCP stdio 리더가 즉시 EOF를 보고 "정상" 종료하는데, 이 정상 종료도 같은 이유로
+     대시보드를 함께 끌고 내려간다. `nohup sh -c 'tail -f /dev/null | ./target/debug/fleet serve ...'
+     &`처럼 stdin을 무한히 열어 둬야 살아남는다.
+  두 함정 모두 `fleet serve`가 MCP와 대시보드를 분리 불가능하게 묶은 설계에서 나온다 — 이번 범위
+  밖이지만, MCP 없이 대시보드만 띄우고 싶은 다음 상황(예: 대시보드 전용 헬스체크·로컬 UI 검증)에
+  반복해서 부딪힐 문제라 여기 남긴다.
+- **검증 한계**: CI에서 아직 이 실행을 재현하지 않았다 — 로컬(macOS, 1.98.0)에서만 확인했다. 위에서
+  언급했듯 2026-08-25 CI 관측 4건 실패가 이번엔 로컬에서 재현되지 않았는데, 그게 CI에서도 고쳐졌다는
+  뜻인지는 다음 CI 실행으로만 확인된다.

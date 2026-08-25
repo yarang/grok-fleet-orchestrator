@@ -43,8 +43,8 @@ use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry, FleetEvent, Issue,
     IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
     PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
-    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskPhase, TaskStatus,
-    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskPhase,
+    TaskStatus, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -200,6 +200,84 @@ pub trait Store: Send + Sync {
         tasks.retain(|t| t.thread_id == thread_id);
         tasks.sort_by_key(|t| t.created_at);
         Ok(tasks)
+    }
+
+    /// terminal Task를 영구 삭제한다 (로드맵 #96).
+    ///
+    /// **기본 구현이 없다** — `list_thread_tasks`와 달리 삭제는 `list_tasks`로
+    /// 유도할 수 없다(목록에서 없는 행을 만들어낼 수는 있어도, 실제로 행을
+    /// 지우는 동작은 저장소마다 직접 구현해야 한다). 그래서 테스트 전용 mock
+    /// 4종을 포함한 이 트레이트의 모든 구현체가 이 메서드에 명시적으로
+    /// 답해야 한다 — 실제로 지원하지 않는 mock은 `unimplemented!()`로 그
+    /// 사실을 드러낸다.
+    ///
+    /// 판정 순서(둘 다 [`TaskDeleteOutcome`]의 값이지 `Err`이 아니다 —
+    /// `TransitionOutcome`과 같은 이유):
+    /// 1. terminal이 아니면 [`TaskDeleteOutcome::NotTerminal`].
+    /// 2. 이 Task를 `dependency_ids`에 담은 `Pending` Task가 있으면
+    ///    [`TaskDeleteOutcome::BlockedByDependents`].
+    /// 3. 그 외엔 삭제하고 [`TaskDeleteOutcome::Deleted`].
+    ///
+    /// `Err(StoreError::NotFound)`는 행 자체가 없을 때만 쓴다. 두 조건 모두
+    /// 통과하지 못한 실패가 아니라 **관측 결과**이므로 앞의 두 판정과 섞지
+    /// 않는다.
+    ///
+    /// 원자성 한계는 [`TaskDeleteOutcome::BlockedByDependents`] 문서 참고 —
+    /// terminal 판정은 대상 행 자체를 조건절에 걸어 TOCTOU가 없지만, 의존자
+    /// 판정은 다른 행을 대상으로 한 별도 조회라 같은 보장이 없다.
+    async fn delete_task(&self, id: TaskId) -> Result<TaskDeleteOutcome, StoreError>;
+
+    /// 스레드 단위 페이지의 `thread_id` 목록 (`#96`, `GET /api/task-threads`).
+    ///
+    /// `docs/ui-dashboard/ui-design.md` §3.3 "페이지네이션": 페이지의 단위는
+    /// Task가 아니라 스레드다. 이 메서드는 그 "스레드 선정" 질의만 맡는다 —
+    /// 값은 활동순(스레드 구성원 `created_at`의 최댓값 내림차순)으로 정렬된
+    /// `thread_id` 페이지 하나다. "구성원 적재"는 호출부가 이 결과의 각
+    /// `thread_id`에 대해 [`Store::list_thread_tasks`]를 따로 불러 채운다 —
+    /// 설계 문서가 명시한 두 질의 구조를 트레이트 경계에도 그대로 옮긴다.
+    ///
+    /// 기본 구현은 [`Store::list_thread_tasks`]와 같은 방식으로
+    /// [`Store::list_tasks`] 위에서 유도한다: 전체를 끌어와 Rust에서
+    /// `thread_id`별 최신 활동을 계산하고 정렬·페이지네이션한다. 스레드
+    /// 수가 커지면 비효율적이다 — [`PgStore`](crate::PgStore)는
+    /// `GROUP BY thread_id ORDER BY MAX(created_at) DESC`로 재정의해
+    /// `idx_tasks_thread_id (thread_id, created_at)`를 타는 집계 질의를
+    /// 쓴다.
+    async fn list_task_threads(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        let tasks = self
+            .list_tasks(&TaskFilter {
+                limit: 10_000,
+                ..Default::default()
+            })
+            .await?;
+
+        let mut last_activity: std::collections::HashMap<TaskId, chrono::DateTime<chrono::Utc>> =
+            std::collections::HashMap::new();
+        for task in &tasks {
+            last_activity
+                .entry(task.thread_id)
+                .and_modify(|max| {
+                    if task.created_at > *max {
+                        *max = task.created_at;
+                    }
+                })
+                .or_insert(task.created_at);
+        }
+
+        let mut threads: Vec<(TaskId, chrono::DateTime<chrono::Utc>)> =
+            last_activity.into_iter().collect();
+        threads.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+
+        Ok(threads
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(thread_id, _)| thread_id)
+            .collect())
     }
 
     // ── Worker ──────────────────────────────────────────────────────

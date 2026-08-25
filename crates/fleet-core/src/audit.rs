@@ -109,6 +109,15 @@ pub mod action {
     /// `ready_for_agent`로의 전이는 Agent 자동 착수의 인가 지점이므로
     /// 누가 승인했는지가 감사에 남아야 한다.
     pub const ISSUE_TRANSITION: &str = "issue.transition";
+    /// Task 영구 삭제 시도 — 성공·거부 모두 기록한다 (로드맵 #96).
+    ///
+    /// `events.task_id`는 `ON DELETE SET NULL`이지만 `events.payload`는
+    /// `FleetEvent`를 통째로 JSONB로 담고 있어 원본 `task_id`를 잃지 않는다
+    /// (`docs/architecture/tasks/management.md` "무엇이 함께 사라지는가"
+    /// 참고). 이 감사 이벤트가 증언하는 것은 "그 Task가 존재했다"가 아니라
+    /// "언제 누구에 의해 지워졌는가"이며, `actor`/`target`이 인덱스가 있는
+    /// 자리에 남는 조회 가능한 유일한 경로라는 뜻이다.
+    pub const TASK_DELETE: &str = "task.delete";
 }
 
 /// 감사 로그 한 건.

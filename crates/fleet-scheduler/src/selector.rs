@@ -276,6 +276,12 @@ mod tests {
         ) -> Result<(), StoreError> {
             unimplemented!()
         }
+        async fn delete_task(
+            &self,
+            _: TaskId,
+        ) -> Result<fleet_core::TaskDeleteOutcome, StoreError> {
+            unimplemented!()
+        }
         async fn upsert_worker(&self, _: &Worker) -> Result<(), StoreError> {
             unimplemented!()
         }

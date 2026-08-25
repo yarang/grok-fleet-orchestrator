@@ -57,8 +57,8 @@ pub use issue::{
 };
 pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
-    FailureKind, IdempotentInsert, Labels, Task, TaskFailure, TaskFilter, TaskOutput,
-    TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest, TaskResult, TaskStatus,
+    FailureKind, IdempotentInsert, Labels, Task, TaskDeleteOutcome, TaskFailure, TaskFilter,
+    TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest, TaskResult, TaskStatus,
     TaskStatusFilter, TokenUsage, TransitionOutcome,
 };
 pub use worker::{

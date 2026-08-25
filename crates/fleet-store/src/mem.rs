@@ -31,9 +31,9 @@ use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, CloseReason, EmailVerificationToken, EventEntry,
     FleetEvent, Host, HostEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId,
     IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter,
-    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId,
-    TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOutcome, User,
-    UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome,
+    TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -267,6 +267,75 @@ impl Store for MemStore {
         };
         task.checkpoint_branch = checkpoint_branch.map(|s| s.to_string());
         Ok(())
+    }
+
+    async fn delete_task(&self, id: TaskId) -> Result<TaskDeleteOutcome, StoreError> {
+        // 1. 의존자 선검사. PgStore와 동일한 순서로 판정하지만, 이 락과 아래
+        //    terminal 판정 락은 별개다 — PgStore의 두 SQL 왕복과 마찬가지로
+        //    그 사이에 새 Pending 의존자가 끼어드는 창이 여기도 남아 있다
+        //    (`TaskDeleteOutcome` 문서 참고). PgStore와 다른 보장을 주면
+        //    MemStore에서만 통과하는 테스트가 생기므로 일부러 좁히지 않는다.
+        {
+            let tasks = self.tasks.lock().unwrap();
+            let dependent_ids: Vec<TaskId> = tasks
+                .values()
+                .filter(|t| {
+                    t.status.phase() == TaskPhase::Pending && t.dependency_ids.contains(&id)
+                })
+                .map(|t| t.id)
+                .collect();
+            if !dependent_ids.is_empty() {
+                return Ok(TaskDeleteOutcome::BlockedByDependents { dependent_ids });
+            }
+        }
+
+        // 2. terminal 판정과 제거는 같은 락 안에서 끝낸다 — Postgres와 달리
+        //    여기엔 그 둘 사이의 TOCTOU가 없다(단일 Mutex).
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            let Some(task) = tasks.get(&id) else {
+                return Err(StoreError::NotFound);
+            };
+            let current = task.status.phase();
+            if !current.is_terminal() {
+                return Ok(TaskDeleteOutcome::NotTerminal { current });
+            }
+            tasks.remove(&id);
+        }
+
+        // task_outputs(001)의 ON DELETE CASCADE 대응.
+        self.outputs.lock().unwrap().remove(&id);
+
+        // tasks.parent_task_id(013)의 ON DELETE SET NULL 대응 — thread_id는
+        // 건드리지 않는다: 루트가 삭제된 스레드는 도달 가능한 정상 상태다.
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks.values_mut() {
+                if task.parent_task_id == Some(id) {
+                    task.parent_task_id = None;
+                }
+            }
+        }
+
+        // issue_task_links.task_id(023)의 ON DELETE SET NULL 대응 —
+        // task_label은 이미 별도로 저장돼 있어 여기서 건드릴 것이 없다.
+        {
+            let mut links = self.issue_task_links.lock().unwrap();
+            for link in links.iter_mut() {
+                if link.task_id == Some(id) {
+                    link.task_id = None;
+                }
+            }
+        }
+
+        // events(001)의 ON DELETE SET NULL 대응은 하지 않는다 — MemStore의
+        // `EventEntry`는 `FleetEvent`를 그대로 감쌀 뿐 PgStore의 `events.task_id`
+        // 컬럼에 대응하는 별도 필드가 없다. PgStore에서도 그 컬럼은 어떤
+        // 조회 경로에서도 읽히지 않으므로(`list_events`는 `payload`만 읽는다),
+        // 지울 것이 애초에 없다는 점에서 두 구현은 일치한다.
+        // task_telemetry(016)에 대응하는 저장소도 MemStore에 없다 — Store
+        // 트레이트에 그 테이블을 다루는 메서드 자체가 없다.
+        Ok(TaskDeleteOutcome::Deleted)
     }
 
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {

@@ -184,6 +184,58 @@ pub async fn list_tasks(
     Ok(Json(summaries))
 }
 
+/// `/api/task-threads` — 스레드 단위 페이지(`#96`).
+///
+/// `docs/ui-dashboard/ui-design.md` §3.3: 페이지의 단위는 Task가 아니라
+/// 스레드다. `Store::list_task_threads`로 이번 페이지의 `thread_id`들을
+/// 활동순으로 고른 뒤, 각 스레드의 구성원 전체를 `list_thread_tasks`로
+/// 채운다 — 설계 문서가 명시한 두 질의 구조. 루트(`id == thread_id`)가
+/// 삭제됐으면 `root`는 `null`이고 `members`만 남는다 — 그룹을 "루트 Task의
+/// 행"이 아니라 "`thread_id` 값 자체"로 정의하기로 한 설계 결정 그대로다.
+pub async fn list_task_threads_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(q): Query<ListTasksQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_permission(&principal, PermissionKind::TaskList)?;
+
+    let thread_ids = state
+        .store
+        .list_task_threads(q.limit, q.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_task_threads failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    let mut threads = Vec::with_capacity(thread_ids.len());
+    for thread_id in thread_ids {
+        let members = state
+            .store
+            .list_thread_tasks(thread_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, thread_id = %thread_id, "list_thread_tasks failed");
+                ApiError::Store(e.to_string())
+            })?;
+
+        let root = members
+            .iter()
+            .find(|t| t.id == thread_id)
+            .map(task_to_summary);
+        let member_summaries: Vec<TaskSummary> = members.iter().map(task_to_summary).collect();
+
+        threads.push(serde_json::json!({
+            "thread_id": thread_id,
+            "root": root,
+            "members": member_summaries,
+        }));
+    }
+
+    debug!(count = threads.len(), "list_task_threads");
+    Ok(Json(serde_json::json!({ "threads": threads })))
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct ListEventsQuery {
     #[serde(default)]
@@ -718,6 +770,66 @@ pub async fn get_task_thread_api(
 
     let summaries: Vec<TaskSummary> = thread.iter().map(task_to_summary).collect();
     Ok(Json(serde_json::json!({ "thread": summaries })))
+}
+
+/// DELETE /api/tasks/:id — terminal Task 영구 삭제 (`#96`).
+///
+/// 204는 성공, 404/409/403은 각각 부재·거절·권한없음을 뜻한다 —
+/// `docs/contracts/dashboard-api.md`의 응답 코드 표가 정본이다. 세 경우
+/// 모두 감사 이벤트를 남긴다: 실패한 삭제 시도도 "누가 무엇을 지우려
+/// 했는가"라는 점에서 감사 가치가 있다(`audit.rs`의 기록 원칙).
+pub async fn delete_task_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_permission(&principal, PermissionKind::TaskDelete)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let task_id: fleet_core::TaskId = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("invalid task id: {id}")))?;
+
+    let outcome = state.store.delete_task(task_id).await.map_err(|e| {
+        tracing::error!(error = %e, "delete_task: failed");
+        ApiError::from(e)
+    })?;
+
+    let result = match &outcome {
+        fleet_core::TaskDeleteOutcome::Deleted => Ok(StatusCode::NO_CONTENT),
+        fleet_core::TaskDeleteOutcome::NotTerminal { current } => Err(ApiError::Conflict(format!(
+            "task {id} is not terminal (current: {current:?})"
+        ))),
+        fleet_core::TaskDeleteOutcome::BlockedByDependents { dependent_ids } => {
+            let ids = dependent_ids
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ApiError::Conflict(format!(
+                "task {id} is blocked by pending dependents: {ids}"
+            )))
+        }
+    };
+
+    let audit = match &result {
+        Ok(_) => fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::TASK_DELETE,
+        ),
+        Err(e) => fleet_core::AuditEvent::failure(
+            &principal.user.username,
+            fleet_core::audit::action::TASK_DELETE,
+        )
+        .detail(serde_json::json!({ "reason": e.to_string() })),
+    }
+    .actor(principal.user.id)
+    .target("task", task_id.to_string());
+    crate::audit::record(&state, audit).await;
+
+    result
 }
 
 // ── P1: Worker Detail ────────────────────────────────────────────────

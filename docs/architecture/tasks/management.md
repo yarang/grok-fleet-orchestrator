@@ -117,7 +117,7 @@ DELETE FROM tasks WHERE id = $1 AND status_phase = ANY($2)
 |---|---|---|
 | `task_outputs.task_id` | `ON DELETE CASCADE` | 출력은 Task 없이 의미가 없다 |
 | `task_telemetry.task_id` | `ON DELETE CASCADE` | 위와 같다 |
-| `events.task_id` | `ON DELETE SET NULL` | 사건은 일어났다. 행은 남지만 `task_label`이 없어 어느 Task였는지는 잃는다 |
+| `events.task_id` | `ON DELETE SET NULL` | 사건은 일어났다. FK 컬럼은 NULL이 되지만 `payload`가 원본 `task_id`를 그대로 담고 있어 신원을 잃지 않는다 |
 | `tasks.parent_task_id` | `ON DELETE SET NULL` | 자식은 살아남고 부모 간선만 끊긴다 |
 | `issue_task_links.task_id` | `ON DELETE SET NULL` | `task_label`이 남아 링크가 이름을 잃지 않는다 |
 
@@ -125,10 +125,16 @@ DELETE FROM tasks WHERE id = $1 AND status_phase = ANY($2)
 사실 자체는 audit에 독립적으로 남는" 곳에만 쓴다.
 
 `issue_task_links`·`audit_log`와 달리 `events`는 001에서 SET NULL만 두고 라벨 컬럼을 두지 않았다(011·023이
-나중에 세운 관례를 소급 적용하지 않았다). 따라서 삭제된 Task의 `events` 행은 **익명으로 남는다** — "보존"이
-가리키는 것은 사건의 존재 여부이지 어느 Task의 사건이었는지가 아니다. 이 컬럼에 라벨을 추가하는 것은 이번
-범위 밖이다: append-only 로그의 과거 행을 채울 방법이 없고, 새 라벨은 쓰기 경로 변경을 요구하는 별도 결정이라
-지금 만들면 "어떤 값을 넣을지 정하지 않은 컬럼"이 된다.
+나중에 세운 관례를 소급 적용하지 않았다). **다만 이것이 신원 손실로 이어지지는 않는다.** `events.payload`는
+`FleetEvent` enum 전체를 JSONB로 저장하고, `TaskCreated`/`TaskDispatched`/`TaskProgress`/`TaskCompleted`/
+`TaskFailed`/`TaskCancelled` 모든 variant가 `task_id: TaskId`를 직렬화 필드로 갖는다(`fleet-core/src/events.rs`).
+`list_events`(`fleet-store/src/postgres.rs`)는 `SELECT seq, payload`만 읽어 `FleetEvent`를 복원하며, `task_id`
+컬럼을 조회 조건으로 쓰는 경로는 코드베이스 어디에도 없다 — 그 컬럼은 사실상 write-only다. 따라서 `ON DELETE
+SET NULL`이 지우는 것은 인덱싱/조인용 컬럼 하나뿐이고, 그 사건이 어느 Task의 것이었는지는 `payload`를 읽으면
+그대로 복원된다. 이 절의 이전 버전(2026-08-26 초판)은 이를 "익명으로 남는다"고 적었는데, 이는 `task_id`
+컬럼만 보고 `payload`를 확인하지 않은 채 내린 결론이라 틀렸다 — `docs/log.md`의 정정 기록 참고. 이 컬럼에
+라벨을 추가하는 것은 여전히 이번 범위 밖이지만, 이유가 다르다: 채울 방법이 없어서가 아니라 `payload`가 이미
+그 정보를 담고 있어 채울 필요가 없어서다.
 
 `parent_task_id`가 NULL이 되어도 `thread_id`는 그대로 남는다. 따라서 **루트가 사라진 스레드**가 정상
 상태로 존재한다. 목록 UI는 이를 오류가 아니라 표시 대상으로 다룬다 —
@@ -176,10 +182,12 @@ SELECT id FROM tasks
 **이 권한에는 마이그레이션이 필요 없다**(위의 GIN 인덱스는 별개로 필요하다).
 
 현재 감사 액션에는 `task.*`가 **하나도 없다**(auth·user·worker·credential만 있다). `task.delete`를
-추가한다. hard delete는 행 자체를 없애고, 위에서 정리했듯 남는 `events` 행은 `task_label`이 없어
-익명이므로 어느 Task였는지를 잇지 못한다. 따라서 감사 로그가 "이 Task가 존재했고 누가 지웠다"를
-증언하는 **유일한 기록**이다 — `events`를 뺀 나머지가 아니라, 예외 없이 유일하다. 감사 없는 hard
-delete는 흔적 없는 삭제다.
+추가한다. hard delete는 행 자체를 없애지만, 위에서 정리했듯 `events` 행은 `payload`에 `task_id`를 보존한
+채 남으므로 "그 Task가 존재했다"는 사실 자체는 `events`를 훑으면 재구성할 수 있다 — 다만 `task_id` 컬럼이
+NULL이라 인덱스를 탈 수 없으니 `seq` 범위 전체를 스캔해야 하는, 운영 목적으로는 쓰기 어려운 경로다. 그래서
+"이 Task가 존재했고 누가 지웠다"를 **조회 가능한 형태로** 증언하는 것은 감사 로그뿐이다 — `events`가 정보를
+전혀 담지 않아서가 아니라, 감사 로그만 `actor`·`target`·시각을 인덱스가 있는 자리에 남기기 때문이다. 감사
+없는 hard delete는 그 조회 가능한 흔적이 없는 삭제다.
 
 ## Project·Agent와의 관계
 
@@ -216,7 +224,7 @@ API/MCP는 Task 생성·조회·목록·취소를 제공하고, Dashboard는 여
 - `Pending` 의존자가 있는 Task의 삭제가 거부되고, 의존자가 전부 terminal이면 허용되는 테스트
 - 루트를 지운 뒤 자식의 `parent_task_id`가 NULL이 되고 `thread_id`는 유지되며, 그 스레드가 목록에서
   사라지지 않는 테스트
-- 삭제된 Task의 `events` 행은 `task_id`가 NULL로 남고(익명화), `task_outputs`·`task_telemetry` 행은
-  사라지는 테스트
+- 삭제된 Task의 `events` 행은 유지되되 `task_id` 컬럼만 NULL로 남고(`payload`의 `task_id`는 보존),
+  `task_outputs`·`task_telemetry` 행은 사라지는 테스트
 - Admin이 아닌 principal의 삭제가 403으로 거부되는 테스트
 - 삭제 성공·거부가 `task.delete` 감사 이벤트를 남기는 테스트

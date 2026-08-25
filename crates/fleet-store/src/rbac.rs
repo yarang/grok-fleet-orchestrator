@@ -68,6 +68,7 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::TaskCancel => "Cancel running tasks",
         PermissionKind::TaskRead => "Read task details",
         PermissionKind::TaskOutput => "Read task output streams",
+        PermissionKind::TaskDelete => "Permanently delete terminal tasks",
         PermissionKind::WorkerList => "List registered workers",
         PermissionKind::WorkerRegister => "Register new workers",
         PermissionKind::WorkerDelete => "Delete/deregister workers",

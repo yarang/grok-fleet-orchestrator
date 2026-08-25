@@ -604,6 +604,43 @@ impl IdempotentInsert {
     }
 }
 
+/// Task 영구 삭제 시도의 결과 (로드맵 #96).
+///
+/// `TransitionOutcome`과 같은 이유로 거절을 `Err`이 아니라 `Ok`의 값으로
+/// 표현한다 — "terminal이 아니다"와 "Pending 의존자가 있다"는 둘 다 저장소가
+/// 정상적으로 판정한 결과이지 장애가 아니며, 호출자(핸들러)가 이 값을 보고
+/// 서로 다른 HTTP 상태 코드로 응답을 나눠야 한다(계약: `docs/contracts/dashboard-api.md`
+/// "계획된 표면" 절). `Err`은 행이 아예 없거나(`StoreError::NotFound`) DB
+/// 접근 자체가 실패한 경우로 남긴다.
+///
+/// `NotTerminal`의 원자성은 `TransitionOutcome`과 동일하다 — `DELETE ... WHERE
+/// id = $1 AND status_phase = ANY($2)`처럼 삭제 대상 행 자체를 조건절에 걸므로
+/// TOCTOU가 없다. 반면 `BlockedByDependents`는 **다른 행들**을 대상으로 한
+/// 별도 조회이므로 같은 보장이 없다 — 이 조회와 뒤따르는 `DELETE` 사이에 새
+/// `Pending` 의존자가 삽입되면 그 창을 통과한다. `SERIALIZABLE` 격리나 아직
+/// 존재하지 않는 행에 대한 predicate lock 없이는 닫을 수 없는 창이라 지금은
+/// 닫지 않는다 — 제출과 삭제 모두 사람이 직접 트리거하는 저빈도 경로이고,
+/// 결과가 나타나도 "영원히 Pending인 Task"라는 관측 가능하고 되돌릴 수 있는
+/// 상태이지 데이터 손상이 아니다. `docs/architecture/tasks/management.md`
+/// "삭제 계약"에 이 한계를 명시적으로 남긴다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskDeleteOutcome {
+    /// 삭제됐다.
+    Deleted,
+    /// 대상 Task가 terminal(`is_terminal()`)이 아니라 삭제를 거절했다.
+    NotTerminal { current: TaskPhase },
+    /// 이 Task를 `dependency_ids`에 담은 `Pending` Task가 하나 이상 있어
+    /// 거절했다 — 그 Task들이 먼저 정리되거나 자기 자신이 삭제돼야 한다.
+    BlockedByDependents { dependent_ids: Vec<TaskId> },
+}
+
+impl TaskDeleteOutcome {
+    /// 이 시도로 실제 행이 삭제됐는가.
+    pub fn deleted(&self) -> bool {
+        matches!(self, TaskDeleteOutcome::Deleted)
+    }
+}
+
 /// 작업 완료 결과.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskResult {

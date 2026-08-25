@@ -26,9 +26,10 @@ use fleet_core::{
     AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry,
     FleetEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity,
     IssueStatus, IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project,
-    ProjectFilter, ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId,
-    TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter,
-    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    ProjectFilter, ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskDeleteOutcome,
+    TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus,
+    TaskStatusFilter, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -522,6 +523,111 @@ impl Store for PgStore {
         // worker_id 필터는 SQL에서 처리했으므로 Rust 단 후처리 불필요.
 
         Ok(tasks)
+    }
+
+    async fn delete_task(&self, id: TaskId) -> Result<TaskDeleteOutcome, StoreError> {
+        // 1. 의존자 선검사. `dependency_ids <> '{}'`을 `@>`와 함께 명시해야
+        //    idx_tasks_dependency_ids(025)의 predicate를 플래너가 증명할 수
+        //    있다 — 배열 포함 연산자는 등호 비교와 달리 IS NOT NULL/빈 배열
+        //    아님을 자동으로 함의하지 않는다 (마이그레이션 025 주석 참고).
+        //
+        //    이 조회와 아래 DELETE 사이에는 트랜잭션이 없다 — 그 사이 새
+        //    Pending 의존자가 삽입되면 통과한다. `TaskDeleteOutcome` 문서에
+        //    남긴 대로, 닫지 않기로 한 창이다.
+        let dependent_rows = sqlx::query(
+            "SELECT id FROM tasks \
+             WHERE status_phase = 'pending' \
+               AND dependency_ids <> '{}' \
+               AND dependency_ids @> ARRAY[$1]::uuid[]",
+        )
+        .bind(id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+
+        if !dependent_rows.is_empty() {
+            let dependent_ids = dependent_rows
+                .into_iter()
+                .map(|row| row.try_get::<Uuid, _>("id").map(TaskId::from))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(TaskDeleteOutcome::BlockedByDependents { dependent_ids });
+        }
+
+        // 2. terminal 판정과 삭제를 한 조건절에 건다 — 대상 행 자체가
+        //    조건이므로 compare_and_set_task_status와 같은 이유로 TOCTOU가
+        //    없다. task_outputs/task_telemetry는 ON DELETE CASCADE로 함께
+        //    지워지고, events.task_id/issue_task_links.task_id/자식의
+        //    parent_task_id는 ON DELETE SET NULL로 컬럼만 NULL이 된다.
+        //    events.payload는 FleetEvent 전체를 JSONB로 담고 있어 원본
+        //    task_id를 잃지 않는다 — "익명화"가 아니다 (001/016/013/023,
+        //    docs/architecture/tasks/management.md "무엇이 함께 사라지는가"
+        //    가 이 cascade 표의 정본이다).
+        let terminal_phases: Vec<&str> = [
+            TaskPhase::Pending,
+            TaskPhase::Dispatched,
+            TaskPhase::Completed,
+            TaskPhase::Failed,
+            TaskPhase::Cancelled,
+        ]
+        .into_iter()
+        .filter(|p| p.is_terminal())
+        .map(|p| p.as_str())
+        .collect();
+
+        let result = sqlx::query("DELETE FROM tasks WHERE id = $1 AND status_phase = ANY($2)")
+            .bind(id.as_uuid())
+            .bind(&terminal_phases)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() > 0 {
+            return Ok(TaskDeleteOutcome::Deleted);
+        }
+
+        // 0행은 행이 없거나(NotFound) terminal이 아니었거나(NotTerminal) 둘 중
+        // 하나다 — compare_and_set_task_status와 같은 형태로 재조회해 가른다.
+        // 이 SELECT도 위 DELETE와 같은 트랜잭션이 아니므로 `current`는 보고
+        // 전용이다.
+        let row = sqlx::query("SELECT status FROM tasks WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            None => Err(StoreError::NotFound),
+            Some(row) => {
+                let status_json: serde_json::Value = row.try_get("status")?;
+                let current: TaskStatus = serde_json::from_value(status_json)?;
+                Ok(TaskDeleteOutcome::NotTerminal {
+                    current: current.phase(),
+                })
+            }
+        }
+    }
+
+    async fn list_task_threads(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<TaskId>, StoreError> {
+        // 스레드 선정만 한다 — 구성원 적재는 호출부가 각 thread_id에
+        // list_thread_tasks를 따로 호출한다(ui-design.md §3.3의 "두 질의"
+        // 설계). idx_tasks_thread_id(thread_id, created_at)가 이
+        // GROUP BY + MAX(created_at) 집계와 뒤따르는 정렬을 뒷받침한다.
+        let rows = sqlx::query(
+            "SELECT thread_id FROM tasks \
+             GROUP BY thread_id \
+             ORDER BY MAX(created_at) DESC, thread_id DESC \
+             LIMIT $1 OFFSET $2",
+        )
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| row.try_get::<Uuid, _>("thread_id").map(TaskId::from))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     // ── Worker ─────────────────────────────────────────────────────────

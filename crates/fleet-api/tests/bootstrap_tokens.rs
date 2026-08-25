@@ -670,6 +670,9 @@ impl Store for BsStore {
     async fn update_task_checkpoint(&self, _: TaskId, _: Option<&str>) -> Result<(), StoreError> {
         unimplemented!()
     }
+    async fn delete_task(&self, _: TaskId) -> Result<fleet_core::TaskDeleteOutcome, StoreError> {
+        unimplemented!()
+    }
     async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
         self.workers.lock().unwrap().insert(w.id, w.clone());
         Ok(())
