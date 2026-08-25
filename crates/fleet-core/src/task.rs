@@ -354,6 +354,36 @@ impl TaskPhase {
     }
 }
 
+/// compare-and-set 상태 전이의 결과.
+///
+/// `Rejected`는 실패가 아니라 **정상적인 관측 결과**다 — 다른 writer가 먼저
+/// 상태를 옮겼다는 뜻이며, 호출자는 대개 자기 쓰기를 포기하는 것이 옳다.
+/// 그래서 `Result`의 `Err`이 아니라 `Ok`의 값으로 표현한다. `Err`은 DB 장애나
+/// 역직렬화 실패처럼 관측 자체가 불가능했던 경우로 남긴다.
+///
+/// `current`는 **거절 사유를 설명하기 위한 값**이며, 관측 시점 이후에도
+/// 그 상태가 유지된다는 보장은 없다 — Postgres 구현은 UPDATE가 0행을 돌려준
+/// 뒤 별도 SELECT로 읽으므로 그 사이에 또 다른 writer가 상태를 바꿀 수 있다.
+/// 로깅·에러 메시지용으로만 쓰고, 제어 흐름의 근거로 삼지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionOutcome {
+    /// 기대한 선행 상태와 일치해 새 상태가 기록됐다.
+    Applied,
+    /// 기대한 선행 상태와 달라 아무것도 쓰지 않았다.
+    Rejected { current: TaskPhase },
+}
+
+impl TransitionOutcome {
+    /// 전이가 실제로 적용됐는가.
+    ///
+    /// 이벤트 발행처럼 "상태가 바뀌었다"를 전제로 하는 후속 동작을 이 값으로
+    /// 가드한다. 거절된 전이에 이벤트를 붙이면 이벤트 로그가 일어나지 않은
+    /// 일을 주장하게 된다.
+    pub fn applied(self) -> bool {
+        matches!(self, TransitionOutcome::Applied)
+    }
+}
+
 /// 작업 완료 결과.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskResult {

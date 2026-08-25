@@ -204,8 +204,8 @@ mod tests {
     use async_trait::async_trait;
     use fleet_core::{
         BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
-        TaskOutput, TaskRequest, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
-        WorkerStatus,
+        TaskOutput, TaskPhase, TaskRequest, TaskStatus, TransitionOutcome, Worker, WorkerFilter,
+        WorkerHeartbeat, WorkerId, WorkerStatus,
     };
     use fleet_store::{Store, StoreError};
 
@@ -246,6 +246,14 @@ mod tests {
             unimplemented!()
         }
         async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn compare_and_set_task_status(
+            &self,
+            _: TaskId,
+            _: &[TaskPhase],
+            _: &TaskStatus,
+        ) -> Result<TransitionOutcome, StoreError> {
             unimplemented!()
         }
         async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {

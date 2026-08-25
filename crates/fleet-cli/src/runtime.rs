@@ -35,8 +35,8 @@ use fleet_api::{
     ApiTokenCredential, AppState,
 };
 use fleet_core::{
-    CircuitBreakerConfig, PermissionKind, TaskFilter, TaskId, TaskStatus, TaskStatusFilter,
-    WorkerFilter, WorkerStatus,
+    CircuitBreakerConfig, PermissionKind, TaskFilter, TaskId, TaskPhase, TaskStatus,
+    TaskStatusFilter, TransitionOutcome, WorkerFilter, WorkerStatus,
 };
 // CLI 하위 명령 enum (main.rs).
 use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
@@ -1405,12 +1405,28 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
         reason: reason.clone(),
         cancelled_at,
     };
-    store
-        .update_task_status(id, &new_status)
+    // 위의 `get_task` → `is_terminal()` 검사와 이 쓰기 사이에 실행 중인
+    // `fleet serve`가 같은 작업을 완료·실패로 확정할 수 있다. CLI는 스케줄러와
+    // 완전히 별개의 프로세스라 그 경합을 볼 방법이 없으므로, 같은 조건을
+    // `WHERE`에 다시 걸어 확정된 종료 상태를 덮어쓰지 않게 한다.
+    match store
+        .compare_and_set_task_status(
+            id,
+            &[TaskPhase::Pending, TaskPhase::Dispatched],
+            &new_status,
+        )
         .await
-        .context("failed to update task status")?;
-    println!("task {id} cancelled (reason: {reason})");
-    Ok(())
+        .context("failed to update task status")?
+    {
+        TransitionOutcome::Applied => {
+            println!("task {id} cancelled (reason: {reason})");
+            Ok(())
+        }
+        TransitionOutcome::Rejected { current } => Err(anyhow!(
+            "task {id} reached a terminal state ({}) while the cancel was in flight",
+            current.as_str()
+        )),
+    }
 }
 
 /// `tasks submit <prompt>` 명령.

@@ -27,8 +27,8 @@ use fleet_core::{
     FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus,
     IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter,
     ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPriority, TaskStatus, TaskStatusFilter, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter, TransitionOutcome,
+    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -258,6 +258,81 @@ impl Store for PgStore {
             return Err(StoreError::NotFound);
         }
         Ok(())
+    }
+
+    async fn compare_and_set_task_status(
+        &self,
+        id: TaskId,
+        expected: &[TaskPhase],
+        new: &TaskStatus,
+    ) -> Result<TransitionOutcome, StoreError> {
+        // 빈 기대 집합은 어떤 현재 상태와도 일치할 수 없다. SQL로 보내면
+        // `= ANY('{}')`가 항상 거짓이라 0행이 되고, 아래 재조회가 이를
+        // `Rejected`로 보고하므로 동작 자체는 옳다. 다만 왕복 두 번을 쓸
+        // 이유가 없고, 호출자의 버그(예: `allowed_predecessors(Pending)`을
+        // 그대로 넘김)를 조용히 삼키는 대신 여기서 바로 드러내는 편이 낫다.
+        debug_assert!(
+            !expected.is_empty(),
+            "compare_and_set_task_status: expected가 비어 있으면 어떤 전이도 성립하지 않는다"
+        );
+
+        let status_json = serde_json::to_value(new)?;
+        let is_dispatching = matches!(new, TaskStatus::Dispatched { .. });
+        // `status_phase`는 001_init.sql의 생성 칼럼(`status->>'phase'`)이라 TEXT다.
+        // 여기 문자열은 `TaskStatus`의 serde 표현과 반드시 일치해야 하며,
+        // 그 계약은 fleet-core의 `phase_str_matches_serialized_status`가 지킨다.
+        let expected_phases: Vec<&str> = expected.iter().map(|p| p.as_str()).collect();
+
+        // `dispatched_at = NOW()`는 조건 없는 버전과 동일하게 Dispatched 전이에만
+        // 붙인다 — 두 분기를 하나로 합치면 이 타임스탬프가 사라지거나 종료
+        // 전이에서도 갱신된다.
+        let result = if is_dispatching {
+            sqlx::query(
+                "UPDATE tasks SET status = $2, dispatched_at = NOW() \
+                 WHERE id = $1 AND status_phase = ANY($3)",
+            )
+            .bind(id.as_uuid())
+            .bind(status_json)
+            .bind(&expected_phases)
+            .execute(&self.pool)
+            .await?
+        } else {
+            sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1 AND status_phase = ANY($3)")
+                .bind(id.as_uuid())
+                .bind(status_json)
+                .bind(&expected_phases)
+                .execute(&self.pool)
+                .await?
+        };
+
+        if result.rows_affected() > 0 {
+            return Ok(TransitionOutcome::Applied);
+        }
+
+        // 0행에는 두 가지 원인이 있다: 행이 없거나(NotFound), 있는데 위상이
+        // 달랐거나(Rejected). UPDATE만으로는 구분할 수 없어 한 번 더 읽는다.
+        //
+        // 이 SELECT는 위 UPDATE와 같은 트랜잭션이 아니다. 그 사이에 또 다른
+        // writer가 상태를 바꾸면 여기서 읽는 위상은 UPDATE가 거절당한 시점의
+        // 위상이 아닐 수 있다. `current`를 로깅·에러 메시지 전용으로 규정하고
+        // 제어 흐름에 쓰지 않기로 한 이유이며(`TransitionOutcome` 주석 참조),
+        // 그 대가로 트랜잭션 비용을 치르지 않는다. 두 경우 모두 "이 호출은
+        // 아무것도 쓰지 않았다"는 결론은 동일하게 참이다.
+        let row = sqlx::query("SELECT status FROM tasks WHERE id = $1")
+            .bind(id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            None => Err(StoreError::NotFound),
+            Some(row) => {
+                let status_json: serde_json::Value = row.try_get("status")?;
+                let current: TaskStatus = serde_json::from_value(status_json)?;
+                Ok(TransitionOutcome::Rejected {
+                    current: current.phase(),
+                })
+            }
+        }
     }
 
     async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError> {

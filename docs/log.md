@@ -1409,3 +1409,48 @@ last_verified: "2026-08-15"
   - **DB 게이트(`DATABASE_URL` 주입)는 다시 돌리지 않았다.** 이번 변경에 SQL 쿼리나 DB 트레이트 수정이 없어 `agent.md` §3.2의 발동 조건에 해당하지 않는다. 해당 경로의 최신 증적은 이 파일의 "2026-08-25 — `#58` 후속: Project 경계 술어 추출, 그리고 `main`의 CI fmt 게이트 실패 발견"과 "2026-08-25 — `main`의 CI fmt 게이트 복구, 그리고 게이트 목록을 CI와 일치시킴" 두 항목이다.
   - **벤더 SDK의 테스트는 이제 `cargo test --workspace`·`cargo llvm-cov --workspace`가 채점하지 않는다.** 우리가 그 코드를 유지보수하지 않으므로 의도된 것이지만, upstream을 당겨올 때 회귀를 우리 스위트가 잡아 주지 않는다는 뜻이기도 하다. 이 SDK를 유지보수하는 fork로 바꾸는 순간 경계를 `-test` 하나로 좁혀야 한다(그 신호를 `Cargo.toml` 주석에 적어 뒀다).
   - **CI 러너에서 1.98.0이 실제로 설치되는 것은 아직 관측하지 못했다.** 액션이 `toolchain` 입력을 존중한다는 것은 `action.yml`에서 확인했지만(위), 실제 워크플로 실행 로그의 `rustc --version`은 다음 CI 실행에서만 보인다. 로컬에서 직접 확인한 것은 `rust-toolchain.toml` 쪽 효과뿐이다.
+
+## 2026-08-25 — `#62` 1단계 — 상태 전이 compare-and-set: 늦은 완료와 취소 경쟁을 스토어에서 닫음
+
+- 유형: `feature` + `correctness`
+- **무엇을 했나**: 작업 상태를 옮기는 모든 경로가 `update_task_status`로 **무조건 덮어쓰기**를 하고 있었다. 그래서 reconciler가 orphan을 `Failed`로 확정한 뒤 워커의 늦은 `Completed`가 도착하면 그대로 덮어썼고, 두 개의 취소가 동시에 들어오면 둘 다 성공했다. `reconcile.rs`의 모듈 주석 자신이 "이 스윕도 이론적 경쟁 상태를 완전히 막지는 못한다 — `update_task_status`가 현재 상태를 조건으로 거는 낙관적 잠금을 하지 않기 때문"이라고 적어 두고 있었다. 그 문장을 참으로 만들던 원인을 제거했다.
+- **설계**: `Store::compare_and_set_task_status(id, expected: &[TaskPhase], new)`를 추가하고, 결과를 `TransitionOutcome{Applied, Rejected{current}}`로 돌려준다.
+  - **거절을 `Err`이 아니라 `Ok`로 표현한다.** 다른 writer가 먼저 상태를 옮긴 것은 장애가 아니라 **정상적인 관측 결과**이고, 호출자는 대개 자기 쓰기를 포기하는 것이 옳다. `Err`은 DB 장애나 역직렬화 실패처럼 관측 자체가 불가능했던 경우로 남긴다. `Err`로 표현했다면 모든 호출 지점이 "진짜 실패"와 "정상적으로 진 경쟁"을 문자열이나 variant 매칭으로 다시 갈라야 했다.
+  - **트레이트에 기본 구현을 두지 않았다.** 기본 구현을 주면 새 backend가 CAS를 조용히 잊고도 컴파일된다 — 이 저장소의 mock들이 `update_task_status`에 이미 `unimplemented!()`를 쓰는 것과 같은 이유다. 그 대가로 `Store` 구현 6곳(PgStore, MemStore, mock 4개)을 전부 손대야 했고, 실제로 그게 census를 강제해 아래 "놓칠 뻔한 것"을 잡아냈다.
+  - **마이그레이션이 없다.** PgStore는 `WHERE id = $1 AND status_phase = ANY($3)` 단일 statement로 구현하는데, `status_phase`는 `001_init.sql:43`이 이미 만들어 둔 생성 칼럼(`status->>'phase'` STORED)이고 `002_indexes.sql`이 인덱스까지 걸어 두었다. 낙관적 잠금에 필요한 것이 이미 스키마에 있었고 아무도 쓰지 않고 있었다. MemStore는 단일 lock 안에서 read-compare-write이라 원자적이다.
+  - `TaskPhase` 어휘는 `fec2371`에서 **소비자 0인 채로** 커밋돼 있었다. 이번이 그 첫 소비자다.
+- **`expected`를 호출 지점별로 좁게 넘긴다** — 이게 이 변경에서 가장 틀리기 쉬웠던 지점이다. `TaskPhase::allowed_predecessors(Failed)`는 `[Pending, Dispatched]`를 준다. `mark_failed`에 그 합집합을 하드코딩하면 컴파일도 되고 테스트도 통과하지만, orphan sweep이 방금 `Pending → Dispatched`로 옮겨간 작업을 `Failed`로 죽일 수 있다 — **닫으려던 경쟁이 그대로 남는다.** 그래서 `mark_failed`는 `expected`를 인자로 받고, 호출 지점이 각자 자기가 실제로 뒤따를 수 있는 상태만 선언한다: 선택 실패·breaker open·dead-letter는 `[Pending]`, transport 실패·orphan·offline은 `[Dispatched]`. `allowed_predecessors`의 doc comment가 이미 이 함정을 경고하고 있었다.
+- **전이 결과에 무엇을 종속시킬지 두 방향으로 갈렸다** (grep으로 결정했고, 가정으로 결정하지 않았다):
+
+  | 부수효과 | 게이트 | 이유 |
+  |---|---|---|
+  | `append_event` | `Applied`일 때만 | 이벤트 로그는 스토어 사실의 파생물이다. 거절된 전이가 `task_completed`를 남기면 로그가 **일어나지 않은 일**을 주장한다 |
+  | `dec_running()` | 결과와 무관하게 | 이 게이지는 스토어 상태가 아니라 **디스패처 자신의 `inc_running()`**과 짝지어져 있다. `inc_running()`은 워크스페이스 전체에서 정확히 1곳(`dispatcher.rs:530`, dispatch 경로)뿐이고 reconciler는 게이지를 건드리지 않는다. `Applied`일 때만 감소시키면 늦은 완료가 거절될 때마다 증가분이 영구히 남는다 |
+
+- **dispatch 경로는 transport로 보내기 _전에_ 중단한다.** CAS가 거절되면 `DispatchError::NotPending`으로 즉시 반환한다 — 상태를 차지하지 못한 채 dispatch하면 아무도 소유하지 않는 실행이 생긴다. 이 에러는 재시도 대상이 아니다(작업은 이미 누군가의 소유다). 부수적으로 `dispatch_ready_tasks`에 있던 실제 이중 dispatch 창이 닫혔다 — 두 스윕이 같은 pending 작업을 집어도 하나만 `Pending`을 차지한다.
+- **`Dispatcher::cancel`의 TOCTOU를 닫았다.** 기존 코드는 `get_task` → `is_terminal()` 검사 → 쓰기 3단계였다. 이제 `[Pending, Dispatched]` CAS 한 번이고, 거절은 곧 `CancelError::AlreadyTerminal`이다. `fleet tasks cancel`(CLI)도 같은 형태로 바꿨다.
+- **중복 매핑 하나를 제거했다**: `phase_label`이 `TaskStatus` → 문자열 5-arm match를 손으로 다시 적고 있었다. CAS의 SQL 조건절이 이 문자열 집합에 의존하게 됐으므로 사본이 늘수록 조용히 어긋날 자리가 늘어난다. `status.phase().as_str()` 위임으로 바꿨다.
+- **놓칠 뻔한 것**: `Store` 구현이 5개인 줄 알았는데 6개였다. `crates/fleet-scheduler/src/sync.rs:148`이 `impl fleet_store::Store for NoopStore`라고 **경로 한정 이름**으로 적혀 있어 `grep "impl Store for"`에 걸리지 않았고, `#[cfg(test)]` 안이라 평범한 `cargo check`도 잡지 못했다. `--all-targets` clippy 게이트가 잡아 줬다. 반대 방향의 오판도 한 번 있었다 — `project_rules.rs:261`을 프로덕션 writer로 세었는데 `#[cfg(test)] mod tests`(137행부터) 안이었다. 전환했다면 아무도 도달할 수 없는 `Rejected` 분기를 만들었을 것이다.
+- **테스트**: `crates/fleet-store/tests/task_cas.rs` 9건, `both_backends!`로 MemStore와 실제 PostgreSQL 양쪽에서 같은 단언을 돌린다. 정본 [실행 일관성](architecture/tasks/execution-consistency.md)의 검증 게이트 대응은 `a_late_completion_cannot_overwrite_a_reconciled_failure`(게이트 1), `only_one_of_two_racing_cancels_applies`·`a_completion_cannot_land_on_a_cancelled_task`(게이트 2). 거절 케이스는 반환값만이 아니라 **저장된 상태가 바뀌지 않았음**까지 확인한다 — 그러지 않으면 "`Rejected`를 반환하면서 실제로는 쓴" 구현이 통과한다. `cas_reports_not_found_for_an_unknown_task`는 0행의 두 원인(행 없음 / 위상 불일치)이 갈리는 것을 고정한다.
+- **검증 게이트**: `rustc 1.98.0 (88d9e12ae 2026-08-18)`로 `rust-toolchain.toml`의 고정과 일치. `RUSTFLAGS="-D warnings"` 아래에서 `cargo fmt --all -- --check`, `cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings`, `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` 모두 종료 코드 0. `cargo test --workspace --all-features`는 66개 스위트 991건 통과(`FAILED`·`panicked`·`error` 라인 0, exit 0). DB 게이트는 새로 만든 빈 DB에 `DATABASE_URL`을 주입해 `--test-threads=1`로 직렬 실행 — `task_cas` 9건(0.19s, PgStore가 실제로 돈 신호. `DATABASE_URL` 없이는 MemStore만 돌아 0.00s가 나온다), `fleet-scheduler` 98건 통과.
+
+- **검증 한계와 이번에 밟은 함정**:
+
+  | 무엇 | 내용 |
+  |---|---|
+  | `cargo test --workspace`에 `DATABASE_URL`을 물리면 안 된다 | 처음 워크스페이스 실행에서 `fleet-store/tests/audit_integration.rs` 7건이 전부 깨졌다. #62 회귀가 **아니다** — 그 파일과 `fleet-store/src/audit.rs`는 이번 변경과 diff가 0이고, `DATABASE_URL` 없이는 7건 통과, 직렬 실행에서도 7건 통과한다. 원인은 이 스위트가 격리(truncate)를 하지 않고 깨끗한 DB를 가정하는데 `cargo test`가 테스트 함수를 **병렬**로 돌린다는 것 — 같은 DB를 물린 채 재현하면 `users_username_key` 중복과 잔존 감사 행(`left: 14, right: 1`)으로 똑같이 깨진다. DB 게이트 크레이트를 `--test-threads=1`로 직렬 실행하라는 기존 방법이 정확히 이 이유 때문이며, 워크스페이스 실행은 `DATABASE_URL`을 **빼고** 돌려야 한다 |
+  | 게이트 출력은 파일로 받고 그 다음에 필터한다 | 위 실패를 처음 관측했을 때 백그라운드 파이프 안에서 `grep \| sort \| uniq -c`를 걸어 둔 탓에 패닉 메시지가 사라지고 개수만 남아 있었다. 원인 규명이 불가능해 원본 출력을 파일로 다시 받아야 했다 |
+  | 간헐 실패 2종 | `fleet-worker`의 `disk_cache_get_or_schedule_refresh_populates_background`와 `fleet-mcp`의 `cross_client` 타이밍 flake는 이번 clean 실행에서 나타나지 않았다. "이번에 안 났다"가 "없다"는 뜻은 아니다 — 둘 다 기존 flake이고 해당 크레이트는 이번 변경과 diff가 0이다 |
+  | CAS가 **동시성 부하 아래**에서 검증되지는 않았다 | `task_cas.rs`는 전이를 순차로 겹쳐서 경쟁의 **결과**를 고정한다(늦은 완료가 거부되는지, 두 취소 중 하나만 적용되는지). 실제 다중 writer를 동시에 때리는 부하 테스트는 없다. 단일 `UPDATE ... WHERE status_phase = ANY(...)` statement의 원자성은 Postgres가 보장하는 것이지 이 테스트가 증명하는 것이 아니다 |
+
+- **미룬 것과 이유**:
+
+  | 미룬 것 | 왜 |
+  |---|---|
+  | `TaskAttempt` 엔티티, effect ledger, external idempotency key (정본 게이트 3·6·7·9·10) | 이번 변경은 **Task의 상태 칸 하나**에 대한 잠금이다. Attempt는 별도 테이블·수명주기·재시도 계약을 요구하며 CAS 위에 얹히는 층이지 그 일부가 아니다. 로드맵 `#62`의 2단계 이후로 남긴다 |
+  | 이전 control epoch 이벤트 거부 (게이트 4) | 전이 시점에 epoch를 읽을 경로가 없다. `#63` 2단계가 `FleetState.lease`를 배선했지만 그건 **호출 진입점**에서의 fence이고, 스토어 statement에 epoch를 조건으로 함께 거는 것은 `control_plane_lease`와 `tasks`를 한 트랜잭션으로 묶는 별개 설계다 |
+  | 비가역 tool effect의 자동 재실행 금지 (게이트 5) | effect 분류 자체가 아직 코드에 없다. 분류 없이 "비가역이면 재실행 금지" 분기를 넣으면 항상 거짓인 죽은 조건이 된다 |
+  | `Rejected{current}`를 UPDATE와 한 트랜잭션으로 읽기 | PgStore는 0행을 받은 뒤 **별도 SELECT**로 현재 위상을 읽으므로 그 사이에 또 다른 writer가 상태를 바꿀 수 있다. 그래서 `current`를 타입 doc에서 **로깅·에러 메시지 전용**으로 규정하고 제어 흐름의 근거로 삼지 않기로 했다. 정확성이 필요한 판단은 전부 `Applied`/`Rejected` 이분법만 쓴다. 그 대가로 모든 전이에 트랜잭션 비용을 치르지 않는다 |
+  | `RUNNING_GAUGE` underflow | `Dispatcher::cancel`은 `Pending` 작업에 대해서도 `dec_running()`을 호출하는데, `inc_running()`은 dispatch 시점에만 실행되므로 0에서 `fetch_sub(1)`이 `usize::MAX`로 wrap한다. **이번 변경이 만든 것이 아니다**(기존 `cancel`도 무조건 감소시켰다). 고치지 않은 이유는 따로 있다 — **`running_count()`의 소비자가 워크스페이스에 0개**다. 이 게이지는 쓰기 전용이고 아무도 읽지 않아 결함이 관측되지 않는다. 밴드에이드(`checked_sub`)로 덮으면 "고쳤다"는 인상만 남고 회계는 여전히 틀린다. 정확한 회계에는 `Applied{previous: TaskPhase}`가 필요하고, 그건 이 게이지를 실제로 메트릭에 배선할 때 같이 결정할 일이다. 별도 항목으로 분리한다 |
+
+- **문서**: `reconcile.rs`의 모듈 주석에서 "낙관적 잠금을 하지 않기 때문에 경쟁을 막지 못한다"는 서술을 걷어내고, 5분 유예가 이제 **정합성의 근거가 아니라 되돌릴 수 있는 `Offline` 상태에서 성급하게 실패 처리하지 않기 위한 정책**으로만 남는다고 고쳐 적었다. 동시에 CAS가 닫지 **않는** 것도 명시했다 — 워커에서 실제로 완료된 작업이 여기서 `Failed`로 확정되면 그 결과물은 여전히 버려진다. 상태는 일관되지만 일은 낭비되며, 그것을 줄이는 것은 유예 시간 조정의 몫이다. 같은 파일의 dispatch 결과 `match`에 있던 catch-all 주석도 고쳤다 — "dispatch_existing이 이미 Failed로 마킹했으므로 로깅만 한다"는 서술은 새로 생긴 `DispatchError::NotPending`에 대해 **거짓**이다. NotPending은 상태를 전혀 건들지 않은 경우이며, 여기서 실패 마킹을 하면 방금 다른 writer가 정당하게 가져간 작업을 죽여 이번 변경이 닫으려던 것과 같은 종류의 경쟁을 **새로** 만든다. 코드는 이미 로깅만 하고 있었으므로 동작 변경은 없고, 주석이 그 이유를 잘못 말하고 있던 것을 바로잡았다.

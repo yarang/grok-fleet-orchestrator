@@ -15,7 +15,8 @@ use chrono::Utc;
 use fleet_api::{build_app, AppState};
 use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
-    TaskOutput, TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    TaskOutput, TaskPhase, TaskStatus, TransitionOutcome, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerId,
 };
 use fleet_store::{Store, StoreError, WorkerOperationalCredential};
 use serde_json::json;
@@ -643,6 +644,14 @@ impl Store for BsStore {
         unimplemented!()
     }
     async fn update_task_status(&self, _: TaskId, _: &TaskStatus) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn compare_and_set_task_status(
+        &self,
+        _: TaskId,
+        _: &[TaskPhase],
+        _: &TaskStatus,
+    ) -> Result<TransitionOutcome, StoreError> {
         unimplemented!()
     }
     async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {

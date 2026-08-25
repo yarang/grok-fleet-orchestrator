@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use fleet_core::{
     BootstrapToken, EventEntry, FleetEvent, LoginAttempt, Task, TaskFilter, TaskId, TaskOutput,
-    TaskStatus, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    TaskPhase, TaskStatus, TransitionOutcome, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use fleet_dashboard::{build_dashboard_app, DashboardState};
 use fleet_store::{Store, StoreError};
@@ -154,6 +154,14 @@ impl Store for AttemptStore {
         _id: TaskId,
         _status: &TaskStatus,
     ) -> Result<(), StoreError> {
+        unimplemented!()
+    }
+    async fn compare_and_set_task_status(
+        &self,
+        _id: TaskId,
+        _expected: &[TaskPhase],
+        _new: &TaskStatus,
+    ) -> Result<TransitionOutcome, StoreError> {
         unimplemented!()
     }
     async fn list_tasks(&self, _filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {

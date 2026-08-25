@@ -32,8 +32,8 @@ use fleet_core::{
     FleetEvent, Host, HostEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus,
     IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId,
     ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskStatus, TaskStatusFilter, User, UserId, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId,
+    TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOutcome, User, UserId,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -171,6 +171,38 @@ impl Store for MemStore {
             task.dispatched_at = Some(Utc::now());
         }
         Ok(())
+    }
+
+    async fn compare_and_set_task_status(
+        &self,
+        id: TaskId,
+        expected: &[TaskPhase],
+        new: &TaskStatus,
+    ) -> Result<TransitionOutcome, StoreError> {
+        debug_assert!(
+            !expected.is_empty(),
+            "compare_and_set_task_status: expected가 비어 있으면 어떤 전이도 성립하지 않는다"
+        );
+
+        // Postgres 구현과 달리 검사와 쓰기가 같은 락 안에서 끝나므로,
+        // `Rejected`가 보고하는 `current`는 거절 시점의 값과 정확히 일치한다.
+        // 그럼에도 호출자는 이 값을 제어 흐름에 쓰지 않아야 한다 — 두 백엔드가
+        // 다른 보장을 주면 MemStore에서만 통과하는 코드가 생긴다.
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.get_mut(&id) else {
+            return Err(StoreError::NotFound);
+        };
+
+        let current = task.status.phase();
+        if !expected.contains(&current) {
+            return Ok(TransitionOutcome::Rejected { current });
+        }
+
+        task.status = new.clone();
+        if matches!(new, TaskStatus::Dispatched { .. }) {
+            task.dispatched_at = Some(Utc::now());
+        }
+        Ok(TransitionOutcome::Applied)
     }
 
     async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError> {

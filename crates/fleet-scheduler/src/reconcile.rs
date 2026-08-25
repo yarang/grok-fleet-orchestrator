@@ -44,11 +44,18 @@
 //! 전이한다. **의도적으로 45초(HealthChecker의 Offline 판정 기준)보다 훨씬 긴
 //! 유예를 둔다** — `Offline`은 (row 삭제와 달리) 되돌릴 수 있는 상태라, 워커가
 //! 곧 재연결될 수 있는 상황에서 성급하게 작업을 실패 처리하고 싶지 않기 때문이다.
-//! 이 스윕도 워커가 실제로는 재연결에 성공했는데 뒤늦게 `WorkerEvent::Completed`가
-//! 도착해 이미 `Failed`로 마킹된 작업의 상태를 다시 덮어쓰는 이론적 경쟁 상태를
-//! 완전히 막지는 못한다 — `update_task_status`가 현재 상태를 조건으로 거는
-//! 낙관적 잠금을 하지 않기 때문. 다만 5분이라는 유예 자체가 이 경쟁이 실제로
-//! 발생할 창을 매우 좁게 만든다.
+//! 워커가 실제로는 재연결에 성공했는데 뒤늦게 `WorkerEvent::Completed`가 도착해
+//! 이미 `Failed`로 마킹된 작업을 다시 덮어쓰는 경쟁 상태는, 유예 시간이 아니라
+//! [`Store::compare_and_set_task_status`](fleet_store::Store::compare_and_set_task_status)가
+//! 막는다(로드맵 `#62`). 이 스윕은 `[Dispatched]`를 기대 위상으로 넘기고, 늦게
+//! 도착한 완료 이벤트도 마찬가지로 `[Dispatched]`를 기대하므로, 둘 중 먼저
+//! 도착한 쪽만 상태를 옮기고 나머지는 거절된다. 5분의 유예는 이제 정합성의
+//! 근거가 아니라 **되돌릴 수 있는 `Offline` 상태에서 성급하게 실패 처리하지
+//! 않기 위한 정책**으로만 남는다.
+//!
+//! 다만 CAS가 닫는 것은 "확정된 상태를 덮어쓰는 것"까지다. 워커에서 실제로
+//! 완료된 작업이 여기서 `Failed`로 확정됐다면 그 결과물은 여전히 버려진다 —
+//! 상태는 일관되지만 일은 낭비된다. 이를 줄이는 것은 유예 시간 조정의 몫이다.
 //!
 //! ## 설계 노트
 //!
@@ -82,7 +89,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use fleet_core::{
-    FailureKind, TaskFailure, TaskFilter, TaskStatus, TaskStatusFilter, WorkerStatus,
+    FailureKind, TaskFailure, TaskFilter, TaskPhase, TaskStatus, TaskStatusFilter, WorkerStatus,
 };
 
 use crate::dispatcher::{DispatchError, Dispatcher};
@@ -316,12 +323,20 @@ impl Reconciler {
                     worker_id: None,
                     attempts: retry_count,
                 };
-                self.dispatcher.mark_failed(task_id, failure).await;
-                summary.dead_lettered += 1;
-                warn!(
-                    %task_id, retry_count, ?kind,
-                    "reconcile: dispatch retries exhausted, dead-lettering task"
-                );
+                // 이 루프는 `Pending` 작업만 돈다. `[Pending]`으로 좁혀야
+                // 스캔 도중 다른 인스턴스가 dispatch에 성공한 작업을
+                // dead-letter로 죽이지 않는다.
+                if self
+                    .dispatcher
+                    .mark_failed(task_id, &[TaskPhase::Pending], failure)
+                    .await
+                {
+                    summary.dead_lettered += 1;
+                    warn!(
+                        %task_id, retry_count, ?kind,
+                        "reconcile: dispatch retries exhausted, dead-lettering task"
+                    );
+                }
                 continue;
             }
 
@@ -355,8 +370,11 @@ impl Reconciler {
                     warn!(%task_id, "reconcile: lost the control plane lease mid-sweep, leaving pending");
                 }
                 Err(e) => {
-                    // 진짜 dispatch 에러(transport 실패 등) — dispatch_existing이
-                    // 이미 task를 Failed로 마킹했으므로 여기서는 로깅만 한다.
+                    // 두 가지가 여기로 모인다. (a) transport 실패 등 진짜 dispatch
+                    // 에러는 dispatch_existing이 이미 Failed로 마킹했다. (b) NotPending은
+                    // dispatch 직전 compare-and-set이 거절된 경우로, 상태를 전혀
+                    // 건들지 않았다 — 다른 writer가 이미 그 작업을 가져갔다는 뜻이므로
+                    // 여기서 실패로 마킹하면 남의 소유물을 죽이게 된다. 둘 다 로깅만 한다.
                     warn!(%task_id, error = %e, "reconcile: dispatch attempt failed");
                 }
             }
@@ -448,12 +466,20 @@ impl Reconciler {
                         worker_id: Some(worker_id),
                         attempts: 0,
                     };
-                    self.dispatcher.mark_failed(task_id, failure).await;
-                    summary.orphaned_failed += 1;
-                    warn!(
-                        %task_id, %worker_id,
-                        "reconciliation: dispatched task's worker no longer exists, marked failed"
-                    );
+                    // `[Dispatched]`로 좁힌다. 넓은 기본값을 쓰면 방금
+                    // `Pending` → `Dispatched`로 넘어간 작업까지 orphan으로
+                    // 오인한다.
+                    if self
+                        .dispatcher
+                        .mark_failed(task_id, &[TaskPhase::Dispatched], failure)
+                        .await
+                    {
+                        summary.orphaned_failed += 1;
+                        warn!(
+                            %task_id, %worker_id,
+                            "reconciliation: dispatched task's worker no longer exists, marked failed"
+                        );
+                    }
                 }
                 Some(w) if w.status == WorkerStatus::Offline => {
                     // (b) 워커는 존재하지만 Offline — 되돌릴 수 있는 상태이므로
@@ -482,12 +508,18 @@ impl Reconciler {
                         worker_id: Some(worker_id),
                         attempts: 0,
                     };
-                    self.dispatcher.mark_failed(task_id, failure).await;
-                    summary.offline_worker_failed += 1;
-                    warn!(
-                        %task_id, %worker_id, offline_for = %offline_for_desc,
-                        "reconciliation: dispatched task's worker offline too long, marked failed"
-                    );
+                    // (b)와 같은 이유로 `[Dispatched]`.
+                    if self
+                        .dispatcher
+                        .mark_failed(task_id, &[TaskPhase::Dispatched], failure)
+                        .await
+                    {
+                        summary.offline_worker_failed += 1;
+                        warn!(
+                            %task_id, %worker_id, offline_for = %offline_for_desc,
+                            "reconciliation: dispatched task's worker offline too long, marked failed"
+                        );
+                    }
                 }
                 Some(_) => {
                     // 워커는 존재하고 Offline이 아님(Online/Degraded/CircuitOpen) —

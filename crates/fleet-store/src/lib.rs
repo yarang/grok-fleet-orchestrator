@@ -43,8 +43,8 @@ use fleet_core::{
     AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry, FleetEvent, Issue,
     IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
     PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
-    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskStatus, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId,
+    Session, SessionId, Task, TaskFilter, TaskId, TaskOutput, TaskPhase, TaskStatus,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -106,7 +106,33 @@ pub trait Store: Send + Sync {
     async fn get_task(&self, id: TaskId) -> Result<Option<Task>, StoreError>;
 
     /// 작업 상태 업데이트. `status_phase` 생성 칼럼도 자동 갱신.
+    ///
+    /// **무조건 덮어쓴다.** 동시에 다른 writer가 같은 작업을 옮기고 있을 수
+    /// 있는 경로에서는 [`Store::compare_and_set_task_status`]를 쓴다.
     async fn update_task_status(&self, id: TaskId, status: &TaskStatus) -> Result<(), StoreError>;
+
+    /// 현재 상태가 `expected` 중 하나일 때만 `new`로 전이한다 (낙관적 잠금).
+    ///
+    /// 여러 writer가 같은 작업의 상태를 옮기는 경로 — 워커 이벤트, reconciler의
+    /// 스윕, 사용자 취소 — 는 서로를 알지 못한 채 동시에 도착한다. 조건 없는
+    /// `update_task_status`는 마지막에 도착한 쓰기가 이기므로, 이미 `Failed`로
+    /// 확정된 작업에 늦은 `Completed`가 덮어써지는 일이 실제로 가능하다.
+    /// 이 메서드는 `WHERE` 절에 현재 위상을 걸어 그 창을 닫는다.
+    ///
+    /// `expected`는 **호출 지점이 실제로 뒤따를 수 있는 상태만** 넘긴다.
+    /// [`TaskPhase::allowed_predecessors`]의 넓은 기본값을 그대로 쓰면
+    /// reconciler가 방금 `Pending` → `Dispatched`로 넘어간 작업을 orphan으로
+    /// 오인해 죽이는 경합이 그대로 남는다 — 그 함수의 주석에 적힌 그대로다.
+    ///
+    /// 전이가 거절된 것은 에러가 아니라 관측 결과이므로
+    /// [`TransitionOutcome::Rejected`]로 돌려준다. `Err`은 작업이 아예 없거나
+    /// (`StoreError::NotFound`) DB 접근 자체가 실패한 경우다.
+    async fn compare_and_set_task_status(
+        &self,
+        id: TaskId,
+        expected: &[TaskPhase],
+        new: &TaskStatus,
+    ) -> Result<TransitionOutcome, StoreError>;
 
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError>;

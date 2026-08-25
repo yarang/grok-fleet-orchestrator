@@ -11,7 +11,8 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use fleet_core::{
-    CircuitState, FailureKind, FleetEvent, Task, TaskFailure, TaskId, TaskStatus, WorkerId,
+    CircuitState, FailureKind, FleetEvent, Task, TaskFailure, TaskId, TaskPhase, TaskStatus,
+    TransitionOutcome, WorkerId,
 };
 use fleet_transport::{DispatchRequest, TransportError, WorkerEvent};
 use tracing::{info, warn};
@@ -152,20 +153,49 @@ impl Dispatcher {
                         .await;
                 }
 
-                self.state
-                    .store
-                    .update_task_status(task_id, &TaskStatus::Completed(result.clone()))
-                    .await
-                    .ok();
-
-                let _ = self
+                // 워커 이벤트는 dispatch된 작업에만 도착하므로 기대 위상은
+                // `Dispatched` 하나뿐이다. reconciler가 이 작업을 이미
+                // `Failed`로 확정한 뒤 워커가 뒤늦게 재연결해 완료를 보고하는
+                // 경합(reconcile.rs의 orphan/offline 스윕)이 여기서 거절된다.
+                let outcome = self
                     .state
                     .store
-                    .append_event(&FleetEvent::task_completed(task_id, worker_id, result))
+                    .compare_and_set_task_status(
+                        task_id,
+                        &[TaskPhase::Dispatched],
+                        &TaskStatus::Completed(result.clone()),
+                    )
                     .await;
 
+                match outcome {
+                    Ok(TransitionOutcome::Applied) => {
+                        let _ = self
+                            .state
+                            .store
+                            .append_event(&FleetEvent::task_completed(task_id, worker_id, result))
+                            .await;
+                        info!(%task_id, %worker_id, "task completed");
+                    }
+                    Ok(TransitionOutcome::Rejected { current }) => {
+                        // 이벤트를 발행하지 않는다 — 상태가 바뀌지 않았는데
+                        // `task_completed`를 남기면 이벤트 로그가 일어나지 않은
+                        // 일을 주장하게 된다.
+                        warn!(
+                            %task_id, %worker_id, current = current.as_str(),
+                            "late completion ignored — task already left the dispatched phase"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(%task_id, %worker_id, error = %e, "failed to record task completion");
+                    }
+                }
+
+                // `dec_running()`은 전이 결과와 무관하게 실행한다. 이 게이지는
+                // 스토어 상태가 아니라 **디스패처 자신의 `inc_running()`**과
+                // 짝지어져 있고, reconciler는 게이지를 전혀 건드리지 않는다.
+                // `Applied`일 때만 감소시키면 늦은 완료가 거절될 때마다
+                // 증가분이 영구히 남는다.
                 dec_running();
-                info!(%task_id, %worker_id, "task completed");
                 self.dispatch_ready_tasks().await;
             }
             WorkerEvent::Failed { task_id, error } => {
@@ -211,19 +241,12 @@ impl Dispatcher {
                     worker_id,
                     attempts: 1,
                 };
-                self.state
-                    .store
-                    .update_task_status(task_id, &TaskStatus::Failed(failure.clone()))
-                    .await
-                    .ok();
-                let _ = self
-                    .state
-                    .store
-                    .append_event(&FleetEvent::task_failed(task_id, failure))
+                // Completed 경로와 같은 이유로 `Dispatched`만 기대한다.
+                self.mark_failed(task_id, &[TaskPhase::Dispatched], failure)
                     .await;
 
+                // 전이 결과와 무관하게 감소 — 위 Completed 핸들러의 주석 참조.
                 dec_running();
-                warn!(%task_id, "task failed");
             }
             WorkerEvent::Output {
                 task_id,
@@ -392,7 +415,9 @@ impl Dispatcher {
                         worker_id: None,
                         attempts: 0,
                     };
-                    self.mark_failed(task_id, failure).await;
+                    // 워커를 배정하지 못했으므로 작업은 아직 Pending이다.
+                    self.mark_failed(task_id, &[TaskPhase::Pending], failure)
+                        .await;
                 }
                 return Err(DispatchError::NoWorker(e.to_string()));
             }
@@ -438,7 +463,9 @@ impl Dispatcher {
                     worker_id: Some(worker_id),
                     attempts: 0,
                 };
-                self.mark_failed(task_id, failure).await;
+                // 브레이커가 열려 dispatch를 시도조차 못 했으므로 Pending이다.
+                self.mark_failed(task_id, &[TaskPhase::Pending], failure)
+                    .await;
             }
             return Err(DispatchError::CircuitOpen(worker_id));
         }
@@ -448,11 +475,31 @@ impl Dispatcher {
             worker_id,
             started_at: Utc::now(),
         };
-        self.state
+        // 같은 작업을 두 인스턴스가 동시에 집어가는 경합, 그리고 dispatch 도중
+        // 도착한 취소를 여기서 거른다. 기대 위상은 `Pending` 하나뿐이다 —
+        // 이미 `Dispatched`인 작업을 다시 dispatch하면 워커 두 곳에서 같은
+        // 작업이 실행된다.
+        match self
+            .state
             .store
-            .update_task_status(task_id, &task.status)
+            .compare_and_set_task_status(task_id, &[TaskPhase::Pending], &task.status)
             .await
-            .map_err(|e| DispatchError::Store(e.to_string()))?;
+            .map_err(|e| DispatchError::Store(e.to_string()))?
+        {
+            TransitionOutcome::Applied => {}
+            TransitionOutcome::Rejected { current } => {
+                // transport로 보내기 **전에** 반환한다. 상태를 차지하지 못한
+                // 채로 dispatch하면 아무도 소유하지 않는 실행이 생긴다.
+                warn!(
+                    %task_id, %worker_id, current = current.as_str(),
+                    "dispatch aborted — task is no longer pending"
+                );
+                return Err(DispatchError::NotPending {
+                    task_id,
+                    current: current.as_str(),
+                });
+            }
+        }
 
         let _ = self
             .state
@@ -520,7 +567,10 @@ impl Dispatcher {
                 worker_id: Some(worker_id),
                 attempts: 1,
             };
-            self.mark_failed(task_id, failure).await;
+            // 5단계에서 이미 Dispatched로 옮긴 뒤 transport가 실패한 경로다.
+            self.mark_failed(task_id, &[TaskPhase::Dispatched], failure)
+                .await;
+            // 위 `inc_running()`과 짝을 이루므로 전이 결과와 무관하게 감소.
             dec_running();
             return Err(DispatchError::Transport(e.to_string()));
         }
@@ -566,21 +616,58 @@ impl Dispatcher {
         }
     }
 
-    /// 작업을 실패로 마킹하고 이벤트 발행.
+    /// 작업을 실패로 마킹하고 이벤트 발행. 전이가 실제로 적용됐으면 `true`.
     ///
     /// `pub(crate)` — `Reconciler`가 orphaned `Dispatched` 작업(담당 워커가
     /// 재등록으로 사라진 경우)을 Failed로 전이시킬 때도 재사용한다.
-    pub(crate) async fn mark_failed(&self, task_id: TaskId, failure: TaskFailure) {
-        let _ = self
+    ///
+    /// `expected`를 **호출자가 넘기는 이유**: 이 함수는 두 종류의 선행 상태에
+    /// 걸쳐 공유된다. 워커를 배정하지 못했거나 브레이커가 열려 dispatch가
+    /// 끝난 경로와 reconciler의 dead-letter는 작업이 아직 `Pending`이고,
+    /// transport dispatch 실패와 reconciler의 orphan/offline 스윕은 이미
+    /// `Dispatched`다. 여기서 `[Pending, Dispatched]`를 하드코딩하면
+    /// (즉 [`TaskPhase::allowed_predecessors`]의 기본값을 쓰면) orphan 스윕이
+    /// 방금 `Pending` → `Dispatched`로 넘어간 작업을 죽일 수 있다 — 닫으려던
+    /// 경합을 그대로 남기는 셈이다.
+    ///
+    /// 반환값은 호출자가 카운터를 정확히 세기 위한 것이다. 거절됐거나 스토어
+    /// 접근이 실패했으면 `false` — 두 경우 모두 "이 호출은 아무것도 쓰지
+    /// 않았다"가 참이므로 집계에서 동일하게 취급하는 것이 옳다. 구분은 로그에
+    /// 남긴다.
+    pub(crate) async fn mark_failed(
+        &self,
+        task_id: TaskId,
+        expected: &[TaskPhase],
+        failure: TaskFailure,
+    ) -> bool {
+        let outcome = self
             .state
             .store
-            .update_task_status(task_id, &TaskStatus::Failed(failure.clone()))
+            .compare_and_set_task_status(task_id, expected, &TaskStatus::Failed(failure.clone()))
             .await;
-        let _ = self
-            .state
-            .store
-            .append_event(&FleetEvent::task_failed(task_id, failure))
-            .await;
+
+        match outcome {
+            Ok(TransitionOutcome::Applied) => {
+                let _ = self
+                    .state
+                    .store
+                    .append_event(&FleetEvent::task_failed(task_id, failure))
+                    .await;
+                warn!(%task_id, "task failed");
+                true
+            }
+            Ok(TransitionOutcome::Rejected { current }) => {
+                warn!(
+                    %task_id, current = current.as_str(),
+                    "failure not recorded — task already left the expected phase"
+                );
+                false
+            }
+            Err(e) => {
+                warn!(%task_id, error = %e, "failed to record task failure");
+                false
+            }
+        }
     }
 
     /// 작업을 취소.
@@ -644,11 +731,33 @@ impl Dispatcher {
             cancelled_at: Utc::now(),
         };
 
-        self.state
+        // 위의 `get_task` → `is_terminal()` 검사와 이 쓰기 사이에는 창이 있다.
+        // 그 사이에 워커가 완료를 보고하거나 reconciler가 실패로 확정하면
+        // 조건 없는 쓰기는 확정된 종료 상태를 취소로 덮어썼다. 같은 조건을
+        // `WHERE`에 다시 걸어 그 창을 닫는다 — 위의 검사는 이제 빠른 경로이자
+        // 더 나은 에러 메시지를 위한 것이고, 정합성의 근거는 이 CAS다.
+        match self
+            .state
             .store
-            .update_task_status(task_id, &cancelled)
+            .compare_and_set_task_status(
+                task_id,
+                &[TaskPhase::Pending, TaskPhase::Dispatched],
+                &cancelled,
+            )
             .await
-            .map_err(|e| CancelError::Store(e.to_string()))?;
+            .map_err(|e| CancelError::Store(e.to_string()))?
+        {
+            TransitionOutcome::Applied => {}
+            TransitionOutcome::Rejected { current } => {
+                // 검사 이후에 종료 상태에 도달한 것이므로, 처음부터 종료
+                // 상태였을 때와 같은 에러를 돌려준다 — 호출자 입장에서 두
+                // 경우는 구분할 수 없고, 구분할 이유도 없다.
+                return Err(CancelError::AlreadyTerminal {
+                    task_id,
+                    phase: current.as_str(),
+                });
+            }
+        }
 
         let _ = self
             .state
@@ -746,13 +855,9 @@ impl Dispatcher {
 
 /// `TaskStatus`의 위상 라벨 (에러 메시지용).
 fn phase_label(status: &TaskStatus) -> &'static str {
-    match status {
-        TaskStatus::Pending => "pending",
-        TaskStatus::Dispatched { .. } => "dispatched",
-        TaskStatus::Completed(_) => "completed",
-        TaskStatus::Failed(_) => "failed",
-        TaskStatus::Cancelled { .. } => "cancelled",
-    }
+    // 같은 매핑을 손으로 두 번 적지 않는다 — CAS의 SQL 조건절이 이 문자열
+    // 집합에 의존하므로, 사본이 늘어날수록 조용히 어긋날 자리가 늘어난다.
+    status.phase().as_str()
 }
 
 /// 디스패치 에러.
@@ -769,6 +874,15 @@ pub enum DispatchError {
 
     #[error("transport error: {0}")]
     Transport(String),
+
+    /// dispatch 직전의 compare-and-set이 거절됐다 — 그 사이에 다른 writer가
+    /// 작업을 `Pending`에서 옮겼다는 뜻이다(취소, 또는 다른 인스턴스의 dispatch).
+    /// 재시도해서는 안 된다: 작업은 이미 누군가의 소유다.
+    #[error("task {task_id} is no longer pending (now '{current}') — dispatch aborted")]
+    NotPending {
+        task_id: TaskId,
+        current: &'static str,
+    },
 
     /// 이 인스턴스가 지금 control plane lease를 쥐고 있지 않다(로드맵
     /// `#63` 불변식 2). Cold Standby거나 갱신에 실패해 fenced됐다 —

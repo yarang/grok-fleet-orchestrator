@@ -162,6 +162,14 @@ mod tests {
         ) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }
+        async fn compare_and_set_task_status(
+            &self,
+            _: TaskId,
+            _: &[fleet_core::TaskPhase],
+            _: &fleet_core::TaskStatus,
+        ) -> Result<fleet_core::TransitionOutcome, fleet_store::StoreError> {
+            unimplemented!()
+        }
         async fn list_tasks(
             &self,
             _: &fleet_core::TaskFilter,
