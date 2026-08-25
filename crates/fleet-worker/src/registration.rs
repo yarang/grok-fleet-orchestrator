@@ -1029,8 +1029,16 @@ mod tests {
         // 첫 호출 — 캐시 비어 있음, 백그라운드 수집 트리거.
         assert!(cache.get_or_schedule_refresh().is_none());
 
-        // 백그라운드 spawn_blocking 완료 대기 (최대 10초).
-        for _ in 0..100 {
+        // 백그라운드 spawn_blocking 완료 대기.
+        //
+        // 예산이 30초인 이유: 이 프로세스에서 `Disks::new_with_refreshed_list()`의
+        // **첫** 호출은 macOS에서 실측 12.9초가 걸렸고(2회차 이후는 30ms), 이 테스트가
+        // 프로세스 안에서 그 첫 호출을 유발한다. 예산이 10초였을 때는 비용과 예산이
+        // 거의 같아 5회 중 2회가 실패하는 결정적 flake였다 — 간헐적 경합이 아니라
+        // 예산 < 비용 구조였다. `collect_disk_free_mb`의 doc comment도 "수 초"를
+        // 예고하고 있으므로, 예산은 그 예고보다 넉넉해야 한다. 값이 도착하면 즉시
+        // break하므로 빠른 환경에서 이 상수는 비용이 아니다.
+        for _ in 0..300 {
             if cache.get().is_some() {
                 break;
             }
