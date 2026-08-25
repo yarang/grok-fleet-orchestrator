@@ -87,9 +87,10 @@ impl McpAuthorization {
         // 아무 전이 권한도 없으면 도구 자체가 보이지 않고, 일부만 가진
         // 호출자는 자기가 가진 전이만 실제로 수행할 수 있다.
         if tool == crate::schema::TOOL_TRANSITION_ISSUE {
-            return IssueStatus::ALL
-                .iter()
-                .any(|s| self.capabilities.contains(&required_capability_for_transition(*s)));
+            return IssueStatus::ALL.iter().any(|s| {
+                self.capabilities
+                    .contains(&required_capability_for_transition(*s))
+            });
         }
         required_permission(tool).is_some_and(|required| self.capabilities.contains(&required))
     }

@@ -238,9 +238,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
     // 몇 건 실패했나" 같은 질문에 답할 수 없었다(#90 조사에서 발견). `kind`가
     // 하나도 관측되지 않아도 0을 명시적으로 찍어(FailureKind::ALL 순회) 없는
     // 라인과 0건인 라인을 구분한다.
-    out.push_str(
-        "# HELP fleet_tasks_failed_total Number of failed tasks by FailureKind.\n",
-    );
+    out.push_str("# HELP fleet_tasks_failed_total Number of failed tasks by FailureKind.\n");
     out.push_str("# TYPE fleet_tasks_failed_total gauge\n");
     for kind in FailureKind::ALL {
         push_gauge(

@@ -564,7 +564,9 @@ mod tests {
     async fn perform_join_sends_token_only_via_stdin_and_chmods_on_success() {
         let exec = MockExecutor::new();
         let ctx = ctx_with("w1", "https://orch.example.com", Some("tok"));
-        let out = perform_join(&exec, &ctx, "bt_supersecret", None).await.unwrap();
+        let out = perform_join(&exec, &ctx, "bt_supersecret", None)
+            .await
+            .unwrap();
         assert!(out.message.contains("joined"));
 
         let calls = exec.recorded_calls();

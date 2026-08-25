@@ -160,7 +160,10 @@ impl Step for InstallCloudflared {
         // 재시작은 best-effort로 남긴다 — service install 방식에 따라 이미
         // active 상태일 수 있다. 다만 실패는 더 이상 조용히 삼키지 않고
         // 로그로 관측 가능하게 한다 (로드맵 #79).
-        if let Err(e) = exec.exec_checked("sudo systemctl restart cloudflared").await {
+        if let Err(e) = exec
+            .exec_checked("sudo systemctl restart cloudflared")
+            .await
+        {
             tracing::warn!(error = %e, "cloudflared restart failed (best-effort, continuing)");
         }
 

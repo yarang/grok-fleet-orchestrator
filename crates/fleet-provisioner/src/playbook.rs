@@ -167,14 +167,15 @@ impl Playbook {
             tracing::info!(step = name, host = %host, "running step");
 
             // 멱등성 검사
-            let already_applied = step.is_applied(exec).await.map_err(|e| {
-                PlaybookError::StepFailed {
-                    step: name.into(),
-                    host: host.clone(),
-                    source: Box::new(e),
-                    completed_steps: reports.clone(),
-                }
-            })?;
+            let already_applied =
+                step.is_applied(exec)
+                    .await
+                    .map_err(|e| PlaybookError::StepFailed {
+                        step: name.into(),
+                        host: host.clone(),
+                        source: Box::new(e),
+                        completed_steps: reports.clone(),
+                    })?;
 
             if already_applied {
                 tracing::info!(step = name, "already applied, skipping");
@@ -367,7 +368,10 @@ mod tests {
             completed_steps[1].status,
             StepStatus::Applied { .. }
         ));
-        assert!(matches!(completed_steps[2].status, StepStatus::Failed { .. }));
+        assert!(matches!(
+            completed_steps[2].status,
+            StepStatus::Failed { .. }
+        ));
     }
 
     #[tokio::test]

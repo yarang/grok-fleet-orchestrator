@@ -2152,7 +2152,10 @@ impl Store for PgStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn get_control_lease(&self, cluster_id: &str) -> Result<Option<ControlLease>, StoreError> {
+    async fn get_control_lease(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<ControlLease>, StoreError> {
         let row = sqlx::query(
             "SELECT cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at \
                FROM control_plane_lease WHERE cluster_id = $1",
@@ -2182,9 +2185,9 @@ impl Store for PgStore {
         .execute(&self.pool)
         .await
         .map_err(|e| match e {
-            sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::Conflict(
-                format!("project name already exists: {}", db.message()),
-            ),
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!("project name already exists: {}", db.message()))
+            }
             other => StoreError::Sqlx(other),
         })?;
         Ok(())
@@ -2237,13 +2240,12 @@ impl Store for PgStore {
         id: ProjectId,
         status: ProjectStatus,
     ) -> Result<bool, StoreError> {
-        let result = sqlx::query(
-            "UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1",
-        )
-        .bind(id.0)
-        .bind(status.as_str())
-        .execute(&self.pool)
-        .await?;
+        let result =
+            sqlx::query("UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1")
+                .bind(id.0)
+                .bind(status.as_str())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -2371,7 +2373,10 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn list_issue_comments(&self, issue_id: IssueId) -> Result<Vec<IssueComment>, StoreError> {
+    async fn list_issue_comments(
+        &self,
+        issue_id: IssueId,
+    ) -> Result<Vec<IssueComment>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, issue_id, author, body, created_at FROM issue_comments \
               WHERE issue_id = $1 ORDER BY created_at",
@@ -2643,9 +2648,8 @@ fn row_to_issue(row: sqlx::postgres::PgRow) -> Result<Issue, StoreError> {
 fn row_to_project(row: sqlx::postgres::PgRow) -> Result<Project, StoreError> {
     let id: Uuid = row.try_get("id")?;
     let status_str: String = row.try_get("status")?;
-    let status = ProjectStatus::parse_str(&status_str).ok_or_else(|| {
-        StoreError::Decode(format!("unknown project status in DB: {status_str}"))
-    })?;
+    let status = ProjectStatus::parse_str(&status_str)
+        .ok_or_else(|| StoreError::Decode(format!("unknown project status in DB: {status_str}")))?;
     Ok(Project {
         id: ProjectId(id),
         name: row.try_get("name")?,

@@ -39,7 +39,10 @@ fn scoped_token(token: &str, capabilities: Vec<PermissionKind>) -> fleet_api::Ap
 }
 
 async fn seed_worker(store: &Arc<dyn Store>, name: &str) -> fleet_core::WorkerId {
-    let worker = Worker::new(name, format!("wss://{name}.local/ws?server-key=leaked-secret"));
+    let worker = Worker::new(
+        name,
+        format!("wss://{name}.local/ws?server-key=leaked-secret"),
+    );
     let worker_id = worker.id;
     store.upsert_worker(&worker).await.unwrap();
     worker_id
@@ -158,7 +161,9 @@ async fn register_worker_writes_masked_endpoint_into_the_event_log() {
     let events = store.list_events(0, 100).await.unwrap();
     let joined = events
         .iter()
-        .find(|e| matches!(&e.event, FleetEvent::WorkerJoined { name, .. } if name == "event-worker"))
+        .find(
+            |e| matches!(&e.event, FleetEvent::WorkerJoined { name, .. } if name == "event-worker"),
+        )
         .expect("expected a WorkerJoined event for event-worker");
     let FleetEvent::WorkerJoined { endpoint, .. } = &joined.event else {
         unreachable!();
@@ -263,7 +268,11 @@ async fn host_register_with_host_provision_capability_succeeds() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "host:provision must still be sufficient");
+    assert_eq!(
+        resp.status(),
+        200,
+        "host:provision must still be sufficient"
+    );
 }
 
 /// 워커 자신의 operational credential(`WorkerRegister`/`WorkerDelete`뿐)로는

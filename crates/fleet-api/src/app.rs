@@ -940,7 +940,8 @@ async fn record_capability_denial(
         }
     }
     if let Some(ctx) = &ctx {
-        detail["authentication_method"] = serde_json::json!(format!("{:?}", ctx.authentication_method));
+        detail["authentication_method"] =
+            serde_json::json!(format!("{:?}", ctx.authentication_method));
     }
 
     let event = AuditEvent::failure(actor_label, action::HTTP_CAPABILITY_DENIED).detail(detail);
@@ -1406,7 +1407,9 @@ mod tests {
         assert!(!is_worker_by_id_route("/workers"));
         assert!(!is_worker_by_id_route("/workers/abc/credential"));
         assert!(!is_worker_by_id_route("/workers/abc/credentials"));
-        assert!(!is_worker_by_id_route("/workers/abc/credentials/model/export"));
+        assert!(!is_worker_by_id_route(
+            "/workers/abc/credentials/model/export"
+        ));
     }
 
     /// 함수 수준의 기본값 회귀 가드. `#58`/`#66`이 두 번 반복한 "행렬 미등록 =
@@ -1650,7 +1653,10 @@ mod tests {
         // 로드맵 #74 — 매핑을 아예 설정하지 않은 배포는 fail-closed다.
         // 전체 capability를 부여하던 과거 동작(fail-open)은 제거됐다.
         let state = AppState::new(MemStore::new_arc()).with_cf_audience("aud-123");
-        assert_eq!(cf_access_capabilities(&state, "ops@example.com"), Vec::new());
+        assert_eq!(
+            cf_access_capabilities(&state, "ops@example.com"),
+            Vec::new()
+        );
     }
 
     #[test]

@@ -168,12 +168,7 @@ impl CloseReason {
         }
     }
 
-    pub const ALL: [CloseReason; 4] = [
-        Self::Fixed,
-        Self::WontFix,
-        Self::Duplicate,
-        Self::Obsolete,
-    ];
+    pub const ALL: [CloseReason; 4] = [Self::Fixed, Self::WontFix, Self::Duplicate, Self::Obsolete];
 }
 
 /// Issue 심각도.
@@ -502,7 +497,11 @@ mod tests {
             .transition_to(IssueStatus::ReadyForAgent, None)
             .unwrap_err();
         assert!(matches!(err, TransitionError::NotAllowed { .. }));
-        assert_eq!(i.status, IssueStatus::Open, "거절된 전이는 상태를 바꾸지 않는다");
+        assert_eq!(
+            i.status,
+            IssueStatus::Open,
+            "거절된 전이는 상태를 바꾸지 않는다"
+        );
     }
 
     #[test]

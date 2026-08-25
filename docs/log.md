@@ -1099,3 +1099,34 @@ last_verified: "2026-08-15"
   - **이 커밋에 섞지 않았다**: 로직 변경과 33개 파일 대량 재포맷이 한 커밋에 들어가면 리뷰가 불가능해진다. `cargo fmt`가 건드린 파일을 전부 되돌리고 내 편집만 손으로 다시 적용했으며, 위반 개수를 변경 전후로 비교해 **내가 추가한 코드가 새 fmt 위반을 0개 추가**함을 확인했다. 별도 `style:` 커밋으로 분리하는 것은 사용자 승인 대기 중이다.
 - 검증: `cargo test --workspace`(exit 0, 전체 `ok`), `DATABASE_URL`(`postgres://yarang@localhost:5432/fleet_test`)+`FLEET_MCP_CAPABILITIES` 주입 재실행 — `fleet-store` DB-gated 11개 바이너리 각각 별도 프로세스 `--test-threads=1` 전부 `ok`(116건), `fleet-api`/`fleet-scheduler`/`fleet-dashboard` 전부 `ok`, `fleet-mcp`는 사전 존재 버그 `unknown_tool_returns_error` 1건만 FAILED(`task_78be5260`, 이번 변경과 무관) — `cargo check --no-default-features` 통과, `cargo clippy --all-targets --all-features` 경고 0.
   - **검증 한계**: 로컬 Postgres가 내려가 있어 `pg_ctl`로 직접 기동했는데 `postmaster became multithreaded during startup`으로 한 번 실패했다(macOS 로케일 문제). `LC_ALL=C LANG=C`로 기동해 해결했다 — `brew services start`는 `launchctl bootstrap` 오류로 실패하므로, 이 환경에서 DB 게이트를 돌릴 다음 에이전트는 `env LC_ALL=C LANG=C pg_ctl -D /opt/homebrew/var/postgresql@16 start`를 쓰는 편이 빠르다.
+
+## 2026-08-25 — `main`의 CI fmt 게이트 복구, 그리고 게이트 목록을 CI와 일치시킴
+
+- 유형: `lint` + `verification`
+- **무엇을 했나**: `cargo fmt --all`로 31개 파일을 재포맷해(`691 insertions(+), 481 deletions(-)`) `main`이 CI 첫 단계(`.github/workflows/ci.yml:57`)에서 실패하던 상태를 해소했다. 직전 항목에서 발견해 사용자 승인 후 **로직 변경과 분리한 순수 포맷 커밋**이다.
+- **순수 포맷임을 증명했다**: `git diff -w`로는 부족하다 — rustfmt는 줄 자체를 재구성하므로 공백 무시 비교로도 차이가 남는다. 그래서 변경된 31개 파일 전부에 대해 **공백·후행 쉼표·중괄호를 제거한 토큰열**을 `HEAD`와 비교했고, 31개 모두 바이트 단위로 동일했다. 실제로 rustfmt가 한 일은 두 종류뿐이다: (1) 후행 쉼표 삽입, (2) 긴 match arm을 블록으로 감싸기. 예(`crates/fleet-store/src/rbac.rs`):
+  ```rust
+  -        PermissionKind::ProjectDelete => "Archive projects (request draining, not permanent delete)",
+  +        PermissionKind::ProjectDelete => {
+  +            "Archive projects (request draining, not permanent delete)"
+  +        }
+  ```
+- **근본 원인을 같이 고쳤다(`agent.md` §4.3)**: 재포맷만 하면 다음 에이전트가 같은 드리프트를 다시 만든다. 로컬 게이트 목록이 CI보다 약했던 지점이 **셋**이라 전부 CI와 동일한 형태로 바꿔 적었다.
+
+  | 항목 | 기존 `agent.md` | CI 실제 | 문제 |
+  |---|---|---|---|
+  | 포맷 | (없음) | `cargo fmt --all -- --check` | 검사 자체가 누락 → 112건 누적 |
+  | 기본 피처 lint | `cargo clippy --all-targets --all-features` | `cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings` | `-D warnings`가 없어 **경고가 있어도 exit 0** |
+  | 최소 빌드 | `cargo check --no-default-features` | `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` | `check`는 컴파일 오류만 봄, lint 미검사 |
+
+  특히 두 번째는 "clippy 경고 0을 확인했다"는 그동안의 로그 진술이 **명령만 놓고 보면 성립하지 않았다**는 뜻이다(경고가 있었더라도 exit 0이므로). 이번에 CI와 동일한 `-D warnings` 형태로 실행해 실제로 경고 0임을 확인했다.
+- **작업 중 드러난 별개 결함 2건은 이 커밋에 섞지 않고 분리했다**(순수 포맷 커밋을 유지하기 위해):
+  - `collect_disk_free_mb()`(`fleet-worker/src/registration.rs:536`)가 `total_space() - available_space()`, 즉 **사용 중 용량**을 계산하면서 `disk_free_mb`(여유 용량)라는 이름으로 `WorkerHost`·`fleet-api` 스키마·공개 `openapi.yaml`까지 흘려보낸다 — 모든 소비자가 뒤집힌 값을 본다. 덤으로 이 뺄셈은 debug 빌드에서 언더플로 panic이 가능하고, panic 시 `DiskCacheState`가 `Refreshing`에 영구히 갇혀 디스크 통계가 조용히 멈춘다.
+  - `disk_cache_get_or_schedule_refresh_populates_background` 테스트가 flaky다(아래).
+- **Flaky 테스트 1건을 규명했다**(`agent.md` §3.3 "방치 금지"): `cargo test --workspace`에서 `fleet-worker --lib`가 71 passed / 1 failed로 한 번 깨졌다. 포맷 때문인지 확인하려고 12회 반복 실행해 **3회차에 재현**했다 — `registration::tests::disk_cache_get_or_schedule_refresh_populates_background`(`registration.rs:1040`).
+  - **분류: 환경적 타이밍 예산 문제이지 런타임 버그가 아니다.** 테스트는 `spawn_blocking`이 `sysinfo::Disks::new_with_refreshed_list()`를 끝내기를 100ms×100회 = **10초** 동안 기다린다. 그런데 구현 자신의 doc comment(`registration.rs` ~535, ~555)가 이 호출을 "환경에 따라 **수 초가 소요될 수 있음**(예: macOS autofs 마운트 타임아웃)"이라고 명시한다. 즉 테스트가 **구현이 명시적으로 보장하지 않는 벽시계 상한**을 단언하고 있고, 병렬 cargo 부하나 느린 마운트에서 예산을 넘긴다. 프로덕션 코드의 계약("캐시가 비면 `None` 반환, heartbeat를 블록하지 않음")은 위반되지 않았다.
+  - 타임아웃을 늘리는 것은 해법이 아니다(빈도만 낮추고 스위트를 느리게 함) — 수집기를 주입 가능하게 만들어 실제 디스크 I/O 의존을 끊어야 한다.
+- 검증(전부 이번 포맷 트리에서 실행): `cargo fmt --all -- --check` 통과 · `cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings` **exit 0** · `cargo clippy --workspace --no-default-features --all-targets -- -D warnings` **exit 0** · `cargo test --workspace` 통과(위 flaky 1건 제외) · `DATABASE_URL` 주입 재실행 — `fleet-store` DB-gated 11개 바이너리 각각 별도 프로세스 `--test-threads=1` 전부 `ok`(116건), `fleet-api`(16개 스위트 `ok`), `fleet-scheduler`(98건 `ok`), `fleet-dashboard`(104건 `ok`), `fleet-mcp`는 사전 존재 버그 `unknown_tool_returns_error` 1건만 FAILED(`task_78be5260`, 이번 변경과 무관).
+- **검증 한계**:
+  - **로컬 rustfmt는 1.9.0-stable(8bab26f4f6, 2026-07-14)이고, CI는 `dtolnay/rust-toolchain@stable`을 실행 시점에 해석한다.** CI의 stable이 더 최신이면 내 rustfmt가 만들지 않는 포맷을 요구해 fmt 검사가 그래도 실패할 수 있다. 로컬 통과를 CI 통과로 읽으면 안 된다.
+  - **DB 게이트 실행 중 하네스 오류 2건을 스스로 만들었다가 잡았고, 다음 에이전트를 위해 남긴다**: (1) `cargo test -p fleet-store --test issues`는 `--all-features` 없이는 **컴파일되지 않는다** — `MemStore`가 `test-support` 피처 뒤에 있다(`lib.rs:22`). 피처를 빼면 이 바이너리만 조용히 결과 없이 지나가므로 11개 중 1개를 검증하지 않은 채 "전부 ok"로 오독하기 쉽다. (2) `FLEET_MCP_CAPABILITIES`에 존재하지 않는 이름(`task:submit`, `project:update`)을 넣었더니 fail-closed 파싱이 서버 기동을 막아 `cross_client` **12건이 전부 `initialize` 응답 없음으로 실패**했다 — 트리 회귀처럼 보였지만 전적으로 환경변수 오류였다. 정본 이름은 `fleet-core/src/auth.rs:466`의 `as_str()`이며 `task:create`/`project:read` 등이다.

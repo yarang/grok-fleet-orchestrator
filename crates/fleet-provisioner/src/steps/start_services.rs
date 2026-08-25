@@ -258,7 +258,10 @@ mod tests {
 
     #[test]
     fn classify_status_marks_401_and_403_as_unauthorized_not_transient() {
-        for status in [reqwest::StatusCode::UNAUTHORIZED, reqwest::StatusCode::FORBIDDEN] {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
             match classify_status(status) {
                 Some(Probe::Unauthorized(code)) => assert_eq!(code, status.as_u16()),
                 _ => panic!("expected Probe::Unauthorized for status {status}"),
@@ -274,7 +277,10 @@ mod tests {
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             reqwest::StatusCode::NOT_FOUND,
         ] {
-            assert!(matches!(classify_status(status), Some(Probe::TransientError)));
+            assert!(matches!(
+                classify_status(status),
+                Some(Probe::TransientError)
+            ));
         }
     }
 
@@ -330,7 +336,9 @@ mod tests {
         }
         // fleet-worker enable/restart는 실행되지 않아야 한다 (즉시 중단).
         let calls = exec.recorded_calls();
-        assert!(!calls.iter().any(|c| c.contains("enable --now fleet-worker")));
+        assert!(!calls
+            .iter()
+            .any(|c| c.contains("enable --now fleet-worker")));
     }
 
     #[tokio::test]

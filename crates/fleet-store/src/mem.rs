@@ -1347,13 +1347,11 @@ impl Store for MemStore {
         }
     }
 
-    async fn get_control_lease(&self, cluster_id: &str) -> Result<Option<ControlLease>, StoreError> {
-        Ok(self
-            .control_leases
-            .lock()
-            .unwrap()
-            .get(cluster_id)
-            .cloned())
+    async fn get_control_lease(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<ControlLease>, StoreError> {
+        Ok(self.control_leases.lock().unwrap().get(cluster_id).cloned())
     }
 
     // ── Project (로드맵 #48, 1단계) ───────────────────────────────────
@@ -1419,7 +1417,10 @@ impl Store for MemStore {
         let tasks = self.tasks.lock().unwrap();
         Ok(tasks.values().any(|t| {
             t.project_id == Some(project_id)
-                && matches!(t.status, TaskStatus::Pending | TaskStatus::Dispatched { .. })
+                && matches!(
+                    t.status,
+                    TaskStatus::Pending | TaskStatus::Dispatched { .. }
+                )
         }))
     }
 
@@ -1494,7 +1495,10 @@ impl Store for MemStore {
         Ok(())
     }
 
-    async fn list_issue_comments(&self, issue_id: IssueId) -> Result<Vec<IssueComment>, StoreError> {
+    async fn list_issue_comments(
+        &self,
+        issue_id: IssueId,
+    ) -> Result<Vec<IssueComment>, StoreError> {
         let comments = self.issue_comments.lock().unwrap();
         let mut out: Vec<IssueComment> = comments
             .iter()
@@ -1508,10 +1512,9 @@ impl Store for MemStore {
     async fn link_issue_task(&self, link: &IssueTaskLink) -> Result<bool, StoreError> {
         let mut links = self.issue_task_links.lock().unwrap();
         // PgStore의 `(issue_id, task_id)` 유니크 인덱스와 같은 멱등성.
-        if links
-            .iter()
-            .any(|l| l.issue_id == link.issue_id && l.task_id.is_some() && l.task_id == link.task_id)
-        {
+        if links.iter().any(|l| {
+            l.issue_id == link.issue_id && l.task_id.is_some() && l.task_id == link.task_id
+        }) {
             return Ok(false);
         }
         links.push(link.clone());
@@ -1551,7 +1554,12 @@ impl Store for MemStore {
             .filter(|l| l.issue_id == issue_id)
             .filter_map(|l| l.task_id)
             .filter_map(|tid| tasks.get(&tid))
-            .any(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Dispatched { .. })))
+            .any(|t| {
+                matches!(
+                    t.status,
+                    TaskStatus::Pending | TaskStatus::Dispatched { .. }
+                )
+            }))
     }
 }
 

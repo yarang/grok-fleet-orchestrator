@@ -1206,13 +1206,13 @@ async fn handle_transition_issue(ctx: &ToolContext, args: &Value) -> Result<Valu
         )));
     }
 
-    let close_reason = match args.get("close_reason").and_then(|v| v.as_str()) {
-        Some(raw) => Some(
-            fleet_core::CloseReason::parse_str(raw)
-                .ok_or_else(|| JsonRpcError::invalid_params(format!("unknown close_reason: {raw}")))?,
-        ),
-        None => None,
-    };
+    let close_reason =
+        match args.get("close_reason").and_then(|v| v.as_str()) {
+            Some(raw) => Some(fleet_core::CloseReason::parse_str(raw).ok_or_else(|| {
+                JsonRpcError::invalid_params(format!("unknown close_reason: {raw}"))
+            })?),
+            None => None,
+        };
 
     let issue_id = parse_issue_id_arg(args)?;
     let Some(mut issue) = ctx
@@ -1318,10 +1318,7 @@ mod tests {
     fn worker_summary_never_leaks_raw_server_key() {
         // 로드맵 #75 — MCP tool 호출자 중 endpoint의 server-key 원문을
         // 봐야 하는 사람은 없다.
-        let w = fleet_core::Worker::new(
-            "leaky",
-            "wss://leaky.example/ws?server-key=leaked-secret",
-        );
+        let w = fleet_core::Worker::new("leaky", "wss://leaky.example/ws?server-key=leaked-secret");
         let summary = worker_summary(&w);
         let rendered = summary.to_string();
         assert!(!rendered.contains("leaked-secret"));
@@ -1718,7 +1715,10 @@ mod tests {
         )
         .await
         .unwrap();
-        parse_tool_json(&created)["id"].as_str().unwrap().to_string()
+        parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     #[tokio::test]
@@ -1745,7 +1745,9 @@ mod tests {
         assert_eq!(body["has_active_tasks"], false);
         let id = body["id"].as_str().unwrap().to_string();
 
-        let listed = dispatch_tool(&ctx, TOOL_LIST_ISSUES, &json!({})).await.unwrap();
+        let listed = dispatch_tool(&ctx, TOOL_LIST_ISSUES, &json!({}))
+            .await
+            .unwrap();
         let body = parse_tool_json(&listed);
         assert_eq!(body["count"], 1);
 
@@ -1827,10 +1829,7 @@ mod tests {
     async fn transition_capability_is_checked_per_target_status() {
         let store = fleet_store::mem::MemStore::new();
         // triage는 가능하지만 agent 승인·종결은 불가능한 capability 집합.
-        let ctx = test_ctx_with_caps(
-            store,
-            vec![PK::IssueRead, PK::IssueCreate, PK::IssueUpdate],
-        );
+        let ctx = test_ctx_with_caps(store, vec![PK::IssueRead, PK::IssueCreate, PK::IssueUpdate]);
         let project_id = seed_project(&ctx, "mcp-gated").await;
         let id = make_issue(&ctx, project_id, "gated").await;
 
@@ -1872,7 +1871,13 @@ mod tests {
         // 저장된 상태는 triaged 그대로여야 한다.
         let issue_id: IssueId = id.parse().unwrap();
         assert_eq!(
-            ctx.state.store.get_issue(issue_id).await.unwrap().unwrap().status,
+            ctx.state
+                .store
+                .get_issue(issue_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
             fleet_core::IssueStatus::Triaged
         );
     }
@@ -2040,7 +2045,10 @@ mod tests {
         let created = dispatch_tool(&ctx, TOOL_CREATE_PROJECT, &json!({"name": "closed-shop"}))
             .await
             .unwrap();
-        let project_id = parse_tool_json(&created)["id"].as_str().unwrap().to_string();
+        let project_id = parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         dispatch_tool(
             &ctx,
             TOOL_DELETE_PROJECT,

@@ -1014,18 +1014,18 @@ pub async fn host_detail_page(Path(_hostname): Path<String>) -> Response {
 // 정본을 따르고, UI 문서는 이 커밋에서 함께 정정했다.
 
 /// GET /projects — 프로젝트 목록 HTML 페이지.
-pub async fn projects_page(
-    Extension(principal): Extension<AuthPrincipal>,
-) -> Response {
+pub async fn projects_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
     serve_page_if_permitted(&principal, PermissionKind::ProjectRead, "projects.html")
 }
 
 /// GET /projects/new — 프로젝트 생성 폼. `ProjectCreate`가 없으면 폼을
 /// 아예 보여주지 않는다 — 제출 시점에야 403을 받는 것보다 낫다.
-pub async fn project_new_page(
-    Extension(principal): Extension<AuthPrincipal>,
-) -> Response {
-    serve_page_if_permitted(&principal, PermissionKind::ProjectCreate, "project-new.html")
+pub async fn project_new_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::ProjectCreate,
+        "project-new.html",
+    )
 }
 
 /// GET /projects/:id — 프로젝트 상세 HTML 페이지.
@@ -1033,7 +1033,11 @@ pub async fn project_detail_page(
     Extension(principal): Extension<AuthPrincipal>,
     Path(_id): Path<String>,
 ) -> Response {
-    serve_page_if_permitted(&principal, PermissionKind::ProjectRead, "project-detail.html")
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::ProjectRead,
+        "project-detail.html",
+    )
 }
 
 /// GET /api/hosts — 호스트 목록 JSON API.
@@ -1096,7 +1100,10 @@ pub async fn list_projects_api(
             ApiError::Store(e.to_string())
         })?;
     Ok(Json(
-        projects.iter().map(crate::schema::ProjectSummary::from).collect(),
+        projects
+            .iter()
+            .map(crate::schema::ProjectSummary::from)
+            .collect(),
     ))
 }
 
@@ -1138,10 +1145,13 @@ pub async fn create_project_api(
 
     crate::audit::record(
         &state,
-        fleet_core::AuditEvent::success(&principal.user.username, fleet_core::audit::action::PROJECT_CREATE)
-            .actor(principal.user.id)
-            .target("project", project.id.to_string())
-            .detail(serde_json::json!({ "name": project.name })),
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::PROJECT_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("project", project.id.to_string())
+        .detail(serde_json::json!({ "name": project.name })),
     )
     .await;
 
@@ -1267,7 +1277,10 @@ async fn issue_summary(
         .issue_has_active_tasks(issue.id)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
-    Ok(crate::schema::IssueSummary::from_issue(issue, has_active_tasks))
+    Ok(crate::schema::IssueSummary::from_issue(
+        issue,
+        has_active_tasks,
+    ))
 }
 
 async fn load_issue(
@@ -1560,7 +1573,9 @@ pub async fn add_issue_comment_api(
 
     let text = body.body.trim();
     if text.is_empty() {
-        return Err(ApiError::BadRequest("comment body must not be empty".into()));
+        return Err(ApiError::BadRequest(
+            "comment body must not be empty".into(),
+        ));
     }
 
     // 존재하지 않는 Issue에 코멘트를 남길 수 없다.

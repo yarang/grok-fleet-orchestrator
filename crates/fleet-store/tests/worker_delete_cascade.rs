@@ -81,7 +81,10 @@ async fn delete_worker_cascades_both_credential_tables() {
     store.upsert_worker(&target).await.unwrap();
     store.upsert_worker(&bystander).await.unwrap();
 
-    for (w, digest) in [(&target, "cascade-target-digest"), (&bystander, "cascade-bystander-digest")] {
+    for (w, digest) in [
+        (&target, "cascade-target-digest"),
+        (&bystander, "cascade-bystander-digest"),
+    ] {
         store
             .upsert_worker_operational_credential(&WorkerOperationalCredential {
                 worker_id: w.id,

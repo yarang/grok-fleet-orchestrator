@@ -638,11 +638,15 @@ workers:
 "#;
         let inv = Inventory::parse(yaml).unwrap();
         assert_eq!(
-            inv.workers[0].effective_fleet_worker_bin(&inv.defaults).as_deref(),
+            inv.workers[0]
+                .effective_fleet_worker_bin(&inv.defaults)
+                .as_deref(),
             Some("/opt/generic")
         );
         assert_eq!(
-            inv.workers[1].effective_fleet_worker_bin(&inv.defaults).as_deref(),
+            inv.workers[1]
+                .effective_fleet_worker_bin(&inv.defaults)
+                .as_deref(),
             Some("/opt/special")
         );
     }

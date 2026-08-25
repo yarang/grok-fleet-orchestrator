@@ -38,7 +38,9 @@ async fn mem_backend() -> Arc<dyn Store> {
 
 /// `DATABASE_URL`이 없으면 `None` — 호출부가 skip한다.
 async fn pg_backend() -> Option<Arc<dyn Store>> {
-    let url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())?;
+    let url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&url)
@@ -106,7 +108,11 @@ both_backends!(create_and_get_issue_roundtrip, |store| async move {
 
     store.create_issue(&issue).await.unwrap();
 
-    let fetched = store.get_issue(issue.id).await.unwrap().expect("must exist");
+    let fetched = store
+        .get_issue(issue.id)
+        .await
+        .unwrap()
+        .expect("must exist");
     assert_eq!(fetched.title, "login is broken");
     assert_eq!(fetched.body, "steps to reproduce: ...");
     assert_eq!(fetched.status, IssueStatus::Open);
@@ -124,97 +130,103 @@ both_backends!(get_unknown_issue_returns_none, |store| async move {
         .is_none());
 });
 
-both_backends!(list_issues_filters_by_project_and_status, |store| async move {
-    let a = seed_project(&store, &unique("proj-a")).await;
-    let b = seed_project(&store, &unique("proj-b")).await;
+both_backends!(
+    list_issues_filters_by_project_and_status,
+    |store| async move {
+        let a = seed_project(&store, &unique("proj-a")).await;
+        let b = seed_project(&store, &unique("proj-b")).await;
 
-    let in_a = Issue::new(a.id, "issue in a", "alice");
-    let in_b = Issue::new(b.id, "issue in b", "alice");
-    store.create_issue(&in_a).await.unwrap();
-    store.create_issue(&in_b).await.unwrap();
+        let in_a = Issue::new(a.id, "issue in a", "alice");
+        let in_b = Issue::new(b.id, "issue in b", "alice");
+        store.create_issue(&in_a).await.unwrap();
+        store.create_issue(&in_b).await.unwrap();
 
-    let only_a = store
-        .list_issues(&IssueFilter {
-            project_id: Some(a.id),
-            limit: 100,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(only_a.len(), 1);
-    assert_eq!(only_a[0].id, in_a.id);
+        let only_a = store
+            .list_issues(&IssueFilter {
+                project_id: Some(a.id),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].id, in_a.id);
 
-    // 하나를 닫고 open_only 필터를 확인.
-    let mut closing = in_a.clone();
-    closing
-        .transition_to(IssueStatus::Closed, Some(CloseReason::Fixed))
-        .unwrap();
-    store
-        .transition_issue(closing.id, closing.status, closing.close_reason)
-        .await
-        .unwrap();
+        // 하나를 닫고 open_only 필터를 확인.
+        let mut closing = in_a.clone();
+        closing
+            .transition_to(IssueStatus::Closed, Some(CloseReason::Fixed))
+            .unwrap();
+        store
+            .transition_issue(closing.id, closing.status, closing.close_reason)
+            .await
+            .unwrap();
 
-    let open_in_a = store
-        .list_issues(&IssueFilter {
-            project_id: Some(a.id),
-            open_only: true,
-            limit: 100,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert!(open_in_a.is_empty(), "the only issue in A was closed");
+        let open_in_a = store
+            .list_issues(&IssueFilter {
+                project_id: Some(a.id),
+                open_only: true,
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(open_in_a.is_empty(), "the only issue in A was closed");
 
-    let closed_in_a = store
-        .list_issues(&IssueFilter {
-            project_id: Some(a.id),
-            status: Some(IssueStatus::Closed),
-            limit: 100,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    assert_eq!(closed_in_a.len(), 1);
-});
+        let closed_in_a = store
+            .list_issues(&IssueFilter {
+                project_id: Some(a.id),
+                status: Some(IssueStatus::Closed),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(closed_in_a.len(), 1);
+    }
+);
 
-both_backends!(transition_persists_status_and_close_reason, |store| async move {
-    let project = seed_project(&store, &unique("proj")).await;
-    let mut issue = Issue::new(project.id, "needs triage", "alice");
-    store.create_issue(&issue).await.unwrap();
+both_backends!(
+    transition_persists_status_and_close_reason,
+    |store| async move {
+        let project = seed_project(&store, &unique("proj")).await;
+        let mut issue = Issue::new(project.id, "needs triage", "alice");
+        store.create_issue(&issue).await.unwrap();
 
-    issue.transition_to(IssueStatus::Triaged, None).unwrap();
-    store
-        .transition_issue(issue.id, issue.status, issue.close_reason)
-        .await
-        .unwrap();
-    let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
-    assert_eq!(fetched.status, IssueStatus::Triaged);
-    assert_eq!(fetched.close_reason, None);
+        issue.transition_to(IssueStatus::Triaged, None).unwrap();
+        store
+            .transition_issue(issue.id, issue.status, issue.close_reason)
+            .await
+            .unwrap();
+        let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, IssueStatus::Triaged);
+        assert_eq!(fetched.close_reason, None);
 
-    issue
-        .transition_to(IssueStatus::Closed, Some(CloseReason::WontFix))
-        .unwrap();
-    store
-        .transition_issue(issue.id, issue.status, issue.close_reason)
-        .await
-        .unwrap();
-    let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
-    assert_eq!(fetched.status, IssueStatus::Closed);
-    assert_eq!(fetched.close_reason, Some(CloseReason::WontFix));
+        issue
+            .transition_to(IssueStatus::Closed, Some(CloseReason::WontFix))
+            .unwrap();
+        store
+            .transition_issue(issue.id, issue.status, issue.close_reason)
+            .await
+            .unwrap();
+        let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, IssueStatus::Closed);
+        assert_eq!(fetched.close_reason, Some(CloseReason::WontFix));
 
-    // reopen — close_reason이 지워져야 한다.
-    issue.transition_to(IssueStatus::Open, None).unwrap();
-    store
-        .transition_issue(issue.id, issue.status, issue.close_reason)
-        .await
-        .unwrap();
-    let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
-    assert_eq!(fetched.status, IssueStatus::Open);
-    assert_eq!(
-        fetched.close_reason, None,
-        "reopen must clear close_reason in storage too"
-    );
-});
+        // reopen — close_reason이 지워져야 한다.
+        issue.transition_to(IssueStatus::Open, None).unwrap();
+        store
+            .transition_issue(issue.id, issue.status, issue.close_reason)
+            .await
+            .unwrap();
+        let fetched = store.get_issue(issue.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, IssueStatus::Open);
+        assert_eq!(
+            fetched.close_reason, None,
+            "reopen must clear close_reason in storage too"
+        );
+    }
+);
 
 both_backends!(update_fields_does_not_touch_status, |store| async move {
     // `issue:update`(오탈자 수정)와 `issue:close`(종결)를 분리한 계약이
@@ -247,15 +259,18 @@ both_backends!(update_fields_does_not_touch_status, |store| async move {
     assert_eq!(fetched.close_reason, None);
 });
 
-both_backends!(update_and_transition_on_unknown_issue_return_false, |store| async move {
-    let project = seed_project(&store, &unique("proj")).await;
-    let ghost = Issue::new(project.id, "never stored", "alice");
-    assert!(!store.update_issue_fields(&ghost).await.unwrap());
-    assert!(!store
-        .transition_issue(ghost.id, IssueStatus::Triaged, None)
-        .await
-        .unwrap());
-});
+both_backends!(
+    update_and_transition_on_unknown_issue_return_false,
+    |store| async move {
+        let project = seed_project(&store, &unique("proj")).await;
+        let ghost = Issue::new(project.id, "never stored", "alice");
+        assert!(!store.update_issue_fields(&ghost).await.unwrap());
+        assert!(!store
+            .transition_issue(ghost.id, IssueStatus::Triaged, None)
+            .await
+            .unwrap());
+    }
+);
 
 // ── 코멘트 ──────────────────────────────────────────────────────────────
 
@@ -305,7 +320,10 @@ both_backends!(link_and_unlink_task, |store| async move {
         !store.link_issue_task(&link).await.unwrap(),
         "re-linking the same task must be a no-op"
     );
-    assert_eq!(store.list_issue_task_links(issue.id).await.unwrap().len(), 1);
+    assert_eq!(
+        store.list_issue_task_links(issue.id).await.unwrap().len(),
+        1
+    );
 
     assert!(store.unlink_issue_task(issue.id, task.id).await.unwrap());
     assert!(store
@@ -319,140 +337,156 @@ both_backends!(link_and_unlink_task, |store| async move {
     );
 });
 
-both_backends!(issue_has_active_tasks_is_derived_not_stored, |store| async move {
-    // "진행 중"은 파생 값이다 — Issue의 status는 이 값과 무관하게 그대로
-    // 남아야 한다(`InProgress` 상태를 두지 않은 이유).
-    let project = seed_project(&store, &unique("proj")).await;
-    let issue = Issue::new(project.id, "has work in flight", "alice");
-    store.create_issue(&issue).await.unwrap();
+both_backends!(
+    issue_has_active_tasks_is_derived_not_stored,
+    |store| async move {
+        // "진행 중"은 파생 값이다 — Issue의 status는 이 값과 무관하게 그대로
+        // 남아야 한다(`InProgress` 상태를 두지 않은 이유).
+        let project = seed_project(&store, &unique("proj")).await;
+        let issue = Issue::new(project.id, "has work in flight", "alice");
+        store.create_issue(&issue).await.unwrap();
 
-    assert!(!store.issue_has_active_tasks(issue.id).await.unwrap());
+        assert!(!store.issue_has_active_tasks(issue.id).await.unwrap());
 
-    let task = seed_task(&store, "in flight", TaskStatus::Pending).await;
-    store
-        .link_issue_task(&IssueTaskLink {
-            issue_id: issue.id,
-            task_id: Some(task.id),
-            task_label: "in flight".into(),
-            linked_by: "alice".into(),
-            linked_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+        let task = seed_task(&store, "in flight", TaskStatus::Pending).await;
+        store
+            .link_issue_task(&IssueTaskLink {
+                issue_id: issue.id,
+                task_id: Some(task.id),
+                task_label: "in flight".into(),
+                linked_by: "alice".into(),
+                linked_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
 
-    assert!(store.issue_has_active_tasks(issue.id).await.unwrap());
-    assert_eq!(
-        store.get_issue(issue.id).await.unwrap().unwrap().status,
-        IssueStatus::Open,
-        "an in-flight task must not change the issue's stored status"
-    );
+        assert!(store.issue_has_active_tasks(issue.id).await.unwrap());
+        assert_eq!(
+            store.get_issue(issue.id).await.unwrap().unwrap().status,
+            IssueStatus::Open,
+            "an in-flight task must not change the issue's stored status"
+        );
 
-    // Task가 종결되면 파생 값도 따라 내려간다.
-    store
-        .update_task_status(
-            task.id,
-            &TaskStatus::Cancelled {
-                reason: "done".into(),
-                cancelled_at: chrono::Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-    assert!(!store.issue_has_active_tasks(issue.id).await.unwrap());
-});
+        // Task가 종결되면 파생 값도 따라 내려간다.
+        store
+            .update_task_status(
+                task.id,
+                &TaskStatus::Cancelled {
+                    reason: "done".into(),
+                    cancelled_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!store.issue_has_active_tasks(issue.id).await.unwrap());
+    }
+);
 
 // ── 교착 없음 (구현 게이트 2) ───────────────────────────────────────────
 
-both_backends!(open_issue_does_not_block_a_task_from_reaching_terminal, |store| async move {
-    // I1 — Task 전이는 issue.status를 읽지 않는다. 열린 Issue(그것도
-    // ReadyForAgent 상태)에 연관된 Task가 아무 방해 없이 터미널까지 간다.
-    let project = seed_project(&store, &unique("proj")).await;
-    let mut issue = Issue::new(project.id, "still very much open", "alice");
-    store.create_issue(&issue).await.unwrap();
-    issue.transition_to(IssueStatus::Triaged, None).unwrap();
-    issue.transition_to(IssueStatus::ReadyForAgent, None).unwrap();
-    store
-        .transition_issue(issue.id, issue.status, issue.close_reason)
-        .await
-        .unwrap();
+both_backends!(
+    open_issue_does_not_block_a_task_from_reaching_terminal,
+    |store| async move {
+        // I1 — Task 전이는 issue.status를 읽지 않는다. 열린 Issue(그것도
+        // ReadyForAgent 상태)에 연관된 Task가 아무 방해 없이 터미널까지 간다.
+        let project = seed_project(&store, &unique("proj")).await;
+        let mut issue = Issue::new(project.id, "still very much open", "alice");
+        store.create_issue(&issue).await.unwrap();
+        issue.transition_to(IssueStatus::Triaged, None).unwrap();
+        issue
+            .transition_to(IssueStatus::ReadyForAgent, None)
+            .unwrap();
+        store
+            .transition_issue(issue.id, issue.status, issue.close_reason)
+            .await
+            .unwrap();
 
-    let task = seed_task(&store, "work", TaskStatus::Pending).await;
-    store
-        .link_issue_task(&IssueTaskLink {
-            issue_id: issue.id,
-            task_id: Some(task.id),
-            task_label: "work".into(),
-            linked_by: "alice".into(),
-            linked_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+        let task = seed_task(&store, "work", TaskStatus::Pending).await;
+        store
+            .link_issue_task(&IssueTaskLink {
+                issue_id: issue.id,
+                task_id: Some(task.id),
+                task_label: "work".into(),
+                linked_by: "alice".into(),
+                linked_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
 
-    // Task를 터미널까지 전이 — 어떤 단계에서도 Issue 때문에 막히지 않는다.
-    store
-        .update_task_status(
-            task.id,
-            &TaskStatus::Cancelled {
-                reason: "terminal despite an open issue".into(),
-                cancelled_at: chrono::Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
+        // Task를 터미널까지 전이 — 어떤 단계에서도 Issue 때문에 막히지 않는다.
+        store
+            .update_task_status(
+                task.id,
+                &TaskStatus::Cancelled {
+                    reason: "terminal despite an open issue".into(),
+                    cancelled_at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
 
-    let fetched = store.get_task(task.id).await.unwrap().unwrap();
-    assert!(
-        fetched.is_terminal(),
-        "an open (even ReadyForAgent) issue must not keep a task from terminating"
-    );
-    // Issue는 그대로 열려 있다.
-    assert_eq!(
-        store.get_issue(issue.id).await.unwrap().unwrap().status,
-        IssueStatus::ReadyForAgent
-    );
-});
+        let fetched = store.get_task(task.id).await.unwrap().unwrap();
+        assert!(
+            fetched.is_terminal(),
+            "an open (even ReadyForAgent) issue must not keep a task from terminating"
+        );
+        // Issue는 그대로 열려 있다.
+        assert_eq!(
+            store.get_issue(issue.id).await.unwrap().unwrap().status,
+            IssueStatus::ReadyForAgent
+        );
+    }
+);
 
-both_backends!(non_terminal_task_does_not_block_closing_an_issue, |store| async move {
-    // I2 — Issue의 close에는 Task 상태에 대한 선행 조건이 없다.
-    let project = seed_project(&store, &unique("proj")).await;
-    let mut issue = Issue::new(project.id, "closing early", "alice");
-    store.create_issue(&issue).await.unwrap();
+both_backends!(
+    non_terminal_task_does_not_block_closing_an_issue,
+    |store| async move {
+        // I2 — Issue의 close에는 Task 상태에 대한 선행 조건이 없다.
+        let project = seed_project(&store, &unique("proj")).await;
+        let mut issue = Issue::new(project.id, "closing early", "alice");
+        store.create_issue(&issue).await.unwrap();
 
-    let task = seed_task(&store, "still running", TaskStatus::Pending).await;
-    store
-        .link_issue_task(&IssueTaskLink {
-            issue_id: issue.id,
-            task_id: Some(task.id),
-            task_label: "still running".into(),
-            linked_by: "alice".into(),
-            linked_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
-    assert!(
-        store.issue_has_active_tasks(issue.id).await.unwrap(),
-        "precondition: the task really is non-terminal"
-    );
+        let task = seed_task(&store, "still running", TaskStatus::Pending).await;
+        store
+            .link_issue_task(&IssueTaskLink {
+                issue_id: issue.id,
+                task_id: Some(task.id),
+                task_label: "still running".into(),
+                linked_by: "alice".into(),
+                linked_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            store.issue_has_active_tasks(issue.id).await.unwrap(),
+            "precondition: the task really is non-terminal"
+        );
 
-    issue
-        .transition_to(IssueStatus::Closed, Some(CloseReason::WontFix))
-        .unwrap();
-    let updated = store
-        .transition_issue(issue.id, issue.status, issue.close_reason)
-        .await
-        .unwrap();
-    assert!(
-        updated,
-        "closing an issue must succeed even with a non-terminal linked task"
-    );
-    assert_eq!(
-        store.get_issue(issue.id).await.unwrap().unwrap().status,
-        IssueStatus::Closed
-    );
+        issue
+            .transition_to(IssueStatus::Closed, Some(CloseReason::WontFix))
+            .unwrap();
+        let updated = store
+            .transition_issue(issue.id, issue.status, issue.close_reason)
+            .await
+            .unwrap();
+        assert!(
+            updated,
+            "closing an issue must succeed even with a non-terminal linked task"
+        );
+        assert_eq!(
+            store.get_issue(issue.id).await.unwrap().unwrap().status,
+            IssueStatus::Closed
+        );
 
-    // 그리고 Task는 여전히 살아 있다 — close가 Task를 건드리지 않는다.
-    assert!(!store.get_task(task.id).await.unwrap().unwrap().is_terminal());
-});
+        // 그리고 Task는 여전히 살아 있다 — close가 Task를 건드리지 않는다.
+        assert!(!store
+            .get_task(task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_terminal());
+    }
+);
 
 // ── DB 레벨 불변식 (PgStore 전용) ───────────────────────────────────────
 //
@@ -463,7 +497,9 @@ both_backends!(non_terminal_task_does_not_block_closing_an_issue, |store| async 
 
 /// 위 `pg_backend`와 달리 raw SQL을 쓰기 위해 구체 타입을 돌려준다.
 async fn pg_raw() -> Option<PgStore> {
-    let url = std::env::var("DATABASE_URL").ok().filter(|s| !s.is_empty())?;
+    let url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)

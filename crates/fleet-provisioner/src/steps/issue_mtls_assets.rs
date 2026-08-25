@@ -125,9 +125,9 @@ fn require_local_path<'a>(value: Option<&'a str>, field: &str) -> Result<&'a str
 }
 
 async fn read_local_pem(path: &str) -> Result<String, StepError> {
-    tokio::fs::read_to_string(path).await.map_err(|e| {
-        StepError::PrereqFailed(format!("reading mTLS asset '{path}' failed: {e}"))
-    })
+    tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| StepError::PrereqFailed(format!("reading mTLS asset '{path}' failed: {e}")))
 }
 
 #[cfg(test)]
@@ -202,9 +202,15 @@ mod tests {
         assert!(out.message.contains(REMOTE_MTLS_DIR));
 
         let calls = exec.recorded_calls();
-        assert!(calls.iter().any(|c| c.contains("mkdir -p") && c.contains(REMOTE_MTLS_DIR)));
-        assert!(calls.iter().any(|c| c.contains(&format!("write {TMP_CERT}"))));
-        assert!(calls.iter().any(|c| c.contains(&format!("write {TMP_KEY}"))));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("mkdir -p") && c.contains(REMOTE_MTLS_DIR)));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains(&format!("write {TMP_CERT}"))));
+        assert!(calls
+            .iter()
+            .any(|c| c.contains(&format!("write {TMP_KEY}"))));
         assert!(calls.iter().any(|c| c.contains(&format!("write {TMP_CA}"))));
         assert!(calls.iter().any(|c| c.contains(REMOTE_SERVER_CERT_PATH)
             && c.contains(REMOTE_SERVER_KEY_PATH)

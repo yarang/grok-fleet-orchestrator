@@ -147,7 +147,11 @@ pub async fn register_worker(
     let event = if is_new {
         info!(%worker_id, name = %worker.name, "worker registered");
         // 로드맵 #75 — 이벤트 로그는 append-only이므로 쓰기 시점에 마스킹한다.
-        fleet_core::FleetEvent::worker_joined(worker_id, &worker.name, mask_server_key(&worker.endpoint))
+        fleet_core::FleetEvent::worker_joined(
+            worker_id,
+            &worker.name,
+            mask_server_key(&worker.endpoint),
+        )
     } else {
         info!(%worker_id, name = %worker.name, "worker re-registered");
         fleet_core::FleetEvent::WorkerHeartbeat {
@@ -806,13 +810,16 @@ pub async fn create_bootstrap_token(
     // 수 있는 권한"이다 — 누가 발급했는지 남기지 못하면 export(#66)와 같은
     // 이유로 발급 자체를 무효화한다: 감사 실패 시 방금 만든 토큰을 즉시
     // 회수하고 원문을 반환하지 않는다.
-    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::TOKEN_BOOTSTRAP_ISSUE)
-        .target("bootstrap_token", bt.public_id())
-        .detail(serde_json::json!({
-            "prefix": req.prefix,
-            "max_uses": req.max_uses,
-            "expires_at": expires_at,
-        }));
+    let audit_event = AuditEvent::success(
+        audit_actor_label(ctx.as_deref()),
+        action::TOKEN_BOOTSTRAP_ISSUE,
+    )
+    .target("bootstrap_token", bt.public_id())
+    .detail(serde_json::json!({
+        "prefix": req.prefix,
+        "max_uses": req.max_uses,
+        "expires_at": expires_at,
+    }));
     if let Err(e) = state.store.record_audit_event(&audit_event).await {
         tracing::error!(error = %e, "failed to record audit event for bootstrap token issuance — revoking token");
         let _ = state.store.revoke_bootstrap_token(&bt.token_digest).await;
@@ -922,9 +929,12 @@ pub async fn create_admin_token(
     // 가장 강한 credential이다 — 누가 어떤 principal에게 어떤 capability를
     // 발급했는지 남기지 못하면 즉시 회수한다(create_bootstrap_token과 동일한
     // fail-closed 원칙).
-    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::ADMIN_TOKEN_CREATE)
-        .target("admin_token", principal_id.clone())
-        .detail(serde_json::json!({ "capabilities": req.capabilities }));
+    let audit_event = AuditEvent::success(
+        audit_actor_label(ctx.as_deref()),
+        action::ADMIN_TOKEN_CREATE,
+    )
+    .target("admin_token", principal_id.clone())
+    .detail(serde_json::json!({ "capabilities": req.capabilities }));
     if let Err(e) = state.store.record_audit_event(&audit_event).await {
         tracing::error!(%principal_id, error = %e, "failed to record audit event for admin token creation — revoking token");
         let _ = state.store.revoke_admin_token(&principal_id).await;
@@ -973,9 +983,12 @@ pub async fn rotate_admin_token(
     // "이전 토큰 복원"은 불가능하므로, 대신 방금 발급한 새 토큰마저
     // 즉시 회수해 principal을 무자격 상태로 안전하게 실패시킨다(권한이
     // 남는 쪽보다 없는 쪽으로 실패하는 게 안전하다).
-    let audit_event = AuditEvent::success(audit_actor_label(ctx.as_deref()), action::ADMIN_TOKEN_ROTATE)
-        .target("admin_token", principal_id.clone())
-        .detail(serde_json::json!({ "rotation_generation": record.rotation_generation }));
+    let audit_event = AuditEvent::success(
+        audit_actor_label(ctx.as_deref()),
+        action::ADMIN_TOKEN_ROTATE,
+    )
+    .target("admin_token", principal_id.clone())
+    .detail(serde_json::json!({ "rotation_generation": record.rotation_generation }));
     if let Err(e) = state.store.record_audit_event(&audit_event).await {
         tracing::error!(%principal_id, error = %e, "failed to record audit event for admin token rotation — revoking new token");
         let _ = state.store.revoke_admin_token(&principal_id).await;

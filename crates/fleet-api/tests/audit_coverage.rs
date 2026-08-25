@@ -112,8 +112,7 @@ async fn bootstrap_token_issuance_fails_closed_when_audit_recording_fails() {
     // record_audit_event가 항상 실패하는 store — 발급이 감사되지 못하면
     // 방금 만든 토큰을 즉시 회수하고 500을 반환해야 한다(export의
     // fail-closed 원칙을 발급 쪽에도 적용).
-    let store: Arc<dyn Store> =
-        Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
+    let store: Arc<dyn Store> = Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
     let srv = spawn_with_admin(store.clone(), "root-secret").await;
     let client = reqwest::Client::new();
 
@@ -185,8 +184,7 @@ async fn admin_token_create_rotate_revoke_are_audited() {
 
 #[tokio::test]
 async fn admin_token_creation_fails_closed_when_audit_recording_fails() {
-    let store: Arc<dyn Store> =
-        Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
+    let store: Arc<dyn Store> = Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
     let srv = spawn_with_admin(store.clone(), "root-secret").await;
     let client = reqwest::Client::new();
 
@@ -221,8 +219,7 @@ async fn admin_token_creation_fails_closed_when_audit_recording_fails() {
 
 #[tokio::test]
 async fn admin_token_rotation_fails_closed_when_audit_recording_fails() {
-    let store: Arc<dyn Store> =
-        Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
+    let store: Arc<dyn Store> = Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
 
     // store trait을 직접 통해 시딩 — 이 경로는 handler의 감사 로직을
     // 거치지 않으므로 with_failing이어도 성공한다.
@@ -293,7 +290,10 @@ async fn worker_register_and_deregister_are_audited() {
     assert_eq!(registered[0].target_id.as_deref(), Some(worker_id.as_str()));
     assert_eq!(registered[0].detail["is_new"], true);
     assert!(
-        !registered[0].detail.to_string().contains("super-secret-value"),
+        !registered[0]
+            .detail
+            .to_string()
+            .contains("super-secret-value"),
         "endpoint secret must never reach the audit log"
     );
 
@@ -361,8 +361,7 @@ async fn capability_denial_is_audited() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 
-    let denials =
-        find_events(&store, fleet_core::audit::action::HTTP_CAPABILITY_DENIED).await;
+    let denials = find_events(&store, fleet_core::audit::action::HTTP_CAPABILITY_DENIED).await;
     assert_eq!(denials.len(), 1);
     assert_eq!(denials[0].outcome, fleet_core::AuditOutcome::Failure);
     assert_eq!(denials[0].actor_label, "no-worker-list");
@@ -374,8 +373,7 @@ async fn capability_denial_audit_failure_does_not_change_the_403_response() {
     // 거절은 권한을 내주는 쪽이 아니므로 감사 기록 실패가 이미 결정된
     // 403을 뒤집지 않는다(log-only) — 발급 쪽의 fail-closed와 대칭적으로
     // 확인해 둔다.
-    let store: Arc<dyn Store> =
-        Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
+    let store: Arc<dyn Store> = Arc::new(MemStore::new().with_failing(&["record_audit_event"]));
     let state = AppState::new(store).with_tokens(vec![ApiTokenCredential {
         principal_id: "no-worker-list".into(),
         token: "limited-token".into(),

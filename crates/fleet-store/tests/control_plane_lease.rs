@@ -96,11 +96,7 @@ async fn second_acquire_by_different_instance_is_refused_while_valid() {
     assert!(matches!(err, StoreError::Conflict(_)));
 
     // 거절됐다고 해서 기존 소유권이 바뀌면 안 된다.
-    let current = store
-        .get_control_lease(&cluster_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let current = store.get_control_lease(&cluster_id).await.unwrap().unwrap();
     assert_eq!(current.active_instance_id, "instance-a");
     assert_eq!(current.epoch, 1);
 }
@@ -147,7 +143,10 @@ async fn renew_extends_expiry_and_keeps_epoch() {
         .await
         .unwrap();
 
-    assert_eq!(renewed.epoch, first.epoch, "renew must not change the epoch");
+    assert_eq!(
+        renewed.epoch, first.epoch,
+        "renew must not change the epoch"
+    );
     assert_eq!(renewed.active_instance_id, "instance-a");
     assert!(
         renewed.expires_at > first.expires_at,
@@ -254,11 +253,7 @@ async fn release_with_wrong_instance_is_a_noop() {
         "an instance must not be able to release a lease it doesn't own"
     );
 
-    let current = store
-        .get_control_lease(&cluster_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let current = store.get_control_lease(&cluster_id).await.unwrap().unwrap();
     assert_eq!(current.active_instance_id, "instance-a");
     assert!(
         current.expires_at > chrono::Utc::now(),
@@ -316,10 +311,6 @@ async fn concurrent_acquire_attempts_only_one_wins() {
     assert_eq!(wins, 1, "exactly one concurrent acquirer must win");
     assert_eq!(conflicts, N - 1);
 
-    let final_lease = store
-        .get_control_lease(&cluster_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let final_lease = store.get_control_lease(&cluster_id).await.unwrap().unwrap();
     assert_eq!(final_lease.epoch, 1);
 }

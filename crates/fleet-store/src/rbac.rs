@@ -95,7 +95,9 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::HostProvision => "Provision hosts and manage SSH keys",
         PermissionKind::ProjectRead => "List/read projects",
         PermissionKind::ProjectCreate => "Create projects",
-        PermissionKind::ProjectDelete => "Archive projects (request draining, not permanent delete)",
+        PermissionKind::ProjectDelete => {
+            "Archive projects (request draining, not permanent delete)"
+        }
         PermissionKind::IssueRead => "List/read issues within a project",
         PermissionKind::IssueCreate => "Open new issues",
         PermissionKind::IssueComment => "Append comments to issues",

@@ -234,7 +234,9 @@ impl Reconciler {
         // (불변식 1), 이 함수는 조회로 끝나지 않고 항상 mutation까지
         // 이어지므로 여기서는 조회 전에 미리 막는다.
         if !self.state.lease_allows_control() {
-            debug!("reconcile: skipping sweep — this instance does not hold the control plane lease");
+            debug!(
+                "reconcile: skipping sweep — this instance does not hold the control plane lease"
+            );
             return ReconcileSummary::default();
         }
 
@@ -648,10 +650,9 @@ mod tests {
 
         let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(MockTransport::new());
         let state = Arc::new(
-            FleetState::new(store.clone(), transport, CircuitBreakerConfig::default())
-                .with_lease(crate::lease::LeaseObserver::with_status(
-                    crate::lease::LeaseStatus::Fenced,
-                )),
+            FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
+                crate::lease::LeaseObserver::with_status(crate::lease::LeaseStatus::Fenced),
+            ),
         );
         let dispatcher = Arc::new(Dispatcher::new(state.clone()));
 

@@ -83,7 +83,9 @@ impl Step for ConfigureMtls {
         // 필터링(`--tags mtls`)으로 JoinWorker 없이 이 스텝만 단독 실행되는
         // 경로를 조용히 깨진 파일로 만들지 않기 위해서다.
         let existing = exec
-            .exec(&format!("sudo cat {REMOTE_CONFIG_PATH} 2>/dev/null || true"))
+            .exec(&format!(
+                "sudo cat {REMOTE_CONFIG_PATH} 2>/dev/null || true"
+            ))
             .await?;
         if !existing.contains("[worker]") {
             return Err(StepError::PrereqFailed(format!(
@@ -189,10 +191,9 @@ mod tests {
         // 여기서는 write가 정확히 한 번, 대상 경로로 일어났음과 이어지는
         // sudo mv/chmod가 최종 경로를 향함을 확인하는 선에서 검증한다.
         assert!(write_call.contains(TMP_PATCHED_CONFIG));
-        assert!(calls
-            .iter()
-            .any(|c| c.contains(&format!("mv {TMP_PATCHED_CONFIG} {REMOTE_CONFIG_PATH}"))
-                && c.contains("chmod 600")));
+        assert!(calls.iter().any(|c| c
+            .contains(&format!("mv {TMP_PATCHED_CONFIG} {REMOTE_CONFIG_PATH}"))
+            && c.contains("chmod 600")));
     }
 
     #[tokio::test]

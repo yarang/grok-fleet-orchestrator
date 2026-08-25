@@ -63,14 +63,19 @@ GitHub Actions CI 환경에서 조건부 컴파일 및 코드 검사가 깨지�
     *   코드 빌드 시 clippy 경고가 발생하면 CI 파이프라인이 즉시 실패합니다.
     *   특히 `#[cfg(test)] mod tests` 모듈 뒤에 임의의 공개/비공개 헬퍼 함수를 정의하는 것은 `clippy::items_after_test_module` 경고를 유발하므로, 테스트 모듈 뒤에는 어떠한 일반 구현체도 배치하지 말고 항상 파일의 최하단에 테스트 모듈을 두도록 코드를 구조화합니다.
 3.  **원격 Push 전 로컬 자가 진단**:
-    *   수정 사항을 `origin` 원격지로 푸시하기 전에, 에이전트와 개발자는 로컬 터미널에서 다음 2가지 검증 명령을 반드시 통과시켜야 합니다:
+    *   수정 사항을 `origin` 원격지로 푸시하기 전에, 에이전트와 개발자는 로컬 터미널에서 다음 3가지 검증 명령을 반드시 통과시켜야 합니다. **CI(`.github/workflows/ci.yml`)가 실행하는 것과 동일한 형태**로 적어 둔 것이므로 축약하지 말고 그대로 실행합니다:
         ```bash
-        # 1. 최소 기능 빌드에서의 컴파일 오류 유무 확인
-        cargo check --no-default-features
+        # 1. 포맷 검사 — CI의 첫 단계이며, 실패하면 이후 단계는 실행조차 되지 않음
+        cargo fmt --all -- --check
 
-        # 2. 전체 타깃/피처 하에서의 Clippy 경고 유무 확인
-        cargo clippy --all-targets --all-features
+        # 2. 기본 피처 세트(acp+mtls)에서의 Clippy 경고 유무 확인
+        cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings
+
+        # 3. 최소 기능 빌드에서의 Clippy 경고 유무 확인
+        cargo clippy --workspace --no-default-features --all-targets -- -D warnings
         ```
+    *   **`-D warnings`를 빼지 않습니다.** 이 플래그가 없으면 clippy는 경고가 있어도 종료 코드 0을 반환하므로, "경고 유무를 확인했다"는 판단이 성립하지 않습니다. 마찬가지로 3번을 `cargo check`로 대체하면 컴파일 오류만 잡히고 lint는 통과 여부를 알 수 없습니다.
+    *   `cargo fmt --all -- --check`가 이 목록에서 빠져 있던 동안 33개 파일에 112건의 포맷 위반이 누적되어 `main`의 CI가 첫 단계에서 실패하는 상태로 방치된 적이 있습니다(2026-08-25). 게이트 목록이 CI보다 약하면 드리프트는 반드시 재발합니다.
 
 ---
 

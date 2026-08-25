@@ -312,7 +312,11 @@ mod tests {
     use super::*;
     use fleet_store::mem::MemStore;
 
-    fn manager(store: Arc<dyn Store>, instance_id: &str, config: LeaseManagerConfig) -> LeaseManager {
+    fn manager(
+        store: Arc<dyn Store>,
+        instance_id: &str,
+        config: LeaseManagerConfig,
+    ) -> LeaseManager {
         LeaseManager::new(store, "test-cluster", instance_id, config)
     }
 

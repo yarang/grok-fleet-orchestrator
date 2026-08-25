@@ -36,9 +36,7 @@ pub use breaker::{BreakerRegistry, BreakerState};
 pub use cleanup::{CleanupConfig, CleanupSummary, SessionCleanup, SessionCleanupHandle};
 pub use dispatcher::{CancelError, DispatchError, Dispatcher, WaitError};
 pub use health::{HealthChecker, HealthCheckerHandle, HealthConfig};
-pub use lease::{
-    LeaseManager, LeaseManagerConfig, LeaseManagerHandle, LeaseObserver, LeaseStatus,
-};
+pub use lease::{LeaseManager, LeaseManagerConfig, LeaseManagerHandle, LeaseObserver, LeaseStatus};
 pub use reconcile::{ReconcileConfig, ReconcileSummary, Reconciler, ReconcilerHandle};
 pub use router::{HeuristicTaskRouter, RoutingDecision, RoutingProfile, TaskRouter};
 pub use selector::{SelectionError, WorkerSelector};

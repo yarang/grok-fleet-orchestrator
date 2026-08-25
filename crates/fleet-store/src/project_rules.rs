@@ -24,10 +24,7 @@ pub enum ProjectAdmissionError {
     NotFound(ProjectId),
 
     #[error("project '{name}' is {status} and does not accept new tasks")]
-    NotAccepting {
-        name: String,
-        status: &'static str,
-    },
+    NotAccepting { name: String, status: &'static str },
 
     #[error("store error: {0}")]
     Store(#[from] StoreError),
@@ -217,11 +214,10 @@ mod tests {
         store.create_project(&project).await.unwrap();
 
         let mut transitions = Vec::new();
-        let progress = advance_project_archive(store.as_ref(), &mut project, |s| {
-            transitions.push(s)
-        })
-        .await
-        .unwrap();
+        let progress =
+            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+                .await
+                .unwrap();
 
         assert_eq!(progress, ArchiveProgress::Archived);
         assert_eq!(project.status, ProjectStatus::Archived);
@@ -247,11 +243,10 @@ mod tests {
         store.insert_task(&task).await.unwrap();
 
         let mut transitions = Vec::new();
-        let progress = advance_project_archive(store.as_ref(), &mut project, |s| {
-            transitions.push(s)
-        })
-        .await
-        .unwrap();
+        let progress =
+            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+                .await
+                .unwrap();
 
         assert_eq!(progress, ArchiveProgress::Draining);
         assert_eq!(project.status, ProjectStatus::Draining);
@@ -284,11 +279,10 @@ mod tests {
             .unwrap();
 
         let mut transitions = Vec::new();
-        let progress = advance_project_archive(store.as_ref(), &mut project, |s| {
-            transitions.push(s)
-        })
-        .await
-        .unwrap();
+        let progress =
+            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+                .await
+                .unwrap();
 
         assert_eq!(progress, ArchiveProgress::Archived);
         assert!(

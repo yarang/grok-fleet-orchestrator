@@ -1027,7 +1027,10 @@ mod tests {
     #[cfg(feature = "ssh")]
     #[test]
     fn shell_quote_wraps_plain_paths() {
-        assert_eq!(shell_quote("/usr/local/bin/fleet-worker"), "'/usr/local/bin/fleet-worker'");
+        assert_eq!(
+            shell_quote("/usr/local/bin/fleet-worker"),
+            "'/usr/local/bin/fleet-worker'"
+        );
     }
 
     #[cfg(feature = "ssh")]

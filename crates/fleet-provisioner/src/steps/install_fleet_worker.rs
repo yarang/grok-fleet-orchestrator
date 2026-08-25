@@ -79,17 +79,19 @@ impl Step for InstallFleetWorker {
             )));
         }
 
-        let local_bin = self.resolve_local_bin(ctx).ok_or_else(|| match &self.target_arch {
-            Some(arch) => StepError::PrereqFailed(format!(
-                "no fleet-worker binary available for arch '{arch}' — set \
+        let local_bin = self
+            .resolve_local_bin(ctx)
+            .ok_or_else(|| match &self.target_arch {
+                Some(arch) => StepError::PrereqFailed(format!(
+                    "no fleet-worker binary available for arch '{arch}' — set \
                  ctx.fleet_worker_bin_by_arch['{arch}'] or ctx.fleet_worker_bin \
                  (or local_bin for a forced override)"
-            )),
-            None => StepError::PrereqFailed(
-                "fleet_worker_bin path not provided (set ctx.fleet_worker_bin or local_bin)"
-                    .into(),
-            ),
-        })?;
+                )),
+                None => StepError::PrereqFailed(
+                    "fleet_worker_bin path not provided (set ctx.fleet_worker_bin or local_bin)"
+                        .into(),
+                ),
+            })?;
 
         // 1. 디렉토리 준비 — 뒤이은 JoinWorker 스텝이 여기에 worker.toml을
         //    쓴다(로드맵 #82). 실패를 삼키지 않는다(로드맵 #79).
@@ -240,9 +242,7 @@ mod tests {
         step.apply(&exec, &ctx).await.unwrap();
         let calls = exec.recorded_calls();
         assert!(
-            calls
-                .iter()
-                .any(|c| c.contains("fleet-worker-aarch64")),
+            calls.iter().any(|c| c.contains("fleet-worker-aarch64")),
             "expected the aarch64-specific binary to be uploaded, got: {calls:?}"
         );
         assert!(

@@ -1217,10 +1217,14 @@ async fn list_projects_requires_project_read_permission() {
     let server = spawn_server_inner(store).await;
     let client = reqwest::Client::new();
 
-    let resp = authed_get(&client, &format!("http://{}/api/projects", server.addr), &cookie)
-        .send()
-        .await
-        .unwrap();
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/projects", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(resp.status(), 403);
 }
 
@@ -1281,7 +1285,11 @@ async fn create_and_list_project_roundtrip() {
 
     let detail_resp = authed_get(
         &client,
-        &format!("http://{}/api/projects/{}", server.addr, created["id"].as_str().unwrap()),
+        &format!(
+            "http://{}/api/projects/{}",
+            server.addr,
+            created["id"].as_str().unwrap()
+        ),
         &cookie,
     )
     .send()
@@ -1475,7 +1483,10 @@ async fn delete_project_stays_draining_when_active_tasks_exist() {
         reason: "test cleanup".into(),
         cancelled_at: Utc::now(),
     };
-    store.update_task_status(task.id, &task.status).await.unwrap();
+    store
+        .update_task_status(task.id, &task.status)
+        .await
+        .unwrap();
 
     let final_delete = authed_json(
         &client,
@@ -1571,11 +1582,7 @@ async fn spawn_dispatcher_server_with_store(
         .max_connections(1)
         .connect_lazy("postgres://__test_unused__@localhost/__none__")
         .expect("connect_lazy must not perform I/O");
-    let state = Arc::new(DashboardState::new(
-        store.clone(),
-        pool,
-        Some(dispatcher),
-    ));
+    let state = Arc::new(DashboardState::new(store.clone(), pool, Some(dispatcher)));
     let app = build_dashboard_app(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1596,8 +1603,7 @@ async fn spawn_dispatcher_server_with_store(
 #[tokio::test]
 async fn submit_task_with_active_project_id_records_it_on_the_task() {
     let worker = sample_worker("w1", WorkerStatus::Online);
-    let (server, cookie, store) =
-        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
     let client = reqwest::Client::new();
 
     let project = fleet_core::Project::new("acme-web");
@@ -1642,8 +1648,7 @@ async fn submit_task_with_active_project_id_records_it_on_the_task() {
 #[tokio::test]
 async fn submit_task_with_unknown_project_id_is_rejected_and_creates_no_task() {
     let worker = sample_worker("w1", WorkerStatus::Online);
-    let (server, cookie, store) =
-        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
     let client = reqwest::Client::new();
 
     let resp = authed_post_form(
@@ -1672,8 +1677,7 @@ async fn submit_task_with_unknown_project_id_is_rejected_and_creates_no_task() {
 #[tokio::test]
 async fn submit_task_with_archived_project_id_is_rejected() {
     let worker = sample_worker("w1", WorkerStatus::Online);
-    let (server, cookie, store) =
-        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
     let client = reqwest::Client::new();
 
     let mut project = fleet_core::Project::new("closed-shop");
@@ -1724,8 +1728,7 @@ async fn reply_inherits_project_from_parent_task() {
     // 로드맵 #48 2단계 — 이어가기는 같은 작업 흐름이므로 Project 경계도
     // 물려받는다. 폼에 project_id를 다시 넣지 않아도 유지돼야 한다.
     let worker = sample_worker("w1", WorkerStatus::Online);
-    let (server, cookie, store) =
-        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
     let client = reqwest::Client::new();
 
     let project = fleet_core::Project::new("continuing");
@@ -1776,8 +1779,7 @@ async fn reply_is_rejected_when_the_parents_project_has_since_been_archived() {
     // 상속된 project_id도 명시 입력과 똑같이 검증 대상이다 — 닫힌 Project는
     // 이어가기라 해도 새 Task를 받지 않는다.
     let worker = sample_worker("w1", WorkerStatus::Online);
-    let (server, cookie, store) =
-        spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
     let client = reqwest::Client::new();
 
     let mut project = fleet_core::Project::new("archived-mid-thread");
@@ -1993,7 +1995,13 @@ async fn create_issue_requires_issue_create_permission() {
 }
 
 /// 헬퍼: Issue 하나를 만들고 id를 돌려준다.
-async fn make_issue(client: &reqwest::Client, server: &TestServer, cookie: &str, project_id: &str, title: &str) -> String {
+async fn make_issue(
+    client: &reqwest::Client,
+    server: &TestServer,
+    cookie: &str,
+    project_id: &str,
+    title: &str,
+) -> String {
     let created: serde_json::Value = authed_json(
         client,
         reqwest::Method::POST,
@@ -2038,7 +2046,14 @@ async fn transition(
 async fn full_transition_lifecycle_through_the_api() {
     let (server, cookie, _store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "lifecycle").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "lifecycle",
+    )
+    .await;
 
     for (status, reason, expect_status) in [
         ("triaged", None, "triaged"),
@@ -2069,7 +2084,14 @@ async fn full_transition_lifecycle_through_the_api() {
 async fn disallowed_transition_returns_409() {
     let (server, cookie, _store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "no shortcut").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "no shortcut",
+    )
+    .await;
 
     // Open -> ReadyForAgent 간선은 없다(사람의 triage를 반드시 거친다).
     let resp = transition(&client, &server, &cookie, &id, "ready_for_agent", None).await;
@@ -2080,7 +2102,14 @@ async fn disallowed_transition_returns_409() {
 async fn closing_without_a_reason_returns_409() {
     let (server, cookie, _store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "needs reason").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "needs reason",
+    )
+    .await;
 
     let resp = transition(&client, &server, &cookie, &id, "closed", None).await;
     assert_eq!(resp.status(), 409);
@@ -2123,7 +2152,14 @@ async fn withdrawing_approval_does_not_require_the_approval_capability() {
     // 권한 회수가 부여보다 어려우면 잘못된 승인을 되돌리기가 더 힘들어진다.
     let (server, cookie, _store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "withdraw").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "withdraw",
+    )
+    .await;
     transition(&client, &server, &cookie, &id, "triaged", None).await;
     transition(&client, &server, &cookie, &id, "ready_for_agent", None).await;
 
@@ -2144,7 +2180,14 @@ async fn closing_requires_close_capability_not_update() {
     ]))
     .await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "cannot close").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "cannot close",
+    )
+    .await;
 
     let resp = transition(&client, &server, &cookie, &id, "closed", Some("wont_fix")).await;
     assert_eq!(
@@ -2158,7 +2201,14 @@ async fn closing_requires_close_capability_not_update() {
 async fn patch_updates_fields_but_cannot_change_status() {
     let (server, cookie, store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "typo ttile").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "typo ttile",
+    )
+    .await;
     transition(&client, &server, &cookie, &id, "triaged", None).await;
 
     // status 필드를 본문에 끼워 넣어도 무시돼야 한다(스키마에 아예 없다).
@@ -2201,7 +2251,14 @@ async fn changing_assignee_requires_the_assign_capability() {
     ]))
     .await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "assign me").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "assign me",
+    )
+    .await;
 
     // title만 바꾸는 건 통과.
     let resp = authed_json(
@@ -2234,7 +2291,14 @@ async fn changing_assignee_requires_the_assign_capability() {
 async fn comments_round_trip() {
     let (server, cookie, _store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "discuss").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "discuss",
+    )
+    .await;
 
     let resp = authed_json(
         &client,
@@ -2270,7 +2334,14 @@ async fn linking_a_task_surfaces_the_derived_in_progress_badge() {
     // has_active_tasks만 바뀐다.
     let (server, cookie, store, project) = spawn_issue_server(None).await;
     let client = reqwest::Client::new();
-    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "has work").await;
+    let id = make_issue(
+        &client,
+        &server,
+        &cookie,
+        &project.id.to_string(),
+        "has work",
+    )
+    .await;
 
     let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
         prompt: "do the work".into(),
@@ -2330,10 +2401,7 @@ async fn linking_a_task_surfaces_the_derived_in_progress_badge() {
     let resp = authed_json(
         &client,
         reqwest::Method::DELETE,
-        &format!(
-            "http://{}/api/issues/{id}/links/{}",
-            server.addr, task.id
-        ),
+        &format!("http://{}/api/issues/{id}/links/{}", server.addr, task.id),
         &cookie,
     )
     .send()
@@ -2516,7 +2584,12 @@ async fn projects_list_page_is_forbidden_without_project_read() {
     let client = reqwest::Client::new();
 
     assert_eq!(
-        page_status(&client, &format!("http://{}/projects", server.addr), &cookie).await,
+        page_status(
+            &client,
+            &format!("http://{}/projects", server.addr),
+            &cookie
+        )
+        .await,
         403
     );
 }
@@ -2561,8 +2634,17 @@ async fn every_sidebar_page_links_to_projects() {
     let client = reqwest::Client::new();
 
     for path in [
-        "", "tasks", "tasks/new", "hosts", "hosts/provision", "admin/ssh-keys", "admin/users",
-        "admin/activity", "admin/tools", "projects", "projects/new",
+        "",
+        "tasks",
+        "tasks/new",
+        "hosts",
+        "hosts/provision",
+        "admin/ssh-keys",
+        "admin/users",
+        "admin/activity",
+        "admin/tools",
+        "projects",
+        "projects/new",
     ] {
         let body = authed_get(&client, &format!("http://{}/{path}", server.addr), &cookie)
             .send()

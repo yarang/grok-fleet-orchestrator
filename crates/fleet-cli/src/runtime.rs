@@ -44,8 +44,7 @@ use fleet_mcp::run_mcp_server;
 use fleet_provisioner::{
     append_known_hosts_line, default_known_hosts_path, scan_host_key, HostKeyConfig, HostKeyPolicy,
     Inventory, InventoryWorker, MockExecutor, Playbook, PlaybookContext, PlaybookError,
-    PlaybookReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo,
-    StepContext,
+    PlaybookReport, ProvisionOptions, RemoteExecutor, SshClient, SshConnectInfo, StepContext,
 };
 use fleet_scheduler::{
     CleanupConfig, Dispatcher, FleetState, HealthChecker, HealthConfig, LeaseManager,
@@ -708,9 +707,8 @@ struct CfPrincipalCapabilityEntry {
 fn parse_cf_principal_capabilities(
     raw: &str,
 ) -> Result<std::collections::HashMap<String, Vec<PermissionKind>>> {
-    let entries: Vec<CfPrincipalCapabilityEntry> = serde_json::from_str(raw).context(
-        "FLEET_CF_PRINCIPAL_CAPABILITIES must be a JSON array of {email, capabilities}",
-    )?;
+    let entries: Vec<CfPrincipalCapabilityEntry> = serde_json::from_str(raw)
+        .context("FLEET_CF_PRINCIPAL_CAPABILITIES must be a JSON array of {email, capabilities}")?;
     if entries.is_empty()
         || entries
             .iter()
@@ -1669,8 +1667,7 @@ fn issue_local_mtls_assets(
 ) -> Result<(tempfile::TempDir, LocalMtlsPaths)> {
     #[cfg(feature = "mtls")]
     {
-        let tmp = tempfile::tempdir()
-            .context("creating temp dir for mTLS server cert issuance")?;
+        let tmp = tempfile::tempdir().context("creating temp dir for mTLS server cert issuance")?;
         crate::mtls::run_issue_server(
             Path::new(ca_dir),
             tmp.path(),
@@ -1682,7 +1679,10 @@ fn issue_local_mtls_assets(
         let paths = LocalMtlsPaths {
             cert: tmp.path().join("server.pem").to_string_lossy().into_owned(),
             key: tmp.path().join("server.key").to_string_lossy().into_owned(),
-            ca: Path::new(ca_dir).join("ca.pem").to_string_lossy().into_owned(),
+            ca: Path::new(ca_dir)
+                .join("ca.pem")
+                .to_string_lossy()
+                .into_owned(),
         };
         Ok((tmp, paths))
     }
@@ -1718,9 +1718,10 @@ async fn run_provision_single(host: &str, args: &ProvisionArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| name.clone());
     let (_mtls_tmp, local_mtls) = if args.mtls_enabled && !args.dry_run {
-        let ca_dir = args.mtls_ca_dir.as_deref().ok_or_else(|| {
-            anyhow!("--mtls-ca-dir is required when --mtls-enabled is set")
-        })?;
+        let ca_dir = args
+            .mtls_ca_dir
+            .as_deref()
+            .ok_or_else(|| anyhow!("--mtls-ca-dir is required when --mtls-enabled is set"))?;
         let (tmp, paths) = issue_local_mtls_assets(ca_dir, &name, &advertised_host)?;
         (Some(tmp), Some(paths))
     } else {
@@ -1892,7 +1893,9 @@ async fn run_provision_inventory(inv_path: &str, args: &ProvisionArgs) -> Result
     // 로드맵 #85 — 인증서 없이 mTLS 활성화 시 명확한 실패(완료 게이트).
     // 대상 워커 중 하나라도 mtls_enabled인데 mtls_ca_dir이 없으면, 다른
     // 워커들의 SSH 작업까지 낭비하기 전에 여기서 즉시 막는다.
-    let any_mtls = workers.iter().any(|w| w.effective_mtls_enabled(&inv.defaults));
+    let any_mtls = workers
+        .iter()
+        .any(|w| w.effective_mtls_enabled(&inv.defaults));
     if !options.dry_run && any_mtls && options.mtls_ca_dir.as_deref().is_none_or(str::is_empty) {
         return Err(anyhow!(
             "options.mtls_ca_dir (or --mtls-ca-dir) is required — at least one matched worker \
@@ -2403,7 +2406,11 @@ mod admin_bootstrap_token_file_tests {
     #[test]
     fn creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("etc").join("fleet").join("bootstrap-admin-token");
+        let path = dir
+            .path()
+            .join("etc")
+            .join("fleet")
+            .join("bootstrap-admin-token");
 
         write_admin_bootstrap_token_to_path(&path, "fat_x").unwrap();
         assert!(path.exists());

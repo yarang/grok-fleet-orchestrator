@@ -97,8 +97,10 @@ impl Dispatcher {
         // 순수 append-only 관측 데이터 전달이므로 lease 여부와 무관하게
         // 계속 흘려보낸다 — 막으면 사용자가 보고 있는 실시간 출력만 끊기고
         // 얻는 안전 이득은 없다.
-        if matches!(event, WorkerEvent::Completed { .. } | WorkerEvent::Failed { .. })
-            && !self.state.lease_allows_control()
+        if matches!(
+            event,
+            WorkerEvent::Completed { .. } | WorkerEvent::Failed { .. }
+        ) && !self.state.lease_allows_control()
         {
             // `event`를 통째로 로깅하지 않는다 — `Completed.result.output`은
             // 워커 실행 결과 원문이라 로그에 남기면 안 되는 데이터다.
