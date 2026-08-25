@@ -289,15 +289,17 @@ fn generate_random_bytes(n: usize) -> Result<Vec<u8>> {
 fn base64url(input: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
-    let mut chunks = input.chunks_exact(3);
-    for c in &mut chunks {
+    // `as_chunks::<3>()`는 Rust 1.88.0에서 안정화됐고 워크스페이스 MSRV가
+    // 정확히 1.88이다(`fleet-worker/src/join.rs`가 이미 이 형태를 쓴다).
+    // MSRV를 내리면 여기가 먼저 깨진다.
+    let (chunks, rem) = input.as_chunks::<3>();
+    for c in chunks {
         let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
         out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
         out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
         out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
         out.push(ALPHA[(n & 0x3F) as usize] as char);
     }
-    let rem = chunks.remainder();
     match rem.len() {
         1 => {
             let n = (rem[0] as u32) << 16;

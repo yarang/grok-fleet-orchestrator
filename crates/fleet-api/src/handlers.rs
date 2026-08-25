@@ -1167,15 +1167,17 @@ pub(crate) fn generate_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
 pub(crate) fn base64url(input: &[u8]) -> String {
     const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((input.len() * 4).div_ceil(3));
-    let mut chunks = input.chunks_exact(3);
-    for c in &mut chunks {
+    // `as_chunks::<3>()`는 Rust 1.88.0에서 안정화됐고 워크스페이스 MSRV가
+    // 정확히 1.88이다(`fleet-worker/src/join.rs`가 이미 이 형태를 쓴다).
+    // MSRV를 내리면 여기가 먼저 깨진다.
+    let (chunks, rem) = input.as_chunks::<3>();
+    for c in chunks {
         let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
         out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
         out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
         out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
         out.push(ALPHA[(n & 0x3F) as usize] as char);
     }
-    let rem = chunks.remainder();
     match rem.len() {
         1 => {
             let n = (rem[0] as u32) << 16;
@@ -1705,5 +1707,48 @@ mod tests {
         headers.insert("TraceParent", "00-abc-def-01".parse().unwrap());
         let extractor = HeaderExtractor(&headers);
         assert_eq!(extractor.get("traceparent"), Some("00-abc-def-01"));
+    }
+
+    // ── base64url 인코딩 ────────────────────────────────────────────────
+    //
+    // 이 함수는 관리자 부트스트랩 토큰(`app.rs`의 `fat_` 토큰)과 worker join
+    // secret을 만드는 프로덕션 경로에 있는데도 2026-08-25까지 단위 테스트가
+    // 하나도 없었다. 아래 벡터는 RFC 4648 §10의 표준 테스트 벡터로, 나머지
+    // 길이 0/1/2 세 경로를 모두 지난다.
+
+    #[test]
+    fn base64url_matches_rfc4648_vectors_without_padding() {
+        assert_eq!(base64url(b""), "");
+        assert_eq!(base64url(b"f"), "Zg"); // rem 1
+        assert_eq!(base64url(b"fo"), "Zm8"); // rem 2
+        assert_eq!(base64url(b"foo"), "Zm9v"); // rem 0
+        assert_eq!(base64url(b"foob"), "Zm9vYg");
+        assert_eq!(base64url(b"fooba"), "Zm9vYmE");
+        assert_eq!(base64url(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64url_uses_url_safe_alphabet() {
+        // 0xfc 0x00 은 표준 base64에서 '+' 또는 '/'가 나오는 바이트 조합이다.
+        // 토큰이 URL·쿠키·헤더에 그대로 실리므로 이 치환이 깨지면 안 된다.
+        let s = base64url(&[0xfc, 0x00]);
+        assert!(s.contains('-') || s.contains('_'), "got: {s}");
+        assert!(!s.contains('+'), "got: {s}");
+        assert!(!s.contains('/'), "got: {s}");
+    }
+
+    #[test]
+    fn base64url_length_is_ceil_of_four_thirds() {
+        // 부트스트랩 토큰은 32바이트 난수 → 43자여야 한다(패딩 없음).
+        // `String::with_capacity`의 계산식과 실제 출력이 어긋나면 여기서 깨진다.
+        for n in 0..=48usize {
+            let input = vec![0u8; n];
+            assert_eq!(
+                base64url(&input).len(),
+                (n * 4).div_ceil(3),
+                "length mismatch for {n} bytes"
+            );
+        }
+        assert_eq!(base64url(&[0u8; 32]).len(), 43);
     }
 }
