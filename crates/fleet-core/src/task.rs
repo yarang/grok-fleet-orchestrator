@@ -103,7 +103,13 @@ pub struct Task {
     /// 이 태스크가 "이어가기(Reply)"라면, 직전 태스크의 id. `None`이면 스레드 루트.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<TaskId>,
-    /// 예약 필드 — project 그룹화 기능 도입 전까지는 항상 `None`.
+    /// 선택 Project 경계. `TaskRequest::project_id`에서 그대로 옮겨지거나
+    /// `inherit_from_parent`로 이어받는다 — `None`이면 일반 풀 Task.
+    /// (이전엔 "project 그룹화 도입 전까지 항상 None"이라 적혀 있었지만,
+    /// #48 이후 실제 호출부(예: `submit_task_api`)가 채우므로 더 이상
+    /// 사실이 아니었다. `Some`이면 이 Task는 `#58`의 Project 경계 불변식
+    /// 대상이다 — 예: `link_issue_task`는 Issue와 다른 Project의 Task를
+    /// 거부한다.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
     /// dispatch 재시도 횟수 (로드맵 #38). `submit()`의 최초 시도 또는

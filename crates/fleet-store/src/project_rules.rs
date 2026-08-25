@@ -33,6 +33,36 @@ pub enum ProjectAdmissionError {
     Store(#[from] StoreError),
 }
 
+/// Issue에 링크하려는 Task가 그 Issue와 같은 Project 경계 안에 있는지 검사한다
+/// (로드맵 `#58`).
+///
+/// `issue_task_links`는 링크된 Task를 Issue를 통해 노출하므로, 서로 다른
+/// Project의 Task를 그대로 받아들이면 Project 경계 무결성이 깨진다 —
+/// principal 단위 Project scope가 아직 없는 지금도 리소스 사이의 경계 자체는
+/// 지켜야 한다. principal scope가 나중에 들어오면 이 불변식이 그대로 보안
+/// 통제로 격상된다.
+///
+/// 일반 풀 Task(`task_project_id: None`)는 어느 Project에도 속하지 않으므로
+/// 검사 대상이 아니다 — 계속 링크를 허용한다.
+///
+/// [`Store`] 조회가 필요 없는 순수 판정이지만, 다른 Project 규칙
+/// ([`ensure_project_accepts_new_tasks`], [`advance_project_archive`])과 같은
+/// 주제이므로 같은 모듈에 둔다. **오늘 호출부는 Dashboard의
+/// `link_issue_task_api` 하나뿐이다** — MCP에는 아직 링크 도구가 없다. 그럼에도
+/// surface 크레이트가 아니라 여기 두는 이유는, `#92`에서 Dashboard에 넣어 둔
+/// Issue 전이 규칙을 MCP 표면이 생긴 뒤에야 `fleet-core`로 옮겨야 했던 비용을
+/// 반복하지 않기 위해서다. 두 번째 호출부가 생기기 전까지 이 함수가 단일 호출부
+/// 헬퍼라는 점은 숨기지 않는다.
+pub fn task_project_matches_issue_project(
+    task_project_id: Option<ProjectId>,
+    issue_project_id: ProjectId,
+) -> bool {
+    match task_project_id {
+        Some(task_project_id) => task_project_id == issue_project_id,
+        None => true,
+    }
+}
+
 /// Task 제출 시점의 `project_id` 검증.
 ///
 /// Project가 존재하고 새 Task를 받는 상태([`ProjectStatus::accepts_new_tasks`])
@@ -115,6 +145,28 @@ mod tests {
 
     fn store() -> Arc<dyn Store> {
         Arc::new(MemStore::new())
+    }
+
+    #[test]
+    fn general_pool_task_matches_any_issue_project() {
+        assert!(task_project_matches_issue_project(None, ProjectId::new()));
+    }
+
+    #[test]
+    fn task_in_same_project_matches() {
+        let project_id = ProjectId::new();
+        assert!(task_project_matches_issue_project(
+            Some(project_id),
+            project_id
+        ));
+    }
+
+    #[test]
+    fn task_in_different_project_does_not_match() {
+        assert!(!task_project_matches_issue_project(
+            Some(ProjectId::new()),
+            ProjectId::new()
+        ));
     }
 
     #[tokio::test]

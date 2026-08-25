@@ -29,8 +29,8 @@ pub use error::StoreError;
 pub use listener::listen_events;
 pub use postgres::{PgStore, PoolConfig};
 pub use project_rules::{
-    advance_project_archive, ensure_project_accepts_new_tasks, ArchiveProgress,
-    ProjectAdmissionError,
+    advance_project_archive, ensure_project_accepts_new_tasks, task_project_matches_issue_project,
+    ArchiveProgress, ProjectAdmissionError,
 };
 pub use rbac::{
     consume_bootstrap_and_create_admin, issue_admin_bootstrap_token, seed_builtin_roles,
