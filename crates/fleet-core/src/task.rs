@@ -226,9 +226,15 @@ impl Task {
 /// 작업 상태 (상태머신).
 ///
 /// 허용 전이:
-/// - `Pending` → `Dispatched` | `Cancelled`
+/// - `Pending` → `Dispatched` | `Cancelled` | `Failed`
 /// - `Dispatched` → `Completed` | `Failed` | `Cancelled`
 /// - `Completed` / `Failed` / `Cancelled` → (종료, 전이 불가)
+///
+/// `Pending` → `Failed`은 워커를 못 잡았거나 CircuitBreaker가 열린 채로
+/// dispatch가 끝난 경우다(`Dispatcher::mark_failed`, dispatcher.rs의
+/// `NoWorker`/`CircuitOpen` 경로). 이 간선은 실제로 존재했지만 이 표에는
+/// 빠져 있었다 — 표를 강제하는 코드가 없어 드리프트가 드러나지 않았다.
+/// 지금은 [`TaskPhase::transition_allowed`]가 정본이며 이 주석은 그 사본이다.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -249,6 +255,103 @@ pub enum TaskStatus {
         reason: String,
         cancelled_at: DateTime<Utc>,
     },
+}
+
+impl TaskStatus {
+    /// 이 상태의 phase 태그.
+    ///
+    /// DB의 `tasks.status_phase` 생성 칼럼(`status->>'phase'`,
+    /// 001_init.sql)이 담고 있는 값과 정확히 같다.
+    pub fn phase(&self) -> TaskPhase {
+        match self {
+            TaskStatus::Pending => TaskPhase::Pending,
+            TaskStatus::Dispatched { .. } => TaskPhase::Dispatched,
+            TaskStatus::Completed(_) => TaskPhase::Completed,
+            TaskStatus::Failed(_) => TaskPhase::Failed,
+            TaskStatus::Cancelled { .. } => TaskPhase::Cancelled,
+        }
+    }
+}
+
+/// [`TaskStatus`]에서 페이로드를 걷어낸 상태 태그.
+///
+/// compare-and-set의 "기대 상태" 집합을 표현하려고 존재한다. `TaskStatus`
+/// 자체는 페이로드(worker_id, 실행 결과, 취소 사유)를 들고 있어서 "무엇이든
+/// Dispatched이기만 하면 된다"를 표현할 수 없고, [`TaskStatusFilter`]는 조회
+/// 편의를 위한 합성 변형(`Terminal`/`Active`)을 갖고 있어 상태 기계의
+/// 정점(vertex) 집합이 아니다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPhase {
+    Pending,
+    Dispatched,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl TaskPhase {
+    /// DB `status_phase` 칼럼에 실제로 저장되는 문자열.
+    ///
+    /// `TaskStatus`의 `#[serde(tag = "phase", rename_all = "snake_case")]`가
+    /// 만들어내는 값과 반드시 일치해야 한다 — CAS의 SQL 조건절이 이 문자열로
+    /// 비교하기 때문이다. 이 계약은 `phase_str_matches_serialized_status`가
+    /// 지킨다(주석만으로 두었다가 어긋난 전례가 있다).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskPhase::Pending => "pending",
+            TaskPhase::Dispatched => "dispatched",
+            TaskPhase::Completed => "completed",
+            TaskPhase::Failed => "failed",
+            TaskPhase::Cancelled => "cancelled",
+        }
+    }
+
+    /// 종료 상태(나가는 간선이 없는 상태)인지 여부.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskPhase::Completed | TaskPhase::Failed | TaskPhase::Cancelled
+        )
+    }
+
+    /// 상태 기계의 허용 간선 판정 (순수 함수 — 테스트가 전이표 전체를 훑을
+    /// 수 있게 공개한다).
+    ///
+    /// `Pending` → `Failed`은 워커를 배정하지 못했거나 CircuitBreaker가 열린
+    /// 채로 dispatch가 끝난 경로다. 실제로 늘 일어나던 전이인데 [`TaskStatus`]
+    /// 주석의 표에는 빠져 있었다.
+    pub fn transition_allowed(from: TaskPhase, to: TaskPhase) -> bool {
+        use TaskPhase::*;
+        matches!(
+            (from, to),
+            (Pending, Dispatched)
+                | (Pending, Failed)
+                | (Pending, Cancelled)
+                | (Dispatched, Completed)
+                | (Dispatched, Failed)
+                | (Dispatched, Cancelled)
+        )
+    }
+
+    /// `to`로 전이할 수 있는 선행 상태 전체.
+    ///
+    /// compare-and-set 기대값의 **기본값**이다. 호출자가 더 좁은 집합을 아는
+    /// 경우에는 이 값 대신 그 집합을 넘겨야 한다. 예를 들어 reconciler는
+    /// 이미 dispatch된 작업만 orphan으로 실패 처리해야 하므로 `[Dispatched]`를
+    /// 넘긴다 — 넓은 기본값 `[Pending, Dispatched]`을 그대로 쓰면 방금
+    /// `Pending` → `Dispatched`로 넘어간 작업을 orphan으로 오인해 죽이는
+    /// 경합이 그대로 남는다.
+    pub fn allowed_predecessors(to: TaskPhase) -> &'static [TaskPhase] {
+        use TaskPhase::*;
+        match to {
+            Pending => &[],
+            Dispatched => &[Pending],
+            Completed => &[Dispatched],
+            Failed => &[Pending, Dispatched],
+            Cancelled => &[Pending, Dispatched],
+        }
+    }
 }
 
 /// 작업 완료 결과.
@@ -633,5 +736,132 @@ mod tests {
             cache_read_tokens: 10,
         };
         assert_eq!(u.total(), 150);
+    }
+
+    /// 상태 기계의 정점 전체. 새 변형이 생기면 이 배열도 같이 늘려야
+    /// 아래 전수 테스트들이 계속 전수로 남는다.
+    const ALL_PHASES: [TaskPhase; 5] = [
+        TaskPhase::Pending,
+        TaskPhase::Dispatched,
+        TaskPhase::Completed,
+        TaskPhase::Failed,
+        TaskPhase::Cancelled,
+    ];
+
+    fn sample_status(phase: TaskPhase) -> TaskStatus {
+        let now = Utc::now();
+        match phase {
+            TaskPhase::Pending => TaskStatus::Pending,
+            TaskPhase::Dispatched => TaskStatus::Dispatched {
+                worker_id: WorkerId::nil(),
+                started_at: now,
+            },
+            TaskPhase::Completed => TaskStatus::Completed(TaskResult {
+                output: "ok".into(),
+                exit_code: 0,
+                duration_secs: 1.0,
+                token_usage: None,
+                worker_id: WorkerId::nil(),
+                finished_at: now,
+            }),
+            TaskPhase::Failed => TaskStatus::Failed(TaskFailure {
+                error: "boom".into(),
+                kind: FailureKind::WorkerError,
+                worker_id: None,
+                attempts: 1,
+            }),
+            TaskPhase::Cancelled => TaskStatus::Cancelled {
+                reason: "user".into(),
+                cancelled_at: now,
+            },
+        }
+    }
+
+    /// [`TaskPhase::as_str`]이 DB `status_phase`에 실제로 들어가는 문자열과
+    /// 같은지 전수 확인한다.
+    ///
+    /// CAS는 `WHERE status_phase = ANY($3)`로 비교하므로 이 둘이 어긋나면
+    /// 조건절이 조용히 0행을 매칭하고, 모든 전이가 "거부됨"으로 보인다.
+    /// 같은 종류의 드리프트(주석은 맞다고 하는데 실제 직렬화는 다른)가
+    /// PgStore의 worker_id 필터에서 이미 한 번 일어났다.
+    #[test]
+    fn phase_str_matches_serialized_status() {
+        for phase in ALL_PHASES {
+            let json = serde_json::to_value(sample_status(phase)).unwrap();
+            let serialized = json
+                .get("phase")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("{phase:?} 직렬화에 phase 태그가 없다: {json}"));
+            assert_eq!(
+                phase.as_str(),
+                serialized,
+                "{phase:?}: as_str()와 직렬화된 phase 태그가 다르다"
+            );
+        }
+    }
+
+    /// `TaskStatus::phase()`가 각 변형을 올바른 태그로 보낸다.
+    #[test]
+    fn status_maps_to_its_phase() {
+        for phase in ALL_PHASES {
+            assert_eq!(sample_status(phase).phase(), phase);
+        }
+    }
+
+    /// 허용 간선이 [`TaskStatus`] 문서의 표와 정확히 일치한다.
+    #[test]
+    fn allowed_transitions_match_the_contract_diagram() {
+        use TaskPhase::*;
+        let expected = [
+            (Pending, Dispatched),
+            (Pending, Failed),
+            (Pending, Cancelled),
+            (Dispatched, Completed),
+            (Dispatched, Failed),
+            (Dispatched, Cancelled),
+        ];
+        for from in ALL_PHASES {
+            for to in ALL_PHASES {
+                let allowed = TaskPhase::transition_allowed(from, to);
+                let want = expected.contains(&(from, to));
+                assert_eq!(allowed, want, "전이 {from:?} → {to:?} 판정이 표와 다르다");
+            }
+        }
+    }
+
+    /// 종료 상태에서 나가는 간선은 하나도 없다.
+    #[test]
+    fn terminal_phases_have_no_outgoing_transitions() {
+        for from in ALL_PHASES.into_iter().filter(|p| p.is_terminal()) {
+            for to in ALL_PHASES {
+                assert!(
+                    !TaskPhase::transition_allowed(from, to),
+                    "종료 상태 {from:?}에서 {to:?}로 나가는 간선이 있다"
+                );
+            }
+        }
+    }
+
+    /// `allowed_predecessors`는 `transition_allowed`를 뒤집은 것과 같아야
+    /// 한다. 두 표현이 갈라지면 CAS가 상태 기계와 다른 규칙을 강제하게 된다.
+    #[test]
+    fn allowed_predecessors_agree_with_transition_table() {
+        for to in ALL_PHASES {
+            let derived: Vec<TaskPhase> = ALL_PHASES
+                .into_iter()
+                .filter(|&from| TaskPhase::transition_allowed(from, to))
+                .collect();
+            assert_eq!(
+                TaskPhase::allowed_predecessors(to),
+                derived.as_slice(),
+                "{to:?}의 선행 상태 집합이 전이표와 다르다"
+            );
+        }
+    }
+
+    /// `Pending`은 초기 상태이므로 선행 상태가 없다 — CAS로 진입할 수 없다.
+    #[test]
+    fn pending_has_no_predecessors() {
+        assert!(TaskPhase::allowed_predecessors(TaskPhase::Pending).is_empty());
     }
 }
