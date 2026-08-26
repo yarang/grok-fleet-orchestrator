@@ -265,6 +265,13 @@ impl Store for MemStore {
         task.status = new.clone();
         if matches!(new, TaskStatus::Dispatched { .. }) {
             task.dispatched_at = Some(Utc::now());
+            // Postgres 쪽 SET 절과 같은 조건이다 — Dispatched 전이 x fence 존재.
+            // fence가 없을 때 `None`을 대입하지 않고 아예 건드리지 않는 것도
+            // 의도적이다. 두 백엔드가 문장 단위로 대응해야 `both_backends!`
+            // 테스트가 백엔드 차이를 잡아낼 수 있다.
+            if let Some(f) = fence {
+                task.dispatch_control_epoch = Some(f.epoch);
+            }
         }
         Ok(TransitionOutcome::Applied)
     }

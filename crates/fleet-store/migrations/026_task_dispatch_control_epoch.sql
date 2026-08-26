@@ -1,0 +1,27 @@
+-- 026: Task를 디스패치한 제어 평면 세대(control epoch)를 기록한다. (로드맵 #62 4단계)
+--
+-- 왜 컬럼 하나인가 — 원래 이 자리에는 `task_attempts` 테이블이 계획돼 있었다.
+-- 재시도를 하지 않기로 결정하면서 그 계획이 성립하지 않게 됐다:
+--
+--   * Task는 생성 시 `Pending`으로 태어나고, `Dispatched`에서 `Pending`으로
+--     되돌리는 경로가 코드 전체에 없다. dispatch 재시도(#38)는 `Pending`에
+--     머무는 Task의 **워커 선정** 실패라 시도 행을 만들기 전에 끝난다.
+--   * 따라서 Task당 시도는 최대 하나다. 시도 테이블은 `tasks`와 1:0..1이 되고,
+--     `worker_id`는 `status->'Dispatched'->>'worker_id'`의 복사본,
+--     `created_at`은 `dispatched_at`의 복사본, generation은 영원히 1이 된다.
+--   * 남는 새 사실은 epoch 하나뿐이다.
+--
+-- 이 값만 따로 적는 이유는 **사후 복원이 불가능**하기 때문이다. 021의
+-- `control_plane_lease`는 *현재* epoch만 들고 있어서, 리스가 한 번 넘어가면
+-- "이 Task를 어느 세대가 디스패치했는가"는 어디에도 남지 않는다. 반대로 위의
+-- 세 값은 전부 `tasks`에서 지금도 읽을 수 있다.
+--
+-- NULL의 의미: HA 리스를 쓰지 않는 단일 인스턴스 배포에서는
+-- `SchedulerState::control_fence()`가 `None`이라 이 컬럼이 항상 NULL이다.
+-- "값을 못 구해서 비었다"가 아니라 "제어 세대라는 개념이 없는 배포"라는 뜻이며,
+-- 두 경우를 구분할 필요가 생기면 리스 테이블의 존재 여부가 그것을 가른다.
+--
+-- 026 이전에 디스패치된 기존 행도 NULL이다. 소급해 채울 방법이 없다 —
+-- 위에 적은 그대로, 지나간 epoch는 복원되지 않는다.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS dispatch_control_epoch BIGINT
+    CHECK (dispatch_control_epoch >= 0);

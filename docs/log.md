@@ -2128,3 +2128,94 @@ Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실�
   `cross_client`에는 소요 시간 판별을 적용해 놓고 **방금 내가 쓴 파일에는 적용하지 않았다는**
   점이다. §4.3의 (3)이 남긴 교훈은 도구가 아니라 겨냥이었다 — **판별법은 들이대는 곳에서만
   작동하고, 새로 쓴 코드는 의심 목록의 맨 뒤로 밀린다.**
+
+---
+
+## 2026-08-26 — ingest — 무재시도 정책 채택과 `TaskAttempt`의 철회 (`#62` 4단계)
+
+- **결정**: 실행 실패를 재시도하지 않는다. 실패한 Task는 터미널로 남고, 다시 하려면 **새 Task**를
+  만든다. 사용자 결정이며, 논의와 대안 비교는
+  [재시도 정책 결정 기록](./reviews/task-retry-policy-decision-2026-08-26.md)에 있다.
+- **그 결정이 무너뜨린 것**: 4단계의 원래 범위는 `TaskAttempt` 엔티티였다. 무재시도 아래에서
+  Task와 시도는 **1:0..1**이 된다 — 실측 근거는 `TaskStatus::Pending`을 **새 상태로 쓰는 코드가
+  저장소에 하나도 없다**는 것이다(`expected` 슬라이스 밖의 모든 출현은 테스트 `matches!` 단언
+  이거나 읽기 측 표시·메트릭 match arm). Task는 `Pending`으로 태어나 다시 돌아오지 않으므로
+  `Pending→Dispatched` CAS는 Task당 영구히 최대 한 번 성공한다. 그러면 attempt 행의 `worker_id`·
+  `created_at`·`generation`은 각각 `TaskStatus::Dispatched{worker_id}`·`tasks.dispatched_at`·상수 1의
+  중복이고 `AttemptId`는 소비자가 없다. **새로운 사실은 `control_epoch` 하나뿐**이었다.
+- **그래서 749 insertions를 되돌리고 컬럼 하나로 남겼다.** 마이그레이션 026이
+  `tasks.dispatch_control_epoch BIGINT CHECK (>= 0)`을 더하고, 3단계가 만든 CAS **안에서**
+  `is_dispatching && fence.is_some()`일 때만 쓴다. `control_plane_lease`가 **현재** epoch만 들고 있어
+  lease가 넘어가면 "어느 제어 세대가 이 Task를 디스패치했는가"가 사후 복원 불가능해지기 때문에
+  이 하나는 기록할 값이 있다. 나머지 셋은 오늘 `tasks`에서 읽힌다.
+- **두 조건의 교집합인 이유**: Postgres는 자리번호 개수를 문장 텍스트의 최댓값으로 추론하므로
+  `$5`가 fence 없이 텍스트에만 남으면 문장 자체가 거절된다. 그리고 `is_dispatching`을 떼면 완료·
+  실패 전이가 값을 덮어써 "디스패치한 세대"가 "마지막으로 손댄 세대"로 바뀐다. 두 이유가 **서로
+  다른 실패 모드**라 조건도 두 개다.
+- **검증**: `task_cas.rs` 3건을 MemStore·실제 PostgreSQL 양쪽에서. 셋째(E1 디스패치 → lease 해제 →
+  `instance-b`가 E2로 재획득 → E2에서 완료 → 값이 여전히 `Some(E1)`)만이 `is_dispatching` 가드를
+  지키며, 뮤테이션으로 그 사실을 확인했다.
+- **부수 수정**: `migration_lease_guard.rs`가 관측 지점을 마이그레이션 025의 인덱스 이름으로
+  하드코딩해 두어 **어떤** 새 마이그레이션이든 이 테스트를 깨뜨렸다. `_sqlx_migrations` 원장
+  조회로 일반화했다 — sqlx `Migrator`는 각 마이그레이션의 DDL과 원장 삽입을 **한 트랜잭션**에
+  넣으므로 원장 부재는 스키마 객체 부재와 동등한 증거이며, 이 관측은 마이그레이션에 무관하다.
+- **정본 반영**: [실행 일관성](./architecture/tasks/execution-consistency.md)의 ER·상태 모델에서
+  `TASK_ATTEMPT`와 `RetryWaiting`을 제거하고, `## 재시도 계약`을 `## 실패 처리 계약`으로 교체했다.
+  CAS 술어 목록에서 `attempt_id`/generation을 뺐고, `### control epoch 게이트를 절반만 닫은 이유`의
+  둘째 문단(=늦은 이벤트를 가르는 진짜 식별자는 `attempt_id`라는 논증)은 **무효**가 되어 다시
+  썼다 — 시도 2가 없으므로 phase CAS가 그 경쟁을 실제로 가른다.
+- **정책이 만든 새 구멍(미해결, 정직하게 기록)**: 외부 멱등성 키는 **Project ID + Task ID +
+  effect scope + 제출 시 정책 revision**의 HMAC이다. Task ID가 안정된 앵커였던 이유는 재시도가 한
+  Task **안에** 머물렀기 때문인데, 실패를 새 Task로 옮기면 ID가 바뀌어 키가 달라지고 외부
+  provider는 새 작업으로 본다 — 그 파생식이 막으려던 이중 적용이 되살아난다. 새 Task 경계를 넘는
+  앵커 필드가 필요하지만 **없다.** "채울 방법이 없는 것은 미리 만들지 않는다"에 따라 필드를 만들지
+  않고 정본 유예 표에 **설계 미결**로 올렸다. 이것은 미구현 게이트가 아니라 **정책과 함께 받아들인
+  대가**다.
+- **`#95`의 대기 사유가 유령이 됐다**: [Authorization](./security/authorization-and-audit.md)
+  202-204는 `AuditEvent`에 `attempt_id`가 없는 이유를 "Project/Attempt 엔티티가 아직 없어
+  (`#48`·`#62` 계열 선행)"로 적는다. 4단계가 "생산자 없음"으로 닫힌 지금 그 선행은 `#62`로는
+  **영원히 충족되지 않는다.** 로드맵 `#95` 행에 이 사실과 삭제 지시를 적었고, security 정본의
+  같은 문장 수정은 그 도메인의 몫으로 남겼다.
+- **검증 한계**: 이 컬럼을 **읽는 코드는 없다**. HA lease가 없는 단일 인스턴스 배포에서는
+  `SchedulerState::control_fence()`가 `None`이라 **항상 NULL**이며, 이는 "값을 못 구했다"가 아니라
+  "제어 세대 개념이 없는 배포"라는 뜻이다. 026 이전 행은 소급 불가다. 라이브 2프로세스 장애
+  전환에서의 쓰기 거절은 이번에도 관찰하지 않았다.
+- **고치지 않은 용어 드리프트**: [`security/authorization-and-audit.md`](./security/authorization-and-audit.md)
+  37·42·111·202-204와 [`security/control-plane-security-model.md`](./security/control-plane-security-model.md)
+  72·91·97·106-112는 아직 `Attempt`를 별도 엔티티로 전제한다. 1:0..1이므로 실체는 Task이지만
+  **단순 개명이 아니다** — 전자는 `#95`의 대기 사유(로드맵 상태 주장)이고 후자는 grant 수명
+  의미론(보안 계약 주장)이라, 각 도메인에서 등가성을 확인한 뒤 고친다. 위치와 사유를 정본의
+  "다른 문서에 남은 `Attempt` 표현" 절 표에 남겼다.
+
+---
+
+## 2026-08-26 — lint — 로컬 테스트 게이트가 CI와 다르다: `--test-threads=1` 누락
+
+`#62` 4단계 커밋 전 게이트를 돌리다 `fleet-store`의 `audit_integration` 7건 중 6건이 실패했다.
+원인을 규명한 결과 **코드 결함도, flaky도 아니었다 — 로컬 게이트 명령이 CI와 달랐다.**
+
+- **증상**: `DATABASE_URL`을 주입한 `cargo test -p fleet-store --test audit_integration`이
+  6건 실패. DB를 새로 만들어도 동일하게 재현됐다(누적 오염이 아니다).
+- **규명**: `-- --test-threads=1`을 붙이면 **7건 전부 통과**한다. 내 변경을 `git stash`로
+  제외한 HEAD에서도 병렬 실행은 똑같이 6건 실패한다 — 즉 **이번 변경과 무관한 선재 조건**이다.
+- **기전**: 이 파일의 `require_db!` 매크로는 매 테스트 시작에 `TRUNCATE audit_log, sessions,
+  user_roles, users CASCADE`를 실행하고, 여러 테스트가 **필터 없는 전역 목록**을 단언한다.
+  병렬로 돌면 한 테스트의 TRUNCATE가 다른 테스트의 행을 지우고, 한 테스트의 삽입이 다른
+  테스트의 단언을 오염시킨다. 파일 상단 doc comment는 이미 `-- --test-threads=1`을 적어
+  두었으나 **강제하지는 않는다.**
+- **CI가 초록인 이유**: `.github/workflows/ci.yml`의 두 test 잡은 모두
+  `cargo test --workspace -- --test-threads=1`로 **직렬 실행**한다. 그래서 CI는 이 조건을
+  애초에 만나지 않는다.
+- **드리프트의 방향이 평소와 반대다.** §4.3이 기록한 세 사례는 전부 "로컬 게이트가 CI보다
+  **약해서** CI만 실패"였다. 이번은 "로컬이 CI와 **달라서** 로컬만 실패"다. 위험은 대칭이다 —
+  같은 불일치가 반대로 작동하면 **병렬에서만 통과하는 테스트**가 로컬 초록을 받고 CI에서
+  깨진다. 게이트는 CI보다 강하거나 약한 것이 아니라 **같아야** 한다.
+- **조치**: 로컬 테스트 게이트를 CI와 같은 형태로 적는다.
+  ```bash
+  cargo build -p fleet-cli --features "acp mtls"   # 잡의 피처로 먼저 (§3.2)
+  cargo test --workspace -- --test-threads=1
+  ```
+  `audit_integration`의 테스트 격리 자체(전역 목록 단언을 테스트별 고유 actor/action으로
+  좁히기)는 이 커밋의 범위가 아니라 별도 항목으로 남긴다. 직렬 실행으로 CI와 로컬이 모두
+  성립하므로 지금 당장 깨지는 것은 없고, 고치면 워크스페이스 테스트를 병렬화할 수 있다는
+  것이 이득이다.

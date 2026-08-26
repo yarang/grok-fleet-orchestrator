@@ -46,9 +46,27 @@ use sqlx::migrate::{Migration, Migrator};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-/// 025가 만드는 인덱스. "거절이 말뿐이 아니라 실제로 적용을 막았는가"를
-/// 확인하는 관찰 지점으로 쓴다.
-const MIGRATION_025_INDEX: &str = "idx_tasks_dependency_ids";
+/// "거절이 말뿐이 아니라 실제로 적용을 막았는가"를 확인하는 관찰 지점.
+///
+/// 예전에는 마지막 마이그레이션이 만드는 스키마 객체 이름(025의
+/// `idx_tasks_dependency_ids`)을 상수로 박아 뒀다. 버전 계산은
+/// `last_two_versions()`로 일반화해 두고 관찰 지점만 고정해 둔 탓에, 다음
+/// 마이그레이션이 하나라도 추가되면 `previous`가 025로 밀리면서 "아직
+/// 적용되지 않았어야 한다"는 단언이 반드시 깨졌다 — 026이 실제로 그것을
+/// 발동시켰다.
+///
+/// 원장을 보면 그 결합이 사라진다. sqlx는 각 마이그레이션의 DDL과
+/// `_sqlx_migrations` 삽입을 **같은 트랜잭션**에서 처리하므로, 원장에 행이
+/// 없다는 것은 DDL도 적용되지 않았다는 것과 같은 증거다. 그리고 이 관찰은
+/// 마이그레이션이 무엇을 만드는지와 무관하다.
+async fn migration_is_recorded(pool: &PgPool, version: i64) -> bool {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = $1")
+        .bind(version)
+        .fetch_one(pool)
+        .await
+        .expect("_sqlx_migrations must exist after a partial migration")
+        > 0
+}
 
 /// 이 바이너리가 들고 있는 마지막 마이그레이션 버전보다 하나 앞. DB를 여기까지만
 /// 올려 두면 정확히 마지막 하나가 pending이 된다.
@@ -177,7 +195,7 @@ async fn migration_is_refused_while_another_instance_holds_a_live_lease() {
         "partial migration must already include 021"
     );
     assert!(
-        !relation_exists(&pool, MIGRATION_025_INDEX).await,
+        !migration_is_recorded(&pool, last).await,
         "the last migration must not be applied yet"
     );
 
@@ -212,7 +230,7 @@ async fn migration_is_refused_while_another_instance_holds_a_live_lease() {
 
     // 거절이 말뿐이 아니어야 한다 — 실제로 적용되지 않았는지 확인.
     assert!(
-        !relation_exists(&pool, MIGRATION_025_INDEX).await,
+        !migration_is_recorded(&pool, last).await,
         "a refused migration must not have applied anything"
     );
 
@@ -228,7 +246,7 @@ async fn migration_proceeds_immediately_after_the_holder_releases() {
         return;
     };
     let pool = temp.connect().await;
-    let (previous, _last) = last_two_versions();
+    let (previous, last) = last_two_versions();
     migrator_up_to(previous)
         .run(&pool)
         .await
@@ -252,7 +270,7 @@ async fn migration_proceeds_immediately_after_the_holder_releases() {
         .await
         .expect("a released lease must not block the upgrade at all");
     assert!(
-        relation_exists(&pool, MIGRATION_025_INDEX).await,
+        migration_is_recorded(&pool, last).await,
         "the pending migration must actually have been applied"
     );
 

@@ -526,3 +526,103 @@ both_backends!(fenced_takes_precedence_over_not_found, |store| async move {
 
     assert_eq!(outcome, TransitionOutcome::Fenced);
 });
+
+// ── dispatch control epoch (로드맵 #62 4단계) ───────────────────────────
+
+both_backends!(dispatch_records_the_control_epoch, |store| async move {
+    let cluster = unique_cluster();
+    let fence = acquire_fence(&store, &cluster, "instance-a").await;
+    let task = seed_task(&store, "record epoch", TaskStatus::Pending).await;
+
+    let outcome = store
+        .compare_and_set_task_status(
+            task.id,
+            &[TaskPhase::Pending],
+            &dispatched(WorkerId::new()),
+            Some(&fence),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, TransitionOutcome::Applied);
+
+    let stored = store.get_task(task.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.dispatch_control_epoch,
+        Some(fence.epoch),
+        "디스패치를 실행한 제어 세대가 그대로 남아야 한다"
+    );
+});
+
+both_backends!(
+    dispatch_without_a_fence_leaves_the_epoch_unset,
+    |store| async move {
+        // HA 리스를 쓰지 않는 단일 인스턴스 배포의 모습이다. epoch 개념이
+        // 없으므로 0 같은 가짜 기본값이 아니라 NULL이어야 한다 — 0을 쓰면
+        // "0세대가 디스패치했다"와 구분되지 않는다.
+        let task = seed_task(&store, "no fence", TaskStatus::Pending).await;
+
+        let outcome = store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Pending],
+                &dispatched(WorkerId::new()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, TransitionOutcome::Applied);
+
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(stored.dispatch_control_epoch, None);
+    }
+);
+
+both_backends!(
+    terminal_transitions_do_not_overwrite_the_dispatch_epoch,
+    |store| async move {
+        // 이 테스트가 지키는 것은 `is_dispatching` 가드 하나다. 그 조건을 떼고
+        // 모든 CAS가 epoch를 쓰게 하면 컬럼의 의미가 "디스패치한 세대"에서
+        // "마지막으로 손댄 세대"로 조용히 바뀌는데, 위의 두 테스트는 둘 다
+        // 통과한 채로 그 변질을 놓친다.
+        let cluster = unique_cluster();
+        let dispatch_fence = acquire_fence(&store, &cluster, "instance-a").await;
+        let worker = WorkerId::new();
+        let task = seed_task(&store, "epoch is pinned", TaskStatus::Pending).await;
+
+        store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Pending],
+                &dispatched(worker),
+                Some(&dispatch_fence),
+            )
+            .await
+            .unwrap();
+
+        // 장애 전환으로 제어 세대가 넘어간 뒤 새 인스턴스가 완료를 기록한다.
+        store
+            .release_control_lease(&cluster, "instance-a", dispatch_fence.epoch)
+            .await
+            .unwrap();
+        let later_fence = acquire_fence(&store, &cluster, "instance-b").await;
+        assert!(later_fence.epoch > dispatch_fence.epoch);
+
+        let outcome = store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                Some(&later_fence),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, TransitionOutcome::Applied);
+
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.dispatch_control_epoch,
+            Some(dispatch_fence.epoch),
+            "완료 전이는 디스패치 세대를 덮어쓰면 안 된다"
+        );
+    }
+);

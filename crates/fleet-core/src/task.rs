@@ -302,6 +302,23 @@ pub struct Task {
     /// 가르는 값이다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_payload_hash: Option<String>,
+    /// 이 Task를 디스패치한 제어 평면 세대(control epoch). (로드맵 #62 4단계)
+    ///
+    /// `Pending -> Dispatched` 전이가 fence를 들고 이뤄질 때만 채워진다.
+    /// HA 리스를 쓰지 않는 배포에서는 `control_fence()`가 `None`이라 항상
+    /// `None`이다 — "제어 세대라는 개념이 없는 배포"라는 뜻이지, 값을
+    /// 못 구했다는 뜻이 아니다.
+    ///
+    /// 디스패치 시점에 한 번만 쓰이고 이후 전이는 건드리지 않는다. Task가
+    /// `Dispatched`에서 `Pending`으로 돌아가는 경로가 없어 디스패치가 Task당
+    /// 최대 한 번이므로, "마지막 전이의 epoch"가 아니라 "그 디스패치의 epoch"가
+    /// 정확히 보존된다.
+    ///
+    /// 아직 이 값을 읽어 판단하는 코드는 없다. 그럼에도 기록하는 이유는
+    /// 021의 `control_plane_lease`가 *현재* epoch만 들고 있어, 리스가 넘어가면
+    /// 사후 복원이 불가능하기 때문이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_control_epoch: Option<i64>,
 }
 
 impl Task {
@@ -346,6 +363,7 @@ impl Task {
             partial_output: None,
             idempotency_key: req.idempotency_key,
             idempotency_payload_hash,
+            dispatch_control_epoch: None,
         }
     }
 

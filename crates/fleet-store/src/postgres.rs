@@ -372,7 +372,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
                FROM tasks WHERE created_by = $1 AND idempotency_key = $2"#,
         )
         .bind(&task.created_by)
@@ -406,7 +406,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -422,7 +422,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -491,6 +491,17 @@ impl Store for PgStore {
         let mut sql = String::from("UPDATE tasks SET status = $2");
         if is_dispatching {
             sql.push_str(", dispatched_at = NOW()");
+            // epoch는 fence가 있을 때만 적는다. `$5`는 아래에서 fence가
+            // `Some`일 때만 바인딩되므로, 이 두 조건이 어긋나면 자리번호가
+            // 텍스트에만 남고 값이 없어 Postgres가 문장을 거절한다 —
+            // 그래서 여기 조건은 `is_dispatching`이 아니라 그 **교집합**이다.
+            //
+            // Dispatched 전이에만 붙이는 것도 `dispatched_at`과 같은 이유다.
+            // 조건을 떼면 완료/실패 전이가 이 값을 덮어써서 "디스패치한 세대"가
+            // "마지막으로 손댄 세대"로 바뀐다.
+            if fence.is_some() {
+                sql.push_str(", dispatch_control_epoch = $5");
+            }
         }
         sql.push_str(" WHERE id = $1 AND status_phase = ANY($3)");
         if fence.is_some() {
@@ -603,7 +614,7 @@ impl Store for PgStore {
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                           requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
                    FROM tasks"#;
         const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
                        OR status->'Completed'->>'worker_id' = $1
@@ -2927,6 +2938,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let partial_output: Option<String> = row.try_get("partial_output")?;
     let idempotency_key: Option<String> = row.try_get("idempotency_key")?;
     let idempotency_payload_hash: Option<String> = row.try_get("idempotency_payload_hash")?;
+    let dispatch_control_epoch: Option<i64> = row.try_get("dispatch_control_epoch")?;
 
     let required_labels: Vec<String> = serde_json::from_value(labels_json)?;
     let status: TaskStatus = serde_json::from_value(status_json)?;
@@ -2961,6 +2973,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         partial_output,
         idempotency_key,
         idempotency_payload_hash,
+        dispatch_control_epoch,
     })
 }
 
