@@ -640,9 +640,23 @@ pub async fn run_serve(
     };
 
     tracing::info!("starting MCP stdio server");
-    run_mcp_server(state, dispatcher)
-        .await
-        .context("MCP server error")?;
+    // MCP stdio 서버의 종료(stdin EOF)뿐 아니라 SIGINT/SIGTERM으로도 정상
+    // 종료 경로에 들어가야 한다(로드맵 #63 3단계). 그러지 않으면 아래
+    // `lease_handle.shutdown()`은 운영자가 실제로 쓰는 종료 방법
+    // (`systemctl stop` = SIGTERM)에서 **한 번도 실행되지 않고**, lease 즉시
+    // 반납은 stdin을 닫는 경우에만 동작하는 장식이 된다.
+    //
+    // 결과를 여기서 바로 `?`로 던지지 않고 들고 있다가 정리 뒤에 던지는
+    // 이유: MCP 서버가 에러로 끝난 경우에도 lease는 반납하는 편이 낫다.
+    // 종료 사유가 무엇이든 이 프로세스가 control plane 권한을 놓는다는
+    // 사실은 같다.
+    let mcp_result = tokio::select! {
+        result = run_mcp_server(state, dispatcher) => Some(result),
+        reason = wait_for_shutdown_signal() => {
+            tracing::info!(reason = %reason, "shutdown signal received");
+            None
+        }
+    };
 
     // MCP 서버 종료 시 백그라운드 태스크도 정리.
     if let Some(h) = _health_handle {
@@ -657,19 +671,58 @@ pub async fn run_serve(
     if let Some(h) = _circuit_sync_handle {
         h.abort();
     }
-    // lease는 명시적으로 release하지 않는다 — `LeaseManagerHandle`은 그
-    // 책임을 (의도적으로) 갖고 있지 않다(lease.rs의 abort() doc 참고).
-    // 갱신 루프만 멈추므로, 이 lease는 최대 TTL(기본 15초)만큼 유효한
-    // 채로 남았다가 자연 만료된다 — graceful shutdown에서 즉시 release해
-    // 대기 인스턴스의 failover를 앞당기는 건 후속 개선으로 남긴다.
-    lease_handle.abort().await;
+    // 정상 종료이므로 lease를 즉시 반납한다(로드맵 #63 3단계). `abort()`는
+    // 프로세스 급사를 흉내내는 경로로 남겨두고, 여기서는 `shutdown()`을 써서
+    // 갱신 루프가 자기 epoch로 반납한 뒤 끝나기를 기다린다 — 그래야 대기
+    // 인스턴스가 TTL(기본 15초) 자연 만료를 기다리지 않고 곧바로 승격할 수
+    // 있다. DB가 응답하지 않으면 `shutdown_grace`(기본 5초) 뒤 포기하고
+    // TTL 만료에 맡기므로, 종료가 무한정 매달리지는 않는다.
+    lease_handle.shutdown().await;
     if let Some(h) = _http_handle {
         h.abort();
     }
     if let Some(h) = _dashboard_handle {
         h.abort();
     }
-    Ok(())
+    if let Some(result) = mcp_result {
+        return result.context("MCP server error").map(|_| ());
+    }
+
+    // 신호로 종료한 경우에는 여기서 프로세스를 명시적으로 끝낸다.
+    // `run_mcp_server`의 stdin 읽기는 `tokio::io::stdin()`이고, 이는 전용
+    // blocking 스레드에서 동작하므로 `select!`가 future를 버려도 이미
+    // 진행 중인 read는 취소되지 않는다. stdin이 닫히지 않는 배포
+    // (systemd의 열린 파이프, 터미널, `tail -f`로 열어 둔 stdin)에서는 그
+    // 스레드가 끝나지 않아 런타임 종료가 반환하지 못하고, **lease는 반납했는데
+    // 프로세스만 남는** 상태가 된다(2026-08-26 라이브 검증에서 실측). 여기는
+    // 이미 모든 백그라운드 태스크를 정리하고 lease까지 반납한 뒤이므로
+    // 명시적 종료가 안전하다.
+    std::process::exit(0);
+}
+
+/// SIGINT 또는 SIGTERM 대기. 반환값은 종료 사유 문자열.
+///
+/// `fleet-worker`의 `runner::wait_for_signal`과 같은 형태다 — Worker는
+/// 이미 신호로 정상 종료하는데 control plane만 그러지 못하던 비대칭을
+/// 없앤다.
+async fn wait_for_shutdown_signal() -> String {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+
+        tokio::select! {
+            _ = sigint.recv() => "SIGINT".to_string(),
+            _ = sigterm.recv() => "SIGTERM".to_string(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "ctrl_c".to_string()
+    }
 }
 
 /// JSON token manifest을 엄격하게 검증한다. 평면 쉼표 bearer 목록은 권한을 표현하지

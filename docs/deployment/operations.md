@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/deployment/operations.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-26"
 last_verified_commit: "working-tree"
 owners: ["operations"]
 ---
@@ -46,10 +46,51 @@ desired/observed 상태, reconciliation의 자동 범위, alert와 운영자 act
 자동 failover는 지원하지 않는다. 다음 절차는 기존 Primary가 종료되었거나 네트워크 fencing되어
 새 제어 명령을 낼 수 없다는 증거가 있을 때만 수행한다.
 
+**먼저 정상 종료인지 확인한다.** Primary를 `SIGTERM`/`SIGINT`로 정상 종료하면 lease를 즉시
+반납하므로(2026-08-26 라이브 측정: 신호로부터 1.7ms) 이미 기동해 polling 중인 Standby는
+약 2초 안에 스스로 승격한다 — 이 경우 아래 1·2단계는 "일어난 일을 확인"하는 절차이고,
+운영자가 승격을 유도할 필요가 없다. 계획된 재시작·배포는 이 경로를 쓴다.
+
+**TTL 만료만으로 승격하지 않는다.** 비정상 종료된 Primary의 lease는 TTL(기본 15초) 뒤
+만료되고, 그때 Standby는 **운영자 개입 없이 자동으로** lease를 얻는다. 그러나 이 경로에서
+Standby가 가진 증거는 시계뿐이다 — 전 Primary가 실제로 죽었는지, GC 정지나 네트워크 분단으로
+갱신만 못 하고 있는지 구분하지 못한다. 그 창을 닫아야 할 epoch 강제는 아직 구현되지 않았다
+([Control Plane 권한과 장애 전환 계약](../architecture/control-plane-authority-and-failover.md)의
+"구현 상태와 유예"). 따라서 **TTL 만료는 승격의 근거가 아니다.** 아래 1단계의 fencing 증거를
+독립적으로 확보하지 못했다면, lease가 이미 넘어갔더라도 gateway 트래픽을 전환하지 말고 전
+Primary를 확실히 정지시키는 것을 먼저 한다.
+
 1. 기존 Primary의 접근 가능성, 프로세스 종료 또는 네트워크 fencing을 기록한다.
-2. DB에서 기존 lease 만료와 현재 epoch를 확인한다.
+   lease 만료 사실은 이 증거를 대체하지 못한다.
+2. DB에서 lease 소유자와 만료 상태를 확인한다.
+
+   ```sql
+   SELECT active_instance_id, epoch,
+          expires_at < NOW() AS expired,
+          expires_at - last_renewed_at AS gap
+     FROM control_plane_lease;
+   ```
+
+   **`gap`은 두 조건이 모두 참일 때만 종료 유형을 말한다** — `active_instance_id`가 아직
+   죽은 Primary이고, `expired`가 참일 때다. 이때 `gap`이 TTL(기본 15초)과 같으면 갱신이
+   끊긴 것이므로 **비정상 종료**이고, TTL보다 뚜렷이 작으면(0 ~ `renew_interval` 기본
+   5초) **명시적 반납**이다. 갱신은 `expires_at`과 `last_renewed_at`을 `NOW()+TTL`과
+   `NOW()`로 함께 쓰지만 명시적 반납은 `expires_at`만 `NOW()`로 당기고 `last_renewed_at`은
+   그대로 두므로, 두 구간은 겹치지 않는다.
+
+   **그 밖의 경우에는 `gap`을 읽지 않는다.** 정상적으로 갱신 중인 살아 있는 lease도
+   `gap`이 항상 정확히 TTL이다 — `expired`를 함께 보지 않으면 건강한 Primary를 비정상
+   종료로 오독한다. 그리고 `control_plane_lease`는 cluster당 한 행이고 획득이
+   `active_instance_id`·`acquired_at`·`expires_at`·`last_renewed_at`을 모두 덮어쓰므로,
+   Standby가 이미 승격한 뒤에는 이 행에 전 Primary의 종료 증거가 **남아 있지 않다**.
+   그때 보이는 `gap`은 새 소유자의 갓 얻은 lease를 기술할 뿐이다. 이미 기동해 polling
+   중인 Standby가 있으면 증거가 남아 있는 창은 `poll_interval`(기본 3초) 수준이므로,
+   실무에서는 운영자가 이 쿼리에 도달했을 때 이미 덮어써져 있는 쪽이 흔하다. 그런
+   경우 1단계에서 독립적으로 확보한 fencing 증거가 유일한 입력이다.
 3. Standby의 binary version, schema compatibility, DB 접근, 인증 설정을 확인한다.
-4. Standby를 기동해 새 epoch의 lease를 얻었는지 확인한다.
+   (기동 시 자동 호환성 검사는 아직 없다 — 수동 확인이 유일한 게이트다.)
+4. Standby를 기동해 새 epoch의 lease를 얻었는지 확인한다. 이미 기동해 있었다면 승격
+   여부만 확인한다.
 5. readiness와 인증된 API를 확인한 뒤 gateway 트래픽을 전환한다.
 6. Worker 재연결, pending/stale dispatched reconciliation, 무해 Task dispatch를 확인한다.
 

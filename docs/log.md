@@ -1733,3 +1733,90 @@ Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실�
 - **검증 한계**: CI에서 아직 이 실행을 재현하지 않았다 — 로컬(macOS, 1.98.0)에서만 확인했다. 위에서
   언급했듯 2026-08-25 CI 관측 4건 실패가 이번엔 로컬에서 재현되지 않았는데, 그게 CI에서도 고쳐졌다는
   뜻인지는 다음 CI 실행으로만 확인된다.
+
+## 2026-08-26 — ingest — #63 3단계: graceful lease 반납, 라이브 failover 검증, 승격 Runbook
+
+- **구현**: `LeaseManagerConfig.shutdown_grace`(기본 5초)와 `CancellationToken` 기반
+  `LeaseManagerHandle::shutdown()`을 추가했다. 반납을 핸들이 직접 하지 않고 **갱신 루프 안에서**
+  한다 — `release`는 현재 Active epoch로 CAS하는데 핸들에서 부르면 두 태스크가 같은 상태를 읽고,
+  읽은 직후 루프가 재획득해 epoch가 바뀌면 무효한 epoch로 반납하게 된다. 루프 안에서 하면 epoch를
+  소유한 주체가 유일해 그 경쟁 자체가 성립하지 않는다. 종료 신호는 **대기 지점**(`interval.tick()`,
+  `sleep`)에서만 관측하고 `try_acquire`/`try_renew` 주변에서는 보지 않는다 — DB future를 중간에
+  버리면 커밋됐는지 알 수 없는 lease가 남는다. `abort()`의 의미(비정상 종료 흉내)는 손대지 않았고,
+  두 의미가 뭉개지지 않도록 대칭 테스트 2건으로 잠갔다.
+- **`shutdown()`은 그전까지 도달 불가능한 코드였다.** `fleet-cli::run_serve`에 신호 핸들러가
+  없어서 stdin EOF 경로만 존재했다. `wait_for_shutdown_signal()`(unix는 `SIGTERM`/`SIGINT`,
+  그 외는 `ctrl_c`)을 넣고 MCP 서버 실행을 `tokio::select!`로 감쌌다.
+- **라이브 검증에서만 드러난 결함 — blocking stdin 때문에 프로세스가 종료되지 않는다.**
+  신호 처리를 넣은 직후의 실행에서 lease는 반납됐는데(`control plane lease released on graceful
+  shutdown`) 프로세스가 살아남았다(`ps` 상태 `SN`). 원인은 `crates/fleet-mcp/src/server.rs`의
+  `tokio::io::stdin()`이다 — 이것은 전용 **blocking 스레드**에서 `read(2)`를 호출하므로
+  `select!`가 future를 버려도 이미 커널에 들어간 read는 취소되지 않고, tokio 런타임의 종료는 그
+  blocking 태스크가 끝나기를 기다린다. stdin이 닫히지 않는 배포(systemd 파이프, 터미널,
+  `tail -f`)에서는 그 스레드가 영원히 끝나지 않는다. 운영자 입장에서 이것은 `systemctl stop`이
+  타임아웃 뒤 `SIGKILL`로 승격되는 형태로 나타난다. 모든 정리와 lease 반납이 끝난 신호 경로 끝에
+  `std::process::exit(0)`을 두어 해소했다.
+  **이 부류의 결함은 단위 테스트로 잡히지 않는다** — 테스트 하네스는 프로세스를 새로 띄우지
+  않는다. 라이브 2-프로세스 검증을 하지 않았다면 그대로 배포됐을 것이다.
+- **`shutdown_grace` 초과 분기가 약속과 다르게 동작하고 있었다.** 주석은 "포기하고 abort한다"고
+  했지만 `timeout(grace, self.inner)`는 만료 시 `JoinHandle`을 drop할 뿐이고, tokio에서
+  `JoinHandle`의 drop은 취소가 아니라 **detach**다. 그대로 두면 종료 중인 프로세스의 갱신 루프가
+  계속 살아 lease를 갱신하고, "반납도 못 했고 TTL 만료도 오지 않는" 상태가 된다 — 주석이 약속한
+  fallback 자체가 성립하지 않는다. `abort_handle()`을 미리 잡아 timeout 분기에서 명시적으로
+  abort하도록 고쳤다. 오늘은 위의 `process::exit(0)`이 이 결함을 가리고 있었지만 `shutdown()`은
+  공개 API이므로 `exit`하지 않는 호출자에게는 그대로 노출된다.
+- **라이브 failover 검증** (실제 PostgreSQL, `fleet serve` 프로세스 2개, `fleet_failover_63`):
+
+  | 시각 (UTC) | 인스턴스 | 관측 |
+  | --- | --- | --- |
+  | 01:38:59.017 | A | lease acquired epoch=1 (ttl=15s) |
+  | 01:39:01.079 | B | lease manager 기동 — 획득하지 못함 (구현 게이트 1) |
+  | 01:39:04.028 | A | renewed epoch=1, expires_at=01:39:19.024 |
+  | 01:39:05.169 | A | `SIGTERM` 수신 |
+  | 01:39:05.171 | A | lease released (신호로부터 1.7ms), 프로세스 실제 종료 |
+  | 01:39:07.094 | B | lease acquired epoch=2 |
+
+  B의 승격은 `SIGTERM`으로부터 1.93초, 그 시점 TTL이 13.85초 남아 있었다 — 승격이 TTL 만료로는
+  설명되지 않으므로 명시적 반납이 실제로 인수인계를 앞당겼다는 증거다.
+- **문서를 코드에 맞춰 정정했다.** 정본이 "자동 failover는 지원하지 않는다"고 못박고 있었지만,
+  `PgStore::acquire_control_lease`의 CAS 술어는 `expires_at < NOW()` **하나**뿐이라 lease가 왜
+  만료됐는지를 구분하지 못한다. 그래서 실제 인수인계는 성격이 다른 두 경로로 갈린다 — 정상 반납은
+  "전 소유자가 스스로 놓았다"는 명시적 증거를 남기지만, TTL 만료는 **시계만이 증거**다. 후자가
+  정확히 "지원하지 않는 모델"의 *Primary fencing 없는 자동 failover*이고 불변식 3("Standby는 기존
+  Primary의 종료 또는 fencing을 확인하기 전 제어 권한을 얻지 않는다")을 위반하는데, **코드가 그
+  경로를 막지 않는다**. 계약 문장을 약화하지 않고, 정본에 [구현 상태와 유예](architecture/control-plane-authority-and-failover.md)
+  절을 신설해 두 경로와 게이트 7개의 상태를 표로 남겼다. Runbook에는 "TTL 만료는 승격의 근거가
+  아니다"와 `expires_at - last_renewed_at`으로 종료 유형을 판별하는 SQL을 넣었다(갱신은 두 값을
+  `NOW()`/`NOW()+TTL`로 함께 쓰지만 반납은 `expires_at`만 당기므로, gap이 TTL이면 비정상 종료,
+  `renew_interval` 이하면 명시적 반납 — 두 구간이 겹치지 않는다).
+- **그 판별식은 전제 없이는 틀린다 — 리뷰에서 잡아 Runbook을 고쳤다.** 처음 쓴 문장은 gap만으로
+  종료 유형을 읽게 했는데, 두 가지가 그것을 무너뜨린다. (1) 정상적으로 갱신 중인 **살아 있는**
+  lease도 gap이 항상 정확히 TTL이다(갱신이 두 값을 같은 `NOW()` 기준으로 함께 쓰므로) — 만료
+  여부를 함께 보지 않으면 건강한 Primary를 비정상 종료로 오독한다. (2) `control_plane_lease`는
+  cluster당 한 행이고 획득의 `ON CONFLICT DO UPDATE`가 `active_instance_id`·`acquired_at`·
+  `expires_at`·`last_renewed_at`을 전부 덮어쓰므로, **승격이 자신을 판정할 증거를 파괴한다** —
+  Standby가 이미 lease를 얻은 뒤 운영자가 이 쿼리를 실행하면 새 소유자의 갓 얻은 lease를 보게
+  되고, 그것도 gap == TTL이다. warm standby 배포에서 증거가 남아 있는 창은 `poll_interval`(기본
+  3초) 수준이라 실무에서는 이미 덮어써져 있는 쪽이 흔하다. 그래서 쿼리에 `expires_at < NOW()`를
+  추가하고, gap을 읽어도 되는 전제(소유자가 아직 죽은 Primary + 만료됨)와 그 밖의 경우에는 1단계
+  fencing 증거가 유일한 입력이라는 것을 명시했다. 이 테이블은 소유권의 **현재 상태**이지 이력이
+  아니다 — 종료 유형을 사후에 확실히 알려면 lease 이력을 따로 남겨야 하는데, 그것은 지금 없다.
+- **정본의 `verification`은 `code-checked`로 둔다.** 라이브 2-프로세스 검증을 실제로 했으므로
+  `integration-tested`를 붙일 유혹이 있었지만, 이 필드는 문서 **전체**의 주장에 대한 척도이고
+  구현 게이트 7개 중 5개는 미착수다 — 그 등급을 붙이면 미착수 게이트까지 통합 검증된 것으로
+  읽힌다. 저장소 관행과도 어긋난다(`implementation: partial`인 architecture 문서는 예외 없이
+  `code-checked`이고, `integration-tested`를 쓴 문서는 아직 하나도 없다). 실제로 관찰한 것은
+  본문 "라이브 검증 기록" 절이 게이트 번호와 함께 정확히 담고 있으므로, 등급을 올려서 얻을
+  정보가 없다.
+- **epoch 강제(불변식 4·5 / 구현 게이트 3 = `#62` 검증 게이트 4)는 `#67`에 귀속시켰다.**
+  `epoch` 컬럼은 있고 승격마다 증가하지만 그것을 읽어 쓰기를 거르는 코드는 저장소에 하나도 없다
+  (`dispatcher.rs`·`state.rs`·이벤트 경로 어디에도 epoch 술어가 없다). 창을 닫으려면 Worker
+  이벤트가 자신이 어느 epoch에서 dispatch됐는지 싣고 돌아와야 하고, 그것은 `worker_execution_lease`의
+  `fencing_token`을 요구한다 — `#67` 범위이고 아직 없다. 바인딩할 대상이 없는 채로 epoch 술어만
+  넣으면 항상 참인 술어가 되어 게이트를 통과한 것처럼 보이는 죽은 검사가 된다.
+- **검증 한계**: 라이브 실행이 관찰한 것은 **정상 종료 경로뿐**이다 — TTL 만료 인수인계, 수동 승격
+  절차, Worker 재연결, reconciliation(구현 게이트 4)은 어느 것도 실행하지 않았다. Standby는 이미
+  기동해 polling 중인 **warm** 상태였으므로 1.93초는 `poll_interval`(3초) 안의 수치이며, 계약이
+  기술하는 Cold Standby(운영자가 승격 시점에 기동)의 수치가 아니다. `fleet-cli`의 신호 처리 경로를
+  덮는 테스트가 없어 이 경로를 통째로 지워도 모든 게이트가 초록으로 남는다. `shutdown_grace` 초과
+  분기도 DB 무응답을 재현할 하네스가 없어 테스트가 없다.
