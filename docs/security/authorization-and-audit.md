@@ -95,11 +95,74 @@ LLM credential 삭제를 흡수한 사고의 재발 방지).
 | (admin bearer 관리) | `admin_token:manage`, `admin_token:list` | 목표 표에 대응 항목 없음 — 추가 필요 |
 | (bootstrap token) | `token:issue`, `token:list`, `token:revoke` | 목표 표에 대응 항목 없음 — 추가 필요 |
 | `audit:read` | `audit:read` | 일치 |
-| `project:*`, `task:redrive`, `agent:*`, `effect:resolve` | **없음** | `#48` Project 기능 이후 대상 발생 |
+| `project:update`, `project:policy_manage`, `task:redrive`, `agent:*`, `effect:resolve` | **없음** | `project:read`/`create`/`delete`(archive 요청)는 `#48` 1단계로 랜딩했다. 나머지는 대상 엔티티·컬럼이 아직 없다 — 아래 승인 절 참고 |
 
 기본 역할은 `ProjectViewer`, `ProjectContributor`, `ProjectOperator`, `ProjectManager`, `FleetOperator`,
 `SecurityAdmin`으로 구성할 수 있으나 역할은 convenience bundle일 뿐 evaluator는 capability와 scope만
 검사한다. Task 생성 권한이 Agent 생성·Project 정책 변경·credential grant 권한을 암묵적으로 주지 않는다.
+
+### Project 정책 변경과 Agent 생성의 관계 (승인 2026-08-27)
+
+[Project 기능 설계](../architecture/project-feature-design.md)가 "권한과 구현 차단 조건" 1번으로
+남겨 둔 사람 결정이다. 승인 시점까지 제안 문언 자체가 없었다 — [Project
+model review](../reviews/project-model-review-2026-08-17.md)는 "보안 모델과 구현 계획에서 결정한 뒤
+정본 계약에 반영한다"고 미뤘을 뿐이다. 따라서 이 절이 승인된 규칙 자체를 소유하고, 설계·계약
+문서는 여기를 참조한다.
+
+**승인 범위.** 사용자가 승인한 것은 차단 조건 1이 **제기된 형태**(`ProjectPolicyManage`와
+`AgentCreate`의 관계를 보안 모델에서 확정한다)다. 아래 결정 1은 그 관계에 대한 직접적 답이고,
+결정 2·3은 그것을 집행 가능한 규칙으로 구체화하며 이 문서가 작성한 것이다. 의도와 다르면 이 절을
+고친다.
+
+**막는 것.** `project:policy_manage` 보유자가 Agent provisioning 관련 정책 필드
+(`max_active_agents`, `max_warm_agents`, 기본 AgentTemplate, worker eligibility selector)를 바꾸면,
+그 뒤 `task:create`만 가진 임의 principal의 Task 제출이 자동 provisioning을 통해 Agent를 만든다.
+둘 중 누구도 Agent 생성 권한을 갖지 않은 채 Agent가 생긴다.
+
+**결정 1 — 필드별 게이팅.** Agent의 **수 또는 provisioning 대상**을 바꾸는 정책 필드의 변경은
+`project:policy_manage`에 더해 `agent:manage`를 요구한다. 나머지 정책 필드(`retention_policy_id`,
+`retain_until` 등)는 `project:policy_manage`만으로 충분하다.
+[AgentTemplate 계약](../architecture/agents/agent-template.md)의 H1 결정(2026-08-22)과 같은
+형태다 — 위험한 것은 표면이 아니라 **어느 필드가 무엇을 만들 수 있는가**이므로, 표면 전체를 막는
+대신 필드에 건다.
+
+**결정 2 — 권한 확인 시점은 정책 쓰기다.** admission은 정책 한도를 **집행**하고 권한을
+**판정하지 않는다**. Task 제출자에게 Agent 생성 권한을 요구하지 않는다 — 그는 이미 승인된 한도
+안에서 Task를 낼 뿐이고, Agent를 만들 권한은 그 한도를 쓴 사람이 정책 쓰기 시점에 증명했다.
+반대로 하면 Project 정책이 의미를 잃는다(모든 contributor가 `agent:manage`를 가져야 하고, 그러면
+정책이 아니라 개별 권한이 상한을 정한다). "누가 이 Agent 생성을 승인했는가"는 Task가 아니라
+정책 revision의 audit event가 답한다.
+
+이것은 위 "Task 생성 권한이 Agent 생성 권한을 암묵적으로 주지 않는다"와 모순되지 않는다.
+제출자는 `agent:manage`를 **얻지 않는다** — 상한을 올릴 수도, 템플릿·격리 class를 고를 수도, 다른
+Project로 provisioning할 수도 없고, 한도 밖 제출은 admission이 거절한다. 일어나는 일은 암묵적 부여가
+아니라 **한도로 감쇠된 사전 위임**이며, credential delivery grant를 발급자의 권한으로 미리 만들고
+실행 구간에 묶는 것과 같은 형태다. 이 감쇠가 성립하지 않는 정책 필드가 나오면 그 필드는 결정 1의
+`agent:manage` 추가 요구 대상이다.
+
+**결정 3 — Project 메타데이터 편집은 이 관계와 무관하다.** `name`·`description` 변경은 Agent를
+만들지 않으므로 `project:update`만 요구하며, 이 관계를 이유로 막지 않는다. H1이 "템플릿 편집은
+Agent를 만들지 않는다"로 `#86`의 과잉 차단을 푼 것과 같은 판정이다.
+
+**이름 정정.** 승인 요청 문언의 `AgentCreate`(UI 표기)와 `agent:create`([Project 관리
+계약](../contracts/project-management.md) 표기)는 위 목표 capability 표에 없다. Agent 영역의 대응
+capability는 `agent:manage`이며 이 절의 규칙은 그 이름에 묶인다. 존재하지 않는 이름에 규칙을 걸어
+두면 구현 시점에 아무 이름에나 갖다 붙일 수 있고, 그것이 `#66`에서 `worker:delete`가 LLM
+credential 삭제를 흡수한 경로다. [UI 설계](../ui-dashboard/ui-design.md)의
+`AgentCreate`/`AgentDelete` 구분, 그리고 아직 열려 있는 차단 조건 2를 서술하며 같은 이름을 쓰는
+[AgentTemplate 계약](../architecture/agents/agent-template.md)·[Issue 추적](../architecture/issues.md)의
+표기는 Agent 엔티티가 랜딩할 때 이 표와 대조해 함께 정리한다 — 지금은 두 표기가 공존하므로
+그때 한 번에 끊지 않으면 재발견될 드리프트다. 마찬가지로
+`project:assign`도 이 표에 없으며, 그 대상이었던 host·worker의 Project 배정은 [공유 실행 풀
+불변식](../architecture/project-feature-design.md)이 "Host와 Worker에는 `project_id`를 두지
+않는다"로 이미 배제했다 — 승인 대기가 아니라 설계상 존재하지 않는다.
+
+**구현 상태.** 이 승인은 capability를 만들지 않는다. `project:policy_manage`가 관리할 정책 필드가
+`projects` 테이블에 하나도 없고(migration 022는 `id`/`name`/`description`/`created_by`/`status`/
+시각뿐), `agent:manage`의 대상인 Agent 엔티티도 없다. 지금 둘을 만들면 검사할 대상이 없어 항상
+통과하거나 아무도 쓰지 않는 죽은 권한이 된다 — `issue:archive_hold_manage`를 만들지 않은 것과 같은
+판정이다. 규칙이 집행되는 시점은 Agent 엔티티와 정책 컬럼이 랜딩할 때이며, 그때의 검증은 아래
+게이트 9다.
 
 ## Transport 적용
 
@@ -217,3 +280,6 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 6. 모든 mutation과 sensitive deny가 상관관계 필드·secret-free audit record를 남기는 시험
 7. capability 행렬에 등록되지 않은 route/tool이 **deny**되는 시험(행렬 커버리지 테스트)
 8. principal→capability 매핑이 없는 인증 주체가 write·export capability를 얻지 못하는 시험
+9. `project:policy_manage`만 가진 principal이 Agent 수·provisioning 대상 정책 필드를 바꾸지 못하고
+   (`agent:manage`를 추가로 요구), 그 필드가 바뀐 뒤의 Task 제출이 제출자의 권한으로 Agent를 만들지
+   않는 시험 — 위 "Project 정책 변경과 Agent 생성의 관계"의 집행 증명

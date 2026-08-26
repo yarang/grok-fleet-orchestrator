@@ -1236,10 +1236,12 @@ pub async fn list_hosts_api(
 
 // ── Project (로드맵 #48, 1단계) ────────────────────────────────────────
 //
-// `docs/contracts/project-management.md`의 "승인 전 차단 후보"에 해당하는
-// `PATCH /api/projects/{id}`(policy 변경)와 host/worker 배정 endpoint는
-// 여기 없다 — 보안 모델 승인 전까지 구현하지 않는다는 그 문서의 명시적
-// 지시를 따른다.
+// `docs/contracts/project-management.md`의 "차단 중인 표면"에 해당하는
+// `PATCH /api/projects/{id}`는 여기 없다. 2026-08-27 보안 모델 승인으로
+// 차단 사유가 바뀌었다 — 메타데이터 편집은 Agent를 만들지 않아 권한 문제가
+// 아니며, 남은 것은 그 문서가 구현 전에 확정하라고 정한 동시 편집 의미
+// (revision 또는 `If-Match`, `request_id`)다. host/worker 배정 endpoint는
+// 공유 실행 풀 불변식이 배제해 애초에 생기지 않는다.
 
 /// GET /api/projects — Project 목록 JSON API.
 pub async fn list_projects_api(

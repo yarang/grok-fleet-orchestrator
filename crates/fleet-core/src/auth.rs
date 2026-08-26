@@ -422,9 +422,12 @@ pub enum PermissionKind {
     AuditRead,
     #[serde(rename = "host:provision")]
     HostProvision,
-    // Project (로드맵 #48 1단계). `project:policy_manage`/`project:assign`은
-    // 목표 계약에서 명시적으로 승인 전 차단 대상이라 아직 만들지 않는다
-    // (docs/architecture/project-feature-design.md "권한과 구현 차단 조건").
+    // Project (로드맵 #48 1단계). `project:policy_manage`는 아직 만들지 않는다 —
+    // 2026-08-27에 `agent:manage`와의 관계는 승인됐으나(docs/security/
+    // authorization-and-audit.md "Project 정책 변경과 Agent 생성의 관계"),
+    // 관리 대상인 정책 컬럼이 `projects` 테이블에 하나도 없어 지금 만들면
+    // 아무것도 게이팅하지 않는 죽은 권한이 된다. `project:assign`은 공유 실행
+    // 풀 불변식이 host/worker의 `project_id`를 배제해 대상 자체가 없다.
     #[serde(rename = "project:read")]
     ProjectRead,
     #[serde(rename = "project:create")]

@@ -11,7 +11,7 @@ owners: ["project-platform", "api-contracts"]
 
 # Project 관리 계약
 
-이 문서는 Project 관리에 필요한 Dashboard HTTP 및 MCP 호출 표면을 정의한다. **로드맵 `#48` 1단계(2026-08-24 완료)로 아래 표의 `GET`/`POST`/`DELETE`(Dashboard)와 `fleet_create_project`/`fleet_list_projects`/`fleet_delete_project`/`fleet_dispatch_task` 확장(MCP)이 구현됐다** — "승인 전 차단 후보" 절의 `PATCH`/정책 관리/host·worker 배정만 여전히 제안 단계다. Project 모델과 배정 불변식은 [Project 모델과 거버넌스](../architecture/project-feature-design.md)가 소유한다.
+이 문서는 Project 관리에 필요한 Dashboard HTTP 및 MCP 호출 표면을 정의한다. **로드맵 `#48` 1단계(2026-08-24 완료)로 아래 표의 `GET`/`POST`/`DELETE`(Dashboard)와 `fleet_create_project`/`fleet_list_projects`/`fleet_delete_project`/`fleet_dispatch_task` 확장(MCP)이 구현됐다** — "차단 중인 표면" 절의 `PATCH`와 정책 관리만 여전히 제안 단계다(host·worker 배정은 그 절에서 설계상 배제됐다). Project 모델과 배정 불변식은 [Project 모델과 거버넌스](../architecture/project-feature-design.md)가 소유한다.
 
 ## Dashboard JSON API
 
@@ -37,11 +37,30 @@ Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같�
 안전하다(같은 게이트를 다시 평가할 뿐). 영구 삭제는 archive 보존 기간·감사 정책을 통과한 별도
 관리 작업이며 이 계약의 호출 표면에 포함하지 않는다(1단계에도 없음).
 
-### 승인 전 차단 후보
+### 차단 중인 표면
 
-`PATCH /api/projects/{id}`와 host·worker Project 배정·해제 endpoint는 `project:assign`과
-`agent:create`의 관계가 승인될 때까지 구현하거나 노출하지 않는다. 승인 후에는 revision 또는
-`If-Match`, `request_id`, Project scope 검사 시점과 동시 배정 충돌 의미를 먼저 확정한다.
+`fleet_update_project_policy`를 비롯한 **정책 변경** 표면은 여전히 구현하거나 노출하지 않는다.
+[Project 기능 설계](../architecture/project-feature-design.md)의 차단 조건 2·3(자동 provisioning이
+권한 상승 경로가 아님을 증명, agent slot 경쟁·lease 회수 통합 검증)이 남아 있고, 그 대상인 Agent
+엔티티와 `worker_execution_leases`가 없어 테스트를 작성할 수조차 없다.
+
+**2026-08-27 승인으로 이 절의 범위가 좁아졌다.** 이전 문언은 `PATCH /api/projects/{id}`와
+host·worker Project 배정·해제 endpoint를 `project:assign`·`agent:create`의 관계 승인까지 함께
+묶었다. 세 부분 모두 정정한다.
+
+- **`project:assign`과 `agent:create`는 목표 capability 표에 없는 이름이었다.** 승인된 규칙은
+  `project:policy_manage`와 `agent:manage`의 관계로 기록됐다 —
+  [Authorization·Project Scope·감사](../security/authorization-and-audit.md)의 "Project 정책 변경과
+  Agent 생성의 관계"가 정본이다.
+- **host·worker Project 배정·해제 endpoint는 승인 대기가 아니라 설계상 존재하지 않는다.**
+  [공유 실행 풀 불변식](../architecture/project-feature-design.md)이 "Host와 Worker에는
+  `project_id`를 두지 않는다"로 이미 배제했다. 차단 후보로 남겨 두면 언젠가 승인되어 생길 것처럼
+  읽히므로 후보 목록에서 뺀다.
+- **`PATCH /api/projects/{id}`의 남은 차단 사유는 보안이 아니다.** `name`·`description` 편집은
+  Agent를 만들지 않으므로 위 관계의 대상이 아니다(승인 결정 3). 다만 구현 전에 동시 편집 의미를
+  먼저 확정해야 한다 — `projects`에 정책 revision 컬럼이 없으므로 `updated_at` 기반 `If-Match`로
+  갈지 revision 컬럼을 신설할지가 실제 결정 대상이고, `request_id` 재시도 의미도 함께 정한다.
+  확정 전까지 노출하지 않는다.
 
 공통 실패는 인증되지 않은 요청의 `401`, 권한 부족의 `403`, 없는 Project·host·worker의 `404`, 배정 불변식 위반 또는 허용되지 않은 lifecycle 변경의 `409`, 잘못된 입력의 `422`다.
 
@@ -54,7 +73,7 @@ Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같�
 | `fleet_create_project` | `name`, 선택 `description` | 구현됨 |
 | `fleet_list_projects` | 선택 `limit`, `offset` | 구현됨 |
 | `fleet_delete_project` | `project_id` | 구현됨 (Dashboard `DELETE`와 동일한 1단계 축소판) |
-| `fleet_update_project_policy` | `project_id`, revision, agent 상한·worker eligibility | 권한 승인 전 차단 |
+| `fleet_update_project_policy` | `project_id`, revision, agent 상한·worker eligibility | 차단 — 권한 규칙은 승인됨(2026-08-27), 정책 컬럼·Agent 엔티티 부재로 차단 조건 2·3 미충족 |
 | `fleet_dispatch_task` 확장 | 선택 `project_id` | 구현됨 — 저장·조회를 넘어 검증까지 한다: 존재하지 않거나 `active`가 아닌 `project_id`는 제출 자체를 거절한다(아래 참고) |
 
 Host/Worker 배정 MCP 도구는 범위에 포함하지 않는다. `fleet_dispatch_task`의 선택 `project_id`는
@@ -78,7 +97,7 @@ policy revision)가 없어 해당하지 않는다 — 대신 1단계 자체의 �
 테스트가 담당한다.
 
 - Project 데이터와 agent slot·Worker lease 불변식의 저장·통합 테스트 — **미해당(Agent 없음)**
-- `ProjectPolicyManage`로 `AgentCreate`를 우회할 수 없다는 권한 테스트 — **미해당(두 capability 다 없음)**
+- `project:policy_manage`로 `agent:manage`를 우회할 수 없다는 권한 테스트 — **규칙은 승인됨(2026-08-27), 시험은 미해당**(두 capability 다 없고 집행 대상인 정책 컬럼·Agent 엔티티도 없다). 시험 형태는 [감사 계약](../security/authorization-and-audit.md)의 구현 게이트 9가 소유한다
 - Project의 capability·slot 조건 부재 시 일반 풀 context로 폴백하지 않는 디스패치 테스트 — **미해당(그 자격 검증 자체가 아직 없음 — 지금은 애초에 project 무관 일반 풀 규칙만 있다)**
 - Dashboard와 MCP의 동일한 권한·오류 응답 검증 — 확인됨(둘 다 `project:{read,create,delete}` 사용). 2단계에서 검증·archive 규칙을 `fleet_store::project_rules`로 단일화해 구조적으로 보장한다
 - 목록 pagination·caller Project scope와 삭제 lifecycle의 revision/충돌 검증 — pagination(limit/offset)은 확인됨; Project scope(호출자가 자기 Project만 보는 것)는 아직 모든 인증된 호출자가 전체 Project를 본다(RBAC의 Project 단위 scope는 미구현); revision/충돌은 정책 revision 자체가 없어 미해당

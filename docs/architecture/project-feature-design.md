@@ -69,15 +69,28 @@ Project가 `Draining`이면 새 Task, 새 Agent, 새 자원 배정을 받지 않
 
 ## 권한과 구현 차단 조건
 
-Project 권한 종류는 `project:create`, `project:read`, `project:update`, `project:delete`, `project:policy_manage`다. `ProjectRead`는 Project 범위 내 읽기만 허용한다. 생성·삭제와 정책 관리의 실제 역할 배정은 아직 승인된 계약이 아니다.
+Project 권한 종류는 `project:create`, `project:read`, `project:update`, `project:delete`, `project:policy_manage`다. `ProjectRead`는 Project 범위 내 읽기만 허용한다. 생성·삭제와 정책 관리를 **어느 기본 역할에 배정할지**는 아직 승인된 계약이 아니다 — 정책 관리와 Agent 생성의 *관계*는 2026-08-27에 승인됐지만(아래 조건 1), 그것이 역할 번들을 정하지는 않는다.
 
-**1단계(#48, 완료)**: `project:create`/`project:read`/`project:delete` 세 capability만 실제로 존재한다(`crates/fleet-core/src/auth.rs::PermissionKind`). `project:update`(목표 계약의 `PATCH` 대응)와 `project:policy_manage`는 아래 차단 조건 때문에 여전히 만들지 않았다 — capability 자체가 없으니 활성화 여부를 고민할 필요도 없다. `project:delete`는 목표 계약이 말하는 "archive 요청"만 수행한다(영구 삭제 아님, 아래 lifecycle 문서 참고).
+**1단계(#48, 완료)**: `project:create`/`project:read`/`project:delete` 세 capability만 실제로 존재한다(`crates/fleet-core/src/auth.rs::PermissionKind`). `project:update`(목표 계약의 `PATCH` 대응)와 `project:policy_manage`는 아직 만들지 않았고, 사유는 2026-08-27 승인 이후 서로 갈라졌다. `project:policy_manage`는 아래 차단 조건에 더해 관리할 정책 컬럼이 `projects`에 하나도 없어서 만들면 죽은 권한이 된다. `project:update`는 승인 결정 3으로 이 차단에서 벗어났으나, [Project 관리 계약](../contracts/project-management.md)이 `PATCH` 구현 전에 확정하라고 정한 동시 편집 의미(revision 또는 `If-Match`, `request_id`)가 아직 정해지지 않았다 — 보안 차단이 아니라 미결 계약이다. `project:delete`는 목표 계약이 말하는 "archive 요청"만 수행한다(영구 삭제 아님, 아래 lifecycle 문서 참고).
 
-특히 Project 정책 변경과 Task 생성이 자동 Agent provisioning을 통해 `AgentCreate`를 우회할 가능성이 있다. 따라서 다음이 확정되고 검증되기 전에는 정책 변경 API나 MCP 도구를 구현하거나 활성화하지 않는다.
+특히 Project 정책 변경과 Task 생성이 자동 Agent provisioning을 통해 Agent 생성 권한을 우회할 가능성이 있다. 따라서 다음이 확정되고 검증되기 전에는 정책 변경 API나 MCP 도구를 구현하거나 활성화하지 않는다.
 
-1. `ProjectPolicyManage` 역할과 `AgentCreate` 역할의 관계를 보안 모델에서 승인한다.
+1. ~~`ProjectPolicyManage` 역할과 `AgentCreate` 역할의 관계를 보안 모델에서 승인한다.~~ **승인됨(2026-08-27).**
+   규칙의 정본은 [Authorization·Project Scope·감사](../security/authorization-and-audit.md)의
+   "Project 정책 변경과 Agent 생성의 관계"다 — Agent 수·provisioning 대상을 바꾸는 정책 필드는
+   `project:policy_manage`에 더해 `agent:manage`를 요구하고(필드별 게이팅), 권한 확인 시점은 Task
+   제출이 아니라 정책 쓰기다. 승인 요청 문언의 `AgentCreate`는 목표 capability 표에 없는 이름이라
+   `agent:manage`로 정정됐다.
 2. 자동 provisioning이 배정·Task 요청자의 권한 상승 경로가 아님을 테스트로 증명한다.
 3. agent slot 경쟁, lease 회수, Project Worker 부재 경로를 통합 테스트로 검증한다.
+
+**1번이 닫혀도 정책 변경 표면은 열리지 않는다.** 2·3번은 사람 결정이 아니라 테스트 조건이고, 그
+대상인 `agents`와 `worker_execution_leases`(로드맵 `#67`)가 아직 없어 지금은 작성할 수조차 없다.
+승인이 세 조건을 한꺼번에 해소한 것으로 읽지 않는다.
+
+**이 차단은 정책 변경에만 걸린다.** `name`·`description` 같은 Project 메타데이터 편집은 Agent를
+만들지 않으므로 이 조건의 대상이 아니다(승인 결정 3). `#86`의 템플릿 편집을 같은 이유로 이 차단에서
+제외한 2026-08-22 판정과 같은 형태다.
 
 미결 정책의 비교와 선택지는 [Project model review](../reviews/project-model-review-2026-08-17.md)에 기록한다. 이 문서는 승인된 불변식과 차단 조건만 보존한다.
 

@@ -2407,3 +2407,75 @@ Mermaid는 노드 잔존만 스크립트로 검사했고 렌더러로 실제 파
 문장이 여전히 말이 되는지가 아니다. 판정 자체도 **현재 정본 문언**을 근거로 하며, `#48`이 Project
 엔티티를 실제로 구현할 때 문언에 없던 사실이 나오면 재개정 대상이다. 세션이 자정을 넘겨 판정일은
 2026-08-26, `last_verified`와 이 항목은 최종 검증을 마친 2026-08-27이다.
+
+## 2026-08-27 — security — `#48` 차단 조건 1을 승인으로 닫고, 함께 묶여 있던 노후 문언 3건을 정정했다
+
+사용자 승인("보안모델 승인")으로 [Project 기능 설계](architecture/project-feature-design.md)의
+차단 조건 1(`ProjectPolicyManage`와 `AgentCreate`의 관계)이 닫혔다. 승인을 기록하려고 대상 문언을
+찾았더니 **제안 자체가 없었다** — [Project model review](reviews/project-model-review-2026-08-17.md)는
+"보안 모델과 구현 계획에서 결정한 뒤 정본 계약에 반영한다"고 미뤘을 뿐이고, 그 뒤로 아무도 규칙을
+쓰지 않았다. 따라서 이 작업은 비준이 아니라 **규칙 작성**이었고, 정본은
+[Authorization·Project Scope·감사](security/authorization-and-audit.md)의 "Project 정책 변경과
+Agent 생성의 관계"가 소유한다. 그 문서를 고른 것은 취향이 아니다 —
+[Control Plane 보안 모델](security/control-plane-security-model.md)이 "capability 카탈로그, Project
+scope의 상세 계약은 authorization-and-audit.md가 정본이다. 이 문서는 분류표를 중복 보유하지 않는다"고
+명시적으로 위임한다.
+
+**승인된 규칙 3건.** (1) 필드별 게이팅 — Agent의 수·provisioning 대상을 바꾸는 정책 필드는
+`project:policy_manage`에 더해 `agent:manage`를 요구하고, 나머지 정책 필드는 아니다. `#86`의 H1
+결정(2026-08-22)이 템플릿 편집에 쓴 것과 같은 형태이며, 위험한 것은 표면이 아니라 어느 필드가
+무엇을 만들 수 있는가라는 판단을 재사용했다. (2) 권한 확인 시점은 Task 제출이 아니라 **정책 쓰기**다.
+admission은 한도를 집행하고 권한을 판정하지 않는다 — 반대로 하면 모든 contributor가 `agent:manage`를
+가져야 하고, 그러면 Project 정책이 아니라 개별 권한이 상한을 정하게 되어 정책이 의미를 잃는다.
+"누가 이 Agent 생성을 승인했는가"는 Task가 아니라 정책 revision의 audit event가 답한다.
+(3) 메타데이터 편집은 무관 — `name`·`description`은 Agent를 만들지 않는다.
+
+**승인을 기록하려다 발견한 노후 문언 3건.** 차단 문구가 실제로 무엇을 가리키는지 대조한 결과다.
+
+- **`project:assign`과 `agent:create`는 목표 capability 표에 없는 이름이었다.**
+  `authorization-and-audit.md`의 Agent 영역은 `agent:read`/`agent:manage`/`agent:attach`뿐이고
+  Project 영역에 `assign`은 없다. 존재하지 않는 두 이름의 "관계"를 승인 조건으로 걸어 둔 셈이며,
+  그대로 두면 구현 시점에 아무 이름에나 갖다 붙일 수 있다 — `#66`에서 `worker:delete`가 LLM
+  credential 삭제를 흡수한 경로가 정확히 그것이다. 규칙을 `agent:manage`에 묶었다.
+- **host·worker Project 배정·해제 endpoint는 승인 대기가 아니라 설계상 존재하지 않는다.**
+  같은 설계 문서의 공유 실행 풀 불변식이 "Host와 Worker에는 `project_id`를 두지 않는다"로 이미
+  배제했다. 차단 후보 목록에 남겨 두면 언젠가 승인되어 생길 것처럼 읽히므로 뺐다.
+- **`PATCH /api/projects/{id}`는 보안 차단 대상이 아니었다.** 메타데이터 편집인데 Agent 우회 위험과
+  한 문장에 묶여 있었다. H1이 템플릿 편집을 같은 이유로 뺀 것과 같은 과잉 적용이다. 남은 선행 조건은
+  보안이 아니라 계약이다 — 같은 절이 구현 전에 확정하라고 정한 동시 편집 의미(revision 또는
+  `If-Match`, `request_id`)가 미결이고, `projects`에 revision 컬럼이 없으므로 `updated_at` 기반
+  `If-Match`로 갈지 컬럼을 신설할지가 실제 결정 대상이다.
+
+**승인이 열지 않은 것.** 차단 조건 2·3은 그대로다. 셋 중 **1번만 사람 결정**이고 2·3은 테스트
+조건이며, 그 대상인 Agent 엔티티와 `worker_execution_leases`(`#67`)가 없어 지금은 작성할 수조차
+없다. 따라서 `fleet_update_project_policy`와 정책 컬럼은 여전히 차단이고, `project:policy_manage`와
+`agent:manage` capability도 만들지 않았다 — 관리·검사할 대상이 없어 만들면 죽은 권한이 된다
+(`issue:archive_hold_manage`를 만들지 않은 것과 같은 판정). 집행 증명은 `authorization-and-audit.md`의
+구현 게이트 9로 등록해, 규칙만 문서에 남고 시험이 사라지는 경로를 막았다.
+
+코드 변경은 노후 사유를 적고 있던 주석 2건뿐이다. `fleet-core/src/auth.rs`는 두 capability의 부재
+사유를 "승인 전 차단"이라고 적고 있었고, `fleet-dashboard/src/handlers.rs`는 `PATCH`를 "policy 변경"
+이라고 잘못 부르며 같은 사유를 달고 있었다. 승인 뒤에는 둘 다 틀린 설명이 되므로 실제 사유로 고쳤다.
+
+**게이트 실행 중 같은 결함을 재현했다 — 기록해 둔다.** 처음 `cargo test`를 `| tail -60`으로 돌렸고,
+읽은 `exit=0`은 `cargo test`가 아니라 `tail`의 종료 코드였다. 출력 파일에도 마지막 60줄(doc-test)만
+남아 "10개 스위트, 1건 통과"라는 말이 안 되는 수치가 나와서야 드러났다. `agent.md` §4.3은 이 결함을
+이미 적어 뒀지만 **clippy 예시로** 적어 뒀고, 명령이 `cargo test`로 바뀌자 적용을 놓쳤다 — 규칙을
+예시에 붙은 것으로 읽으면 예시가 바뀔 때 규칙이 사라진다. 파이프 없이 파일로 리다이렉트하고
+종료 코드를 직접 읽어 다시 돌렸다.
+
+rustc 1.98.0(`rust-toolchain.toml`과 일치), `RUSTFLAGS="-D warnings"`, `cargo fmt --all -- --check`
+exit=0, clippy `--features "acp mtls"` exit=0, clippy `--no-default-features` exit=0 — 넷 다 파이프
+없이 종료 코드를 직접 읽었다. `cargo build -p fleet-cli --features "acp mtls"`(121MB 바이너리 생성
+확인) 후 `DATABASE_URL` 주입 `cargo test --workspace --features "acp mtls" -- --test-threads=1`이
+`exit=0`, 69개 스위트 1053건 통과 0 실패. `cross_client`는 14건 **0.73초**로 `0.00s` 조용한 skip이
+아님을 소요 시간으로 확인했다(워밍업 수정 후 실측 0.64~0.66초와 일치).
+
+**검증 한계**: 승인된 규칙 자체는 코드로 증명되지 않는다 — 집행 대상인 `project:policy_manage`,
+`agent:manage`, Agent 엔티티, 정책 컬럼이 모두 없어서 게이트 9를 지금 쓸 수 없다. 이 커밋이 증명하는
+것은 규칙의 **정확한 기록**과 노후 문언 정정이지 규칙의 **집행**이 아니다. 규칙의 내용은 기존 정본
+(`authorization-and-audit.md`의 "Task 생성 권한이 Agent 생성·Project 정책 변경 권한을 암묵적으로
+주지 않는다")과 `#86` H1 선례에서 도출했으나, 사용자 승인은 차단 조건 1이 **제기된 형태**에 대한
+것이었고 결정 2·3(확인 시점, 메타데이터 제외)은 그 승인을 구체화하며 내가 쓴 것이다 — 의도와 다르면
+이 절과 로드맵 행을 함께 고쳐야 한다. 위 게이트는 이 커밋이 무엇을 깨뜨렸는지가 아니라 트리의 현재
+상태를 말한다(코드 변경이 주석 2건뿐이므로 특히 그렇다).
