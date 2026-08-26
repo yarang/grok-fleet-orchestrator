@@ -4,8 +4,8 @@ authority: derived
 implementation: partial
 verification: code-checked
 source: "docs/architecture/implementation-reference.md"
-last_verified: "2026-08-17"
-last_verified_commit: "09417c6"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["architecture"]
 ---
 
@@ -31,10 +31,10 @@ flowchart LR
 
 | 구성요소 | 코드 근거 | 현재 역할과 제약 |
 |---|---|---|
-| Core | `fleet-core/task.rs`, `worker.rs` | `Task`, `Worker`, heartbeat의 공유 타입을 제공한다. Project·Agent·TaskAttempt 모델은 목표 계약이다. |
+| Core | `fleet-core/task.rs`, `worker.rs` | `Task`, `Worker`, heartbeat의 공유 타입을 제공한다. Project·Agent 모델은 목표 계약이다. |
 | Store | `crates/fleet-store/src/` | memory와 PostgreSQL 구현을 제공한다. Store 이벤트는 곧바로 보안 감사 정책이 아니다. |
 | API | `fleet-api/app.rs`, `handlers.rs` | `/v1` task·Worker·등록 표면을 제공한다. 인증과 join 제한은 security/enrollment 정본을 따른다. |
-| Scheduler | `fleet-scheduler/dispatcher.rs`, `selector.rs`, `breaker.rs` | ready task를 선택 가능한 Worker로 dispatch한다. TaskAttempt CAS와 side-effect fencing은 아직 목표 계약이다. |
+| Scheduler | `fleet-scheduler/dispatcher.rs`, `selector.rs`, `breaker.rs` | ready task를 선택 가능한 Worker로 dispatch한다. Task 실행 CAS와 side-effect fencing은 아직 목표 계약이다. |
 | Transport | `fleet-transport/acp_transport.rs` | Worker별 ACP WebSocket, 재연결 backoff, 연결 손실 시 pending request 실패 처리를 제공한다. |
 | Worker | `fleet-worker/registration.rs`, `runner.rs` | HTTP register/heartbeat와 하나의 Grok runner를 관리한다. Agent command/ACK catalog는 없다. |
 

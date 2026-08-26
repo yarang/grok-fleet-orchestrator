@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/deployment/operations.md"
-last_verified: "2026-08-26"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["operations"]
 ---
@@ -28,7 +28,7 @@ owners: ["operations"]
 4. Worker가 있는 경우 register/heartbeat와 작은 무해 태스크의 dispatch를 각각 확인한다.
 
 health checker, stale-task reconciliation, CircuitBreaker 동기화는 기본 활성화 경로다. 서비스 재시작은
-진행 중 TaskAttempt의 결과를 보장하지 않으므로, 중단 전 실행 중인 작업과 부작용을 확인한다.
+진행 중 Task의 결과를 보장하지 않으므로, 중단 전 실행 중인 작업과 부작용을 확인한다.
 desired/observed 상태, reconciliation의 자동 범위, alert와 운영자 action은
 [관측성·재조정·장애 복구 계약](../architecture/observability-and-reconciliation.md)이 정본이다.
 

@@ -4,7 +4,7 @@ authority: derived
 implementation: partial
 verification: code-checked
 source: "docs/architecture/overview.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["architecture"]
 ---
@@ -44,7 +44,7 @@ flowchart LR
 |---|---|
 | 누가 control plane을 소유하고 장애 전환하는가? | [Control Plane 권한과 장애 전환](control-plane-authority-and-failover.md) |
 | 신원·권한·token·secret 경계는 무엇인가? | [Control-plane security model](../security/control-plane-security-model.md) |
-| TaskAttempt·재시도·취소·부작용은 어떻게 일관성을 지키는가? | [Task 실행 정본](tasks/README.md) |
+| Task 실행·취소·부작용은 어떻게 일관성을 지키는가? | [Task 실행 정본](tasks/README.md) |
 | Project·Task·Agent의 수명주기는 무엇인가? | [Project · Task · Agent lifecycle](project-task-agent-lifecycle.md) |
 | Project 정책·격리·배정 제약은 무엇인가? | [Project model](project-feature-design.md) |
 | Agent의 생성·회수·명령은 어떻게 동작하는가? | [Agent 실행 플랫폼](agents/README.md) |

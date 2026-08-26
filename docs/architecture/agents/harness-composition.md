@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/harness-composition.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # Agent 하네스 구성
@@ -18,12 +19,12 @@ last_verified: "2026-08-17"
 ## 조립 규칙
 
 필수 Skill은 시작 전에 revision/hash까지 고정하고 누락 시 실행을 거절한다. 선택 Skill은 명시된
-조회 시점과 실제 revision/hash를 attempt에 기록한다. Project constitution과 사용자 입력은 출처를
+조회 시점과 실제 revision/hash를 Task의 execution snapshot에 기록한다. Project constitution과 사용자 입력은 출처를
 구분해 포함하며, 사용자 입력이 시스템 규칙·권한·tool allow-list를 바꿀 수 없다.
 
-Tool/Skill의 catalog → Project grant → Agent binding → Task request → Attempt snapshot 우선순위는
+Tool/Skill의 catalog → Project grant → Agent binding → Task request → execution snapshot 우선순위는
 [배치·맥락 계약](../entity-placement-and-context.md)이 정본이다. Tool binding은 [도구 카탈로그](tool-catalog.md)의 허용된 식별자와 capability만 참조한다. prompt,
-Skill, tool, runtime revision 중 하나가 바뀌면 기존 attempt를 변형하지 않고 새 attempt를 만든다.
+Skill, tool, runtime revision 중 하나가 바뀌면 실행 중인 Task를 변형하지 않고 새 Task를 만든다.
 
 ## 구현 게이트
 

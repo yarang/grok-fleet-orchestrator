@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/tasks/budget-control.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["scheduler"]
 ---
 
@@ -26,7 +27,7 @@ Worker 선택은 [Task routing 정책](routing-policy.md), terminal 결과·retr
 
 ## 결정
 
-1. budget, 집계 기준, 정책 revision은 TaskAttempt snapshot에 고정한다.
+1. budget, 집계 기준, 정책 revision은 Task의 execution snapshot에 고정한다.
 2. warning, tool 제한, 종료는 명시적 상태 전이이며 실행 중 임의 변경하지 않는다.
 3. terminal 결과와 OutcomeUnknown 처리는 실행 의미론 정본을 따른다.
 4. telemetry label에는 request 원문, secret, 고카디널리티 식별자를 넣지 않는다.

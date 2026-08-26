@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/tasks/execution-consistency.md"
-last_verified: "2026-08-26"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 ---
 
@@ -262,12 +262,12 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 WHERE cluster_id = $4 AND epoch = $5)` 술어를 **같은 문장 안에** 실어, lease를 잃은 인스턴스의 쓰기가
 거절되고 [`TransitionOutcome::Fenced`](../../../crates/fleet-core/src/task.rs)로 돌아오게 한다.
 
-### 다른 문서에 남은 `Attempt` 표현
+### 다른 문서에 남았던 `Attempt` 표현 (2026-08-26 해소)
 
 무재시도 정책은 이 문서(tasks 도메인)의 정본이지만, `TaskAttempt`는 이 문서만의 개념이 아니었다.
 2026-08-26 실측(`grep -rn --include='*.md' 'TaskAttempt\|attempt_id\|RetryWaiting\|AttemptId\|Attempt' docs`,
 이 파일·`docs/log.md`·[결정 기록](../../reviews/task-retry-policy-decision-2026-08-26.md) 제외)으로
-**30개 파일 161행**이 남아 있다. 아래는 전수 집계이며, 대표 파일만 예시로 든다.
+**30개 파일 161행**이 남아 있었다. 아래는 그 시점의 전수 집계이며, 대표 파일만 예시로 든다.
 
 `docs/roadmap/roadmap.md`도 집계에서 뺀다. 그 파일의 `Attempt` 언급은 남아 있는 드리프트가 아니라
 **이 결정과 후속 항목을 서술하는 원장**이며, 세지 않아야 `#97` 같은 행을 추가할 때마다 이 숫자가
@@ -280,21 +280,29 @@ WHERE cluster_id = $4 AND epoch = $5)` 술어를 **같은 문장 안에** 실어
 | reviews | 5 | 22 | [`entity-lifecycle-consistency-review.md`](../../reviews/entity-lifecycle-consistency-review.md), [`ui-management-and-issue-spec-2026-08-22.md`](../../reviews/ui-management-and-issue-spec-2026-08-22.md) | 결정 당시의 근거 기록 |
 | 기타 | 3 | 6 | [`contracts/project-management.md`](../../contracts/project-management.md), [`credentials/README.md`](../../credentials/README.md), [`deployment/operations.md`](../../deployment/operations.md) | 산문 참조 |
 
-**이 커밋에서 하나도 고치지 않았고, 그것은 의도다.** 이유는 세 가지다.
+**`#62` 4단계 커밋에서는 하나도 고치지 않았고, 그것은 의도였다.** 이유는 세 가지였다.
 
-1. **이 결정의 사정 범위 밖이다.** `#62` 4단계가 확인한 것은 "**현재 코드에서** Task와 시도가
-   1:0..1"이다. 위 문서들의 `TaskAttempt`는 [`tasks/management.md`](management.md)가 "설계만 존재"로
-   표시한 **목표 엔티티**이며, Project·Agent lifecycle과 함께 `#48` 계열이 소유한다. 재시도가
-   사라져 그 주된 존재 이유가 없어진 것은 맞지만, "그러므로 목표 설계에서도 삭제한다"는 판단은
-   tasks 도메인 혼자 내릴 수 없다.
+1. **그 결정의 사정 범위 밖이었다.** `#62` 4단계가 확인한 것은 "**현재 코드에서** Task와 시도가
+   1:0..1"이다. 위 문서들의 `TaskAttempt`는 **목표 엔티티**이며 Project·Agent lifecycle과 함께
+   `#48` 계열이 소유한다. 재시도가 사라져 그 주된 존재 이유가 없어진 것은 맞지만, "그러므로
+   목표 설계에서도 삭제한다"는 판단은 tasks 도메인 혼자 내릴 수 없었다.
 2. **개명이 아니라 계약 변경이다.** 예컨대 `control-plane-security-model.md`의 "Attempt 단위 grant
    수명"을 Task 단위로 바꾸면 credential이 살아 있는 시간 구간이 달라진다 — 확인 없이 개명하면
    보안 정본에 검증하지 않은 주장을 넣는 것이다.
 3. **reviews는 원칙적으로 고치지 않는다.** 결정 당시의 근거 기록이므로 나중 결정으로 소급해
    덮어쓰면 근거로서의 가치를 잃는다.
 
-교차 도메인 판단이 필요하므로 [`#97`](../../roadmap/roadmap.md)로 분리했다. 그때까지 이 표가
-드리프트의 **크기와 위치**를 증언한다 — 2개 파일이 아니라 30개다.
+**2026-08-26 [`#97`](../../roadmap/roadmap.md)이 그 교차 도메인 판단을 내렸다: 흡수.** 판정과 그
+근거, 용어 대응표는 [Attempt 흡수 판정](../project-task-agent-lifecycle.md#attempt-흡수-판정)이
+정본이다. 위 표의 `reviews` 행을 제외한 25개 파일을 그 판정에 맞춰 고쳤고, reviews 5개 파일은
+이유 3에 따라 그대로 두었다.
+
+이유 2가 지목한 위험은 실제로 개명이 아닌 처리를 받았다. 보안 정본 두 곳의 grant 수명은 "Task
+단위"가 아니라 **"dispatch부터 terminal까지의 실행 구간"**으로 명시했다 — Task 행은 `Pending`부터
+archive 보존까지 살지만 실행 구간은 그보다 짧으므로, 평평하게 개명했다면 credential 유효 구간이
+조용히 넓어졌을 것이다.
+
+위 표는 이제 해소된 드리프트의 **당시 크기와 위치** 기록으로 남긴다 — 2개 파일이 아니라 30개였다.
 
 ### 남은 창 두 가지
 

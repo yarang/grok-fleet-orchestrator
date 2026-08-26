@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/observability-and-reconciliation.md"
-last_verified: "2026-08-18"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["operations", "scheduler", "security"]
 ---
 
@@ -19,7 +20,7 @@ Task effect의 결과 판정은 [실행 일관성](tasks/execution-consistency.m
 
 ```mermaid
 flowchart LR
-    Desired["Desired state\nProject policy · TaskAttempt · lease"] --> Reconcile["Reconciler\ncompare / classify"]
+    Desired["Desired state\nProject policy · Task · lease"] --> Reconcile["Reconciler\ncompare / classify"]
     Observed["Observed state\nWorker inventory · receipt · grant"] --> Reconcile
     Reconcile --> Safe["safe automatic convergence"]
     Reconcile --> Unknown["OutcomeUnknown / Quarantined"]
@@ -38,10 +39,10 @@ flowchart LR
 | Control plane | active instance, epoch, DB lease | `ControlPlaneFenced` |
 | Worker | incarnation, liveness mode, control channel, process inventory 시각 | `WorkerUnreachable` 또는 `WorkerUnchecked` |
 | Agent/lease | Agent generation, fencing token, expected container/process ID | `AgentOrphaned` 또는 `OutcomeUnknown` |
-| TaskAttempt | 상태, deadline, Worker ACK, checkpoint | `OutcomeUnknown`, `CancelUnconfirmed` 또는 `RetryWaiting` |
+| Task 실행 | 상태, deadline, Worker ACK, checkpoint | `OutcomeUnknown` 또는 `CancelUnconfirmed` |
 | Tool effect | ledger 상태, provider receipt/조회 결과 | `PartiallyApplied` |
-| Credential delivery | grant ID, expiry, Worker/Attempt binding, revocation | `GrantLeakSuspected` 또는 `CredentialUnavailable` |
-| Project archive | terminal Attempt, process/lease/grant cleanup, open holds | `ArchiveBlocked` |
+| Credential delivery | grant ID, expiry, Worker/Task binding, revocation | `GrantLeakSuspected` 또는 `CredentialUnavailable` |
+| Project archive | terminal Task, process/lease/grant cleanup, open holds | `ArchiveBlocked` |
 
 `Unknown`, `Unchecked`, `CancelUnconfirmed`, `PartiallyApplied`, `ArchiveBlocked`, `Fenced`는 오류를 숨기는 중간 상태가
 아니다. UI·API·alert는 원인, 마지막 관측 시각, 다음 자동 재평가 시각, 필요한 운영자 action을 함께
@@ -56,12 +57,12 @@ Prometheus metric은 집계와 alert용이고, audit/event log는 개별 원인 
 |---|---|---|
 | 제어 권한 | active epoch, lease renewal 실패, fencing 거절 수 | instance ID를 무제한 label로 사용 |
 | Worker/Agent | mode별 관측 age, slot 사용량, warm eviction, orphan/unknown 수 | worker/agent/task UUID label |
-| TaskAttempt | queue age, dispatch/ACK latency, terminal/outcome-unknown 수 | prompt, repository URL, 사용자 입력 |
+| Task 실행 | queue age, dispatch/ACK latency, terminal/outcome-unknown 수 | prompt, repository URL, 사용자 입력 |
 | effect | class별 `Started`/`Unknown`/compensation 실패 수 | provider 요청/응답 원문, idempotency key |
 | Security | grant 발급/거절/만료, revoke 지연, helper 거절 | credential ID, secret fingerprint, token |
 | Archive | drain age, open hold 수와 kind, blocked age | Project name/ID label |
 
-모든 audit/event에는 가능한 범위에서 `request_id`, `project_id`, `task_id`, `attempt_id`, `agent_id`,
+모든 audit/event에는 가능한 범위에서 `request_id`, `project_id`, `task_id`, `agent_id`,
 `worker_id`, `lease_generation`, `fencing_token`, `control_epoch`, actor를 상관관계 필드로 남긴다.
 이 필드는 조회용 structured record에만 두며 metric label·로그 메시지 본문에 secret, prompt, credential
 원문, raw provider payload를 넣지 않는다.
@@ -75,11 +76,11 @@ Reconciler는 Active Orchestrator epoch에서만 동작한다. 한 sweep은 스�
 |---|---|---|
 | 만료된 delivery grant | grant revoke·WarmIdle drain | credential 재발급/다른 Project grant |
 | token 불일치 orphan process | Worker self-fence/cleanup 요청, lease quarantine | 같은 Agent의 즉시 재시작 |
-| Start/stop ACK 유실 | `OutcomeUnknown`, inventory 조회 | 중복 start/새 Attempt |
+| Start/stop ACK 유실 | `OutcomeUnknown`, inventory 조회 | 중복 start/재실행 |
 | Worker 미도달 | 신규 dispatch 차단, lease expiry 관찰 | 외부 effect 재시도/성공 추정 |
 | terminal checkpoint 누락 | Task 성공 확정 차단, evidence 요청 | 임의 Git force push |
 | effect `Started`/`Unknown` | provider 조회, `PartiallyApplied` 승격 | 자동 redrive/보상 추정 |
-| `CancelUnconfirmed` Attempt | inventory·effect ledger 조회, `Cancelled`/`PartiallyApplied`/`OutcomeUnknown` 해소 | 증거 없는 `Cancelled` 확정 |
+| `CancelUnconfirmed` Task | inventory·effect ledger 조회, `Cancelled`/`PartiallyApplied`/`OutcomeUnknown` 해소 | 증거 없는 `Cancelled` 확정 |
 | archive cleanup 미완료 | `ArchiveBlocked` hold 생성 | context/Git/audit 삭제 |
 
 자동 reconcile은 durable data 삭제, Project reopen, irreversible tool 실행, external effect redrive,
@@ -92,12 +93,12 @@ Primary 재시작 또는 수동 승격 뒤에는 신규 dispatch보다 관측이
 1. DB control lease와 epoch를 획득하고 이전 owner가 fenced됐음을 확인한다.
 2. Worker의 incarnation·control channel·process inventory를 수집한다. `on_demand` Worker는
    `Unchecked`로 표시하고 probe 전 정상으로 간주하지 않는다.
-3. 활성 Agent lease와 process inventory, delivery grant, Attempt fencing token을 대조한다.
+3. 활성 Agent lease와 process inventory, delivery grant, Task fencing token을 대조한다.
 4. 불일치는 `OutcomeUnknown` 또는 quarantine으로 보존하고, safe cleanup만 수행한다.
 5. effect ledger의 `Started`/`Unknown`, archive hold, checkpoint 누락을 먼저 재평가한다.
 6. 이 과정이 끝난 Project/Worker에 대해서만 Pending Task dispatch를 재개한다.
 
-recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision, lease/attempt/effect
+recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision, lease/task/effect
 요약, 마지막 관측 시각을 담되 secret 원문·prompt·provider payload는 포함하지 않는다.
 
 ## Alert와 운영자 action
@@ -107,7 +108,7 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 | 조건 | 기본 severity | 운영자 최초 action |
 |---|---|---|
 | control lease renewal 실패 또는 둘 이상의 owner 관측 | Critical | gateway 차단, fencing/epoch 증거 확인 |
-| `OutcomeUnknown` Attempt 또는 orphan Agent | High | Worker inventory와 effect ledger 확인, 재시작 금지 |
+| `OutcomeUnknown` Task 또는 orphan Agent | High | Worker inventory와 effect ledger 확인, 재시작 금지 |
 | credential grant revoke 지연/누수 의심 | High | Worker isolate, grant revoke 증거 확인 |
 | `PartiallyApplied` effect | High | provider receipt·보상·risk acceptance 결정 |
 | `ArchiveBlocked` SLA 초과 | Medium | hold owner/evidence 확인 |
@@ -125,5 +126,5 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 3. ACK 유실·orphan process·grant expiry가 자동 중복 실행 없이 quarantine/cleanup되는 시험
 4. `Started` effect와 archive hold가 운영자 승인 없이 자동 redrive/archive되지 않는 시험
 5. on-demand Worker가 `Unchecked`에서 probe 성공 전 dispatch되지 않는 시험
-6. audit 상관관계 필드만으로 incident의 Project·Attempt·lease·effect 경로를 재구성하는 시험
-7. `CancelUnconfirmed` Attempt가 증거 기반으로 해소되기 전까지 Project archive가 진행되지 않는 시험
+6. audit 상관관계 필드만으로 incident의 Project·Task·lease·effect 경로를 재구성하는 시험
+7. `CancelUnconfirmed` Task가 증거 기반으로 해소되기 전까지 Project archive가 진행되지 않는 시험

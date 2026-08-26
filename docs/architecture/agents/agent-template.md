@@ -4,8 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/agent-template.md"
-last_verified: "2026-08-22"
-last_verified_commit: "411242c"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["agent-platform", "security", "architecture"]
 ---
 
@@ -31,16 +31,16 @@ revision을 올리면 [재현 가능한 Skill loading](harness-composition.md)(`
 - **id+revision 단독도 기각한다.** 저장소가 손상되거나 이관될 때 본문이 그대로임을 증명할 수단이 없다.
 - hash는 필수 동반 증인이다. 같은 내용을 재발행하면 새 revision id를 받되 `content_hash`는 같다.
 
-## 실행 중 Attempt에 대한 불변식
+## 실행 중 Task에 대한 불변식
 
-**실행 중 Attempt는 어떤 revision 전이에도 영향받지 않는다.** Attempt는 revision을 *참조*하는 것이
+**실행 중 Task는 어떤 revision 전이에도 영향받지 않는다.** Task는 revision을 *참조*하는 것이
 아니라 제출 시점에 본문과 hash를 **materialize**한다. 참조만 두면 retention purge가 재현을 깨뜨린다.
 
 | 주체 | `Deprecated` 전이 | `Retired` 전이 |
 |---|---|---|
-| 실행 중 Attempt | 영향 없음 | 영향 없음 |
+| 실행 중 Task | 영향 없음 | 영향 없음 |
 | WarmIdle Agent | process 유지, 경고 metric | `Hibernated`로 evict (reconciler의 기존 "WarmIdle drain" 권한 내) |
-| Hibernated Agent | 기동 가능 | admission 즉시 거절 — `FailureKind::TemplateUnavailable`. 다른 revision fallback 없음, retry 예산 미소모 |
+| Hibernated Agent | 기동 가능 | admission 즉시 거절 — `FailureKind::TemplateUnavailable`. 다른 revision fallback 없음 |
 | Project `default_agent_template_id` | 변화 없음 | **Project 상태를 바꾸지 않는다** — 템플릿 관리자가 Project를 벽돌로 만들 수 있으면 안 된다 |
 
 Agent는 기본적으로 revision을 **pin**한다(`template_upgrade_policy: pinned`). WarmIdle 재사용
@@ -65,7 +65,7 @@ tools_effective = tools_template ∩ allow_project \ deny_project
 연산이 `∩`과 `\`뿐이므로 `tools_effective ⊆ allow_project`가 구조적으로 성립한다. 템플릿에 무엇을
 써넣어도 Project가 허용하지 않은 tool은 나오지 않는다.
 
-**판정 시점은 Attempt admission이다.** 저장 시점 검증은 보조일 뿐 정본이 아니다 — 저장 시 통과해도
+**판정 시점은 Task admission이다.** 저장 시점 검증은 보조일 뿐 정본이 아니다 — 저장 시 통과해도
 이후 Project grant가 좁아지면 저장 시점 결과는 무효다.
 
 격리는 집합이 아니라 **전순서**다. 템플릿은 Project가 정한 floor 이상만 선택할 수 있고 `min()`
@@ -141,9 +141,8 @@ FK마다 폭발 반경을 논증하지 않은 `CASCADE`는 허용하지 않는�
 2. published revision의 content 변경 시도가 거절되고, 같은 content 재발행이 새 revision id에 같은
    `content_hash`를 만드는 시험
 3. retire가 dependent set 해시 없이 실패하고 집합 변화 시 `409`
-4. 실행 중 revision retire가 Attempt harness manifest hash를 바꾸지 않는 E2E
-5. `Retired` pin의 `Hibernated → Starting`이 `TemplateUnavailable`로 admission 즉시 거절되고 retry
-   예산을 소모하지 않는 시험
+4. 실행 중 revision retire가 Task의 harness manifest hash를 바꾸지 않는 E2E
+5. `Retired` pin의 `Hibernated → Starting`이 `TemplateUnavailable`로 admission 즉시 거절되는 시험
 6. 템플릿이 Project grant를 넘는 tool을 부여하지 못하며, 저장 후 Project grant가 좁아진 경우에도
    admission에서 차단되는 시험
 6b. **필드별 게이팅**: `agent_template:update`만 가진 principal이 `role_prompt`는 바꿀 수 있고

@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-08-26"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["architecture", "operations"]
 ---
@@ -37,15 +37,16 @@ flowchart LR
 1. 유효한 dispatch lease를 가진 Orchestrator는 최대 하나다.
 2. lease가 없는 인스턴스는 조회를 제공할 수 있어도 dispatch, cancel, Agent command, breaker 변경을 수행하지 않는다.
 3. Standby는 기존 Primary의 종료 또는 네트워크 fencing을 확인하기 전 제어 권한을 얻지 않는다.
-4. 모든 dispatch attempt와 control command에는 승격마다 증가하는 epoch를 남긴다.
+4. 모든 dispatch 시도와 control command에는 승격마다 증가하는 epoch를 남긴다.
 5. 이전 epoch의 늦은 이벤트는 상태를 변경하지 못한다.
 
 ## Agent execution lease와 fencing
 
 Orchestrator lease만으로는 Worker 안의 이전 Agent process를 막지 못한다. 따라서 Agent activation은
 별도의 `worker_execution_lease`를 획득한 뒤에만 가능하다. 이 레코드는 `agent_id`, `worker_id`,
-`attempt_id`, `worker_incarnation`, `lease_generation`, 단조 증가 `fencing_token`, `control_epoch`,
-`state`, `acquired_at`, `renewed_at`, `expires_at`를 가진다.
+`task_id`, `worker_incarnation`, `lease_generation`, 단조 증가 `fencing_token`, `control_epoch`,
+`state`, `acquired_at`, `renewed_at`, `expires_at`를 가진다. `task_id`는 WarmIdle process가 아직
+Task를 들고 있지 않은 동안 NULL이다.
 
 ```mermaid
 sequenceDiagram

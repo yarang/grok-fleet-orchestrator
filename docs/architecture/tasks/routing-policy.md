@@ -4,7 +4,8 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/tasks/routing-policy.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["scheduler"]
 ---
 
@@ -27,7 +28,7 @@ telemetry는 [Task 예산 제어](budget-control.md)가 소유하고, retry·Out
 ## 결정
 
 1. client가 물리 모델을 강제하지 않을 때 policy가 logical profile을 model/Worker capability로 해석한다.
-2. profile, policy revision, 선택 이유는 TaskAttempt snapshot에 고정한다.
+2. profile, policy revision, 선택 이유는 Task의 execution snapshot에 고정한다.
 3. capability 불일치, policy 거절, override는 이유와 요청 principal을 감사 기록에 남긴다.
 4. routing policy는 secret이나 request 원문을 Worker label·telemetry label로 만들지 않는다.
 
@@ -36,11 +37,11 @@ flowchart LR
     Task["Task request"] --> Classify["profile classification"]
     Classify --> Policy["policy revision"]
     Policy --> Select["WorkerSelector\ncapability · load"]
-    Select --> Attempt["TaskAttempt snapshot\n목표"]
+    Select --> Snapshot["Task execution snapshot\n목표"]
 ```
 
 ## 구현 게이트
 
-1. profile과 policy revision을 포함한 TaskAttempt snapshot migration
+1. profile과 policy revision을 포함한 execution snapshot migration
 2. 선택 이유·override·불일치 capability의 감사 시험
-3. 정책 revision 변경이 기존 attempt를 바꾸지 않는 시험
+3. 정책 revision 변경이 실행 중인 Task를 바꾸지 않는 시험

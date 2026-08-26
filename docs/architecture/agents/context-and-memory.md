@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/context-and-memory.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # Agent 컨텍스트와 메모리
@@ -16,7 +17,7 @@ Project lifecycle은 [교차 lifecycle](../project-task-agent-lifecycle.md)이 �
 
 ## 규칙
 
-thread context는 TaskAttempt에 속하며 입력 출처·요약 version·thread 식별자와 함께 고정한다.
+thread context는 Task 실행에 속하며 입력 출처·요약 version·thread 식별자와 함께 고정한다.
 현재 thread history가 존재해도 그것은 Agent 메모리 기능이 아니다. 장기 메모리는 Project 범위와
 소유 principal, retention, 민감도, 삭제 요청, 접근 감사가 명시된 별도 레코드여야 한다.
 

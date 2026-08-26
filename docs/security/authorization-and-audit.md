@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-08-23"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
@@ -34,13 +34,14 @@ flowchart LR
 | HumanUser | Dashboard session/OIDC, 민감 작업은 step-up MFA | 자신의 Project scope와 부여 capability | Worker·Security Manager 위장 |
 | AutomationService | 짧은-lived workload credential 또는 mTLS | 명시 capability·Project scope·만료 | wildcard admin/무기한 bearer |
 | Worker | `worker_id`에 결합된 mTLS certificate 또는 scoped credential | 자기 inventory, command ACK/result, 자기 grant 수령 | 다른 Worker/Project 제어, policy 변경 |
-| AgentProcess | 일반 control-plane principal 없음 | Attempt-bound Security/privileged-helper grant | `/v1`, MCP, Dashboard의 일반 호출 |
+| AgentProcess | 일반 control-plane principal 없음 | Task의 실행 구간에 묶인 Security/privileged-helper grant | `/v1`, MCP, Dashboard의 일반 호출 |
 | SecurityManager | 별도 service identity | credential metadata·grant·revoke·rotation workflow | Task/Project 정책 임의 변경 |
 | BootstrapInstaller | one-time bootstrap token | join/enrollment 한 번 | 운영 API·credential 사용 |
 
 Agent process는 control plane의 사용자로 취급하지 않는다. Agent가 필요한 privileged operation과
-credential은 각각 Attempt-bound grant를 통해 helper/Security Manager에 요청하며, 그 grant가 Project
-policy·fencing token·만료를 다시 확인한다.
+credential은 각각 실행 구간에 묶인 grant를 통해 helper/Security Manager에 요청하며, 그 grant가 Project
+policy·fencing token·만료를 다시 확인한다. 여기서 실행 구간은 Task 행의 수명이 아니라 **dispatch부터
+terminal까지**다 — 상세는 [제어면 보안 모델](control-plane-security-model.md)이 정본이다.
 
 ## AuthorizationContext와 평가 순서
 
@@ -108,7 +109,7 @@ LLM credential 삭제를 흡수한 사고의 재발 방지).
 | HTTP `/v1/*` | Worker mTLS 또는 AutomationService workload credential | public health/metrics도 deployment ACL; Worker self binding |
 | MCP stdio | authenticated launcher가 발급한 짧은 session assertion 또는 local peer identity | stdio/environment 자체를 신뢰하지 않음; ToolContext에 context 주입 |
 | Worker control stream | mTLS Worker identity + control epoch/fencing token | Worker는 자기 command/result만 ACK |
-| Security Manager | service mTLS + Attempt-bound delivery grant | 원문 export 대신 grant; break-glass만 예외 |
+| Security Manager | service mTLS + 실행 구간에 묶인 delivery grant | 원문 export 대신 grant; break-glass만 예외 |
 
 ### 등록되지 않은 route·tool의 판정 (fail-closed 불변식)
 
@@ -176,7 +177,7 @@ credential 원문 export, irreversible effect resolution, security hold 해제, 
 
 모든 mutation, capability/scope 거절, grant 발급·사용·회수, break-glass, privileged-helper effect,
 archive hold 변경은 append-only audit event를 남긴다. event는 actor, impersonation 여부, request ID,
-resource/project/attempt/lease 상관관계, policy revision, allow/deny outcome, reason code, 전후 metadata
+resource/project/task/lease 상관관계, policy revision, allow/deny outcome, reason code, 전후 metadata
 hash를 가진다. prompt·secret·raw provider payload·session/bearer 값은 기록하지 않는다.
 
 audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, SecurityAdmin은 global event를
@@ -199,9 +200,11 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
 | Dashboard·MCP mutation/거절 | **없음** | Dashboard는 중앙 capability 행렬 자체가 없다(`#92`가 다룸). MCP tool별 감사도 착수 전 |
 
-또한 현재 `AuditEvent`에는 `request_id`, `project_id`, `attempt_id`, `policy_revision` 상관관계
-필드가 없어 구현 게이트 6을 완전히 만족하지 못한다(`#95`). `project_id`/`attempt_id`는 대응하는
-Project/Attempt 엔티티가 아직 없어(`#48`·`#62` 계열 선행) 상관시킬 대상 자체가 없다.
+또한 현재 `AuditEvent`에는 `request_id`, `project_id`, `policy_revision` 상관관계 필드가 없어 구현
+게이트 6을 완전히 만족하지 못한다(`#95`). `project_id`는 대응하는 Project 엔티티가 아직 없어
+(`#48` 계열 선행) 상관시킬 대상이 없다. **실행 상관 필드는 `attempt_id`가 아니라 `task_id`이며
+그것은 이미 있다** — `TaskAttempt`를 만들지 않기로 한 [흡수 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)에
+따라, "Attempt 엔티티가 생기면 상관시킨다"는 대기 사유는 성립하지 않는다.
 
 ## 구현 게이트
 

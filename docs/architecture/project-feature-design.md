@@ -4,7 +4,8 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/project-feature-design.md"
-last_verified: "2026-08-24"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # Project 모델과 거버넌스
@@ -17,7 +18,7 @@ Project는 개발 목표, 권한, 정책, Agent 소유를 묶는 경계다. Host
 |---|---|
 | Project 데이터·정책 revision·Agent 소유 | [Task 관리](tasks/management.md)의 제출·결과·감사 |
 | Agent admission과 shared Worker eligibility | [배치·맥락 계약](entity-placement-and-context.md)의 Host·Worker·Agent placement |
-| Project Task의 Worker 선택 자격 | [실행 일관성](tasks/execution-consistency.md)의 Attempt·재시도·dead-letter |
+| Project Task의 Worker 선택 자격 | [실행 일관성](tasks/execution-consistency.md)의 실행 CAS·dead-letter |
 | Project 권한의 승인 조건 | [Project 관리 계약](../contracts/project-management.md)의 HTTP·MCP 표면 |
 
 화면 구성은 [UI Dashboard](../ui-dashboard/ui-design.md)가, Agent 생성·중지는 [Agent provisioning](agents/provisioning.md)이 소유한다. 이 문서는 SQL, Store 메서드 시그니처, 화면 명세, 구현 단계별 작업 목록을 반복하지 않는다.
@@ -27,9 +28,9 @@ flowchart LR
     Project["Project 모델·정책·소유"] --> Task["Task 관리"]
     Project --> Provisioning["Agent provisioning"]
     Project --> Selector["Worker 선택"]
-    Task --> Attempt["실행 일관성"]
+    Task --> Execution["실행 일관성"]
     Lifecycle["Lifecycle 계약"] -. "상태 전이" .-> Project
-    Selector --> Attempt
+    Selector --> Execution
 ```
 
 ## 목표 데이터 모델
@@ -42,7 +43,7 @@ flowchart LR
 | `worker_execution_leases` | `agent_id`, `worker_id`, generation, 상태, 시각 | 활성 Agent의 일시적 Worker slot 점유. **미구현** — 로드맵 `#67` |
 | `project_archive_holds` | `project_id`, kind, reason, opened/resolved 시각, actor, evidence | effect·cleanup·security/legal hold가 archive를 막는 기록. **미구현** — 1단계의 archive 게이트는 "이 project를 참조하는 비종료 Task 없음" 하나뿐이다(`Store::project_has_active_tasks`) |
 
-Agent provisioning 관련 기본 템플릿, 유휴 시간, 작업 디렉터리 같은 설정은 Project가 정책 값으로 제공할 수 있지만, Agent 템플릿과 실행 수명은 Agent 도메인이 소유한다. 정책이 바뀌면 revision을 올리고 새 Task/Attempt에만 적용한다. 이미 실행 중인 Attempt는 제출 시점 snapshot을 유지한다.
+Agent provisioning 관련 기본 템플릿, 유휴 시간, 작업 디렉터리 같은 설정은 Project가 정책 값으로 제공할 수 있지만, Agent 템플릿과 실행 수명은 Agent 도메인이 소유한다. 정책이 바뀌면 revision을 올리고 새 Task에만 적용한다. 이미 실행 중인 Task는 제출 시점 snapshot을 유지한다.
 
 Agent는 Project를 상속하는 임시 Worker process가 아니라 immutable `project_id`를 가진 논리
 엔티티다. Project가 Agent의 warm idle 정책과 agent 수 상한을 허용할 수는 있지만,

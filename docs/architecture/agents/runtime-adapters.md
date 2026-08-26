@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/runtime-adapters.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # Agent 런타임 어댑터
@@ -23,7 +24,7 @@ Project 정책, 실행 격리는 [실행 격리](execution-isolation.md), prompt
 
 실행 command, argument, mount, environment key는 allow-list된 구조화 필드로만 전달한다. container
 profile의 rootless 여부, image digest, mount manifest, egress profile, privileged tool allow-list revision은
-[실행 격리](execution-isolation.md)의 immutable Attempt snapshot을 따른다.
+[실행 격리](execution-isolation.md)의 immutable execution snapshot을 따른다.
 비밀 원문과 임의 shell 조각을 catalog 또는 Agent 레코드에 저장하지 않는다. 새 runtime은 digest와
 capability 검증, 격리 시험, 취소/cleanup 시험을 통과하기 전 배정할 수 없다.
 

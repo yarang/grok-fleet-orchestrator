@@ -2,7 +2,8 @@
 type: wiki
 status: canonical
 source: "docs/credentials/README.md"
-last_verified: "2026-08-15"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # 시크릿·크리덴셜 관리 지침
@@ -18,7 +19,7 @@ last_verified: "2026-08-15"
 1. **평문 시크릿은 절대 git에 커밋하지 않는다.** 이 저장소(`docs/credentials/`)에는
    시크릿의 **메타데이터만** 기록한다 — 이름, 목적, 저장 위치, 형식, 생성일, 회전 주기,
    소비자(어떤 서비스가 쓰는가). 값 자체는 절대 여기 적지 않는다.
-2. **Fleet runtime credential의 authority는 Security Manager다.** Project·Agent·TaskAttempt가
+2. **Fleet runtime credential의 authority는 Security Manager다.** Project·Agent·Task가
    쓰는 credential은 설정 파일이나 Git이 아니라 Security Manager의 encrypted backend에만 둔다.
    Orchestrator는 credential reference와 policy만 다루며 원문을 복호화·export하지 않는다.
 3. **호스트 전용 bootstrap/부속 서비스 설정은 `/etc/fleet/` 아래로 통일한다.**
@@ -51,8 +52,9 @@ Security Manager는 credential metadata·scope·revision·감사를 관리하고
 
 - credential 목록에는 `credential_id`, 종류, Project scope, revision, 상태, fingerprint/last4만
   표시한다.
-- Project → Agent/Tool → Attempt의 grant는 상위 scope의 부분집합만 허용한다.
-- Worker는 mTLS identity와 Attempt-bound one-time grant로만 전달을 요청한다.
+- Project → Agent/Tool → Task의 grant는 상위 scope의 부분집합만 허용한다.
+- Worker는 mTLS identity와 실행 구간에 묶인 one-time grant로만 전달을 요청한다. 그 구간은 Task 행의
+  수명이 아니라 dispatch부터 terminal까지다.
 - 전달 원문은 Agent process의 `tmpfs` mount 또는 file descriptor에서만 잠시 존재하며, process·lease
   종료 때 제거한다.
 - backend 교체 또는 외부 provider 연동 시 Security Manager가 Fleet revision과 backend version을

@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-08-26"
+last_verified: "2026-08-27"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -2321,3 +2321,89 @@ CI 로그로만 닫힌다. 초록 배지가 아니라 시간을 읽어야 하는
 `${PIPESTATUS[0]}`도 zsh에서는 1-기반이라 빈 문자열이었다. 즉 "게이트 통과"라는 판단이 출력의
 `Finished` 줄에 대한 **추론**에 얹혀 있었다. 파이프 없이 재실행해 세 게이트의 종료 코드가 실제로 0임을
 확인했고(fmt/clippy 2종), 규약은 `agent.md` §4.3에 bullet로 추가했다.
+
+## 2026-08-27 — docs — `TaskAttempt` 존치 여부를 판정했다: 흡수 (`#97`)
+
+`#62` 4단계가 무재시도를 채택하면서 `TaskAttempt`의 주된 존재 이유(시도 generation)가 사라졌지만,
+그 엔티티는 tasks 도메인만의 것이 아니었다 — 2026-08-26 실측으로 30개 파일 161행이 그것을 목표
+설계로 전제하고 있었다. `#97`은 개명 작업이 아니라 **판정 작업**이었고, 판정은 흡수다. 근거와 용어
+대응표는 [Attempt 흡수 판정](architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)이
+정본으로 소유한다.
+
+**판별 기준을 먼저 고정했다**: 별도 엔티티는 어떤 경로든 **하나의 Task가 정당하게 두 개의 실행
+기록을 갖는** 경우가 있을 때만 정당화된다. 원래 행이 후보로 적어 둔 세 경로를 각 정본의 문언과
+대조했다. (1) Agent process 교체 후 재개 — `entity-placement-and-context.md`가 "같은 Agent가 **새**
+Attempt를 재개"라고 적었는데, 무재시도 아래에서 그것은 같은 Task의 둘째 실행이 아니라 **새 Task**다.
+(2) WarmIdle process 재사용 — `WarmIdle --> Running: "next compatible task"`와 "WarmIdle process에는
+실행 중 Task가 없고"는 **한 process가 여러 Task를 거친다**는 뜻이다. (3) 부분 적용 뒤 이어 실행 —
+"Task는 terminal 이후 재개하지 않는다. 후속 작업은 새 Task로 만들고". 셋 다 "한 process, 여러
+Task"였지 "한 Task, 두 실행"이 아니었다. **세 후보가 전부 현재 문언만으로 판별됐기 때문에** 원래
+행이 적어 둔 선행(`#48` 계열 Project/Agent 엔티티)을 기다리지 않았다 — `#48`이 Project를 실제로
+만들 때 어긋나는 사실이 나오면 그때 재개정한다.
+
+판정 과정에서 정본 자신의 자기모순을 하나 찾았다. `project-task-agent-lifecycle.md`의 엔티티 표는
+Task를 "한 번의 dispatch/attempt"로 적었는데 **바로 다음 줄** `TaskAttempt` 행은 존재 이유를
+"retry"로 적고 있었다. 두 행은 같은 표에서 서로를 부정한다. 흡수 판정은 이 둘을 한 행으로 합쳐
+해소했다.
+
+**개명이 아니었던 곳은 정확히 한 군데다 — credential grant 수명.** Attempt는 실행 창에만 존재했지만
+Task 행은 `Pending` 생성부터 archive 보존 기간까지 산다. "Attempt 단위 grant"를 평평하게 "Task 단위"로
+옮겼다면 credential 유효 구간이 **조용히 넓어졌을** 것이다. 그래서 보안 정본 두 곳
+([control plane 보안 모델](security/control-plane-security-model.md),
+[credentials 진입점](credentials/README.md))에 **"dispatch부터 terminal까지의 실행 구간"**으로 명시하고,
+`Pending` Task에는 발급하지 않음과 terminal 전이 시 회수를 함께 적었다. `#97` 행이 착수 전에 이
+위험을 미리 지목해 뒀고, 실제로 그 지목이 맞았다.
+
+**Mermaid 노드 삭제는 문법 오류가 아니라 조용한 오류를 만든다.** `Attempt` 노드를 지우면서
+`Attempt --> Process`만 지우고 `Task --> Attempt`를 남기면 렌더러가 `Attempt`를 **라벨 없는 유령
+노드로 되살린다**. 노드 삭제는 삭제가 아니라 간선 재배선으로 다뤄야 한다. 실제로 5개 다이어그램에서
+간선을 다시 이었다. 부수적으로 `system-entities-mapping.md`에서는 라벨 정의가 참조보다 뒤에 오게
+되어(Mermaid는 허용하지만 읽는 사람에게 `Process`가 미정의로 보인다) 순서를 바꿨다.
+
+**작업 방식**: 26개 파일을 python3 heredoc으로 `(old, new)` 쌍 목록을 돌리되 각 쌍마다
+`if s.count(old) != 1: sys.exit(...)`로 **시끄럽게 실패**하게 했다. 26개 파일 · 100건 남짓의 치환에서
+단 한 건도 조용히 빗나가지 않았고, 이는 치환이 성공했다는 뜻이자 **내가 읽은 원문이 정확했다는
+증거**이기도 하다. sed였다면 0건 매치와 성공이 구분되지 않는다.
+
+범위: 실측 30개 중 reviews 5개 파일을 뺀 25개 + 집계표를 소유한
+[실행 일관성](architecture/tasks/execution-consistency.md) = **26개 파일**. reviews는 결정 당시의 근거
+기록이므로 나중 결정으로 소급해 덮어쓰지 않는다 — 덮어쓰면 근거로서의 가치를 잃는다. 집계표는 삭제
+대신 "당시의 크기와 위치" 기록으로 과거형 전환했다: 드리프트가 2개 파일이 아니라 30개였다는 사실
+자체가 보존할 가치가 있다.
+
+`#95`와의 관계는 무모순을 넘어섰다. `authorization-and-audit.md` 202-204가 "실행 상관 필드는
+`attempt_id`가 아니라 `task_id`이며 그것은 이미 있다"를 **적극 단언**하도록 고쳤으므로, `#95` 행이
+"그 문장도 함께 고친다"고 적어 둔 몫은 사라졌다. `#95` 행을 그에 맞게 동기화했다.
+
+**`#97` 집계 밖에서 함께 고친 것 1건(정직한 부기)**: `agents/agent-template.md`에서 "retry 예산"
+표현 2건을 지웠다(`TemplateUnavailable` 행의 "retry 예산 미소모", 게이트 5의 retry 문구). 무재시도
+아래에서 죽은 서술이지만 **`TaskAttempt`/`attempt_id`/`RetryWaiting` 집계에는 잡히지 않던 문자열**
+이므로 30개 파일 161행에 포함되지 않았다. 즉 이 커밋의 변경량은 `#97` 집계보다 그만큼 넓다.
+
+**집계 방식의 잔여 오차 1건**: 원래 집계는 대소문자 구분 `grep`으로 reviews를 5개 파일 22행으로
+셌는데, 이번 확인에 쓴 `grep -i attempt`는 소문자 "attempt"까지 잡아 23행이 나왔다. 재작성한 절에는
+모호하지 않은 **파일 수(5개)만** 적고 행 수를 다시 주장하지 않았다.
+
+검증: 링크·앵커 스크립트 검사 — 27개 파일의 상대 링크에서 파손 0, 새 앵커 `#attempt-흡수-판정`을
+참조하는 5개 파일 전부 원천 헤딩에 도달. Mermaid 27블록에 `Attempt` 노드 잔존 0. 잔존 문자열
+sweep에서 `docs` 전체에 남은 `TaskAttempt`/`attempt_id`/`RetryWaiting`은 (i) 판정 절 자신, (ii) 의도적
+부정 서술("별도 `TaskAttempt` 엔티티는 없다"), (iii) 역사 집계표, (iv) reviews·이 원장·roadmap뿐이다.
+`security-findings.md`의 `clear_login_attempts`·`MAX_EMAIL_SEND_ATTEMPTS`는 로그인 rate limit의 Rust
+식별자로 무관하며 제외했다.
+
+품질 게이트는 **문서 전용 변경이라는 이유로 건너뛰지 않고** 전부 돌렸다 — `agent.md` §3.2가
+"발동 조건을 변경 종류로 좁게 읽으면 내 변경과 무관하게 이미 깨져 있던 것은 영원히 보이지 않는다"고
+못 박은 그대로다. rustc 1.98.0(`rust-toolchain.toml`과 일치), `RUSTFLAGS="-D warnings"`,
+`cargo fmt --all -- --check` exit=0, clippy `acp mtls` exit=0, clippy `--no-default-features` exit=0
+(셋 다 파이프 없이 종료 코드를 직접 읽었다). `cargo build -p fleet-cli --features "acp mtls"` 후
+`DATABASE_URL` 주입 `cargo test --workspace --features "acp mtls" -- --test-threads=1` → 69개 스위트
+1053건 통과, 0 실패. `cross_client`는 14건 **0.64초**로 조용한 skip(`0.00s`)이 아님을 소요 시간으로
+확인했다 — 워밍업 수정 후의 단독 실행 실측 0.66초와 일치한다.
+
+**검증 한계**: 문서 전용 변경이라 코드로 증명할 대상이 없다. `git diff --name-only`가 27개 전부
+`.md`임을 확인했고 위 게이트는 이 커밋이 무엇을 깨뜨렸는지가 아니라 **트리의 현재 상태**를 말한다.
+Mermaid는 노드 잔존만 스크립트로 검사했고 렌더러로 실제 파싱시키지는 않았다. 목표 설계 서술이 판정과
+**의미상** 맞는지는 사람 판독으로만 확인했다 — 스크립트가 보장하는 것은 문자열 치환의 정확성이지
+문장이 여전히 말이 되는지가 아니다. 판정 자체도 **현재 정본 문언**을 근거로 하며, `#48`이 Project
+엔티티를 실제로 구현할 때 문언에 없던 사실이 나오면 재개정 대상이다. 세션이 자정을 넘겨 판정일은
+2026-08-26, `last_verified`와 이 항목은 최종 검증을 마친 2026-08-27이다.

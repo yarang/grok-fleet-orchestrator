@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/tool-catalog.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 ---
 
 # Agent 도구 카탈로그
@@ -19,9 +20,9 @@ last_verified: "2026-08-17"
 
 각 항목은 불변 `tool_id`, 버전/digest, 허용 principal·Project 범위, 필요한 capability, 입력·출력
 schema, side-effect 분류, 감사 이벤트를 가진다. tool binding 변경은 `AgentManage` 권한과 Project
-범위 검사를 요구한다. 고영향 또는 비가역 tool은 별도 승인과 attempt snapshot 기록을 요구한다.
+범위 검사를 요구한다. 고영향 또는 비가역 tool은 별도 승인과 execution snapshot 기록을 요구한다.
 
-전역 catalog, Project grant, Agent binding, Task 요청과 Attempt snapshot의 관계 및 deny 우선순위는
+전역 catalog, Project grant, Agent binding, Task 요청과 execution snapshot의 관계 및 deny 우선순위는
 [배치·맥락 계약](../entity-placement-and-context.md)을 따른다.
 
 비밀 원문, shell command 문자열, 임의 environment 값은 카탈로그에 저장하지 않는다. 비밀은 실행

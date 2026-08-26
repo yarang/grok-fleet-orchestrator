@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/project-management.md"
-last_verified: "2026-08-24"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["project-platform", "api-contracts"]
 ---
@@ -26,10 +26,12 @@ owners: ["project-platform", "api-contracts"]
 | `DELETE` | `/api/projects/{id}` | `project:delete` | Project archive 요청 (즉시 영구 삭제 아님) | 구현됨(1단계 축소판, 아래) |
 
 **목표 계약과의 차이(1단계)**: 목표는 `DELETE`가 `request_id`를 받는 `Active → Draining` idempotent
-archive 요청이며 `202 Accepted`와 archive progress를 반환하고, 모든 Attempt가 terminal이고 effect
+archive 요청이며 `202 Accepted`와 archive progress를 반환하고, 모든 Task가 terminal이고 effect
 hold가 해소되고 Agent process·lease·credential grant cleanup이 확인된 뒤에만 `Archived`가 되는
-것이다. 1단계 구현은 이 중 "Task가 전부 terminal인가"만 확인한다(`Attempt`·effect ledger·Agent
-process cleanup은 그 대상 자체가 아직 없다) — 게이트를 통과하면 같은 요청 안에서 곧바로
+것이다. 1단계 구현은 이 중 "Task가 전부 terminal인가"만 확인한다(effect ledger·Agent process
+cleanup은 그 대상 자체가 아직 없다). 실행 관점에서는 이 조건이 **완전하다** — [흡수
+판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)으로 따로 확인할 비터미널
+Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같은 요청 안에서 곧바로
 `Draining → Archived`까지 진행하고, 항상 `200`과 현재 Project 상태를 반환한다(`202`+비동기 progress
 아님, `request_id` 입력도 받지 않음 — 배경 drain 작업이 없어 즉시 판정 가능하기 때문). 재호출은
 안전하다(같은 게이트를 다시 평가할 뿐). 영구 삭제는 archive 보존 기간·감사 정책을 통과한 별도

@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/issues.md"
-last_verified: "2026-08-24"
+last_verified: "2026-08-27"
 last_verified_commit: "working-tree"
 owners: ["architecture", "agent-platform", "security"]
 ---
@@ -28,7 +28,7 @@ owners: ["architecture", "agent-platform", "security"]
 
 | 범위 | 로드맵 | 왜 아직인가 |
 |---|---|---|
-| Agent가 여는 Issue (dedup key, `occurrence_count`, `origin_attempt_id`, `author_kind`) | `#89` | Worker control stream 보고 경로와 Attempt 행이 필요하다(`#67` 선행). 지금 컬럼만 만들면 항상 `NULL`인 죽은 컬럼이 된다 |
+| Agent가 여는 Issue (dedup key, `occurrence_count`, `origin_task_id`, `author_kind`) | `#89` | Worker control stream 보고 경로가 필요하다(`#67` 선행). 지금 컬럼만 만들면 그것을 채우는 보고자가 없어 항상 `NULL`인 죽은 컬럼이 된다 |
 | Agent backlog claim (claim lease, Project 예산, 계보 깊이 상한) | `#93` | Agent 자체가 없다 |
 | ~~Issue의 MCP 표면~~ | `#92` | **완료 (2026-08-24)** — `fleet_list_issues`/`fleet_create_issue`/`fleet_transition_issue`/`fleet_comment_issue`. 전이별 요구 capability는 Dashboard와 같은 `fleet_core::required_capability_for_transition`을 쓴다 |
 | AgentTemplate 표면 | `#86`, `#92` | AgentTemplate 엔티티 자체가 없다 |
@@ -117,9 +117,9 @@ stateDiagram-v2
 
 ## 교착 없음 불변식
 
-Task/Attempt 상태 머신은 **한 글자도 바뀌지 않는다.** 다음 두 불변식이 이를 강제한다.
+Task 상태 머신은 **한 글자도 바뀌지 않는다.** 다음 두 불변식이 이를 강제한다.
 
-- **I1**: 어떤 Task/Attempt 전이 조건도 `issue.status`를 읽지 않는다.
+- **I1**: 어떤 Task 전이 조건도 `issue.status`를 읽지 않는다.
 - **I2**: Issue의 close에는 Task 상태에 대한 선행 조건이 없다.
 
 두 방향의 간선 집합이 모두 비어 있으므로 순환이 없다. "P0 Issue가 열려 있으면 dispatch를 막는다"
@@ -189,14 +189,14 @@ sequenceDiagram
     participant CP as Control plane
     participant DB as Store
 
-    A->>W: 발견한 일감 보고 (attempt 결과 채널)
-    W->>CP: report_issue (worker operational identity + attempt_id + fencing token)
-    Note over CP: project_id를 저장된 Attempt 행에서 유도<br/>요청 본문의 project_id는 신뢰하지 않는다
+    A->>W: 발견한 일감 보고 (실행 결과 채널)
+    W->>CP: report_issue (worker operational identity + task_id + fencing token)
+    Note over CP: project_id를 저장된 Task 행에서 유도<br/>요청 본문의 project_id는 신뢰하지 않는다
     CP->>DB: dedup key 조회
     alt 동일 dedup key의 열린 Issue 존재
         DB-->>CP: occurrence_count 증가
     else 신규
-        CP->>DB: Issue 생성 (status=Open, author_kind=agent, origin_attempt_id)
+        CP->>DB: Issue 생성 (status=Open, author_kind=agent, origin_task_id)
     end
     CP-->>W: 접수 결과
 ```
@@ -208,7 +208,7 @@ Issue를 닫거나 `ReadyForAgent`로 올릴 수 있는 Agent는 자기 일을 �
 
 1. **부분 유니크 인덱스** `(project_id, dedup_key) WHERE status NOT IN ('closed')` — 같은 발견을
    N회 보고해도 Issue 1건 + `occurrence_count`가 된다. 주 방어선이다.
-2. Attempt당 신규 Issue 상한. 초과는 Attempt를 실패시키지 않고 refusal을 1회만 기록한다.
+2. Task 실행당 신규 Issue 상한. 초과는 Task를 실패시키지 않고 refusal을 1회만 기록한다.
 3. Project당 토큰 버킷. 소진 시 alert. **dedup 적중은 토큰을 소모하지 않는다.**
 4. `origin_issue_id` 계보 깊이 상한.
 5. 감사 기록에 실패하면 Issue 생성을 거절한다(`#66`의 export fail-closed 패턴).
@@ -255,9 +255,9 @@ Agent와 Worker에게는 위 어느 것도 부여하지 않는다.
 
 1. 전이 권한 강제 — agent principal은 `[*] → Open`과 append만
 2. 교착 없음 3종: 열린 Issue가 있어도 Task가 터미널까지 도달, 비터미널 Task가 있어도 Issue close
-   성공, Attempt 전이 코드 경로가 issue 테이블을 참조하지 않음을 강제하는 구조 시험
+   성공, Task 전이 코드 경로가 issue 테이블을 참조하지 않음을 강제하는 구조 시험
 3. `InProgress` 상태 부재
-4. `project_id`를 요청 본문이 아니라 저장된 Attempt 행에서 유도(본문 위조가 무시되는 시험)
+4. `project_id`를 요청 본문이 아니라 저장된 Task 행에서 유도(본문 위조가 무시되는 시험)
 5. 동일 dedup key N회 보고가 Issue 1건 + `occurrence_count=N`
 6. **`ReadyForAgent`가 아닌 Issue는 claim되지 않음**, 사람의 승인 전이 없이 Agent가 자기 Issue를
    착수할 수 없음
@@ -277,6 +277,6 @@ Agent와 Worker에게는 위 어느 것도 부여하지 않는다.
 ## 관련 문서
 
 - [Lifecycle](project-task-agent-lifecycle.md) — Project/Task/Agent 터미널 규칙과 archive hold
-- [실행 일관성](tasks/execution-consistency.md) — Attempt 상태와 lease 관례
+- [실행 일관성](tasks/execution-consistency.md) — Task 실행 상태와 lease 관례
 - [Project 기능 설계](project-feature-design.md) — 정책 revision과 자동화 차단 조건
 - [Authorization·Project Scope·감사](../security/authorization-and-audit.md) — principal과 capability

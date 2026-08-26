@@ -4,7 +4,8 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/security/control-plane-security-model.md"
-last_verified: "2026-08-23"
+last_verified: "2026-08-27"
+last_verified_commit: "working-tree"
 owners: ["security"]
 ---
 
@@ -65,11 +66,11 @@ credential로 재사용하지 않는다.
 Agent의 실행 격리는 인증·권한 정책의 일부다. 신뢰된 단일 프로젝트만 `host_trusted`를
 쓸 수 있고, 다중 프로젝트 또는 신뢰되지 않은 외부 입력은 `container_required`다.
 권한 있는 caller라도 더 약한 격리를 요청하거나 Worker가 임의로 downgrade할 수 없다.
-격리 결정, 정책 version, runtime/image digest 및 terminal attach grant는 attempt 감사
+격리 결정, 정책 version, runtime/image digest 및 terminal attach grant는 Task 감사
 레코드에 남긴다. 상세는 [Agent 실행 격리](../architecture/agents/execution-isolation.md)를 따른다.
 
 Fleet privileged operation은 Agent의 일반 sudo 권한이 아니다. root-owned helper가 typed tool,
-Project scope, Attempt fencing token, expiry를 다시 검증하고 effect ledger·감사를 남길 때만 수행한다.
+Project scope, Task fencing token, expiry를 다시 검증하고 effect ledger·감사를 남길 때만 수행한다.
 
 ## Bootstrap token
 
@@ -88,13 +89,13 @@ project scope 주입, 등록되지 않은 tool의 fail-closed)은
 ## 시크릿 전달
 
 Fleet 내부의 **Security Manager**가 credential 사용의 단일 authority다. Orchestrator는 Project,
-Agent, TaskAttempt 정책을 Security Manager에 전달할 뿐 원문을 읽거나 export하지 않는다. 초기
+Agent, Task 정책을 Security Manager에 전달할 뿐 원문을 읽거나 export하지 않는다. 초기
 encrypted backend는 Postgres일 수 있지만, 저장 backend는 Security Manager의 구현 세부사항이며
 향후 KMS/HSM 또는 외부 secret backend로 교체 가능해야 한다.
 
 ```mermaid
 flowchart LR
-    Policy["Project · Agent · Attempt policy"] --> SM["Fleet Security Manager\nauthorize · decrypt · audit"]
+    Policy["Project · Agent · Task policy"] --> SM["Fleet Security Manager\nauthorize · decrypt · audit"]
     SM --> Metadata["Metadata DB\nscope · revision · status"]
     SM --> Cipher["Encrypted secret backend\nciphertext only"]
     SM --> Grant["one-time delivery grant"]
@@ -103,13 +104,16 @@ flowchart LR
 ```
 
 - credential 원문은 Git, context, prompt, API/MCP 응답, 감사 로그에 저장·반환하지 않는다.
-- Security Manager는 `credential_id`, revision, Project scope, Agent/Tool grant, Attempt·Worker
+- Security Manager는 `credential_id`, revision, Project scope, Agent/Tool grant, Task·Worker
   binding을 모두 확인한 뒤에만 one-time·짧은 TTL delivery grant를 발급한다.
-- Worker는 원문 대신 `attempt_id`와 grant만 제출한다. 전달은 `tmpfs` read-only mount 또는 제한된
+- **grant는 Task 행의 수명이 아니라 dispatch부터 terminal까지의 실행 구간에 묶인다.** `Pending`
+  Task에는 발급하지 않고, terminal 전이 시 회수한다. Task 행은 terminal 뒤에도 archive 보존
+  기간까지 남으므로, 행 수명에 묶으면 credential 유효 구간이 실행 구간보다 넓어진다.
+- Worker는 원문 대신 `task_id`와 grant만 제출한다. 전달은 `tmpfs` read-only mount 또는 제한된
   file descriptor를 기본으로 하고, 환경변수·URL query·CLI 인자는 금지한다.
-- revoke는 새 grant를 즉시 막고 WarmIdle을 즉시 종료한다. Running Attempt는 credential 위험도에
+- revoke는 새 grant를 즉시 막고 WarmIdle을 즉시 종료한다. 실행 중인 Task는 credential 위험도에
   따라 grace 종료 또는 즉시 중단하며 결과를 `Revoked` 사유와 함께 감사한다.
-- rotation은 새 revision 생성 → Project grant 전환 → 새 Attempt 적용 → grace 종료 → 이전 revision
+- rotation은 새 revision 생성 → Project grant 전환 → 새 Task 적용 → grace 종료 → 이전 revision
   폐기 순서다. 외부 backend의 version 불일치·접근 거부는 fail-closed `Unavailable` 상태다.
 - 원문 export는 일반 API가 아니다. 별도 break-glass capability, 재인증, 만료, 이중 감사가 있는
   운영 절차로만 허용한다.
