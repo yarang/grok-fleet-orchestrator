@@ -1922,3 +1922,17 @@ Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실�
   순서가 뒤집힌다. `Running X` 다음에 오는 첫 `test result`가 X의 것이라는 보장이 없다 — 짝이
   보장되는 앵커는 결과와 같은 stdout에 실리는 `running N tests` 줄이다. 소요 시간을 증거로 쓸
   때는 이 앵커로 잡아야 한다.
+- **두 겹 방어가 실은 도달 불가능이었다.** 위에서 "대응은 build 단계와 panic 두 겹"이라고 적었는데,
+  `spawn_server()`의 체크 순서를 확인하니 `let _ = database_url()?;`가 1행이고 panic하는
+  `canonicalize()`가 19행이었다. `DATABASE_URL` 없이 돌리면 `?`가 먼저 `None`을 반환하므로 panic은
+  **죽은 코드**가 된다. 실측으로 확정했다 — `target/debug/fleet`을 치우고 `env -u DATABASE_URL cargo
+  test -p fleet-mcp --test cross_client`를 돌리면 여전히 `14 passed ... finished in 0.01s`다.
+  **방어를 몇 겹 쌓았는지가 아니라 그 앞에 조기 반환이 있는지가 도달 가능성을 정한다.**
+
+  코드가 아니라 게이트를 고쳤다. 조기 반환 자체는 옳다 — DB 없는 환경에서 통합 테스트를 건너뛰는
+  것은 이 저장소의 규약이고, 순서를 뒤집으면 DB를 안 붙인 사람에게 바이너리 부재로 panic한다.
+  결함은 `agent.md` §3.2 bullet 2가 DB 게이트를 "SQL 쿼리가 수정되었거나 DB 트레이트가 변경되었을
+  경우"로 **조건부**로 적어 둔 쪽에 있었다. 이 파일 1474행이 바로 그 조건 때문에 4건을 놓쳤다고
+  이미 기록해 뒀는데, 정작 그 조건문은 그대로 남아 있었다. 무조건으로 바꾸고, §4.3의 (3) 사례에
+  panic이 `database_url()?` 뒤에 있다는 사실을 덧붙였다. CI는 모든 잡에 postgres 서비스를 붙여
+  조건 없이 돌리므로 이 변경은 게이트를 CI 쪽으로 맞추는 것이지 범위를 넓히는 것이 아니다.
