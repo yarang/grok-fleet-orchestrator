@@ -60,6 +60,17 @@ jobs:
       - name: cargo clippy (acp+mtls)
         run: cargo clippy --workspace --features "acp mtls" --all-targets -- -D warnings
 
+      - name: cargo build -p fleet-cli (fresh `fleet` binary for fleet-mcp subprocess tests)
+        # fleet-mcp의 cross_client 테스트는 `target/debug/fleet`를 subprocess로 띄운다.
+        # 이 경로는 Cargo 의존성 그래프에 잡히지 않는 런타임 전용 참조이고,
+        # fleet-cli에는 통합 테스트가 없어서 `cargo test --workspace`는 `src/main.rs`를
+        # test 타깃으로만 컴파일한다 — 즉 **이 바이너리를 만들지 않는다**(2026-08-26
+        # 로컬 실측). 그래서 두 가지가 동시에 일어났다: 캐시가 복원된 잡은 stale한
+        # 바이너리로 테스트가 실패했고, 캐시가 없던 잡은 바이너리 부재로 이 파일의
+        # 테스트를 한 건도 실행하지 않은 채 초록을 보고했다. 잡마다 자기 피처로
+        # 먼저 빌드해 두 경우를 모두 없앤다.
+        run: cargo build -p fleet-cli --features "acp mtls"
+
       - name: cargo test (acp+mtls)
         # --test-threads=1 필수: fleet-store integration test 가 TRUNCATE ... CASCADE 로
         # 매 테스트마다 테이블을 비우므로 병렬 실행하면 race condition 발생.
@@ -100,6 +111,17 @@ jobs:
           key: ${{ runner.os }}-cargo-nodefault-${{ hashFiles('**/Cargo.lock') }}
       - name: cargo clippy (no-default-features)
         run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
+      - name: cargo build -p fleet-cli (fresh `fleet` binary for fleet-mcp subprocess tests)
+        # fleet-mcp의 cross_client 테스트는 `target/debug/fleet`를 subprocess로 띄운다.
+        # 이 경로는 Cargo 의존성 그래프에 잡히지 않는 런타임 전용 참조이고,
+        # fleet-cli에는 통합 테스트가 없어서 `cargo test --workspace`는 `src/main.rs`를
+        # test 타깃으로만 컴파일한다 — 즉 **이 바이너리를 만들지 않는다**(2026-08-26
+        # 로컬 실측). 그래서 두 가지가 동시에 일어났다: 캐시가 복원된 잡은 stale한
+        # 바이너리로 테스트가 실패했고, 캐시가 없던 잡은 바이너리 부재로 이 파일의
+        # 테스트를 한 건도 실행하지 않은 채 초록을 보고했다. 잡마다 자기 피처로
+        # 먼저 빌드해 두 경우를 모두 없앤다.
+        run: cargo build -p fleet-cli --no-default-features
+
       - name: cargo test (no-default-features)
         # 위 test job 과 동일한 이유로 직렬 실행.
         run: cargo test --workspace --no-default-features -- --test-threads=1

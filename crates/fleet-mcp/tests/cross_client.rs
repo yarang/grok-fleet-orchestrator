@@ -38,17 +38,26 @@ async fn spawn_server() -> Option<tokio::process::Child> {
 
     // workspace root를 추정 — CARGO_MANIFEST_DIR/fleet-mcp/../../target/debug/fleet
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let fleet_bin = std::path::Path::new(manifest_dir)
-        .join("../../target/debug/fleet")
-        .canonicalize()
-        .ok()?;
+    let fleet_bin = std::path::Path::new(manifest_dir).join("../../target/debug/fleet");
 
-    if !fleet_bin.exists() {
-        eprintln!(
-            "cross_client test: {fleet_bin:?} not found — run `cargo build -p fleet-cli` first"
-        );
-        return None;
-    }
+    // 바이너리 부재는 skip 사유가 아니라 **환경 결함**이므로 시끄럽게 실패한다.
+    // DATABASE_URL이 주어졌다는 것은 이 환경에서 통합 테스트를 돌리겠다는
+    // 뜻인데, 그 상태에서 바이너리가 없다는 건 검증이 통째로 빠졌다는 뜻이다.
+    //
+    // 예전에는 여기서 조용히 `None`을 돌려줬고, 그 결과 CI의
+    // no-default-features 잡은 이 파일의 테스트를 한 건도 실행하지 않은 채
+    // 초록을 보고했다(2026-08-26 확인). `cargo test`는 이 바이너리를 만들지
+    // 않는다 — 아래 경로는 Cargo 의존성 그래프에 잡히지 않는 런타임 전용
+    // 참조라서, fleet-cli에 통합 테스트가 없는 한 `src/main.rs`는 test
+    // 타깃으로만 컴파일된다. 그래서 CI는 잡마다 `cargo build -p fleet-cli`를
+    // 따로 돌린다.
+    let fleet_bin = fleet_bin.canonicalize().unwrap_or_else(|e| {
+        panic!(
+            "cross_client test: {} not found ({e}) — run `cargo build -p fleet-cli` first; \
+             DATABASE_URL is set, so skipping these tests would hide the verification gap",
+            fleet_bin.display()
+        )
+    });
 
     let child = Command::new(&fleet_bin)
         .arg("serve")
