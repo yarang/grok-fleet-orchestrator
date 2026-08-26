@@ -103,6 +103,15 @@ epoch는 그렇지 않다. [`021_control_plane_lease.sql`](../../crates/fleet-st
   (`#48`·`#62` 계열 선행)"로 적는다. 4단계가 "생산자 없음"으로 닫히면 그 선행 조건은 `#62`로는
   **영원히 충족되지 않는다.** `#95`의 대기 사유를 다시 적어야 하며, 그 재작성은 security 도메인
   정본의 몫이라 이 결정에 포함하지 않았다.
+- **`TaskAttempt`의 문서 발자국은 tasks 도메인보다 훨씬 넓다 — 처음엔 그 크기를 잘못 적었다.**
+  최초 작성 시 정본의 드리프트 표는 security 문서 2개만 열거했다. 이후 전수 측정(`grep -rn
+  --include='*.md' 'TaskAttempt\|attempt_id\|RetryWaiting\|AttemptId\|Attempt' docs`)에서
+  **30개 파일 161행**이 나왔고(원장인 `docs/roadmap/roadmap.md`는 사유를 적어 제외 — 포함하면
+  `#97` 행을 추가하는 이번 수정 자체가 숫자를 늘려 곧바로 썩는다), architecture 도메인만 20개
+  파일 120행이었다. 2개짜리 표는 없는 것보다 나빴다 — **전수 목록처럼 읽히면서 28개를 감췄다.**
+  표를 도메인별 실측 집계로 교체하고,
+  교차 도메인 판정이 필요한 부분을 [`#97`](../roadmap/roadmap.md)로 분리했다. 이 결정 자체는
+  바뀌지 않는다(코드의 1:0..1은 그대로 성립한다). 바뀐 것은 **그 결정이 문서에 남긴 빚의 크기**다.
 
 ## 정본 반영
 
@@ -110,5 +119,7 @@ epoch는 그렇지 않다. [`021_control_plane_lease.sql`](../../crates/fleet-st
   제거, 재시도 계약을 실패 처리 계약으로 교체, CAS 술어 목록 정정, 유예 표의 control epoch 및
   `CancelUnconfirmed` 행 갱신, 멱등성 키 파생 문단에 redrive 미해결 명시, 다른 도메인에 남은
   `Attempt` 표현의 위치와 미수정 사유 표
+- [로드맵 `#97`](../roadmap/roadmap.md) — `TaskAttempt` 목표 엔티티의 존치 여부 재판정을
+  교차 도메인 항목으로 신설(개명이 아니라 판정 작업임을 명시, reviews는 범위 제외)
 - [로드맵 `#62`](../roadmap/roadmap.md) — 4단계를 "`TaskAttempt` 구현"이 아니라 "정책상 생산자
   부재 확정 + epoch 기록"으로 재범위화

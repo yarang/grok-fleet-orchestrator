@@ -17,7 +17,7 @@ Task 도메인의 내부 설계 정본 진입점이다. 외부 HTTP·MCP 호출 
 | 읽는 순서 | 정본 | 답하는 질문 |
 |---:|---|---|
 | 1 | [Task 관리](management.md) | 작업을 제출·의존성·취소·삭제·결과·감사까지 어떻게 관리하는가? |
-| 2 | [실행 일관성](execution-consistency.md) | Attempt, 재시도, 멱등성, 부작용을 어떻게 안전하게 처리하는가? |
+| 2 | [실행 일관성](execution-consistency.md) | 상태 전이 CAS, 실패 처리, 멱등성, 부작용을 어떻게 안전하게 처리하는가? |
 | 3 | [Routing 정책](routing-policy.md) | 논리 profile을 어떤 Worker 선택 규칙으로 해석하는가? |
 | 4 | [예산 제어](budget-control.md) | usage budget과 routing telemetry 제한을 어떻게 적용하는가? |
 

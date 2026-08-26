@@ -264,19 +264,37 @@ WHERE cluster_id = $4 AND epoch = $5)` 술어를 **같은 문장 안에** 실어
 
 ### 다른 문서에 남은 `Attempt` 표현
 
-무재시도 정책은 이 문서(tasks 도메인)의 정본이며, 아래 위치는 아직 `Attempt`를 별도 엔티티로
-전제한 표현을 갖고 있다. **단순 개명이 아니어서 이 커밋에서 고치지 않았다** — 각각 다른 도메인의
-정본이고, 고치면 그 도메인의 계약을 주장하게 된다.
+무재시도 정책은 이 문서(tasks 도메인)의 정본이지만, `TaskAttempt`는 이 문서만의 개념이 아니었다.
+2026-08-26 실측(`grep -rn --include='*.md' 'TaskAttempt\|attempt_id\|RetryWaiting\|AttemptId\|Attempt' docs`,
+이 파일·`docs/log.md`·[결정 기록](../../reviews/task-retry-policy-decision-2026-08-26.md) 제외)으로
+**30개 파일 161행**이 남아 있다. 아래는 전수 집계이며, 대표 파일만 예시로 든다.
 
-| 위치 | 표현 | 왜 여기서 안 고쳤나 |
-| --- | --- | --- |
-| [`docs/security/authorization-and-audit.md`](../../security/authorization-and-audit.md) 37·42·111·202-204 | `AuditEvent`의 `attempt_id` 상관 필드와 그 부재 사유 | 202-204는 `#95`가 **무엇에 막혀 있는지**를 말한다. 고치면 로드맵 상태를 주장하는 것이다 |
-| [`docs/security/control-plane-security-model.md`](../../security/control-plane-security-model.md) 72·91·97·106-112 | Attempt 단위 credential grant 수명 | grant 수명 의미론을 확인하지 않은 채 개명하면 보안 정본에 검증하지 않은 주장을 넣게 된다 |
+`docs/roadmap/roadmap.md`도 집계에서 뺀다. 그 파일의 `Attempt` 언급은 남아 있는 드리프트가 아니라
+**이 결정과 후속 항목을 서술하는 원장**이며, 세지 않아야 `#97` 같은 행을 추가할 때마다 이 숫자가
+저절로 늘어나 썩는 일이 없다 — 처음 이 표를 2개라고 적었던 것과 같은 종류의 결함을 피하려는 것이다.
 
-1:0..1이므로 두 곳 모두 실체는 Task이지만, **그 등가성을 각 도메인에서 확인한 뒤** 고친다.
-특히 `#95`는 "Project/Attempt 엔티티가 아직 없어(`#48`·`#62` 계열 선행)"를 근거로 대기 중인데,
-`#62` 4단계가 "정책상 생산자 없음"으로 닫히면 그 선행 조건은 `#62`로는 **영원히 충족되지 않는다.**
-`#95`의 대기 사유를 다시 적어야 한다.
+| 도메인 | 파일 | 행 | 대표 위치 | 성격 |
+| --- | ---: | ---: | --- | --- |
+| architecture | 20 | 120 | [`project-task-agent-lifecycle.md`](../project-task-agent-lifecycle.md)(23), [`entity-placement-and-context.md`](../entity-placement-and-context.md)(16), [`tasks/management.md`](management.md)(14), [`observability-and-reconciliation.md`](../observability-and-reconciliation.md)(12) | `TaskAttempt`를 **목표 엔티티**로 전제한 계약·ER·상태표 |
+| security | 2 | 13 | [`authorization-and-audit.md`](../../security/authorization-and-audit.md), [`control-plane-security-model.md`](../../security/control-plane-security-model.md) | `attempt_id` 상관 필드, Attempt 단위 credential grant 수명 |
+| reviews | 5 | 22 | [`entity-lifecycle-consistency-review.md`](../../reviews/entity-lifecycle-consistency-review.md), [`ui-management-and-issue-spec-2026-08-22.md`](../../reviews/ui-management-and-issue-spec-2026-08-22.md) | 결정 당시의 근거 기록 |
+| 기타 | 3 | 6 | [`contracts/project-management.md`](../../contracts/project-management.md), [`credentials/README.md`](../../credentials/README.md), [`deployment/operations.md`](../../deployment/operations.md) | 산문 참조 |
+
+**이 커밋에서 하나도 고치지 않았고, 그것은 의도다.** 이유는 세 가지다.
+
+1. **이 결정의 사정 범위 밖이다.** `#62` 4단계가 확인한 것은 "**현재 코드에서** Task와 시도가
+   1:0..1"이다. 위 문서들의 `TaskAttempt`는 [`tasks/management.md`](management.md)가 "설계만 존재"로
+   표시한 **목표 엔티티**이며, Project·Agent lifecycle과 함께 `#48` 계열이 소유한다. 재시도가
+   사라져 그 주된 존재 이유가 없어진 것은 맞지만, "그러므로 목표 설계에서도 삭제한다"는 판단은
+   tasks 도메인 혼자 내릴 수 없다.
+2. **개명이 아니라 계약 변경이다.** 예컨대 `control-plane-security-model.md`의 "Attempt 단위 grant
+   수명"을 Task 단위로 바꾸면 credential이 살아 있는 시간 구간이 달라진다 — 확인 없이 개명하면
+   보안 정본에 검증하지 않은 주장을 넣는 것이다.
+3. **reviews는 원칙적으로 고치지 않는다.** 결정 당시의 근거 기록이므로 나중 결정으로 소급해
+   덮어쓰면 근거로서의 가치를 잃는다.
+
+교차 도메인 판단이 필요하므로 [`#97`](../../roadmap/roadmap.md)로 분리했다. 그때까지 이 표가
+드리프트의 **크기와 위치**를 증언한다 — 2개 파일이 아니라 30개다.
 
 ### 남은 창 두 가지
 
