@@ -2479,3 +2479,45 @@ exit=0, clippy `--features "acp mtls"` exit=0, clippy `--no-default-features` ex
 것이었고 결정 2·3(확인 시점, 메타데이터 제외)은 그 승인을 구체화하며 내가 쓴 것이다 — 의도와 다르면
 이 절과 로드맵 행을 함께 고쳐야 한다. 위 게이트는 이 커밋이 무엇을 깨뜨렸는지가 아니라 트리의 현재
 상태를 말한다(코드 변경이 주석 2건뿐이므로 특히 그렇다).
+
+## 2026-08-27 — ci — `main`의 빨간 X가 코드 실패가 아니었다: 판정처럼 보이는 값의 세 번째 얼굴
+
+`#48` 4단계(`3767283`)를 푸시하며 CI를 확인하던 중, 바로 앞 커밋 `ddd2b85`(`#97`)의 run
+`32984609335`이 `conclusion: failure`로 닫혀 있는 것을 발견했다. **코드 실패가 아니다.**
+
+```
+{"conclusion":"failure","status":"completed","jobs":[
+  {"name":"Coverage report","status":"queued","completedAt":"0001-01-01T00:00:00Z","conclusion":""},
+  {"name":"Test + Clippy (no features)","status":"queued","completedAt":"0001-01-01T00:00:00Z","conclusion":""},
+  {"name":"Test + Clippy (acp+mtls)","status":"queued","completedAt":"0001-01-01T00:00:00Z","conclusion":""},
+  {"name":"Shellcheck install/uninstall","status":"queued","completedAt":"0001-01-01T00:00:00Z","conclusion":""}]}
+```
+
+네 잡 모두 `queued`에서 벗어나지 못했고 `completedAt`이 제로 타임이다. GitHub Actions
+`major_outage` 중 러너가 배정되지 않은 채 run만 종료됐다. `gh run rerun`은 "This workflow run
+cannot be retried"로 거부했고 `ci.yml`에는 `workflow_dispatch`가 없어, 다음 푸시가 유일한 통로였다.
+
+**왜 기록하는가.** run의 `conclusion`은 잡 결과의 집계가 아니라 run 자체의 종료 상태다. 한 줄도
+실행되지 않아도 `failure`가 될 수 있고, 그 X는 `main`에 영구히 남는다. `conclusion`만 읽으면 없는
+버그를 쫓게 되고, 반대로 "저건 장애였다"고 넘기는 습관이 들면 진짜 실패도 같은 취급을 받는다.
+구분은 `conclusion`이 아니라 잡의 `status`/`completedAt`에 있다.
+
+이것은 오늘 세 번째로 같은 형태다.
+
+| 판정처럼 보이는 값 | 그것을 무효화하는 옆의 값 |
+|---|---|
+| `cargo test ... \| tail -60` 뒤의 `$?` = 0 | 그 0은 `tail`의 것이다 (zsh `PIPESTATUS`는 1-기반이라 `${PIPESTATUS[0]}`도 빈 문자열) |
+| `cross_client`의 `14 passed` | `finished in 0.00s` — 바이너리 부재로 전부 조용히 skip (§4.3의 (3)) |
+| run의 `conclusion: failure` | 잡의 `status: queued`, `completedAt: 0001-01-01` — 실행 자체가 없었다 |
+
+`agent.md` §4.3의 "판정을 파이프 뒤에서 읽지 않습니다" bullet에 두 항목을 붙였다. 하나는 CI
+`conclusion` 사례이고, 다른 하나는 **그 규칙이 이미 있었는데도 오늘 재발한 이유**다 — 예시가
+clippy로만 적혀 있어서 `cargo test`로 명령이 바뀌자 적용 대상으로 읽히지 않았다. 규칙의 사거리를
+예시가 좁힌 것으로, 게이트 목록이 CI보다 약하면 드리프트가 재발한다는 §4.3의 법칙과 같은 결이다.
+
+**이번 푸시의 CI 결과.** run `33019959927`(`3767283`) — 네 잡 전부 `success`, run `conclusion:
+success`. 이번에는 잡 상태까지 확인했다. 장애 이후 처음으로 `main`이 실제 CI 신호를 받았다.
+
+**검증 한계.** 장애 자체는 GitHub 측 상태 페이지가 아니라 관측된 증상(전 잡 `queued` 정체,
+`rerun` 거부)으로 판단했다. `ddd2b85`의 내용이 CI를 통과했을 것이라는 직접 증거는 없고, 다만
+그 트리를 포함한 `3767283`이 통과했으므로 회귀가 남아 있지 않다는 것은 확인됐다.
