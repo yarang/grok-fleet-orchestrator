@@ -53,6 +53,45 @@ macro_rules! require_db {
     };
 }
 
+/// 노드의 인메모리 브레이커가 `expected`에 도달할 때까지 데드라인까지 폴링한다.
+///
+/// 고정 `sleep`을 쓰지 않는 이유: 노드 B의 동기화는 도달 경로가 둘이고 지연이
+/// 크게 다르다. (1) Postgres LISTEN/NOTIFY — 즉시. (2) NOTIFY를 놓쳤을 때의
+/// 폴백 폴링 — `fleet-store`의 `FALLBACK_POLL_INTERVAL`, 현재 5초.
+///
+/// 이 테스트는 `tokio::spawn(sync_b.run())` 직후 곧바로 이벤트를 발행하는데,
+/// `tokio::spawn`은 태스크를 큐에 넣을 뿐 실행을 보장하지 않는다. spawn된
+/// 쪽이 `LISTEN`을 걸기 전에 NOTIFY가 나가면 그 알림은 유실되고(Postgres는
+/// 구독 이전에 발행된 알림을 전달하지 않는다) 수렴은 (2)의 주기까지 늦춰진다.
+/// 고정 200ms 예산은 그 경로에서 반드시 깨지며, 실제로 CI에서 간헐적으로
+/// 깨졌다. 제품은 (2)를 갖고 있어 어느 쪽으로든 수렴하므로 이건 제품 결함이
+/// 아니라 테스트의 대기 방식 문제다 — 두 경로 중 어느 쪽으로 도달하든
+/// 통과하도록 조건 폴링으로 기다린다.
+async fn await_breaker_state(
+    state: &FleetState,
+    worker_id: WorkerId,
+    expected: BreakerState,
+    what: &str,
+) {
+    // 폴백 폴링 주기(5초)보다 넉넉해야 두 경로를 모두 덮는다.
+    const DEADLINE: Duration = Duration::from_secs(15);
+    const POLL: Duration = Duration::from_millis(20);
+
+    let start = std::time::Instant::now();
+    loop {
+        let actual = state.breakers.state_of(worker_id);
+        if actual == expected {
+            return;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "{what}: breaker did not reach {expected:?} within {DEADLINE:?} \
+             (last seen {actual:?})"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 #[tokio::test]
 async fn test_circuit_breaker_sync_between_scaleout_nodes() {
     require_db!(store_a, pool_a);
@@ -136,11 +175,15 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
         .await
         .unwrap();
 
-    // 3. LISTEN/NOTIFY 및 동기화 루프가 노드 B에 전파되도록 대기
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // 노드 B의 인메모리 브레이커가 자동으로 Open으로 싱크되었는지 확인
-    assert_eq!(state_b.breakers.state_of(worker_id), BreakerState::Open);
+    // 3. LISTEN/NOTIFY 또는 폴백 폴링으로 노드 B의 인메모리 브레이커가
+    //    Open으로 싱크될 때까지 대기
+    await_breaker_state(
+        &state_b,
+        worker_id,
+        BreakerState::Open,
+        "node B after node A tripped the breaker",
+    )
+    .await;
 
     // 4. 노드 A에서 서킷을 Closed로 복구(리셋) 모사
     cb_a.reset();
@@ -161,11 +204,14 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
         .await
         .unwrap();
 
-    // 복구 이벤트 동기화 대기
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // 노드 B의 인메모리 브레이커도 Closed로 원복 싱크되었는지 확인
-    assert_eq!(state_b.breakers.state_of(worker_id), BreakerState::Closed);
+    // 노드 B의 인메모리 브레이커도 Closed로 원복 싱크될 때까지 대기
+    await_breaker_state(
+        &state_b,
+        worker_id,
+        BreakerState::Closed,
+        "node B after node A reset the breaker",
+    )
+    .await;
 
     // 백그라운드 태스크 정리
     sync_handle.abort();
