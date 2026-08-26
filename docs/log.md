@@ -2270,3 +2270,43 @@ grep -rn --include='*.md' 'TaskAttempt\|attempt_id\|RetryWaiting\|AttemptId\|Att
 경로로 기존부터 있던 것, dead anchor 0). 30개 파일 각각이 **어떤 종류의** 계약을 주장하는지는
 대표 4개 파일만 실제로 읽었고 나머지는 토큰 분포로만 분류했다 — `#97`이 그것을 파일 단위로
 확인해야 한다.
+
+## 2026-08-26 — test — `cross_client` flake의 원인은 116MB 바이너리의 첫 exec 비용이었다
+
+`cargo build -p fleet-cli` 직후의 `cargo test --workspace`에서 `fleet-mcp`의 `cross_client` 14건 중
+1건이 `RESPONSE_TIMEOUT`(15초)을 넘겨 실패했다(`13 passed; 1 failed ... finished in 17.08s`). 단독
+재실행은 14건 0.66초로 통과했다.
+
+세 가설을 전부 측정했다. 콜드 DB의 26개 마이그레이션은 첫 응답 0.19초(웜 0.02초)로 **크기가 맞지
+않았다**. 커넥션 고갈도 아니었다 — 서버 20개를 동시에 띄워(잠재 200 연결, 서버측
+`max_connections=100`) 전부 ~0.10초였고, 풀이 lazy라 `pg_stat_activity` 실측 연결은 0이었다. 남은
+것은 macOS의 첫 exec 비용이며 이것만 자릿수가 맞았다: 갓 만든 116MB 디버그 바이너리의 첫 `serve`
+응답이 1.35~2.34초, 두 번째가 0.03~0.04초로 **35~78배** 차이였다.
+
+이 비용은 프로세스의 **첫 spawn 하나만** 지불한다. 14건 중 정확히 1건, 그것도 알파벳 순 첫 테스트가
+실패한 관측이 이 설명과 맞는다. 대응은 `spawn_server()`에 `std::sync::Once` 워밍업(`fleet --version`)
+을 넣어 그 비용을 타이머 **밖**에서 치르는 것이다. A/B 실측으로 효과를 확인했다 — 워밍업 없음 1.35초,
+`--version` 워밍업(1.08초) 후 0.04초.
+
+**워밍업의 위치가 안전성을 정한다.** `database_url()?`와 canonicalize panic **뒤**에 둔다. 앞에 두면
+DB 없는 실행이 이유 없이 1초를 물고, 존재를 증명하지 않은 경로를 exec해 명확한 panic 메시지가 흐린
+exec 실패로 바뀐다 — `agent.md` §4.3 (3)이 기록한 "방어의 강도가 아니라 순서가 도달 가능성을 정한다"와
+같은 함정이다. `--version`은 DB에 접속하지 않으므로(웜 0.015초) 이 워밍업은 Postgres 상태에
+의존하지 않는다.
+
+CI 워크플로는 바꾸지 않았다. 두 test 잡 모두 `cargo build -p fleet-cli` 직후 `cargo test`를 돌려
+**같은 노출을 갖지만**, 수정이 테스트 파일 안에 있어 양쪽에 그대로 적용된다.
+
+진단 자체는 `agent.md` §3.3에 정본으로 기록했다(규약이 요구하는 곳은 작업 로그가 아니라
+가이드라인이다).
+
+검증: `cargo build -p fleet-cli --features "acp mtls"` 후 `DATABASE_URL` 주입 `cargo test --workspace
+--features "acp mtls" -- --test-threads=1` → 69개 스위트 1053건 통과, 0 실패. `cross_client`는 14건
+6.48초로 조용한 skip이 아님을 소요 시간으로 확인했다. §4.3 게이트 4종(rustc 1.98.0, `RUSTFLAGS=-D
+warnings`, fmt, clippy 2종) 전부 통과.
+
+**검증 한계**: 유휴 시 ~1.4초가 부하에서 15초를 넘기는 **증폭 자체는 재현하지 못했다**(12개 테스트
+바이너리 동시 실행이라는 정황에서 추론). 15초 실패는 한 번 관측된 뒤 재현되지 않았다. 즉 이 수정은
+재현 후 수정이 아니라 **기전 실측으로 정당화**된다 — 둘은 같은 주장이 아니다. 또한 `--test-threads=1`
+없이 돌리면 `audit_integration` 7건이 공유 DB 격리 문제로 실패하는데, 이는 이 변경과 무관하며 CI가
+그 플래그를 쓰는 이유다(별도 항목으로 분리).

@@ -59,6 +59,36 @@ async fn spawn_server() -> Option<tokio::process::Child> {
         )
     });
 
+    // 이 프로세스에서 **처음** 바이너리를 exec하는 비용을 타이머 밖에서 치른다.
+    //
+    // 왜: 디버그 `fleet`은 116MB이고, macOS는 첫 exec에서 코드서명 검증 + 페이지
+    // 인을 수행한다. 갓 빌드된 바이너리를 처음 `serve`로 띄우면 첫 응답까지
+    // 1.35~2.34s가 걸리는 반면(2026-08-26 실측, 두 번의 시도), 워밍업 뒤에는
+    // 0.03~0.04s다 — 35~78배 차이다. 이 비용은 `cargo build -p fleet-cli` 직후의
+    // 첫 spawn **하나만** 지불하며, 이후 spawn은 페이지 캐시가 더워져 있다.
+    // `cargo test --workspace`처럼 12개 테스트 바이너리가 동시에 도는 상황에서
+    // 이 초기 비용이 증폭되어 RESPONSE_TIMEOUT(15s)을 넘긴 것이 관측된 flake의
+    // 원인으로 보인다 — 14건 중 정확히 1건만, 그것도 알파벳 순으로 첫 테스트가
+    // 실패한 것이 이 설명과 맞는다.
+    //
+    // 배제한 가설(둘 다 실측): 콜드 DB의 26개 마이그레이션은 첫 응답 0.19s로
+    // 크기가 맞지 않고(웜 0.02s), 커넥션 고갈도 아니다 — 서버 20개를 동시에
+    // 띄워도(잠재 200 연결, 서버측 max_connections=100) 전부 ~0.10s였고 풀이
+    // lazy라 실제 연결은 0이었다.
+    //
+    // `--version`은 DB에 접속하지 않으므로(웜 0.015s) 이 워밍업은 Postgres
+    // 상태에 의존하지 않는다. 순서는 의도적이다: `database_url()?`와 위의
+    // canonicalize panic **뒤에** 둔다. 앞에 두면 DB 없는 실행이 이유 없이
+    // 1초를 물고, 존재를 증명하지 않은 경로를 exec해 panic 메시지가 흐려진다.
+    static WARM_UP: std::sync::Once = std::sync::Once::new();
+    WARM_UP.call_once(|| {
+        let _ = std::process::Command::new(&fleet_bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
+
     let child = Command::new(&fleet_bin)
         .arg("serve")
         .arg("--no-health-check") // 테스트에서는 헬스체크 노이즈 방지
