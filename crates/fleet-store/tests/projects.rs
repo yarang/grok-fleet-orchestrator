@@ -60,9 +60,15 @@ fn sample_task(prompt: &str) -> Task {
 async fn create_and_get_project_roundtrip() {
     require_db!(store);
 
-    let project = Project::new("acme-web")
+    let mut project = Project::new("acme-web")
         .with_description("main web app")
         .with_created_by("alice");
+    // macOS의 `Utc::now()`는 마이크로초 해상도라 나노초 성분이 항상 0이다.
+    // 그대로 두면 아래 왕복은 Linux(나노초 해상도)에서만 절삭 경로를 지나므로,
+    // 로컬에서 초록인데 CI에서만 깨진다 — 실제로 그렇게 깨졌다. 나노초를
+    // 명시적으로 주입해 플랫폼과 무관하게 절삭을 재현한다.
+    project.created_at += Duration::nanoseconds(661);
+    project.updated_at += Duration::nanoseconds(661);
     store.create_project(&project).await.unwrap();
 
     let by_id = store
@@ -70,7 +76,25 @@ async fn create_and_get_project_roundtrip() {
         .await
         .unwrap()
         .expect("just-created project must be found by id");
-    assert_eq!(by_id, project);
+    // Postgres `timestamptz`는 마이크로초까지만 저장하므로, `Utc::now()`가
+    // 만든 나노초 성분은 왕복에서 절삭된다. 구조체 전체를 비교하면 값이
+    // 옳아도 이 절삭 때문에 항상 실패하므로, 저장소가 실제로 보장하는
+    // 정밀도로 필드별 비교한다(`auth_integration`/`issues` 왕복 테스트와
+    // 같은 방식). 절삭을 도메인 모델에서 없애지 않는 이유는 그것이
+    // 저장소의 성질이지 `Project`의 성질이 아니기 때문이다.
+    assert_eq!(by_id.id, project.id);
+    assert_eq!(by_id.name, project.name);
+    assert_eq!(by_id.description, project.description);
+    assert_eq!(by_id.created_by, project.created_by);
+    assert_eq!(by_id.status, project.status);
+    assert_eq!(
+        by_id.created_at.timestamp_micros(),
+        project.created_at.timestamp_micros()
+    );
+    assert_eq!(
+        by_id.updated_at.timestamp_micros(),
+        project.updated_at.timestamp_micros()
+    );
 
     let by_name = store
         .get_project_by_name("acme-web")
