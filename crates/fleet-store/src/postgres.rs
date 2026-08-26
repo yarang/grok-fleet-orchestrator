@@ -13,7 +13,7 @@
 //! | `circuit_state` | TEXT | `CircuitState` (snake_case) |
 //! | `payload` (events) | JSONB | `FleetEvent` (serde) |
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -36,6 +36,13 @@ use crate::error::StoreError;
 use crate::{
     AdminApiToken, ControlFence, ControlLease, Store, StoredCredential, WorkerOperationalCredential,
 };
+
+/// `migrations/` 디렉터리를 컴파일 타임에 임베드한 마이그레이터.
+///
+/// 예전에는 [`Store::migrate`] 구현이 `sqlx::migrate!()`를 그 자리에서
+/// 호출했다. [`PgStore::guard_migration_against_live_lease`]가 "이번 기동에서
+/// 적용될 버전"을 알아야 하므로, 두 곳이 같은 값을 보도록 하나로 끌어냈다.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
 ///
@@ -134,6 +141,115 @@ impl PgStore {
     /// 내부 풀 참조 (LISTEN/NOTIFY 등 저수준 접근용).
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// 릴레이션 존재 여부. `to_regclass`는 없는 이름에 대해 에러 대신 NULL을
+    /// 돌려주므로, 존재 확인에 실패 경로를 따로 다룰 필요가 없다.
+    async fn relation_exists(&self, name: &str) -> Result<bool, StoreError> {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(name)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(exists)
+    }
+
+    /// 이 바이너리가 들고 있으나 DB에는 아직 적용되지 않은 마이그레이션 버전.
+    ///
+    /// `_sqlx_migrations`가 없으면(마이그레이션을 한 번도 돌린 적 없는 DB)
+    /// `None`을 돌려준다. "전부 pending"과 "원장을 읽을 수 없음"은 다르고,
+    /// 후자에서는 `control_plane_lease` 테이블도 존재할 수 없으므로 가드가
+    /// 할 일이 없다.
+    async fn pending_migration_versions(&self) -> Result<Option<Vec<i64>>, StoreError> {
+        if !self.relation_exists("_sqlx_migrations").await? {
+            return Ok(None);
+        }
+        let applied: HashSet<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .collect();
+        let mut pending: Vec<i64> = MIGRATOR
+            .iter()
+            .filter(|m| !m.migration_type.is_down_migration())
+            .map(|m| m.version)
+            .filter(|version| !applied.contains(version))
+            .collect();
+        pending.sort_unstable();
+        Ok(Some(pending))
+    }
+
+    /// 아직 만료되지 않은 control plane lease의 (cluster_id, instance_id,
+    /// 남은 초).
+    ///
+    /// 정상 종료는 `release_control_lease`가 `expires_at = NOW()`로 만들어
+    /// 즉시 사라지게 한다 — 따라서 여기 잡히는 것은 **살아 있는** 인스턴스이거나
+    /// **크래시로 죽은 지 TTL이 지나지 않은** 인스턴스뿐이다. 시간 비교는
+    /// `acquire_control_lease`와 같은 술어(`expires_at` vs `NOW()`)를 쓴다.
+    async fn live_control_lease_holder(&self) -> Result<Option<(String, String, i64)>, StoreError> {
+        let row: Option<(String, String, i64)> = sqlx::query_as(
+            "SELECT cluster_id, \
+                    active_instance_id, \
+                    CEIL(EXTRACT(EPOCH FROM (expires_at - NOW())))::BIGINT \
+               FROM control_plane_lease \
+              WHERE expires_at > NOW() \
+              ORDER BY cluster_id \
+              LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// 살아 있는 control plane 밑에서 스키마가 갈리는 것을 막는다 (로드맵 #63,
+    /// 게이트 5의 schema 절반).
+    ///
+    /// sqlx는 **한 방향만** 막는다. DB에 적용돼 있는데 이 바이너리에는 없는
+    /// 마이그레이션은 `ignore_missing`이 기본 `false`라서
+    /// `MigrateError::VersionMissing`으로 거절된다(= DB가 바이너리보다 앞선
+    /// 경우). 그러나 바이너리에만 있는 마이그레이션은
+    /// `Migrator::run_direct`의 `None => conn.apply(...)` 가지에서 **말없이
+    /// 적용된다**. Cold Standby는 primary와 DB 하나를 공유하므로
+    /// (`docs/architecture/control-plane-authority-and-failover.md`), 더 새
+    /// 바이너리를 든 standby가 기동하는 것만으로 살아 있는 primary 밑에서
+    /// 스키마가 바뀐다. sqlx 자신의 advisory lock은 이 위험을 덮지 못한다 —
+    /// 그것은 동시 마이그레이터끼리를 직렬화할 뿐이고, 여기서 문제는 이미
+    /// 돌고 있는 옛 바이너리이지 경쟁하는 마이그레이터가 아니다.
+    ///
+    /// **적용할 것이 없으면 통과시킨다.** 같은 버전의 재기동이나 동일 버전
+    /// standby 기동은 스키마를 바꾸지 않으므로 막을 이유가 없다. 여기서
+    /// 무조건 거절하면 평범한 롤링 재기동이 통째로 막히는 운영 함정이 된다.
+    ///
+    /// **한계 — 이 검사와 실제 적용 사이는 원자적이지 않다.** 검사 직후 다른
+    /// 인스턴스가 lease를 획득하면 스키마는 여전히 바뀔 수 있다. 이 게이트는
+    /// 배포 실수(더 새 바이너리를 살아 있는 클러스터에 붙이는 것)를 막는
+    /// 것이지 분산 합의가 아니다. 원자적으로 만들려면 마이그레이션을 lease
+    /// 아래로 넣어야 하는데, `control_plane_lease` 테이블 자체를 만드는 것이
+    /// 021 마이그레이션이라 순환이 생긴다.
+    async fn guard_migration_against_live_lease(&self) -> Result<(), StoreError> {
+        let Some(pending) = self.pending_migration_versions().await? else {
+            return Ok(());
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if !self.relation_exists("control_plane_lease").await? {
+            return Ok(());
+        }
+        let Some((cluster_id, instance_id, remaining_secs)) =
+            self.live_control_lease_holder().await?
+        else {
+            return Ok(());
+        };
+        let versions: Vec<String> = pending.iter().map(|v| v.to_string()).collect();
+        let versions = versions.join(", ");
+        Err(StoreError::Migration(format!(
+            "refusing to apply migrations [{versions}] while instance '{instance_id}' holds a \
+             live control plane lease for cluster '{cluster_id}' (expires in {remaining_secs}s): \
+             this binary is newer than the database and would change the schema underneath the \
+             running instance. Stop the active instance — a graceful shutdown releases the lease \
+             immediately — or, if it crashed, wait {remaining_secs}s for the lease to expire, \
+             then retry."
+        )))
     }
 
     /// User 행을 튜플에서 구조체로 변환하는 공통 헬퍼.
@@ -921,7 +1037,8 @@ impl Store for PgStore {
     // ── Migration ──────────────────────────────────────────────────────
 
     async fn migrate(&self) -> Result<(), StoreError> {
-        sqlx::migrate!("./migrations")
+        self.guard_migration_against_live_lease().await?;
+        MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|e| StoreError::Migration(e.to_string()))?;

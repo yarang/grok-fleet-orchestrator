@@ -153,27 +153,100 @@ control_plane_lease.expires_at < NOW()`). 이 술어는 lease가 **왜** 만료�
 | --- | --- | --- |
 | 1. 동시에 둘이 lease를 획득하지 못함 | **닫힘** | `crates/fleet-scheduler/src/lease.rs`의 lease 테스트 + 2026-08-26 라이브 2-프로세스 실행(아래) |
 | 2. lease 상실 인스턴스의 신규 dispatch fail-closed | **부분** | `FleetState::lease_allows_control()`이 bool로 거절한다. 갱신 실패를 **관측한 뒤**의 제어 동작만 막으며, 관측 직전 이미 DB로 떠난 쓰기는 막지 못한다 |
-| 3. 이전 epoch completion이 최신 상태를 덮지 못함 | **미착수** | 아래 "epoch 강제" 참고. `#62` 검증 게이트 4("이전 control epoch 이벤트가 거부되는 테스트")와 같은 항목이다 |
+| 3. 이전 epoch completion이 최신 상태를 덮지 못함 | **부분** | **쓰기 절반은 닫혔다** — `PgStore::transition_task_status`가 epoch 술어를 `UPDATE`와 같은 문장에 넣는다(커밋 `516f85e`). **이벤트 절반은 열려 있다** — 아래 "epoch 강제" 참고. `#62` 검증 게이트 4("이전 control epoch 이벤트가 거부되는 테스트")와 같은 항목이다 |
 | 4. Primary 종료 뒤 수동 승격 · Worker 재연결 · pending reconciliation E2E | **미착수** | 라이브 실행은 lease 인수인계만 관찰했다. 수동 승격 절차, Worker 재연결, reconciliation은 어느 것도 실행하지 않았다 |
-| 5. schema/binary 비호환 Standby 기동 거부 | **미착수** | 기동 시 호환성 검사 자체가 없다 |
+| 5. schema/binary 비호환 Standby 기동 거부 | **부분** | **schema 절반은 닫혔다** — 아래 "기동 호환성 게이트" 참고. **binary 버전 검사는 미착수** — 버전을 DB에 쓰는 생산자가 없다 |
 | 6. partition 중 Worker self-fencing과 stale process cleanup E2E | **미착수** | Worker self-fencing 미구현 |
 | 7. 동시 slot claim · ACK 유실 · Worker reincarnation에서 Agent 중복 process 없음 | **미착수** | Agent 엔티티와 `worker_execution_lease`가 아직 없다 |
 
 ### epoch 강제(불변식 4·5)를 미룬 이유와 귀속
 
-lease 테이블에는 `epoch` 컬럼이 있고 승격마다 증가한다. 그러나 `epoch`를 **읽어서 쓰기를
-거르는 코드는 저장소에 하나도 없다** — `crates/fleet-scheduler/src/dispatcher.rs`,
-`crates/fleet-api/src/state.rs`, 이벤트 경로 어디에도 epoch 술어가 없다. 오늘 fenced
-인스턴스를 막는 것은 epoch가 아니라 `lease_allows_control()`의 bool 검사다.
+lease 테이블에는 `epoch` 컬럼이 있고 승격마다 증가한다. 그 창을 닫으려면 두 가지가 함께
+필요하다. ① Task 상태 쓰기가 epoch 술어를 포함한 compare-and-set이어야 하고, ② Worker
+이벤트가 자신이 **어느 epoch에서 dispatch됐는지**를 싣고 돌아와야 한다.
 
-그 창을 닫으려면 두 가지가 함께 필요하다. ① Task 상태 쓰기가 epoch 술어를 포함한
-compare-and-set이어야 하고, ② Worker 이벤트가 자신이 **어느 epoch에서 dispatch됐는지**를
-싣고 돌아와야 한다. ②는 dispatch 시점의 epoch를 실행 단위에 바인딩하는 것이므로
+**①은 `516f85e`(`#62` 3단계)로 닫혔다.** `PgStore::transition_task_status`는 fence가 주어지면
+`AND EXISTS (SELECT 1 FROM control_plane_lease WHERE cluster_id = $4 AND epoch = $5)`를
+`UPDATE`와 **같은 문장 안에** 넣는다. lease를 먼저 SELECT해서 분기하는 방식과의 차이가
+전부다 — 후자는 SELECT와 UPDATE 사이에 fenced되어도 이미 떠난 쓰기가 그대로 도착한다.
+(이전 판의 "epoch를 읽어서 쓰기를 거르는 코드는 저장소에 하나도 없다"는 문장과 그 근거로
+든 `crates/fleet-api/src/state.rs` 경로는 둘 다 낡았다. 후자는 존재하지 않는 파일이다.)
+
+**②는 여전히 열려 있다.** ②는 dispatch 시점의 epoch를 실행 단위에 바인딩하는 것이므로
 `worker_execution_lease`의 `fencing_token`(위 "Agent execution lease와 fencing" 절)과 같은
 구조를 요구한다. 그 엔티티는 로드맵 `#67`의 범위이고 아직 없다. 바인딩할 대상이 없는
 상태에서 epoch 술어만 먼저 넣으면 항상 참인 술어가 되어 게이트를 통과한 것처럼 보이는
 죽은 검사가 된다. 그래서 **epoch 강제 전체를 `#67`에 귀속시키고 여기서는 착수하지
 않았다.**
+
+### 기동 호환성 게이트(게이트 5)
+
+기동 시 호환성 검사는 **여러 방향**으로 나뉘고, 방향마다 상태가 다르다.
+
+| 방향 | 상태 | 강제하는 주체 |
+| --- | --- | --- |
+| DB에 적용된 마이그레이션이 바이너리에 없음 (DB가 앞섬) | **닫힘** | sqlx — `Migrator::run_direct`의 `validate_applied_migrations`가 `VersionMissing`으로 거절 |
+| 적용된 버전의 체크섬이 다름 | **닫힘** | sqlx — `VersionMismatch` |
+| 바이너리에만 있는 마이그레이션 (바이너리가 앞섬) | **닫힘** (2026-08-26) | `PgStore::guard_migration_against_live_lease` |
+| binary 버전 비호환 | **미착수** | 생산자가 없다 — 아래 |
+
+앞의 두 줄은 이 프로젝트가 `set_ignore_missing`을 호출하지 않아 sqlx 기본값
+(`ignore_missing: false`)이 그대로 걸리기 때문에 **이미 성립하고 있었다.** 이전 판의
+"기동 시 호환성 검사 자체가 없다"는 근거문은 이 절반에 대해 틀렸다. 다만 그 보장을
+확인하는 테스트가 없어서, `ignore_missing`이 언젠가 켜지면 조용히 사라질 상태였다 —
+`crates/fleet-store/tests/migration_lease_guard.rs`의
+`db_ahead_of_binary_is_refused_by_sqlx_itself`가 이제 그것을 고정한다.
+
+세 번째 줄이 실제로 뚫려 있던 곳이다. sqlx는 바이너리에만 있는 마이그레이션을
+`run_direct`의 `None => conn.apply(...)` 가지에서 **말없이 적용한다.** Cold Standby는
+Primary와 DB 하나를 공유하므로, 더 새 바이너리를 든 Standby가 기동하는 것만으로 살아
+있는 Primary 밑에서 스키마가 갈린다. sqlx 자신의 advisory lock은 이것을 덮지 못한다 —
+그것은 동시 마이그레이터끼리를 직렬화할 뿐이고, 여기서 위험한 쪽은 경쟁하는
+마이그레이터가 아니라 **이미 돌고 있는 옛 바이너리**다.
+
+**게이트의 술어와 그 이유.** `PgStore::migrate`는 적용할 마이그레이션이 있고 **동시에**
+아직 만료되지 않은 control plane lease가 있을 때만 거절한다. 두 조건을 모두 요구하는 것이
+설계의 핵심이다.
+
+- **적용할 것이 없으면 통과.** 같은 버전의 재기동과 동일 버전 Standby 기동은 스키마를
+  바꾸지 않으므로 막을 이유가 없다. 여기서 막으면 평범한 롤링 재기동이 통째로 거절되는
+  운영 함정이 된다.
+- **정상 종료한 Primary는 즉시 길을 비킨다.** `release_control_lease`가 행을 지우지 않고
+  `expires_at = NOW()`로 만들기 때문에, 계획된 업그레이드는 TTL을 기다리지 않는다. 게이트가
+  실제로 사람을 막는 창은 **크래시 뒤 최대 TTL(기본 15초)** 뿐이고, 에러 메시지가 남은 초와
+  멈춰야 할 인스턴스 이름을 함께 명시한다.
+
+**binary 버전 검사를 넣지 않은 이유.** 저장소 어디에도 바이너리 버전을 DB에 쓰는 코드가
+없고, `control_plane_lease`에 버전 컬럼도 없다. 생산자가 없는 상태에서 술어만 넣으면 항상
+참인 죽은 검사가 된다 — epoch 강제 ②를 `#67`에 귀속시킨 것과 같은 판단이다. 이 절반은
+**미착수로 남기고**, 생산자(승격 시 자신의 버전을 lease 행에 기록하는 쓰기)가 생기는
+시점에 함께 넣는다.
+
+**라이브 관측 (2026-08-26).** 임시 DB를 마지막 마이그레이션 직전까지만 올리고
+`control_plane_lease`에 `expires_at = NOW() + 120s`인 행을 넣은 뒤 실제 바이너리로 관찰했다.
+
+| 명령 | 결과 |
+| --- | --- |
+| `fleet migrate` | 거절, exit code 1, `_sqlx_migrations` 최대 버전 불변 |
+| `fleet serve` | 거절, exit code 1 — MCP 서버를 열기 **전에** 종료 |
+| lease를 `expires_at = NOW()`로 반납한 뒤 `fleet migrate` | 즉시 성공, 마지막 마이그레이션 적용 확인 |
+
+**검증 한계**(정직하게 남긴다):
+
+- **검사와 적용 사이는 원자적이지 않다.** 검사 직후 다른 인스턴스가 lease를 획득하면
+  스키마는 여전히 바뀔 수 있다. 이 게이트는 배포 실수(더 새 바이너리를 살아 있는
+  클러스터에 붙이는 것)를 막는 것이지 분산 합의가 아니다. 원자적으로 만들려면
+  마이그레이션 자체를 lease 아래로 넣어야 하는데, `control_plane_lease` 테이블을 만드는
+  것이 021 마이그레이션이라 순환이 생긴다.
+- 게이트는 `PgStore::migrate` 안에 있으므로 `fleet serve`·`fleet migrate`·`fleet users`·
+  `fleet doctor` 네 호출 지점이 **구조적으로** 모두 덮인다. 위 표는 앞의 두 경로만 실제
+  바이너리로 확인했고, 나머지 둘은 같은 함수를 호출한다는 사실로만 덮여 있다.
+- 라이브 관측은 `control_plane_lease` 행을 직접 INSERT해 "살아 있는 Primary"를 재현했다.
+  두 번째 `fleet` 프로세스를 실제로 띄워 lease를 쥐게 한 상태에서 확인하지는 않았다.
+- 이 게이트는 **Standby가 더 새 바이너리일 때**를 막는다. 운영자가 Primary를 세우지 않은
+  채 `fleet migrate`를 돌리는 경우도 같은 술어로 막히지만, Primary가 크래시해 lease가
+  이미 만료된 뒤라면 막지 못한다 — TTL 이후에는 "살아 있는 Primary"와 "죽은 Primary"를
+  DB만 보고 구분할 수 없기 때문이다(불변식 3의 한계와 같은 뿌리다).
 
 effect ledger 관련 유예(`#62` 검증 게이트 5~10)는 이 문서의 범위가 아니다 — 사유와 판단은
 [실행 일관성](tasks/execution-consistency.md)과 [로드맵](../roadmap/roadmap.md)의 `#62`
