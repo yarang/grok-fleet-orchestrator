@@ -89,6 +89,23 @@ pub struct ControlLease {
     pub last_renewed_at: DateTime<Utc>,
 }
 
+/// Task 상태 쓰기에 함께 거는 control-plane epoch 술어 (로드맵 #62 3단계).
+///
+/// [`ControlLease`]의 `epoch`는 획득마다 단조 증가한다. 그 값을 **읽어서 분기**
+/// 하는 것과 **쓰기에 술어로 거는** 것은 다르다 — 전자는 관측과 쓰기 사이에
+/// 창이 남고(관측 직후 fenced되면 그 쓰기는 그대로 DB에 도착한다), 후자는
+/// 그 창을 저장소의 한 문장 안으로 밀어 넣는다.
+///
+/// `cluster_id`까지 담는 이유: epoch는 클러스터마다 독립적으로 증가하므로
+/// 숫자만으로는 어느 lease의 epoch인지 결정되지 않는다. 하나의 DB가 여러
+/// 클러스터의 lease를 담을 수 있다는 `control_plane_lease`의 PK 설계
+/// (마이그레이션 021)를 그대로 따른다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFence {
+    pub cluster_id: String,
+    pub epoch: i64,
+}
+
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
 ///
 /// 구현체:
@@ -161,11 +178,24 @@ pub trait Store: Send + Sync {
     /// 전이가 거절된 것은 에러가 아니라 관측 결과이므로
     /// [`TransitionOutcome::Rejected`]로 돌려준다. `Err`은 작업이 아예 없거나
     /// (`StoreError::NotFound`) DB 접근 자체가 실패한 경우다.
+    ///
+    /// `fence`를 주면 위상 조건에 **control-plane epoch 술어가 AND로 더해진다**
+    /// (로드맵 #62 3단계). 그 술어가 깨져 있으면 아무것도 쓰지 않고
+    /// [`TransitionOutcome::Fenced`]를 돌려준다. `None`은 "이 호출자에게는
+    /// 걸 fence가 없다"는 뜻이며, 그 자체가 기록으로 남아야 하는 사실이다 —
+    /// 아래 구현 주석과 각 호출 지점을 참고한다.
+    ///
+    /// **fence는 `expected`를 대체하지 않는다.** 둘은 서로 다른 경합을 막는다:
+    /// `expected`는 같은 Task를 두고 경쟁하는 writer들을, `fence`는 제어권을
+    /// 잃은 인스턴스 전체를 막는다. 늦게 도착한 이벤트가 **어느 attempt의
+    /// 것인지**는 둘 다 가르지 못한다 — 그건 `attempt_id`/generation의 몫이고
+    /// 이 저장소에는 아직 없다(설계 정본의 구현 상태 표 참고).
     async fn compare_and_set_task_status(
         &self,
         id: TaskId,
         expected: &[TaskPhase],
         new: &TaskStatus,
+        fence: Option<&ControlFence>,
     ) -> Result<TransitionOutcome, StoreError>;
 
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).

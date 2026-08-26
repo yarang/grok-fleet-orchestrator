@@ -683,7 +683,10 @@ mod tests {
         let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(MockTransport::new());
         let state = Arc::new(
             FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
-                crate::lease::LeaseObserver::with_status(crate::lease::LeaseStatus::Fenced),
+                crate::lease::LeaseObserver::with_status(
+                    "test-cluster",
+                    crate::lease::LeaseStatus::Fenced,
+                ),
             ),
         );
         let dispatcher = Arc::new(Dispatcher::new(state.clone()));

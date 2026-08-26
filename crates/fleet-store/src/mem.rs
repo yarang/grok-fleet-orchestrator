@@ -37,7 +37,8 @@ use fleet_core::{
 };
 
 use crate::{
-    AdminApiToken, ControlLease, Store, StoreError, StoredCredential, WorkerOperationalCredential,
+    AdminApiToken, ControlFence, ControlLease, Store, StoreError, StoredCredential,
+    WorkerOperationalCredential,
 };
 
 /// 모든 메서드가 실제로 동작하는 인메모리 [`Store`] — 테스트 전용 단일 구현.
@@ -220,16 +221,37 @@ impl Store for MemStore {
         id: TaskId,
         expected: &[TaskPhase],
         new: &TaskStatus,
+        fence: Option<&ControlFence>,
     ) -> Result<TransitionOutcome, StoreError> {
         debug_assert!(
             !expected.is_empty(),
             "compare_and_set_task_status: expected가 비어 있으면 어떤 전이도 성립하지 않는다"
         );
 
+        // fence 검사를 tasks 락 **밖에서** 먼저 끝내고 값만 복사해 나온다.
+        // 두 락을 중첩시키지 않기 위해서다 — 이 파일의 다른 메서드가 반대
+        // 순서로 잡는 날 교착이 생기고, 그건 재현이 어려운 종류의 버그다.
+        // Postgres 쪽과 마찬가지로 fenced를 위상 검사보다 먼저 판정한다.
+        if let Some(f) = fence {
+            let held = self
+                .control_leases
+                .lock()
+                .unwrap()
+                .get(&f.cluster_id)
+                .map(|l| l.epoch);
+            if held != Some(f.epoch) {
+                return Ok(TransitionOutcome::Fenced);
+            }
+        }
+
         // Postgres 구현과 달리 검사와 쓰기가 같은 락 안에서 끝나므로,
         // `Rejected`가 보고하는 `current`는 거절 시점의 값과 정확히 일치한다.
         // 그럼에도 호출자는 이 값을 제어 흐름에 쓰지 않아야 한다 — 두 백엔드가
         // 다른 보장을 주면 MemStore에서만 통과하는 코드가 생긴다.
+        //
+        // fence 판정은 이 락 밖에서 이뤄지므로 Postgres의 단일 문장보다 창이
+        // 넓다. MemStore는 단일 프로세스 테스트용이라 그 창을 실제로 통과하는
+        // 시나리오가 없고, 좁히려면 두 락을 중첩해야 해서 대가가 더 크다.
         let mut tasks = self.tasks.lock().unwrap();
         let Some(task) = tasks.get_mut(&id) else {
             return Err(StoreError::NotFound);

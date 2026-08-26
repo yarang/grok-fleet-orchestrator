@@ -541,6 +541,20 @@ pub enum TransitionOutcome {
     Applied,
     /// 기대한 선행 상태와 달라 아무것도 쓰지 않았다.
     Rejected { current: TaskPhase },
+    /// 호출자가 건 control-plane epoch 술어가 더 이상 성립하지 않아 아무것도
+    /// 쓰지 않았다 (로드맵 #62 3단계).
+    ///
+    /// `Rejected`와 나누는 이유는 **후속 동작이 다르기** 때문이다. `Rejected`는
+    /// "다른 writer가 이 Task를 먼저 옮겼다"이므로 이 Task 하나를 포기하면
+    /// 되지만, `Fenced`는 "이 인스턴스가 더 이상 제어 기관이 아니다"이므로
+    /// 같은 이유로 **이후의 모든 쓰기도 실패한다**. 둘을 뭉개면 fenced
+    /// 인스턴스가 Task마다 정상 경합인 줄 알고 재시도를 반복하게 된다.
+    ///
+    /// 어느 epoch가 현재값인지는 담지 않는다 — 그 값을 알려면 별도 조회가
+    /// 필요하고, 읽는 순간 또 바뀔 수 있어 `Rejected { current }`와 같은
+    /// 이유로 제어 흐름의 근거가 되지 못한다. 호출자가 아는 것은 "내가 건
+    /// 술어가 깨졌다"뿐이고, 그것으로 충분하다.
+    Fenced,
 }
 
 impl TransitionOutcome {
@@ -551,6 +565,14 @@ impl TransitionOutcome {
     /// 일을 주장하게 된다.
     pub fn applied(self) -> bool {
         matches!(self, TransitionOutcome::Applied)
+    }
+
+    /// control-plane epoch 술어가 깨져 거절됐는가.
+    ///
+    /// 호출자가 "이 Task를 포기"와 "제어권을 잃었으니 루프 자체를 중단"을
+    /// 갈라야 할 때 쓴다.
+    pub fn fenced(self) -> bool {
+        matches!(self, TransitionOutcome::Fenced)
     }
 }
 

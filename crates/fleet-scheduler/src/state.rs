@@ -10,7 +10,7 @@ use crate::breaker::BreakerRegistry;
 use crate::lease::LeaseObserver;
 use crate::selector::WorkerSelector;
 use fleet_core::CircuitBreakerConfig;
-use fleet_store::Store;
+use fleet_store::{ControlFence, Store};
 use fleet_transport::WorkerTransport;
 
 /// 오케스트레이터 전역 상태. `Arc<FleetState>`로 모든 핸들러에 공유.
@@ -60,5 +60,15 @@ impl FleetState {
             Some(lease) => lease.allows_control(),
             None => true,
         }
+    }
+
+    /// Task 상태 쓰기에 함께 걸 control-plane epoch 술어 (로드맵 #62 3단계).
+    ///
+    /// `lease`가 설정되지 않은 배포는 `None`이다. `lease_allows_control`이
+    /// 같은 경우에 `true`를 돌려주는 것과 짝을 이룬다 — HA lease를 켜지 않은
+    /// 단일 인스턴스 배포에는 fence로 걸 epoch 자체가 없고, 그 배포에서
+    /// 제어권을 다투는 상대도 없다. lease를 켠 배포에서만 술어가 붙는다.
+    pub fn control_fence(&self) -> Option<ControlFence> {
+        self.lease.as_ref().and_then(|lease| lease.fence())
     }
 }

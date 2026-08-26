@@ -24,29 +24,33 @@
 //!
 //! `Fenced`에서 자동으로 재시도하는 것이 표준 leader-election 패턴이다.
 //!
-//! ## 알려진 한계 — epoch는 아직 쓰기를 거르지 않는다
+//! ## epoch가 거르는 것과 아직 거르지 못하는 것
 //!
 //! 표준 패턴에서 이 자동 재시도의 안전성은 "재시도를 막는 것"이 아니라
-//! epoch 기반으로 오래된 쓰기를 거절하는 것이 담당한다(불변식 4·5). **이
-//! 저장소에는 그 거절이 아직 없다.** `LeaseStatus::Active { epoch }`는
-//! 이 모듈 밖으로 나가지 않으며([`LeaseObserver::allows_control`]이 bool로
-//! 축약한다), dispatch 기록에도 task 상태 쓰기에도 epoch가 남지 않는다.
+//! epoch 기반으로 오래된 쓰기를 거절하는 것이 담당한다(불변식 4·5).
 //!
-//! 오늘 fenced 인스턴스를 막는 것은 epoch가 아니라 `allows_control()`의
-//! bool 검사다 — 갱신 실패를 관측한 **뒤에** 시도되는 제어 동작은 거절되지만,
-//! 관측 직전에 이미 DB로 떠난 쓰기는 막지 못한다. 그 창을 닫으려면 task
-//! 상태 쓰기가 epoch 술어를 함께 갖는 CAS여야 하고, Worker 이벤트도 자신이
-//! 어느 epoch에서 dispatch됐는지 함께 실어 와야 한다(로드맵 `#67`의
-//! fencing token). 근거와 판단은
-//! `docs/architecture/control-plane-authority-and-failover.md`의
-//! "구현 상태와 유예" 표에 있다.
+//! **쓰기 쪽은 닫혔다**(로드맵 `#62` 3단계). [`LeaseObserver::fence`]가
+//! `Active { epoch }`를 `ControlFence`로 내보내고, task 상태 CAS가 그것을
+//! 위상 조건과 함께 **한 문장 안에서** 검사한다. 그래서 갱신 실패를 관측하기
+//! 직전에 떠난 쓰기도 DB에서 거절된다 — 예전에는 `allows_control()`의 bool
+//! 관측과 쓰기 도착 사이가 통째로 열린 창이었다.
+//!
+//! **이벤트 쪽은 아직 열려 있다.** 늦게 도착한 Worker 이벤트가 *어느 시도의
+//! 것인지*는 epoch로 가를 수 없다. epoch는 최초 획득을 포함해 획득마다
+//! 증가하므로(마이그레이션 021), "dispatch 당시 epoch < 현재 epoch면 거절"은
+//! 평범한 재시작마다 실행 중이던 모든 Task의 완료를 버리게 된다. 실제
+//! 판별자는 `attempt_id`/generation이고 그 Attempt 행이 이 저장소에는 아직
+//! 없다. 정본의 상태 기계도 재시작으로 고아가 된 dispatch를 거절이 아니라
+//! `Dispatched → OutcomeUnknown`으로 보낸다. 근거와 유예 판단은
+//! `docs/architecture/tasks/execution-consistency.md`의 "구현 상태와 유예"
+//! 표에 있다.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
-use fleet_store::{ControlLease, Store, StoreError};
+use fleet_store::{ControlFence, ControlLease, Store, StoreError};
 use tokio_util::sync::CancellationToken;
 
 /// 이 프로세스가 관측한 현재 lease 상태.
@@ -123,6 +127,9 @@ pub struct LeaseManager {
 /// (정상 종료는 즉시, abort는 최대 `ttl`).
 pub struct LeaseManagerHandle {
     inner: tokio::task::JoinHandle<()>,
+    /// [`LeaseManagerHandle::observer`]가 넘겨줄 값. handle 자신은 쓰지 않지만,
+    /// observer가 fence를 만들려면 epoch와 짝이 되는 cluster를 알아야 한다.
+    cluster_id: Arc<str>,
     status: Arc<Mutex<LeaseStatus>>,
     shutdown: CancellationToken,
     shutdown_grace: Duration,
@@ -138,7 +145,10 @@ impl LeaseManagerHandle {
     /// 책임 없이 "지금 신규 control-plane 동작을 해도 되는가"만 확인하고
     /// 싶은 소비자에게 넘긴다(로드맵 #63 2단계 — dispatch/cancel 경로).
     pub fn observer(&self) -> LeaseObserver {
-        LeaseObserver(self.status.clone())
+        LeaseObserver {
+            cluster_id: self.cluster_id.clone(),
+            status: self.status.clone(),
+        }
     }
 
     /// 정상 종료. 루프에 종료를 알리고, 루프가 **자기가 쥔 epoch로** lease를
@@ -192,11 +202,17 @@ impl LeaseManagerHandle {
 /// 전체를 짊어지지 않도록 분리했다. `Clone`이라 `FleetState`에 값으로
 /// 담아 자유롭게 공유할 수 있다.
 #[derive(Clone)]
-pub struct LeaseObserver(Arc<Mutex<LeaseStatus>>);
+pub struct LeaseObserver {
+    /// epoch 하나만으로는 어느 lease의 것인지 결정되지 않아 함께 들고 다닌다
+    /// ([`ControlFence`]의 주석 참고). `Arc<str>`인 이유는 이 handle이
+    /// 값으로 복제되어 여러 소비자에게 뿌려지기 때문이다.
+    cluster_id: Arc<str>,
+    status: Arc<Mutex<LeaseStatus>>,
+}
 
 impl LeaseObserver {
     pub fn status(&self) -> LeaseStatus {
-        *self.0.lock().unwrap()
+        *self.status.lock().unwrap()
     }
 
     /// 지금 신규 control-plane 동작(dispatch/cancel/breaker 변경)을
@@ -205,13 +221,34 @@ impl LeaseObserver {
         self.status().is_active()
     }
 
+    /// 지금 상태를 Task 상태 쓰기에 걸 수 있는 술어로 변환한다
+    /// (로드맵 #62 3단계).
+    ///
+    /// `allows_control()`과의 차이가 이 메서드의 존재 이유다. 그쪽은 **관측
+    /// 시점**의 bool이라, 관측과 쓰기 사이에 fenced되면 이미 떠난 쓰기를 막지
+    /// 못한다. 이 값을 [`Store::compare_and_set_task_status`](fleet_store::Store::compare_and_set_task_status)에
+    /// 넘기면 그 판정이 저장소의 같은 문장 안으로 들어간다.
+    ///
+    /// `Active`가 아니면 `None`이다 — 걸 epoch가 없다. 그 경우 호출자는
+    /// 애초에 `allows_control()`에서 걸러지므로, `None`이 "fence 없이 써도
+    /// 된다"는 허가로 쓰이지 않는다.
+    pub fn fence(&self) -> Option<ControlFence> {
+        self.status().epoch().map(|epoch| ControlFence {
+            cluster_id: self.cluster_id.to_string(),
+            epoch,
+        })
+    }
+
     /// 임의 상태의 observer를 직접 만든다. 정상 production 경로는 항상
     /// [`LeaseManagerHandle::observer`]를 거친다 — 이 생성자는 실제
     /// `LeaseManager` 없이 "지금 lease가 Active/Fenced/Stopped라면
     /// dispatch/cancel/reconcile이 어떻게 반응하는가"를 검증해야 하는
     /// 상위 크레이트(fleet-scheduler 자신을 포함) 테스트를 위한 것이다.
-    pub fn with_status(status: LeaseStatus) -> Self {
-        Self(Arc::new(Mutex::new(status)))
+    pub fn with_status(cluster_id: impl Into<Arc<str>>, status: LeaseStatus) -> Self {
+        Self {
+            cluster_id: cluster_id.into(),
+            status: Arc::new(Mutex::new(status)),
+        }
     }
 }
 
@@ -330,11 +367,13 @@ impl LeaseManager {
         let status = self.status.clone();
         let shutdown = self.shutdown.clone();
         let shutdown_grace = self.config.shutdown_grace;
+        let cluster_id: Arc<str> = self.cluster_id.as_str().into();
         let inner = tokio::spawn(async move {
             self.run().await;
         });
         LeaseManagerHandle {
             inner,
+            cluster_id,
             status,
             shutdown,
             shutdown_grace,

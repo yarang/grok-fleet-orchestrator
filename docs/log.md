@@ -1936,3 +1936,69 @@ Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실�
   이미 기록해 뒀는데, 정작 그 조건문은 그대로 남아 있었다. 무조건으로 바꾸고, §4.3의 (3) 사례에
   panic이 `database_url()?` 뒤에 있다는 사실을 덧붙였다. CI는 모든 잡에 postgres 서비스를 붙여
   조건 없이 돌리므로 이 변경은 게이트를 CI 쪽으로 맞추는 것이지 범위를 넓히는 것이 아니다.
+
+## 2026-08-26 — ingest — `#62` 3단계: control epoch fencing (게이트 4의 쓰기 절반)과 범위 축소 기록
+
+- **착수 범위는 `TaskAttempt` 계층 전체였고, 실행 가능한 부분이 하나뿐임을 확인해 축소했다.** 정본
+  [실행 일관성](architecture/tasks/execution-consistency.md)의 검증 게이트 11개 중 미구현 7개를
+  코드와 대조한 결과, 게이트 5·6·9·10은 **effect ledger 부재**가 아니라 그보다 앞선 이유로 막혀
+  있었다 — ledger를 채울 **생산자가 없다**. `fleet-worker`는 `grok agent serve`를 장수명 subprocess로
+  띄우므로(`grok_process.rs:145-164`) 개별 tool 호출을 관측할 지점 자체가 없다. `tool_call`/`ToolCall`/
+  `side_effect`/`SideEffect`를 저장소 전체에서 grep하면 0건이다. 게이트 7의 `policy_revision`도
+  마찬가지로 0건이며, 게이트 8의 `CancelUnconfirmed`는 상태 자체가 없다. 지금 스키마만 만들면
+  전부 항상 NULL인 컬럼과 아무도 만들지 않는 variant가 된다.
+- **게이트 4를 절반만 닫았다. 나머지 절반은 지금 닫으면 회귀다.** `epoch`는 migration 021의 정의대로
+  **최초 획득을 포함해** 획득마다 증가한다. 그래서 "dispatch 당시 epoch보다 현재 epoch가 크면 이벤트를
+  버린다"는 규칙을 넣으면 **평범한 control plane 재시작마다 진행 중인 모든 Task의 완료가 버려진다**.
+  phase CAS도 대신하지 못한다 — 시도 1의 늦은 `Completed`는 시도 2가 실행 중일 때도 여전히
+  `Dispatched` 위상과 일치한다. 늦은 이벤트를 가르는 진짜 식별자는 epoch가 아니라
+  `attempt_id`/generation이고, 그래서 정본이 `control_epoch`를 `tasks`가 아니라 **Attempt 행**에
+  둔다는 것을 이번에 다시 읽고 확인했다. 정본의 상태 기계에는 애초에 `epoch 불일치 → 거부` 전이가
+  없다 — 재시작으로 고아가 된 dispatch는 `Dispatched --> OutcomeUnknown: 전달 후 응답 유실`로 간다.
+  정본의 CAS 조항이 epoch를 여섯 개 **쓰기 조건** 중 하나로 열거하는 것도 같은 이야기다.
+- **구현한 쓰기 절반**: `ControlFence{cluster_id, epoch}`(fleet-store), `TransitionOutcome::Fenced`
+  (fleet-core), `compare_and_set_task_status(.., fence: Option<&ControlFence>)`. PgStore는
+  `EXISTS (SELECT 1 FROM control_plane_lease WHERE cluster_id = $4 AND epoch = $5)`를 **기존 UPDATE와
+  같은 문장 안에** 넣는다 — 별도 SELECT로 먼저 확인하면 확인과 쓰기 사이가 그대로 TOCTOU 창이 되어
+  1단계가 없앤 것을 되살린다. 0행일 때만 lease를 재조회해 `Fenced`/`Rejected`/`NotFound`를 가르며,
+  그 재조회는 위상 재조회보다 **먼저** 한다(fenced 인스턴스가 읽은 Task 상태에는 권위가 없다).
+- **`Fenced`를 `Rejected`와 나눈 이유는 후속 동작이 다르기 때문이다.** `Rejected`는 다른 writer가 이
+  Task 하나를 먼저 옮긴 것이라 그 Task만 포기하면 되지만, `Fenced`는 이 인스턴스가 더 이상 제어
+  기관이 아니라는 뜻이라 **이후의 모든 쓰기도 같은 이유로 실패한다**. 두 값을 합치면 호출자가
+  "이 Task를 포기"와 "쓰기를 그만두어야 함"을 구분할 수 없다.
+- **`#63` 2단계의 bool 게이트와 겹치지 않는다.** 그쪽(`lease_allows_control()`)은 이미 `Fenced`를
+  **관측한 뒤**를 막는다. 이번 것은 관측이 아직 `Active`인데 저장소만 앞서 간 창 — 갱신 주기(5초)
+  안에 장애 전환이 일어나면 실제로 도달하는 상태 — 을 막는다. 디스패처 테스트를 이 창 위에 세운
+  이유가 그것이다: 기존 `setup_fenced` 계열은 bool 하나에서 막혀 CAS에 **도달조차 하지 않는다**.
+- **뮤테이션으로 값을 증명했다.** `dispatcher.rs`의 `cancel` 호출 지점에서 `fence` 인자를 `None`으로
+  바꾸면 새 테스트 1건만 정확히 실패한다. 통과 자체는 "무엇을 검증했는가"를 말해 주지 않는다 —
+  §4.3(3)의 "개수가 아니라 소요 시간이 조용한 skip을 드러낸다"와 같은 계열의 확인이다.
+- **`fleet tasks cancel`은 의도적으로 fence를 걸지 않는다.** `fleet serve`가 죽었거나 fenced된
+  상황에서도 동작해야 하는 operator 도구라 lease를 획득하지 않으며 획득해서도 안 된다. 대가는
+  실재한다 — 이 경로만 epoch 술어를 우회한다. 정본과 로드맵 양쪽에 남겼다.
+- **게이트 실행 중에 내 grep이 실패를 삼켰다.** `fleet-store`의 DB 재실행을
+  `cargo test -p fleet-store -- --test-threads=1`로 돌리고 결과를 `grep -E "^running|^test result"`로
+  거른 탓에, 이 크레이트가 `--all-features`(=`test-support`) 없이는 `fleet_store::mem`을 못 찾아
+  **컴파일 자체가 실패한 것**이 화면에서 사라졌다. 출력이 비어 있는 것을 "통과"로 읽을 뻔했다.
+  §4.3의 세 사례와 같은 종류다 — 이번엔 게이트 목록이 아니라 **게이트를 읽는 필터**가 CI보다
+  약했다. 뒤이어 `error|FAILED|panicked` 계수를 함께 찍는 방식으로 바꿔 확인했고, 그 계수도
+  `worker_delete_nonexistent_errors`라는 테스트 **이름**에 걸리는 오탐을 냈다. 요약 필터는 그
+  자체가 증거가 아니며, 0이 아닌 값이 나오면 원문을 봐야 한다.
+- **검증**: `rustc 1.98.0`(rust-toolchain.toml 고정값과 일치), `RUSTFLAGS="-D warnings"`,
+  `cargo fmt --all -- --check` 통과, `cargo clippy --workspace --features "acp mtls" --all-targets
+  -- -D warnings` 및 `--no-default-features` 양쪽 경고 0. `cargo build -p fleet-cli --features
+  "acp mtls"` 후 `cargo test --workspace --features "acp mtls"` **68 스위트 전부 `ok`, 실패 0**.
+  `DATABASE_URL` 주입 직렬 재실행: `fleet-store --all-features`(16 바이너리), `fleet-api`(16),
+  `fleet-scheduler`(4), `fleet-mcp`(3 — `cross_client` **14 passed / 4.86s**로 조용한 skip이 아님을
+  소요 시간으로 확인), `fleet-dashboard`(4) 전부 통과. 신규 테스트는 `task_cas.rs` 4건(MemStore·실제
+  PostgreSQL 양쪽)과 `dispatcher.rs` 1건.
+- **검증 한계**: 실제 두 프로세스의 라이브 장애 전환 중 쓰기 거절은 **관찰하지 않았다**. 각 계층을
+  개별적으로만 확인했다(저장소 CAS는 실제 Postgres, 배선은 수동 구성한 stale observer).
+  READ COMMITTED 잔여 창 — 단일 `UPDATE`가 스냅샷을 한 번 잡으므로 문장 실행 **중**에 커밋되는
+  epoch N+1은 보이지 않는다 — 은 `FOR SHARE` 없이 남겨 두고 정본에 기록했다. 닫으려면 모든 Task
+  상태 쓰기가 5초 주기 lease 갱신 `UPDATE`와 같은 한 행에서 락 경쟁을 하게 된다. 마이크로초 규모이며
+  술어가 없던 이전의 무제한 창에 비하면 유계다.
+- **문서**: 정본에 [구현 상태와 유예](architecture/tasks/execution-consistency.md) 절을 신설해 게이트
+  11개의 상태와 막고 있는 것을 표로 남기고, `implementation`을 `proposed → partial`로 고쳤다.
+  로드맵은 `#62` 행에 3단계를 추가하고, **`#63` 행도 함께 고쳤다** — 그 행의 "아직 안 한 것"이 바로
+  이번에 절반 닫은 게이트를 지목하고 있어서, 한쪽만 고치면 로드맵이 자기모순이 된다.

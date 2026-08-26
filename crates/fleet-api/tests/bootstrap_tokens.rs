@@ -658,6 +658,7 @@ impl Store for BsStore {
         _: TaskId,
         _: &[TaskPhase],
         _: &TaskStatus,
+        _: Option<&fleet_store::ControlFence>,
     ) -> Result<TransitionOutcome, StoreError> {
         unimplemented!()
     }

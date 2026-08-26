@@ -157,6 +157,7 @@ impl Dispatcher {
                 // `Dispatched` 하나뿐이다. reconciler가 이 작업을 이미
                 // `Failed`로 확정한 뒤 워커가 뒤늦게 재연결해 완료를 보고하는
                 // 경합(reconcile.rs의 orphan/offline 스윕)이 여기서 거절된다.
+                let fence = self.state.control_fence();
                 let outcome = self
                     .state
                     .store
@@ -164,6 +165,7 @@ impl Dispatcher {
                         task_id,
                         &[TaskPhase::Dispatched],
                         &TaskStatus::Completed(result.clone()),
+                        fence.as_ref(),
                     )
                     .await;
 
@@ -183,6 +185,16 @@ impl Dispatcher {
                         warn!(
                             %task_id, %worker_id, current = current.as_str(),
                             "late completion ignored — task already left the dispatched phase"
+                        );
+                    }
+                    Ok(TransitionOutcome::Fenced) => {
+                        // `Rejected`와 나눠 로그를 남긴다. 이건 이 작업 하나의
+                        // 경합이 아니라 **이 인스턴스가 제어 기관이 아니라는**
+                        // 신호이므로, 같은 이유로 뒤따르는 모든 쓰기도 거절된다.
+                        warn!(
+                            %task_id, %worker_id,
+                            "completion dropped — this instance no longer holds the control \
+                             plane lease epoch it dispatched under"
                         );
                     }
                     Err(e) => {
@@ -508,11 +520,24 @@ impl Dispatcher {
         match self
             .state
             .store
-            .compare_and_set_task_status(task_id, &[TaskPhase::Pending], &task.status)
+            .compare_and_set_task_status(
+                task_id,
+                &[TaskPhase::Pending],
+                &task.status,
+                self.state.control_fence().as_ref(),
+            )
             .await
             .map_err(|e| DispatchError::Store(e.to_string()))?
         {
             TransitionOutcome::Applied => {}
+            TransitionOutcome::Fenced => {
+                // dispatch **전에** 반환하는 이유는 `Rejected`와 같다 — 상태를
+                // 차지하지 못한 채 transport로 보내면 아무도 소유하지 않는
+                // 실행이 생긴다. 다만 원인이 다르므로 에러도 나눈다: 이건 이
+                // 인스턴스가 제어 기관이 아니라는 뜻이고, `lease_allows_control`
+                // 검사를 통과한 **뒤에** fenced됐을 때만 도달한다.
+                return Err(DispatchError::ControlPlaneFenced);
+            }
             TransitionOutcome::Rejected { current } => {
                 // transport로 보내기 **전에** 반환한다. 상태를 차지하지 못한
                 // 채로 dispatch하면 아무도 소유하지 않는 실행이 생긴다.
@@ -666,10 +691,16 @@ impl Dispatcher {
         expected: &[TaskPhase],
         failure: TaskFailure,
     ) -> bool {
+        let fence = self.state.control_fence();
         let outcome = self
             .state
             .store
-            .compare_and_set_task_status(task_id, expected, &TaskStatus::Failed(failure.clone()))
+            .compare_and_set_task_status(
+                task_id,
+                expected,
+                &TaskStatus::Failed(failure.clone()),
+                fence.as_ref(),
+            )
             .await;
 
         match outcome {
@@ -686,6 +717,14 @@ impl Dispatcher {
                 warn!(
                     %task_id, current = current.as_str(),
                     "failure not recorded — task already left the expected phase"
+                );
+                false
+            }
+            Ok(TransitionOutcome::Fenced) => {
+                warn!(
+                    %task_id,
+                    "failure not recorded — this instance no longer holds the control plane \
+                     lease epoch"
                 );
                 false
             }
@@ -769,11 +808,23 @@ impl Dispatcher {
                 task_id,
                 &[TaskPhase::Pending, TaskPhase::Dispatched],
                 &cancelled,
+                self.state.control_fence().as_ref(),
             )
             .await
             .map_err(|e| CancelError::Store(e.to_string()))?
         {
             TransitionOutcome::Applied => {}
+            TransitionOutcome::Fenced => {
+                // 위의 `lease_allows_control` 검사를 통과한 뒤 fenced된 경우다.
+                // 같은 에러를 돌려주지만 도달 경로가 다르다 — 그쪽은 관측
+                // 시점의 bool이고 이쪽은 저장소가 쓰기를 실제로 거절한 결과다.
+                //
+                // 이 시점에는 이미 `transport.cancel()`을 보낸 뒤일 수 있다.
+                // 그 요청을 되돌리지는 않는다 — cancel은 process 중단 요청이지
+                // effect rollback이 아니고(정본 "취소·timeout·redrive"),
+                // 되돌릴 대상을 이 저장소가 아직 기록하지 않는다.
+                return Err(CancelError::ControlPlaneFenced);
+            }
             TransitionOutcome::Rejected { current } => {
                 // 검사 이후에 종료 상태에 도달한 것이므로, 처음부터 종료
                 // 상태였을 때와 같은 에러를 돌려준다 — 호출자 입장에서 두
@@ -1162,11 +1213,76 @@ mod tests {
         let transport: Arc<dyn fleet_transport::WorkerTransport> =
             Arc::new(fleet_transport::MockTransport::new());
         let state = Arc::new(
-            FleetState::new(store, transport, CircuitBreakerConfig::default())
-                .with_lease(LeaseObserver::with_status(LeaseStatus::Fenced)),
+            FleetState::new(store, transport, CircuitBreakerConfig::default()).with_lease(
+                LeaseObserver::with_status("test-cluster", LeaseStatus::Fenced),
+            ),
         );
         let dispatcher = Dispatcher::new(state.clone());
         (state, dispatcher)
+    }
+
+    /// 로드맵 #62 3단계. 위의 `setup_fenced` 계열과 **다른 창**을 다룬다.
+    ///
+    /// 그쪽은 이미 `Fenced`를 관측한 뒤의 동작이라 `allows_control()`의 bool
+    /// 하나로 막힌다. 여기서는 관측이 아직 `Active`인 채로 저장소만 앞서 간
+    /// 상태를 만든다 — 갱신 주기(5초) 안에 장애 전환이 일어나면 실제로 이렇게
+    /// 된다. bool 검사는 통과하므로, 거절의 근거는 CAS에 실린 epoch 술어뿐이다.
+    #[tokio::test]
+    async fn cancel_is_fenced_when_the_store_moved_to_a_newer_epoch() {
+        let ttl = std::time::Duration::from_secs(60);
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let held = store
+            .acquire_control_lease("c62", "instance-a", ttl)
+            .await
+            .unwrap();
+
+        // 장애 전환. instance-a의 observer는 이 사실을 아직 모른다.
+        store
+            .release_control_lease("c62", "instance-a", held.epoch)
+            .await
+            .unwrap();
+        let taken = store
+            .acquire_control_lease("c62", "instance-b", ttl)
+            .await
+            .unwrap();
+        assert!(taken.epoch > held.epoch);
+
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(
+            FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
+                LeaseObserver::with_status(
+                    "c62",
+                    LeaseStatus::Active {
+                        epoch: held.epoch, // 낡았지만 본인은 Active로 믿는다
+                    },
+                ),
+            ),
+        );
+        let dispatcher = Dispatcher::new(state.clone());
+
+        // 이 단언이 이 테스트의 요점이다 — bool 게이트는 열려 있다.
+        assert!(
+            state.lease_allows_control(),
+            "관측이 아직 Active여야 이 시나리오가 성립한다"
+        );
+
+        let task = sample_task();
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let err = dispatcher
+            .cancel(task_id, "operator")
+            .await
+            .expect_err("저장소가 새 epoch로 옮겨갔으면 취소는 거절돼야 한다");
+        assert!(matches!(err, CancelError::ControlPlaneFenced));
+
+        let stored = store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Pending),
+            "거절된 취소는 상태를 바꾸지 않아야 한다, got {:?}",
+            stored.status
+        );
     }
 
     #[tokio::test]

@@ -33,7 +33,9 @@ use fleet_core::{
 };
 
 use crate::error::StoreError;
-use crate::{AdminApiToken, ControlLease, Store, StoredCredential, WorkerOperationalCredential};
+use crate::{
+    AdminApiToken, ControlFence, ControlLease, Store, StoredCredential, WorkerOperationalCredential,
+};
 
 /// Postgres 커넥션 풀 세부 튜닝 옵션 (로드맵 P2 #16).
 ///
@@ -343,6 +345,7 @@ impl Store for PgStore {
         id: TaskId,
         expected: &[TaskPhase],
         new: &TaskStatus,
+        fence: Option<&ControlFence>,
     ) -> Result<TransitionOutcome, StoreError> {
         // 빈 기대 집합은 어떤 현재 상태와도 일치할 수 없다. SQL로 보내면
         // `= ANY('{}')`가 항상 거짓이라 0행이 되고, 아래 재조회가 이를
@@ -361,33 +364,59 @@ impl Store for PgStore {
         // 그 계약은 fleet-core의 `phase_str_matches_serialized_status`가 지킨다.
         let expected_phases: Vec<&str> = expected.iter().map(|p| p.as_str()).collect();
 
+        // 문장을 조립하는 이유: `dispatched_at` 유무 x fence 유무로 네 가지
+        // 조합이 나오는데, 이걸 네 개의 리터럴로 펼치면 같은 WHERE 절이 네 번
+        // 중복돼 한 곳만 고치는 사고가 난다. 바인딩 자리번호($1..$5)는 아래
+        // `bind` 순서와 정확히 짝을 이뤄야 하므로 둘을 붙여 둔다.
+        //
         // `dispatched_at = NOW()`는 조건 없는 버전과 동일하게 Dispatched 전이에만
         // 붙인다 — 두 분기를 하나로 합치면 이 타임스탬프가 사라지거나 종료
         // 전이에서도 갱신된다.
-        let result = if is_dispatching {
-            sqlx::query(
-                "UPDATE tasks SET status = $2, dispatched_at = NOW() \
-                 WHERE id = $1 AND status_phase = ANY($3)",
-            )
+        let mut sql = String::from("UPDATE tasks SET status = $2");
+        if is_dispatching {
+            sql.push_str(", dispatched_at = NOW()");
+        }
+        sql.push_str(" WHERE id = $1 AND status_phase = ANY($3)");
+        if fence.is_some() {
+            // epoch 술어를 **같은 문장 안에** 넣는 것이 이 변경의 전부다.
+            // lease를 먼저 SELECT해서 분기하면 그 사이에 fenced되어도 이미
+            // 떠난 UPDATE는 그대로 도착한다 — 정확히 그 창을 닫는다.
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM control_plane_lease \
+                  WHERE cluster_id = $4 AND epoch = $5)",
+            );
+        }
+
+        let mut query = sqlx::query(&sql)
             .bind(id.as_uuid())
             .bind(status_json)
-            .bind(&expected_phases)
-            .execute(&self.pool)
-            .await?
-        } else {
-            sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1 AND status_phase = ANY($3)")
-                .bind(id.as_uuid())
-                .bind(status_json)
-                .bind(&expected_phases)
-                .execute(&self.pool)
-                .await?
-        };
+            .bind(&expected_phases);
+        if let Some(f) = fence {
+            query = query.bind(f.cluster_id.as_str()).bind(f.epoch);
+        }
+        let result = query.execute(&self.pool).await?;
 
         if result.rows_affected() > 0 {
             return Ok(TransitionOutcome::Applied);
         }
 
-        // 0행에는 두 가지 원인이 있다: 행이 없거나(NotFound), 있는데 위상이
+        // fence를 걸었다면 0행의 원인이 하나 더 있다 — epoch 술어가 깨진 경우다.
+        // 아래의 위상 재조회보다 **먼저** 확인한다. fenced 인스턴스가 읽은 Task
+        // 상태에는 아무 권위가 없으므로, 그 값을 근거로 `NotFound`나 `Rejected`를
+        // 돌려주면 호출자를 "내가 제어 기관이었는데 이 Task만 문제였다"는
+        // 잘못된 결론으로 보낸다.
+        if let Some(f) = fence {
+            let held: Option<i64> =
+                sqlx::query_scalar("SELECT epoch FROM control_plane_lease WHERE cluster_id = $1")
+                    .bind(f.cluster_id.as_str())
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if held != Some(f.epoch) {
+                return Ok(TransitionOutcome::Fenced);
+            }
+        }
+
+        // 0행의 나머지 원인은 둘이다: 행이 없거나(NotFound), 있는데 위상이
         // 달랐거나(Rejected). UPDATE만으로는 구분할 수 없어 한 번 더 읽는다.
         //
         // 이 SELECT는 위 UPDATE와 같은 트랜잭션이 아니다. 그 사이에 또 다른

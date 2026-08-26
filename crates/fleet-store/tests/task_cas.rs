@@ -27,7 +27,7 @@ use fleet_core::{
     TransitionOutcome, WorkerId,
 };
 use fleet_store::mem::MemStore;
-use fleet_store::{PgStore, Store, StoreError};
+use fleet_store::{ControlFence, PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
 // ── 백엔드 준비 ─────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ both_backends!(cas_applies_when_the_phase_matches, |store| async move {
     let worker = WorkerId::new();
 
     let outcome = store
-        .compare_and_set_task_status(task.id, &[TaskPhase::Pending], &dispatched(worker))
+        .compare_and_set_task_status(task.id, &[TaskPhase::Pending], &dispatched(worker), None)
         .await
         .unwrap();
 
@@ -141,7 +141,7 @@ both_backends!(cas_rejects_when_the_phase_differs, |store| async move {
     let task = seed_task(&store, "differs", failed(worker)).await;
 
     let outcome = store
-        .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &completed(worker))
+        .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &completed(worker), None)
         .await
         .unwrap();
 
@@ -169,6 +169,7 @@ both_backends!(
                     task.id,
                     &[TaskPhase::Pending, TaskPhase::Dispatched],
                     &cancelled(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -190,7 +191,7 @@ both_backends!(
         });
 
         let err = store
-            .compare_and_set_task_status(ghost.id, &[TaskPhase::Pending], &cancelled())
+            .compare_and_set_task_status(ghost.id, &[TaskPhase::Pending], &cancelled(), None)
             .await
             .expect_err("존재하지 않는 작업은 Err(NotFound)여야 한다");
 
@@ -217,6 +218,7 @@ both_backends!(
                 task.id,
                 &[TaskPhase::Pending],
                 &dispatched(WorkerId::new()),
+                None,
             )
             .await
             .unwrap();
@@ -235,14 +237,19 @@ both_backends!(
         let worker = WorkerId::new();
         let task = seed_task(&store, "no restamp", TaskStatus::Pending).await;
         store
-            .compare_and_set_task_status(task.id, &[TaskPhase::Pending], &dispatched(worker))
+            .compare_and_set_task_status(task.id, &[TaskPhase::Pending], &dispatched(worker), None)
             .await
             .unwrap();
         let after_dispatch = store.get_task(task.id).await.unwrap().unwrap();
         let stamped = after_dispatch.dispatched_at.expect("dispatched_at");
 
         store
-            .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &completed(worker))
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                None,
+            )
             .await
             .unwrap();
 
@@ -272,14 +279,19 @@ both_backends!(
 
         // 2. reconciler의 orphan 스윕 — `[Dispatched]`를 기대한다.
         let sweep = store
-            .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &failed(worker))
+            .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &failed(worker), None)
             .await
             .unwrap();
         assert_eq!(sweep, TransitionOutcome::Applied);
 
         // 3. 늦게 도착한 완료 이벤트 — 같은 `[Dispatched]`를 기대하므로 거절된다.
         let late = store
-            .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &completed(worker))
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -305,11 +317,11 @@ both_backends!(only_one_of_two_racing_cancels_applies, |store| async move {
     let expected = [TaskPhase::Pending, TaskPhase::Dispatched];
 
     let first = store
-        .compare_and_set_task_status(task.id, &expected, &cancelled())
+        .compare_and_set_task_status(task.id, &expected, &cancelled(), None)
         .await
         .unwrap();
     let second = store
-        .compare_and_set_task_status(task.id, &expected, &cancelled())
+        .compare_and_set_task_status(task.id, &expected, &cancelled(), None)
         .await
         .unwrap();
 
@@ -334,12 +346,18 @@ both_backends!(
                 task.id,
                 &[TaskPhase::Pending, TaskPhase::Dispatched],
                 &cancelled(),
+                None,
             )
             .await
             .unwrap();
 
         let late = store
-            .compare_and_set_task_status(task.id, &[TaskPhase::Dispatched], &completed(worker))
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                None,
+            )
             .await
             .unwrap();
 
@@ -351,3 +369,160 @@ both_backends!(
         );
     }
 );
+
+// ── control-plane epoch fence (로드맵 #62 3단계) ────────────────────────
+//
+// 위상 CAS는 "같은 Task를 두고 경쟁하는 writer"를 가른다. 아래 테스트들이
+// 다루는 건 다른 경합이다 — **제어권을 잃은 인스턴스 전체**를 막는 것.
+// 그 둘은 독립적이라 위상이 완벽히 맞아떨어져도 fence가 깨졌으면 거절돼야
+// 한다.
+//
+// `control_plane_lease`는 `pg_backend()`의 TRUNCATE 대상이 아니므로 클러스터
+// ID를 테스트마다 새로 만들어 격리한다 — 마이그레이션 021이 `cluster_id`를
+// PK로 둔 이유 그대로다.
+
+const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn unique_cluster() -> String {
+    format!("cas-fence-{}", WorkerId::new())
+}
+
+/// lease를 한 번 획득하고 그 epoch로 fence를 만든다.
+async fn acquire_fence(store: &Arc<dyn Store>, cluster: &str, instance: &str) -> ControlFence {
+    let lease = store
+        .acquire_control_lease(cluster, instance, TTL)
+        .await
+        .expect("lease acquisition must succeed on a fresh cluster id");
+    ControlFence {
+        cluster_id: cluster.to_string(),
+        epoch: lease.epoch,
+    }
+}
+
+both_backends!(
+    cas_applies_under_the_current_control_epoch,
+    |store| async move {
+        let cluster = unique_cluster();
+        let fence = acquire_fence(&store, &cluster, "instance-a").await;
+        let task = seed_task(&store, "current epoch", TaskStatus::Pending).await;
+        let worker = WorkerId::new();
+
+        let outcome = store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Pending],
+                &dispatched(worker),
+                Some(&fence),
+            )
+            .await
+            .unwrap();
+
+        // fence는 정상 경로를 막지 않는다. 이 케이스가 없으면 아래 거절 테스트가
+        // "항상 거절한다"는 구현으로도 통과한다.
+        assert_eq!(outcome, TransitionOutcome::Applied);
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(stored.status.phase(), TaskPhase::Dispatched);
+    }
+);
+
+both_backends!(
+    cas_is_fenced_when_a_newer_epoch_was_acquired,
+    |store| async move {
+        // 검증 게이트: "이전 control epoch 이벤트가 거부되는 테스트".
+        let cluster = unique_cluster();
+        let stale = acquire_fence(&store, &cluster, "instance-a").await;
+
+        // 장애 전환. 반납 후 재획득으로 epoch가 단조 증가한다.
+        store
+            .release_control_lease(&cluster, "instance-a", stale.epoch)
+            .await
+            .unwrap();
+        let fresh = acquire_fence(&store, &cluster, "instance-b").await;
+        assert!(
+            fresh.epoch > stale.epoch,
+            "재획득은 epoch를 올려야 한다: {} -> {}",
+            stale.epoch,
+            fresh.epoch
+        );
+
+        // 옛 인스턴스의 쓰기다. **위상 조건은 완벽히 맞는다** — 이 작업은
+        // 실제로 `Dispatched`이고, 늦은 완료가 아니다. 위상 CAS만으로는
+        // 통과했을 쓰기이며, 거절의 근거는 epoch뿐이다.
+        let worker = WorkerId::new();
+        let task = seed_task(&store, "stale epoch", dispatched(worker)).await;
+        let outcome = store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                Some(&stale),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TransitionOutcome::Fenced);
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.status.phase(),
+            TaskPhase::Dispatched,
+            "거절된 전이는 아무것도 쓰지 않아야 한다"
+        );
+
+        // 같은 쓰기를 현재 epoch로 다시 하면 통과한다 — 거절된 원인이 epoch
+        // 하나였음을 못 박는다.
+        let retried = store
+            .compare_and_set_task_status(
+                task.id,
+                &[TaskPhase::Dispatched],
+                &completed(worker),
+                Some(&fresh),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried, TransitionOutcome::Applied);
+    }
+);
+
+both_backends!(
+    cas_is_fenced_when_the_cluster_has_no_lease_at_all,
+    |store| async move {
+        // lease 행이 아예 없는 것을 "막을 근거가 없으니 통과"로 읽으면,
+        // 테이블이 비워진 순간 fence 전체가 조용히 무력해진다. 없음은 곧
+        // "이 epoch를 쥔 적이 없다"이므로 거절이어야 한다.
+        let fence = ControlFence {
+            cluster_id: unique_cluster(),
+            epoch: 1,
+        };
+        let task = seed_task(&store, "no lease row", TaskStatus::Pending).await;
+
+        let outcome = store
+            .compare_and_set_task_status(task.id, &[TaskPhase::Pending], &cancelled(), Some(&fence))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TransitionOutcome::Fenced);
+    }
+);
+
+both_backends!(fenced_takes_precedence_over_not_found, |store| async move {
+    // fenced 인스턴스가 읽은 Task 상태에는 권위가 없다. 여기서
+    // `Err(NotFound)`를 돌려주면 호출자는 "나는 제어 기관이었고 이 Task만
+    // 없었다"는 결론으로 간다 — 두 백엔드가 같은 우선순위를 갖는지 못
+    // 박아 둔다.
+    let ghost = Task::from_request(TaskRequest {
+        prompt: "never inserted".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    let fence = ControlFence {
+        cluster_id: unique_cluster(),
+        epoch: 99,
+    };
+
+    let outcome = store
+        .compare_and_set_task_status(ghost.id, &[TaskPhase::Pending], &cancelled(), Some(&fence))
+        .await
+        .expect("fenced는 Err이 아니라 관측 결과다");
+
+    assert_eq!(outcome, TransitionOutcome::Fenced);
+});

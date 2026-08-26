@@ -1,10 +1,11 @@
 ---
 type: architecture-decision
 authority: canonical
-implementation: proposed
+implementation: partial
 verification: design-reviewed
 source: "docs/architecture/tasks/execution-consistency.md"
 last_verified: "2026-08-26"
+last_verified_commit: "working-tree"
 ---
 
 # 태스크 실행 일관성, 재시도 및 멱등성
@@ -197,3 +198,52 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 - provider 조회 불가 `Started` effect가 `PartiallyApplied`로 끝나며 성공·자동 retry하지 않는 테스트
 - cancel/timeout이 effect ledger를 우회해 `Cancelled`로만 확정되지 않는 테스트
 - Task 삭제 후 같은 idempotency key의 재제출이 새 Task를 만드는 테스트
+
+## 구현 상태와 유예
+
+위 게이트 중 오늘 실제로 구현·검증된 것은 하나뿐이며, 그것도 절반이다. 이 표는 무엇을 왜
+미뤘는지를 남긴다 — 미구현을 "곧 할 일"로 뭉뚱그리면 **막힌 이유**가 사라지고, 그러면 같은
+설계를 다시 검토하게 된다.
+
+| 게이트 | 상태 | 막고 있는 것 |
+| --- | --- | --- |
+| Failed 이후 늦은 Completed 거부 | 구현됨 | — (phase CAS로 성립. `crates/fleet-store/tests/task_cas.rs`) |
+| 취소·완료 경쟁의 단일 터미널 상태 | 구현됨 | — (같은 CAS) |
+| timeout 후 동일 key 재호출의 중복 방지 | 구현됨 | — (로드맵 `#62` 2단계) |
+| **이전 control epoch 이벤트 거부** | **쓰기 절반만 구현됨** | 이벤트 절반은 `TaskAttempt` 부재 — 아래 참고 |
+| non-idempotent tool effect 자동 재실행 금지 | 미구현 | effect ledger 부재, 그리고 **ledger를 채울 생산자 부재** |
+| retry의 동일 external idempotency key | 미구현 | 같음 |
+| policy revision 변경 후 redrive의 동일 key | 미구현 | `policy_revision` 개념이 저장소·코드 어디에도 없음 |
+| `CancelUnconfirmed` 해소와 archive 차단 | 미구현 | 해당 상태 자체가 없음. `TaskAttempt` 없이는 "어느 시도가 미확인인가"를 지목할 대상이 없음 |
+| 조회 불가 `Started` effect → `PartiallyApplied` | 미구현 | ledger 부재 |
+| cancel/timeout이 ledger를 우회하지 않음 | 미구현(결함 존재) | ledger 부재. 현재 `cancel`은 transport 실패를 로그만 남기고 `Cancelled`를 확정한다 |
+| Task 삭제 후 동일 key 재제출 | 구현됨 | — (로드맵 `#96`) |
+
+### control epoch 게이트를 절반만 닫은 이유
+
+`epoch`는 [`021_control_plane_lease.sql`](../../../crates/fleet-store/migrations/021_control_plane_lease.sql)의 정의대로
+**최초 획득을 포함해** 획득마다 1씩 증가한다. 그래서 "`dispatched_epoch`가 현재 epoch보다 작으면
+이벤트를 버린다"는 규칙을 지금 넣으면, **평범한 control plane 재시작마다 진행 중인 모든 Task의 완료
+이벤트가 버려진다**. 고치는 것이 아니라 새 결함을 만드는 것이다.
+
+phase CAS도 이것을 대신하지 못한다. 시도 1의 늦은 `Completed`는 시도 2가 실행 중일 때 여전히
+`Dispatched` 위상과 일치하기 때문이다. 늦은 이벤트를 가르는 진짜 식별자는 epoch가 아니라
+`attempt_id`/generation이며, 그래서 위 설계는 `control_epoch`를 `tasks`가 아니라 **Attempt 행**에
+둔다. 이벤트 절반은 `TaskAttempt`가 생긴 뒤에 닫는다.
+
+구현된 쓰기 절반은 이것이다: Task 상태를 쓰는 CAS에 `EXISTS (SELECT 1 FROM control_plane_lease
+WHERE cluster_id = $4 AND epoch = $5)` 술어를 **같은 문장 안에** 실어, lease를 잃은 인스턴스의 쓰기가
+거절되고 [`TransitionOutcome::Fenced`](../../../crates/fleet-core/src/task.rs)로 돌아오게 한다.
+
+### 남은 창 두 가지
+
+- **READ COMMITTED 잔여 창**: 위 `UPDATE`는 단일 문장이라 스냅샷을 한 번 잡는다. 문장이 실행되는
+  **도중에** 다른 인스턴스가 epoch N+1을 커밋하면 그 커밋은 보이지 않는다. 마이크로초 규모이며,
+  술어가 없던 이전의 무제한 창에 비하면 유계다. `SELECT ... FOR SHARE`로 정확히 닫을 수 있으나,
+  그러면 모든 Task 상태 쓰기가 5초 주기 lease 갱신 `UPDATE`와 같은 한 행에서 락 경쟁을 하게 되므로
+  택하지 않았다.
+- **CLI `tasks cancel`은 fence를 걸지 않는다**: `fleet serve`가 죽었거나 fenced된 상황에서도 동작해야
+  하는 operator 도구이므로 lease를 획득하지 않으며, 따라서 epoch 술어를 우회한다. 대가는 실재한다 —
+  이 경로는 위 보호를 받지 않는다. 이것이 **유일한** 비펜싱 취소 경로다: MCP `fleet_cancel_task`는
+  [`handlers.rs`](../../../crates/fleet-mcp/src/handlers.rs)에서 `Dispatcher::cancel`을 호출하므로
+  위 네 경로에 포함된다.

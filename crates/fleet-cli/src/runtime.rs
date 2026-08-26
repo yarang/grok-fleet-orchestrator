@@ -1462,11 +1462,22 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
     // `fleet serve`가 같은 작업을 완료·실패로 확정할 수 있다. CLI는 스케줄러와
     // 완전히 별개의 프로세스라 그 경합을 볼 방법이 없으므로, 같은 조건을
     // `WHERE`에 다시 걸어 확정된 종료 상태를 덮어쓰지 않게 한다.
+    //
+    // control-plane fence는 걸지 않는다(`None`). CLI는 lease를 획득하지 않으며
+    // 획득해서도 안 된다 — 이 명령은 `fleet serve`가 죽었거나 fenced됐을 때도
+    // 동작해야 하는 operator 도구다. fence를 걸려면 CLI가 제어권을 다투는
+    // 참가자가 되어야 하고, 그러면 "제어 평면이 멈췄을 때 손으로 취소한다"는
+    // 이 명령의 목적 자체가 사라진다.
+    //
+    // 그 대가는 실재한다: 이 경로는 epoch 술어를 우회하므로, 살아 있는
+    // `fleet serve`와 CLI가 동시에 같은 Task를 옮기면 위상 CAS만이 둘을
+    // 가른다. 위상이 같으면 나중 쓰기가 이긴다.
     match store
         .compare_and_set_task_status(
             id,
             &[TaskPhase::Pending, TaskPhase::Dispatched],
             &new_status,
+            None,
         )
         .await
         .context("failed to update task status")?
@@ -1478,6 +1489,13 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
         TransitionOutcome::Rejected { current } => Err(anyhow!(
             "task {id} reached a terminal state ({}) while the cancel was in flight",
             current.as_str()
+        )),
+        // fence를 넘기지 않았으므로 저장소가 이 값을 만들 수 없다. panic 대신
+        // 에러로 돌려주는 이유는 operator 도구이기 때문이다 — 이 가정이 언젠가
+        // 깨지더라도 취소 명령이 스택 트레이스를 뱉으며 죽는 것보다 낫다.
+        TransitionOutcome::Fenced => Err(anyhow!(
+            "task {id} cancel was fenced by a control plane epoch, but this command \
+             does not hold one — this indicates a bug in the store implementation"
         )),
     }
 }
