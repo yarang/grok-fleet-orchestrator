@@ -251,6 +251,61 @@ pub fn mask_server_key(endpoint: &str) -> String {
     format!("{}<redacted>{}", &endpoint[..start], &endpoint[end..])
 }
 
+/// `agent_endpoint`류 문자열에서 `server-key=<secret>` 쿼리 파라미터를 통째로
+/// **제거하고**, 분리해 낸 secret을 함께 돌려준다 (로드맵 `#94`).
+/// 반환값은 `(secret이 빠진 endpoint, secret)`.
+///
+/// `mask_server_key`가 "보여줄 수 있는 형태"를 만드는 함수라면 이 함수는
+/// "다이얼할 URL과 인증 자격"을 분리하는 함수다. 호출자는 분리된 secret을
+/// `Authorization: Bearer <secret>` 헤더로 실어 보낸다 — 그러면 secret이
+/// URL에서 사라져 중간 프록시의 access log에 남지 않는다.
+///
+/// **저장 형태는 바꾸지 않는다.** `Worker.endpoint`는 여전히 `?server-key=`를
+/// 담은 원문이고, 외부로 나갈 때는 여전히 `mask_server_key`가 가린다 —
+/// `#75`가 막아 둔 네 개의 읽기 경로가 그대로 유효하다. 이 함수는 오직
+/// `fleet-transport`가 실제로 다이얼하는 순간에만 쓰인다.
+///
+/// `mask_server_key`와 달리 **앞 구분자가 `?`/`&`인 경우에만** 파라미터로
+/// 인정한다. 마스킹은 의심스러우면 더 가려도 안전하지만, 분리는 잘못 자르면
+/// 다이얼 자체가 깨지므로 보수적으로 판정해야 한다. 파라미터를 찾지 못하면
+/// `(원문, None)`을 돌려주고 호출자는 기존 동작(URL에 secret 유지)을 그대로
+/// 따른다.
+pub fn split_server_key(endpoint: &str) -> (String, Option<String>) {
+    const MARKER: &str = "server-key=";
+    let Some(idx) = endpoint.find(MARKER) else {
+        return (endpoint.to_string(), None);
+    };
+    // 쿼리 파라미터의 시작이 아니면 건드리지 않는다.
+    if idx == 0 || !matches!(endpoint.as_bytes()[idx - 1], b'?' | b'&') {
+        return (endpoint.to_string(), None);
+    }
+    let sep = endpoint.as_bytes()[idx - 1];
+    let value_start = idx + MARKER.len();
+    let value_end = endpoint[value_start..]
+        .find(['&', '#'])
+        .map(|e| value_start + e)
+        .unwrap_or(endpoint.len());
+    let secret = &endpoint[value_start..value_end];
+    if secret.is_empty() {
+        return (endpoint.to_string(), None);
+    }
+
+    // 파라미터를 들어내면서 쿼리 문자열이 `?&…`/`…?`처럼 깨지지 않도록
+    // 구분자 하나를 함께 소거한다.
+    let (cut_from, cut_to) = if sep == b'&' {
+        // `…&server-key=v` → 앞의 `&`까지 함께 제거.
+        (idx - 1, value_end)
+    } else if endpoint.as_bytes().get(value_end) == Some(&b'&') {
+        // `?server-key=v&rest` → `?`는 남기고 뒤의 `&`를 함께 제거.
+        (idx, value_end + 1)
+    } else {
+        // `?server-key=v` 또는 `?server-key=v#frag` → `?`까지 함께 제거.
+        (idx - 1, value_end)
+    };
+    let stripped = format!("{}{}", &endpoint[..cut_from], &endpoint[cut_to..]);
+    (stripped, Some(secret.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,5 +432,78 @@ mod tests {
     #[test]
     fn mask_server_key_leaves_empty_string_untouched() {
         assert_eq!(mask_server_key(""), "");
+    }
+
+    // ── split_server_key (로드맵 #94) ───────────────────────────────────
+
+    #[test]
+    fn split_server_key_extracts_secret_and_drops_lone_query() {
+        let (url, secret) = split_server_key("wss://h:2420/ws?server-key=topsecret");
+        assert_eq!(url, "wss://h:2420/ws");
+        assert_eq!(secret.as_deref(), Some("topsecret"));
+    }
+
+    #[test]
+    fn split_server_key_keeps_other_params_when_secret_is_first() {
+        let (url, secret) = split_server_key("ws://h/ws/name?server-key=topsecret&foo=bar");
+        assert_eq!(url, "ws://h/ws/name?foo=bar");
+        assert_eq!(secret.as_deref(), Some("topsecret"));
+    }
+
+    #[test]
+    fn split_server_key_keeps_other_params_when_secret_is_last() {
+        let (url, secret) = split_server_key("ws://h/ws?foo=bar&server-key=topsecret");
+        assert_eq!(url, "ws://h/ws?foo=bar");
+        assert_eq!(secret.as_deref(), Some("topsecret"));
+    }
+
+    #[test]
+    fn split_server_key_preserves_fragment() {
+        let (url, secret) = split_server_key("ws://h/ws?server-key=topsecret#frag");
+        assert_eq!(url, "ws://h/ws#frag");
+        assert_eq!(secret.as_deref(), Some("topsecret"));
+    }
+
+    #[test]
+    fn split_server_key_leaves_endpoint_without_secret_untouched() {
+        let (url, secret) = split_server_key("wss://h:2420/ws");
+        assert_eq!(url, "wss://h:2420/ws");
+        assert!(secret.is_none());
+    }
+
+    #[test]
+    fn split_server_key_ignores_marker_that_is_not_a_query_param() {
+        // 경로 일부로 우연히 나타난 문자열은 자르지 않는다 — 잘못 자르면
+        // 다이얼이 깨진다(마스킹과 달리 분리는 보수적으로 판정한다).
+        let raw = "wss://h:2420/server-key=notaparam/ws";
+        let (url, secret) = split_server_key(raw);
+        assert_eq!(url, raw);
+        assert!(secret.is_none());
+    }
+
+    #[test]
+    fn split_server_key_treats_empty_value_as_absent() {
+        let raw = "wss://h:2420/ws?server-key=";
+        let (url, secret) = split_server_key(raw);
+        assert_eq!(url, raw);
+        assert!(secret.is_none());
+    }
+
+    #[test]
+    fn split_server_key_output_is_dialable_and_secret_free() {
+        // 이 두 성질이 #94의 실질이다: 남은 URL은 파싱 가능해야 하고,
+        // secret 문자열이 어디에도 남아 있으면 안 된다.
+        for raw in [
+            "wss://h:2420/ws?server-key=topsecret",
+            "ws://h/ws/name?server-key=topsecret&foo=bar",
+            "ws://h/ws?foo=bar&server-key=topsecret",
+            "ws://h/ws?server-key=topsecret#frag",
+        ] {
+            let (url, secret) = split_server_key(raw);
+            assert_eq!(secret.as_deref(), Some("topsecret"), "{raw}");
+            assert!(!url.contains("topsecret"), "{raw} -> {url}");
+            assert!(!url.contains("server-key"), "{raw} -> {url}");
+            assert!(url::Url::parse(&url).is_ok(), "{raw} -> {url} must parse");
+        }
     }
 }

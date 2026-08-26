@@ -171,6 +171,50 @@ async fn start_ws_echo_upstream() -> SocketAddr {
     addr
 }
 
+/// WS upgrade 요청의 `Authorization` 헤더를 **그대로 포착해** 돌려주는 upstream
+/// (로드맵 `#94`). 헤더가 없으면 `None`을 보낸다.
+// `Err` 타입은 tungstenite의 handshake 콜백 트레이트가 정하는 것이라
+// (`http::Response<Option<String>>`) 우리 쪽에서 줄일 수 없다.
+#[allow(clippy::result_large_err)]
+async fn start_ws_header_capture_upstream(
+) -> (SocketAddr, tokio::sync::mpsc::Receiver<Option<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let seen = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+                let seen_cb = seen.clone();
+                let callback = move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                                     resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    *seen_cb.lock().unwrap() = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    Ok(resp)
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(tcp, callback).await else {
+                    return;
+                };
+                let captured = seen.lock().unwrap().clone();
+                let _ = tx.send(captured).await;
+                while let Some(Ok(msg)) = ws.next().await {
+                    if matches!(msg, Message::Close(_)) {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, rx)
+}
+
 #[tokio::test]
 async fn mtls_proxy_forwards_plain_tcp_roundtrip() {
     let material = generate_material();
@@ -491,4 +535,71 @@ async fn reload_keeps_serving_last_good_cert_on_failure() {
     // (캐시가 그대로 유지된다는 것은 위 mtls_proxy_rotates_server_cert_without_restart
     // 테스트가 정상 케이스에서 이미 증명 — 여기서는 실패 시 panic/캐시 파괴가
     // 없다는 것만 별도로 확인.)
+}
+
+/// 로드맵 `#94` — `Authorization` 헤더가 mTLS 프록시 홉을 **그대로 통과**하는가.
+///
+/// `MtlsProxy`는 `copy_bidirectional`로 바이트를 그대로 나르므로 통과하는 것이
+/// 당연해 보이지만, "당연해 보인다"와 "측정했다"는 다르다. `#94`는 secret을
+/// 이 홉 너머의 grok까지 헤더로 전달하는 데 전적으로 의존하므로, 이 성질이
+/// 깨지면 mTLS 워커 전체의 다이얼이 죽는다.
+#[tokio::test]
+async fn mtls_proxy_forwards_authorization_header_verbatim() {
+    let material = generate_material();
+    let (upstream, mut captured) = start_ws_header_capture_upstream().await;
+
+    let server_tls = ServerTlsConfig::from_paths(
+        write_pem(&material.dir, "ca.pem", &material.ca_pem),
+        write_pem(&material.dir, "server.pem", &material.server_cert_pem),
+        write_pem(&material.dir, "server.key", &material.server_key_pem),
+    );
+    let server_config = Arc::new(server_tls.build_server_config().unwrap());
+
+    let proxy = MtlsProxy::bind("127.0.0.1:0".parse().unwrap(), upstream, server_config)
+        .await
+        .expect("proxy bind");
+    let proxy_addr = proxy.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let proxy_handle = tokio::spawn(async move { proxy.run(shutdown_rx).await });
+
+    let client_tls = ClientTlsConfig::from_paths(
+        write_pem(&material.dir, "ca.pem", &material.ca_pem),
+        write_pem(&material.dir, "client.pem", &material.client_cert_pem),
+        write_pem(&material.dir, "client.key", &material.client_key_pem),
+    );
+    let connector = client_tls.build_connector().unwrap();
+    let tcp = tokio::net::TcpStream::connect(proxy_addr)
+        .await
+        .expect("connect proxy");
+    use rustls::pki_types::ServerName;
+    let tls_stream = connector
+        .connect(ServerName::try_from("localhost").unwrap(), tcp)
+        .await
+        .expect("TLS connect");
+
+    // `#94` 이후 fleet이 실제로 만드는 형태 — URL에 secret 없음, 헤더에 있음.
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("wss://localhost:{}/ws", proxy_addr.port());
+    let mut request = url.as_str().into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer topsecret".parse().unwrap());
+
+    let (mut ws, _resp) = tokio_tungstenite::client_async(request, tls_stream)
+        .await
+        .expect("ws handshake through proxy");
+
+    let seen = tokio::time::timeout(Duration::from_secs(5), captured.recv())
+        .await
+        .expect("timeout waiting for captured header")
+        .expect("capture channel closed");
+    assert_eq!(
+        seen.as_deref(),
+        Some("Bearer topsecret"),
+        "Authorization 헤더가 mTLS 홉을 그대로 통과해야 한다 (#94)"
+    );
+
+    let _ = ws.close(None).await;
+    let _ = shutdown_tx.send(true);
+    let _ = proxy_handle.await;
 }

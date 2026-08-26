@@ -2002,3 +2002,54 @@ Task를 지운 뒤 `events`를 읽어 `payload.task_id`가 보존되는지 실�
   11개의 상태와 막고 있는 것을 표로 남기고, `implementation`을 `proposed → partial`로 고쳤다.
   로드맵은 `#62` 행에 3단계를 추가하고, **`#63` 행도 함께 고쳤다** — 그 행의 "아직 안 한 것"이 바로
   이번에 절반 닫은 게이트를 지목하고 있어서, 한쪽만 고치면 로드맵이 자기모순이 된다.
+
+## 2026-08-26 — ingest — ACP 인증을 URL query 밖으로 이전 (`#94`)
+
+- **로드맵이 걸어 둔 게이트가 틀렸다는 것이 첫 발견이다.** `#94`는 "mTLS client cert만으로
+  충분한지 확인"을 착수 조건으로 걸고 있었는데, 그 조건은 **구조적으로 성립할 수 없다** —
+  `fleet-transport`의 `MtlsProxy`가 TLS를 종단하고 grok에는 평문 TCP를 넘기므로
+  (`copy_bidirectional`) grok은 client certificate를 애초에 볼 수 없다. 실측으로도 로컬의 grok
+  세 버전(0.2.102 / 0.2.112 / 1.0.5)이 전부 인증 없는 `/ws`를 거절했다. 그래서 이 항목이 할 수
+  있는 것은 secret의 **이전**이지 **제거**가 아니다. 로드맵 행과 [Enrollment 정본](contracts/worker-enrollment.md)
+  양쪽의 문구를 고쳤다 — 원문대로 두면 다음 사람이 "grok을 고치면 되겠네"가 아니라 "우리가
+  아직 안 했네"로 읽는다.
+- **저장소를 한 줄도 바꾸지 않은 것이 이번 설계의 핵심이다.** secret은 이미 `Worker.endpoint`
+  문자열 안에 있고 `#75`의 `mask_server_key`가 네 개 읽기 경로를 지키고 있다. 별도 컬럼을
+  만들었다면 그 네 경로를 전부 다시 열고 새 마스킹 의무를 만드는 것 — 유출면을 줄이는 게 아니라
+  **옮기는** 것이다. 대신 신설 `fleet_core::split_server_key`가 **다이얼 직전 한 곳**에서만
+  문자열을 쪼갠다. 생산자(`agent_endpoint` / `mtls_agent_endpoint`)를 건드리지 않았으므로 변경
+  전후에 등록된 워커가 동일하게 동작하고 혼재 상태 마이그레이션이 없다.
+- **`split_server_key`는 `mask_server_key`와 반대 방향으로 보수적이다.** 마커 앞이 `?`/`&`가
+  아니면 손대지 않는다. 마스킹은 과하게 가려도 안전하지만, 잘못 쪼개면 다이얼 자체가 깨진다 —
+  같은 문자열을 보는 두 함수라도 실패의 대가가 다르면 판정 기준도 달라야 한다.
+- **양성 테스트 하나만으로는 아무것도 증명되지 않는다.** `e2e_94_secret_travels_in_header_not_url`은
+  같은 프로세스에서 **음성 대조를 먼저** 돌린다 — 인증 없는 `/ws`가 거절되는 것을 확인하지
+  않으면, 헤더를 붙인 연결이 성공한 것이 "헤더가 인증됐다"인지 "grok이 인증을 강제하지 않았다"인지
+  구분할 수 없다. mTLS 홉도 마찬가지로 상류에서 헤더를 **캡처해서** 확인했다("당연해 보인다"와
+  "측정했다"는 다르다).
+- **워커별 인증 모드 자동 협상은 만들지 않았다.** 헤더를 거절하는 grok이 하나도 관측되지 않았다.
+  가정 위에 협상 기계를 지으면 트리거되지 않는 분기가 영구히 남는다. 프로세스 단위 스위치
+  `FLEET_ACP_AUTH=query` 하나만 escape hatch로 남겼고, `ws_auth_parts(endpoint, mode)`를 순수
+  함수로 분리해 env 읽기를 `AcpAuthMode::from_env()` 한 곳에 가뒀다(프로세스 전역 상태가 병렬
+  테스트를 오염시키는 것을 피한다).
+- **게이트를 읽는 방식도 한 번 더 고쳤다.** 오늘 백그라운드 게이트가 `exit code 0`을 보고했지만
+  실제로는 중간의 acp+mtls clippy가 실패해 있었다 — `&&` 체인은 **마지막** 명령의 코드만 남긴다.
+  이후로는 단계마다 `RC_<단계>=$?`를 개별로 찍어 판정한다. 2026-08-25의 두 사례, 08-26의
+  `cross_client` 사례, 그리고 어제의 "grep이 컴파일 실패를 삼킴"과 같은 계열이다 — **요약값은
+  증거가 아니다.**
+- **검증**: `rustc 1.98.0`(rust-toolchain.toml 고정값과 일치), `RUSTFLAGS="-D warnings"`,
+  `cargo fmt --all -- --check`(`RC=0`), `cargo clippy --workspace --features "acp mtls"
+  --all-targets -- -D warnings`(`RC=0`), 같은 명령의 `--no-default-features` 판(`RC=0`) —
+  셋 다 개별 종료 코드로 확인. `cargo build -p fleet-cli --features "acp mtls"` 후
+  `cargo test --workspace` **68 스위트 전부 `ok`, 1042건 통과, 실패 0**(ignored 5 — `#[ignore]`가
+  붙은 실 grok e2e 3건 포함). `DATABASE_URL` 주입 직렬 재실행(`--test-threads=1`):
+  `fleet-store --all-features` 16 바이너리, `fleet-api` 16, `fleet-scheduler` 4, `fleet-mcp` 3,
+  `fleet-dashboard` 4 — 전부 통과. `fleet-mcp`의 `cross_client`는 **14 passed / 4.99s**로,
+  `target/debug/fleet`를 실제로 띄웠음을 소요 시간으로 확인했다(부재 시엔 `0.00s`에 같은 개수를
+  보고한다). 실 grok e2e는 `GROK_BIN`을 주입해 0.2.102 / 0.2.112 / 1.0.5 세 버전에 각각 수동
+  실행했다. 신규 테스트 15건.
+- **검증 한계**: 비mTLS 워커의 `/ws/{name}` nginx 홉이 `Authorization`을 상류로 전달하는지는
+  **확인하지 못했다** — 그 설정은 운영자 소유이고 이 저장소에 없어 재현할 대상 자체가 없다
+  (`proxy_set_header`로 지운 배포는 조용히 401을 받는다). grok 0.2.102 미만은 로컬에 바이너리가
+  없어 미테스트. 실제 프로덕션 워커가 아니라 로컬 grok 프로세스에 다이얼했다. 미룬 것 전체는
+  Enrollment 정본의 표에 있다.

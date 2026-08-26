@@ -55,7 +55,7 @@ use agent_client_protocol::{Agent, ConnectionTo};
 use agent_client_protocol_http::HttpClient;
 use async_trait::async_trait;
 use chrono::Utc;
-use fleet_core::{mask_server_key, TaskId, TaskResult, TokenUsage, WorkerId};
+use fleet_core::{mask_server_key, split_server_key, TaskId, TaskResult, TokenUsage, WorkerId};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -865,14 +865,73 @@ fn extract_chunk_text(chunk: &agent_client_protocol::schema::v1::ContentChunk) -
     }
 }
 
-/// mTLS 여부에 따라 `HttpClient`를 구성.
+/// ACP WebSocket 인증 자격을 어디에 싣는가 (로드맵 `#94`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpAuthMode {
+    /// `Authorization: Bearer <secret>` 헤더. 기본값.
+    Header,
+    /// `?server-key=<secret>` 쿼리 파라미터. `#94` 이전의 동작.
+    Query,
+}
+
+impl AcpAuthMode {
+    /// `FLEET_ACP_AUTH=query`일 때만 예전 동작으로 되돌린다.
+    ///
+    /// 기본을 헤더로 두는 이유: 쿼리 문자열은 중간 프록시(nginx 등)의 access
+    /// log에 **평문으로** 남고, 그 로그는 우리가 통제하지 않는다. 헤더는 남지
+    /// 않는다. 이것이 `#94`가 실제로 닫는 유일한 구멍이다 — secret을 없애는
+    /// 것은 불가능하다(아래 `ws_auth_parts` 문서 참고).
+    ///
+    /// 탈출구를 남기는 이유: 헤더 인증은 grok `0.2.112`에서 실측했고 그보다
+    /// 오래된 grok이 이를 지원하는지는 확인하지 않았다. 그런 워커가 섞여
+    /// 있으면 다이얼이 401로 거절되므로, 운영자가 grok을 올릴 때까지 이
+    /// 변수로 되돌릴 수 있어야 한다. 워커별 자동 협상은 만들지 않는다 —
+    /// "그런 워커가 실제로 있다"는 증거가 없는 상태에서 협상 기계를 먼저
+    /// 만드는 것은 채울 방법이 없는 것을 미리 만드는 것과 같다.
+    fn from_env() -> Self {
+        match std::env::var("FLEET_ACP_AUTH").as_deref() {
+            Ok("query") => Self::Query,
+            _ => Self::Header,
+        }
+    }
+}
+
+/// 저장된 endpoint 문자열에서 **실제로 다이얼할 URL**과 **`Authorization`
+/// 헤더 값**을 만든다 (로드맵 `#94`).
+///
+/// `Worker.endpoint`의 저장 형태는 바뀌지 않는다 — 여전히 `?server-key=`를
+/// 담은 원문이고, 외부로 나갈 때는 여전히 `mask_server_key`가 가린다(`#75`).
+/// 바뀌는 것은 **wire에 나가는 형태**뿐이다.
+///
+/// secret을 **없애지는 못한다.** `MtlsProxy`가 TLS를 종단하고 grok에게는
+/// 평문을 넘기므로 grok은 클라이언트 인증서를 볼 수 없고, 따라서 "mTLS만으로
+/// 충분"은 성립하지 않는다(grok `0.2.112` 실측: 인증 없는 `/ws`는 401).
+/// `#94`가 할 수 있는 것은 secret을 **URL 밖으로 옮기는 것**뿐이다.
+///
+/// `Query` 모드이거나 endpoint에 `server-key`가 없으면 원문을 그대로 쓴다.
+fn ws_auth_parts(endpoint: &str, mode: AcpAuthMode) -> (String, Option<String>) {
+    if mode == AcpAuthMode::Query {
+        return (endpoint.to_string(), None);
+    }
+    match split_server_key(endpoint) {
+        (stripped, Some(secret)) => (stripped, Some(format!("Bearer {secret}"))),
+        (original, None) => (original, None),
+    }
+}
+
+/// mTLS 여부와 인증 모드에 따라 `HttpClient`를 구성.
 fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
-    let client = HttpClient::with_endpoint(&session.endpoint).map_err(|e| {
+    let (dial_url, auth_header) = ws_auth_parts(&session.endpoint, AcpAuthMode::from_env());
+    let client = HttpClient::with_endpoint(&dial_url).map_err(|e| {
         format!(
             "invalid endpoint {}: {e}",
             mask_server_key(&session.endpoint)
         )
     })?;
+    let client = match auth_header {
+        Some(value) => client.with_ws_auth_header(value),
+        None => client,
+    };
     #[cfg(feature = "mtls")]
     let client = match &session.tls_connector {
         Some(connector) => client.with_tls_connector(connector.clone()),
@@ -884,6 +943,61 @@ fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ws_auth_parts (로드맵 #94) ──────────────────────────────────────
+
+    #[test]
+    fn header_mode_moves_secret_out_of_the_url() {
+        let (url, header) = ws_auth_parts(
+            "wss://worker-1.fleet.internal:2420/ws?server-key=topsecret",
+            AcpAuthMode::Header,
+        );
+        assert_eq!(url, "wss://worker-1.fleet.internal:2420/ws");
+        assert_eq!(header.as_deref(), Some("Bearer topsecret"));
+        // #94의 실질: 다이얼되는 URL 어디에도 secret이 없어야 한다.
+        assert!(!url.contains("topsecret"));
+        assert!(!url.contains("server-key"));
+    }
+
+    #[test]
+    fn header_value_uses_the_exact_format_grok_accepts() {
+        // grok 0.2.112 실측: 스킴은 대소문자를 구분하고(`bearer`는 401),
+        // 공백은 정확히 하나여야 한다(둘이면 401). 이 테스트는 그 계약을
+        // 문자열 수준에서 고정한다.
+        let (_, header) = ws_auth_parts("ws://h/ws?server-key=s3cr3t", AcpAuthMode::Header);
+        assert_eq!(header.as_deref(), Some("Bearer s3cr3t"));
+    }
+
+    #[test]
+    fn query_mode_leaves_the_endpoint_exactly_as_stored() {
+        let raw = "wss://h:2420/ws?server-key=topsecret";
+        let (url, header) = ws_auth_parts(raw, AcpAuthMode::Query);
+        assert_eq!(url, raw, "예전 동작으로의 탈출구는 원문을 그대로 써야 한다");
+        assert!(header.is_none());
+    }
+
+    #[test]
+    fn endpoint_without_secret_is_untouched_in_both_modes() {
+        let raw = "wss://h:2420/ws";
+        for mode in [AcpAuthMode::Header, AcpAuthMode::Query] {
+            let (url, header) = ws_auth_parts(raw, mode);
+            assert_eq!(url, raw, "{mode:?}");
+            assert!(header.is_none(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn non_mtls_named_path_keeps_its_path_while_shedding_the_secret() {
+        // 비mTLS 경로는 `/ws/{name}`을 쓴다(리버스 SSH 터널 뒤에서 워커를
+        // 구분하기 위해 — config.rs의 agent_endpoint 문서 참고). 경로는
+        // 반드시 보존돼야 한다.
+        let (url, header) = ws_auth_parts(
+            "ws://tunnel-host/ws/worker-7?server-key=topsecret",
+            AcpAuthMode::Header,
+        );
+        assert_eq!(url, "ws://tunnel-host/ws/worker-7");
+        assert_eq!(header.as_deref(), Some("Bearer topsecret"));
+    }
 
     #[tokio::test]
     async fn new_transport_has_no_clients() {

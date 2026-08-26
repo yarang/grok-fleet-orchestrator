@@ -163,3 +163,60 @@ async fn e2e_ping_real_worker() {
 
     let _ = transport.unregister(worker).await;
 }
+
+/// 로드맵 `#94` 게이트 — secret이 **URL 밖으로** 나가고도 실제 grok에
+/// 인증되는가.
+///
+/// 이 테스트가 `#94`의 완료 조건이다. 단위 테스트(`ws_auth_parts`)는 URL에서
+/// secret이 제거된다는 것만 증명하고, raw socket probe는 grok이 헤더를
+/// 받아들인다는 것만 증명한다 — **fleet 자신의 다이얼이 그 조합으로 붙는지**는
+/// 둘 중 어느 것도 증명하지 못한다. 여기서 그것을 증명한다.
+///
+/// 양성/음성 한 쌍으로 구성한 이유: 양성만 있으면 "grok이 애초에 인증을
+/// 강제하지 않아서 붙은 것"과 구분되지 않는다. 같은 프로세스에 secret 없이
+/// 붙는 것이 실패해야만, 양성의 성공을 **헤더 덕분**이라고 말할 수 있다.
+#[tokio::test]
+#[ignore = "requires real grok agent (set GROK_BIN env var)"]
+async fn e2e_94_secret_travels_in_header_not_url() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let port: u16 = 12421;
+    let _grok_guard = match spawn_grok_agent(port).await {
+        Some(c) => c,
+        None => {
+            eprintln!("SKIP: GROK_BIN not set or spawn failed");
+            return;
+        }
+    };
+
+    // ── 음성 대조: secret이 아예 없으면 붙지 못해야 한다. ──────────────
+    // 이것이 실패하면(=붙어 버리면) 이 grok은 인증을 강제하지 않는 것이고,
+    // 아래 양성 결과는 아무것도 증명하지 못한다.
+    let no_auth = format!("ws://127.0.0.1:{port}/ws");
+    let transport = std::sync::Arc::new(AcpTransport::new());
+    let unauthenticated = WorkerId::new();
+    let negative = transport.register(unauthenticated, &no_auth, 4).await;
+    assert!(
+        negative.is_err(),
+        "grok이 인증 없는 /ws를 받아들였다 — 이 실행에서는 아래 양성 결과가 \
+         헤더 인증의 증거가 되지 못한다"
+    );
+    let _ = transport.unregister(unauthenticated).await;
+
+    // ── 양성: 저장 형태는 그대로 `?server-key=`지만 다이얼은 헤더로. ────
+    // `AcpAuthMode::Header`(기본값)에서 `ws_auth_parts`가 URL의 secret을
+    // 떼어 `Authorization: Bearer …`로 옮긴다. grok이 101을 돌려주면
+    // 헤더가 실제로 인증에 쓰였다는 뜻이다.
+    let stored = format!("ws://127.0.0.1:{port}/ws?server-key=test-secret-fleet");
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &stored, 4)
+        .await
+        .expect("헤더로 옮긴 secret으로 실제 grok에 연결되어야 한다 (#94)");
+    assert!(
+        transport.is_connected(worker).await,
+        "register 성공 후에는 연결이 살아 있어야 한다"
+    );
+
+    let _ = transport.unregister(worker).await;
+}

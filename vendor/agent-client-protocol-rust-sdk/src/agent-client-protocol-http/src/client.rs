@@ -8,7 +8,9 @@ use agent_client_protocol::{
     TransportFrame,
     schema::v1::{RequestId, Response as RpcResponse},
 };
+// FLEET PATCH (2026-08-26): upgrade 요청에 헤더를 싣기 위해 필요.
 use async_tungstenite::tungstenite::Message as WsMessage;
+use async_tungstenite::tungstenite::client::IntoClientRequest;
 use futures::{
     Stream, StreamExt,
     channel::mpsc::{self, UnboundedSender},
@@ -43,6 +45,13 @@ pub struct HttpClient {
     /// TLS connector를 주입할 방법이 전혀 없었다. 이 패치의 출처와 배경은
     /// `vendor/agent-client-protocol-rust-sdk/FLEET_PATCHES.md` 참고.
     tls_connector: Option<tokio_rustls::TlsConnector>,
+    /// FLEET PATCH (2026-08-26): WebSocket upgrade 요청에 실을 `Authorization`
+    /// 헤더 값 전체(예: `Bearer <token>`). `None`이면 기존과 완전히 동일하게
+    /// 헤더 없이 연결한다. 이 필드는 **스킴을 해석하지 않는다** — 어떤 인증
+    /// 스킴을 쓸지는 호출자가 정하고, 여기서는 완성된 헤더 값을 그대로 싣는다.
+    /// HTTP/SSE 경로(`run`)에는 적용되지 않는다(Fleet은 WS 경로만 사용).
+    /// 배경은 `vendor/agent-client-protocol-rust-sdk/FLEET_PATCHES.md` 참고.
+    ws_auth_header: Option<String>,
 }
 
 impl std::fmt::Debug for HttpClient {
@@ -50,6 +59,8 @@ impl std::fmt::Debug for HttpClient {
         f.debug_struct("HttpClient")
             .field("endpoint", &self.endpoint.as_str())
             .field("tls_connector", &self.tls_connector.is_some())
+            // FLEET PATCH (2026-08-26): 값 자체는 비밀이므로 유무만 노출한다.
+            .field("ws_auth_header", &self.ws_auth_header.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -93,6 +104,8 @@ impl HttpClient {
             endpoint,
             http,
             tls_connector: None,
+            // FLEET PATCH (2026-08-26): 기본은 헤더 없음 = 기존 동작.
+            ws_auth_header: None,
         })
     }
 
@@ -109,6 +122,8 @@ impl HttpClient {
             endpoint,
             http,
             tls_connector: None,
+            // FLEET PATCH (2026-08-26): 기본은 헤더 없음 = 기존 동작.
+            ws_auth_header: None,
         })
     }
 
@@ -120,6 +135,18 @@ impl HttpClient {
     #[must_use]
     pub fn with_tls_connector(mut self, connector: tokio_rustls::TlsConnector) -> Self {
         self.tls_connector = Some(connector);
+        self
+    }
+
+    /// FLEET PATCH (2026-08-26): WebSocket upgrade 요청에 `Authorization`
+    /// 헤더를 실어 보낸다. `value`는 스킴을 포함한 헤더 값 전체다
+    /// (예: `Bearer abc123`). `endpoint`가 `ws`/`wss`가 아니면 무시된다.
+    ///
+    /// 인증 토큰을 URL 쿼리에 실으면 중간 프록시의 access log에 평문으로
+    /// 남는다 — 이 빌더는 그 토큰을 헤더로 옮기기 위한 것이다(Fleet 로드맵 `#94`).
+    #[must_use]
+    pub fn with_ws_auth_header(mut self, value: impl Into<String>) -> Self {
+        self.ws_auth_header = Some(value.into());
         self
     }
 
@@ -1179,6 +1206,7 @@ async fn run_ws(client: HttpClient, channel: Channel) -> Result<(), AcpError> {
     let HttpClient {
         endpoint,
         tls_connector,
+        ws_auth_header,
         ..
     } = client;
 
@@ -1189,9 +1217,28 @@ async fn run_ws(client: HttpClient, channel: Channel) -> Result<(), AcpError> {
     // 호출자에게는 아무 영향이 없다 — `async_tungstenite::tokio::rustls`의
     // `Connector`는 `tokio_rustls::TlsConnector`의 타입 별칭(alias)이라
     // 그대로 전달 가능하다.
+    //
+    // FLEET PATCH (2026-08-26): 첫 인자를 `&str`에서 `Request`로 바꿔 헤더를
+    // 실을 수 있게 했다. `&str`도 `Request`도 모두 `IntoClientRequest`이고
+    // `&str` → `Request` 변환은 tungstenite가 내부적으로 하던 것과 같은
+    // 것이므로, `ws_auth_header`가 `None`이면 wire 상 동작은 기존과 동일하다.
+    let mut request = endpoint.as_str().into_client_request().map_err(|e| {
+        AcpError::internal_error().data(format!("WebSocket request build failed: {e}"))
+    })?;
+    if let Some(value) = ws_auth_header {
+        let value = value.parse().map_err(|_| {
+            // 값을 에러에 넣지 않는다 — 이 값은 비밀이고 에러는 로그로 간다.
+            AcpError::internal_error().data("WebSocket auth header is not a valid header value")
+        })?;
+        request.headers_mut().insert(
+            async_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value,
+        );
+    }
+
     let (ws_stream, response) =
         async_tungstenite::tokio::connect_async_with_tls_connector_and_config(
-            endpoint.as_str(),
+            request,
             tls_connector,
             None,
         )

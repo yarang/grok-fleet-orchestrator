@@ -23,12 +23,26 @@ Fleet의 Phase 8.5 mTLS 요구사항을 만족하지 못했다. 업스트림에 
   - `run_ws()`가 `connect_async` 대신 `connect_async_with_tls_connector_and_config`를
     호출하도록 변경 — `connector: None`일 때는 기존과 완전히 동일한 기본(공용 CA) 동작.
   - 관련 구조체 분해(destructure) 두 곳(`run()`, `run_ws()`)에 `..`/새 필드 추가.
+- `src/client.rs` (2026-08-26, 로드맵 `#94`):
+  - `HttpClient`에 `ws_auth_header: Option<String>` 필드 추가 — WebSocket upgrade
+    요청에 실을 `Authorization` 헤더 **값 전체**(예: `Bearer <token>`).
+  - `HttpClient::with_ws_auth_header(value)` 빌더 메서드 추가.
+  - `run_ws()`가 `connect_async_with_tls_connector_and_config`의 첫 인자로
+    `endpoint.as_str()` 대신 `IntoClientRequest`로 만든 `Request`를 넘기도록 변경.
+    `ws_auth_header`가 `None`이면 wire 상 동작은 기존과 동일하다 — `&str` →
+    `Request` 변환은 tungstenite가 내부적으로 하던 바로 그 변환이다.
+  - `Debug` impl은 값이 아니라 **유무만** 노출한다(비밀값이므로).
+  - 생성자 두 곳의 `Self { .. }`에 `ws_auth_header: None` 추가.
+  - 이 필드는 **스킴을 해석하지 않는다.** 어떤 인증 스킴을 쓸지는 호출자가
+    정하고 여기서는 완성된 헤더 값을 그대로 싣는다 — 업스트림 PR로 올리기에도
+    이 형태가 적절하다. HTTP/SSE 경로(`run()`)에는 적용하지 않았다(Fleet은 WS
+    경로만 사용한다 — `fleet-transport`의 유일한 다이얼 지점이 `connect_with`).
 - `Cargo.toml` (workspace root) + `src/agent-client-protocol-http/Cargo.toml`:
   - `tokio-rustls = "0.26"` 의존성 추가 (Fleet 워크스페이스와 동일 버전 — 의존성
     트리에서 rustls/tokio-rustls 중복 버전 방지).
   - `client` feature에 `dep:tokio-rustls` 추가.
 
-모든 변경에 `// FLEET PATCH (2026-08-11):` 주석을 달아 upstream diff와 구분되게 했다.
+모든 변경에 `// FLEET PATCH (<날짜>):` 주석을 달아 upstream diff와 구분되게 했다.
 
 ## 업스트림 동기화 정책
 
@@ -36,7 +50,8 @@ Fleet의 Phase 8.5 mTLS 요구사항을 만족하지 못했다. 업스트림에 
   `.git` 메타데이터는 제거했다.
 - 업스트림을 다시 당겨올 때는: 새 커밋을 별도로 clone → 이 파일에 적힌 패치들을
   수동으로 재적용 → `VENDORED_COMMIT.txt` 갱신 → 회귀 테스트 재실행.
-- 자동 diff 스크립트는 아직 없다 (패치 3곳뿐이라 수동 관리가 더 안전하다고 판단).
+- 자동 diff 스크립트는 아직 없다 (패치가 `client.rs` 한 파일과 `Cargo.toml` 두 개에
+  모여 있어 수동 관리가 더 안전하다고 판단).
 
 ## 관련 파일
 
