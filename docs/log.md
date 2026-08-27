@@ -2549,3 +2549,135 @@ success로 확인한 `5d56212`와 코드에 관해 바이트 동일하며, `carg
 **검증 한계**: 승인 사실 자체는 대화 기록에만 있고 저장소 안에서 증명할 수단이 없다 — 이 로그
 항목과 정본의 "승인 범위" 문단이 그 기록이다. 규칙의 집행은 여전히 증명되지 않았다(게이트 9는
 대상 capability와 Agent 엔티티가 없어 아직 쓸 수 없다).
+
+## 2026-08-27 — feat — 리스를 잃었다 되찾는 창을 닫았다: 술어는 "지금 내가 기관인가"가 아니라 "이 결과가 내 세대의 것인가"를 물어야 한다 (`#67` 1단계)
+
+`516f85e`(`#62` 3단계)가 넣은 fence 술어는 `EXISTS(control_plane_lease WHERE cluster_id = $4
+AND epoch = $5)`다. 이것이 닫는 것은 **"쓰기를 보내는 이 인스턴스가 지금도 제어 기관인가"**다.
+그런데 같은 프로세스가 리스를 잃었다 **되찾으면** 그 술어가 성립한 채로 낡은 결과가 통과한다.
+
+epoch 5로 디스패치 → 리스가 넘어가 6이 어딘가에서 올라가고 그쪽이 이 작업을 재디스패치할 수
+있다 → 같은 프로세스가 7로 재획득. 이제 epoch 5에 보냈던 dispatch의 결과가 도착한다. 위상은
+`Dispatched`로 **맞고**, lease 술어도 epoch 7로 **성립한다** — 지금 이 인스턴스가 진짜 제어
+기관이기 때문이다. 술어가 하나뿐이면 epoch 5의 결과가 epoch 6의 진행을 덮어쓴다.
+
+**두 술어가 서로 다른 질문을 한다는 것이 이번 변경의 전부다.** 앞은 *"지금 내가 제어 기관인가"*,
+새 술어는 *"이 결과가 내 세대의 것인가"*. 앞이 참이어도 뒤가 거짓일 수 있고, 그 조합이 창이다.
+`#62` 4단계가 만든 `tasks.dispatch_control_epoch`(migration 026)가 이미 dispatch 시점의 세대를
+행에 싣고 있으므로, 새 컬럼이나 새 테이블 없이 술어 한 줄로 닫힌다.
+
+```sql
+AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
+```
+
+### 최초 설계가 틀렸다: 발동 조건은 목표 상태가 아니라 전이의 출처다
+
+들어올 때 계획은 "`Completed`/`Failed` 전이에 세대 술어를 건다"였다. `mark_failed`의 호출부
+6개를 읽고 나서 그 계획을 버렸다. 그중 셋은 **reconciler의 고아·오프라인 스윕**이고 둘은
+**dispatch 실패 확정**이다 — 전부 워커가 보고한 결과가 아니라 **현재 보유자가 지금 내리는
+결정**이다. 목표 상태로 유도하면 그것들까지 술어에 걸리고, 그러면 **epoch 5에 디스패치된
+고아를 epoch 7 보유자가 영원히 회수하지 못하는 라이브락**이 된다. 세대가 넘어간 뒤에 남는
+고아가 정확히 reconciler가 존재하는 이유인데, 그 경로를 막는 셈이다.
+
+저장소는 이 출처를 상태로부터 유도할 수 없다. 그래서 호출자가 선언한다 —
+`TransitionOrigin{WorkerOutcome, ControlDecision}`. 술어는 `WorkerOutcome`에만 걸리고,
+전체 CAS 호출 중 그 값을 넘기는 것은 `WorkerEvent::Completed`/`Failed` 핸들러 **둘뿐**이다.
+
+### 거절을 기존 결과에 접지 않은 이유
+
+`TransitionOutcome::StaleDispatchEpoch { dispatched_under }`를 새로 만들었다.
+
+- `Fenced`에 접으면 → "나는 더 이상 제어 기관이 아니다, 이후 모든 쓰기도 실패한다"로 읽힌다.
+  실제는 정반대다(기관이 맞고 다음 쓰기는 성공한다).
+- `Rejected { current }`에 접으면 → `current: Dispatched`를 보고하게 되는데, 위상은 실제로
+  **맞았다.** 없는 경합을 조사하라고 운영자를 보내는 거짓 신호다.
+
+변형을 새로 만든 대가로 컴파일러가 영향받는 match 지점 4개를 전부 지목했다. 접었다면 그 4개는
+조용히 흡수됐을 자리다. 그중 둘은 구성상 도달 불가능한데, `unreachable!()` 대신 에러 반환으로
+막았다 — 스케줄러 루프 안이라 panic이 프로세스를 죽인다.
+
+### NULL을 통과시킨 것은 026의 의미를 따른 것이다
+
+migration 026에서 NULL은 "값을 못 구했다"가 아니라 **"제어 세대라는 개념이 없는 배포"**다
+(단일 인스턴스, 또는 026 이전 행). 거절했다면 HA를 나중에 켠 배포에서 전환 이전에 디스패치된
+작업이 **전부 종료 불가**가 된다.
+
+### 기존 테스트 하나가 새 술어와 정면으로 충돌했다
+
+`terminal_transitions_do_not_overwrite_the_dispatch_epoch`(`#62` 4단계)는 나중 fence 아래에서
+워커 완료 보고를 적용시키고 `Applied`를 기대했다 — 새 술어가 정확히 거절하는 조합이다.
+지키려는 성질("종료 전이는 dispatch 세대를 덮어쓰지 않는다")은 그대로 두고 전이를 **reconciler의
+고아 회수**(`ControlDecision`)로 바꿨다. 거절되는 쪽은 새로 넣은 `#67` 절이 따로 다룬다.
+
+### 게이트
+
+- `cargo build -p fleet-cli --features "acp mtls"` → exit=0 (§3.2, `cross_client`가 subprocess로
+  쓰는 `target/debug/fleet`는 `cargo test`가 만들지 않는다)
+- `cargo test --workspace --features "acp mtls" -- --test-threads=1` → **exit=0, 69개 스위트,
+  실패 0.** `task_cas` 21건 `finished in 0.40s`, `cross_client` 14건 `0.67s` — 둘 다 `0.00s`가
+  아니므로 조용한 skip이 아니다
+- `cargo build -p fleet-cli --no-default-features` exit=0 + `cargo test --workspace
+  --no-default-features -- --test-threads=1` → **exit=0, 69개 스위트, 실패 0.** `task_cas`
+  21건 `0.51s`, `cross_client` 14건 `12.49s`. 이 잡에서도 `task_cas`가 **실제로 채점된다는
+  것을 확인했다** — 새 테스트가 한쪽 잡에서만 돌고 있었다면 게이트를 통과했다고 말할 수
+  없다. `cross_client`의 12.49s는 acp+mtls 잡의 0.67s보다 훨씬 느리지만(피처가 다른 별도
+  바이너리라 §3.3의 첫 exec 비용을 다시 지불한다) 개별 테스트 기준 `RESPONSE_TIMEOUT` 15초
+  아래이고 14건 전부 통과했다
+- §4.3 5줄: `rustc 1.98.0`(rust-toolchain.toml과 일치), `RUSTFLAGS="-D warnings"`,
+  `cargo fmt --all -- --check` exit=0, clippy acp+mtls exit=0, clippy no-default-features exit=0.
+  전부 파이프 없이 `> file 2>&1; echo "exit=$?"`로 판정을 직접 읽었다
+
+**게이트를 두 번 잘못 돌렸고, 둘 다 CI 형태와 어긋나서였다.** (1) 처음에 `cargo test -p
+fleet-store --test task_cas`를 병렬로 돌려 15건이 `NotFound`로 실패했다. 원인은 코드가 아니라
+하네스 전제다 — `pg_backend()`가 **호출될 때마다** `TRUNCATE`를 돌리므로 병렬에서는 A의
+truncate가 B의 시드를 지운다. 파일 상단 주석에만 `--test-threads=1`이 적혀 있고 코드는 이를
+강제하지 않는다. (2) 그다음 `cargo test --workspace`를 피처 없이 돌렸더니 `task_cas`가 **아예
+실행되지 않았다**. `Running tests/task_cas.rs` 줄이 없다는 것으로만 드러난다. CI는
+`--features "acp mtls" -- --test-threads=1`을 쓰므로 두 번 다 **CI보다 약한 게이트**였다.
+`agent.md` §4.3의 "게이트 목록이 CI보다 약하면 드리프트는 반드시 재발한다"의 또 다른 얼굴이다 —
+이번에는 목록이 짧아서도, 툴체인이 달라서도 아니고 **같은 명령의 인자가 달라서** 생겼다.
+
+**(2)의 원인을 처음에 틀리게 적었다가 고쳤고, 그 오진을 여기 남긴다.** 처음 쓴 설명은
+"`test-support`가 켜지지 않아 타깃이 빠졌다"였다. 근거는 몇 분 전에 `cargo test -p fleet-store
+--test task_cas`가 `E0432: unresolved import fleet_store::mem`으로 죽은 것이었는데, **그 경험을
+워크스페이스 실행에 잘못 일반화했다** — `-p`로 크레이트 하나만 고르면 피처 통합이 일어나지
+않지만, 워크스페이스 실행에서는 다른 크레이트의 dev-dependency가 `test-support`를 켜 준다.
+실측 둘이 이것을 뒤집는다: 피처 없는 `cargo test --workspace --no-run`이 `task_cas` 실행
+파일을 **만들고**, 최종 `--no-default-features` 게이트에서 이 파일이 **21건 실제로 채점됐다**
+(0.51s). 진짜 원인은 cargo의 기본 fail-fast다 — 같은 로그에서 `audit_integration`이 실패해
+그 시점에 중단됐고, fleet-store의 타깃 순서상 `task_cas`는 그 뒤라 도달하지 못했다. 실패가
+아니라 **미도달**이었다.
+
+두 진단은 증상이 같고(줄이 없다) 함의가 정반대다. "타깃이 빠졌다"면 CI도 이 테스트를 영영
+돌리지 않는다는 뜻이지만, "미도달"이면 앞선 실패만 치우면 돌아간다. 전자를 믿었다면 있지도
+않은 피처 게이트를 쫓았을 것이다. 게다가 옳은 사실은 **이 파일에 이미 적혀 있었다** —
+2026-08-25 항목이 "워크스페이스 피처 통합으로 `test-support`가 켜진다"고 기록해 두었다.
+기록이 있어도 직전 경험이 더 생생하면 그쪽을 믿는다는 것이, 이 오진이 남길 만한 이유다.
+
+`audit_integration` 6건은 병렬 실행에서 실패했다가 직렬에서 7건 전부 통과했다 — 알려진 격리
+문제(별도 작업으로 분리되어 있다)이며 이 변경과 무관하다.
+
+### 의도적으로 만들지 않은 것
+
+"채울 방법이 없는 것은 미리 만들지 않는다"를 그대로 적용했다. 표는
+[권한과 장애 전환](architecture/control-plane-authority-and-failover.md)의 "`#67` 1단계" 절에
+있다. 요지는 `worker_execution_lease`·`worker_incarnation`·ACK·self-fencing이 전부 **워커→
+오케스트레이터 제어 스트림**을 전제하는데 그 채널이 없다는 것이다 — `WorkerTransport`의
+오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부다. `#89`로 귀속시켰다.
+
+인접 결함 2건은 발견만 하고 손대지 않았다(정본에 기록). ① `WorkerEvent::Failed`가 워커가
+보고한 실패(확정)와 관측을 잃은 것(타임아웃, 연결 상실 시 `fail_all()`)을 한 종류로 뭉친다.
+② prompt 타임아웃 경로가 `cancel`을 보내지 않은 채 transport 용량 permit만 놓는다.
+
+### 검증 한계
+
+- 새 테스트 5건은 두 백엔드 모두를 돌지만, **전부 단일 프로세스가 순차로 리스를 뺏고 되찾는
+  재구성**이다. 두 오케스트레이터 프로세스가 동시에 떠 있는 상태에서 늦은 결과가 도착하는
+  라이브 실행은 하지 않았다. 즉 **술어의 정확성은 검증됐고, 이 창이 프로덕션에서 실제로
+  열린다는 관측은 없다** — 창의 존재는 코드 대조로만 확인했다.
+- **같은 epoch 안의 재디스패치는 이 술어로 구분할 수 없다.** 구분하려면 세대가 아니라
+  시도(attempt) 단위 신원이 필요한데 그 개념이 없다. 지금 그 창이 닫혀 있는 이유는 술어가
+  아니라 `#62` 4단계의 무재시도 정책이다 — **재시도 정책이 바뀌면 이 창이 다시 열린다.**
+- 라이브락(목표 상태로 유도했을 때 고아가 회수되지 않는 것)은 **실제로 발생시켜 보지 않았다.**
+  `control_decision_can_reap_a_task_dispatched_under_another_epoch`가 그 반대 조건을 고정할
+  뿐이다. 잘못된 설계를 구현해 재현한 것이 아니라 호출부 6개를 읽고 판정했다.

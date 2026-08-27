@@ -89,7 +89,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use fleet_core::{
-    FailureKind, TaskFailure, TaskFilter, TaskPhase, TaskStatus, TaskStatusFilter, WorkerStatus,
+    FailureKind, TaskFailure, TaskFilter, TaskPhase, TaskStatus, TaskStatusFilter,
+    TransitionOrigin, WorkerStatus,
 };
 
 use crate::dispatcher::{DispatchError, Dispatcher};
@@ -328,7 +329,16 @@ impl Reconciler {
                 // dead-letter로 죽이지 않는다.
                 if self
                     .dispatcher
-                    .mark_failed(task_id, &[TaskPhase::Pending], failure)
+                    .mark_failed(
+                        task_id,
+                        &[TaskPhase::Pending],
+                        failure,
+                        // reconciler의 스윕은 **현재 보유자가 지금 내리는 결정**이다.
+                        // 대상 작업을 디스패치한 세대가 지금과 달라도 회수해야 한다 —
+                        // 여기에 dispatch 세대 술어를 걸면 리스가 한 번 넘어간 뒤
+                        // 남겨진 고아를 아무도 회수하지 못하는 라이브락이 된다.
+                        TransitionOrigin::ControlDecision,
+                    )
                     .await
                 {
                     summary.dead_lettered += 1;
@@ -471,7 +481,16 @@ impl Reconciler {
                     // 오인한다.
                     if self
                         .dispatcher
-                        .mark_failed(task_id, &[TaskPhase::Dispatched], failure)
+                        .mark_failed(
+                            task_id,
+                            &[TaskPhase::Dispatched],
+                            failure,
+                            // reconciler의 스윕은 **현재 보유자가 지금 내리는 결정**이다.
+                            // 대상 작업을 디스패치한 세대가 지금과 달라도 회수해야 한다 —
+                            // 여기에 dispatch 세대 술어를 걸면 리스가 한 번 넘어간 뒤
+                            // 남겨진 고아를 아무도 회수하지 못하는 라이브락이 된다.
+                            TransitionOrigin::ControlDecision,
+                        )
                         .await
                     {
                         summary.orphaned_failed += 1;
@@ -511,7 +530,16 @@ impl Reconciler {
                     // (b)와 같은 이유로 `[Dispatched]`.
                     if self
                         .dispatcher
-                        .mark_failed(task_id, &[TaskPhase::Dispatched], failure)
+                        .mark_failed(
+                            task_id,
+                            &[TaskPhase::Dispatched],
+                            failure,
+                            // reconciler의 스윕은 **현재 보유자가 지금 내리는 결정**이다.
+                            // 대상 작업을 디스패치한 세대가 지금과 달라도 회수해야 한다 —
+                            // 여기에 dispatch 세대 술어를 걸면 리스가 한 번 넘어간 뒤
+                            // 남겨진 고아를 아무도 회수하지 못하는 라이브락이 된다.
+                            TransitionOrigin::ControlDecision,
+                        )
                         .await
                     {
                         summary.offline_worker_failed += 1;

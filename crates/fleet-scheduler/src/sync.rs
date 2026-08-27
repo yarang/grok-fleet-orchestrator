@@ -175,6 +175,7 @@ mod tests {
             _: &[fleet_core::TaskPhase],
             _: &fleet_core::TaskStatus,
             _: Option<&fleet_store::ControlFence>,
+            _: fleet_core::TransitionOrigin,
         ) -> Result<fleet_core::TransitionOutcome, fleet_store::StoreError> {
             unimplemented!()
         }

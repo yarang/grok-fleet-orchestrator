@@ -169,6 +169,7 @@ impl Store for AttemptStore {
         _expected: &[TaskPhase],
         _new: &TaskStatus,
         _fence: Option<&fleet_store::ControlFence>,
+        _origin: fleet_core::TransitionOrigin,
     ) -> Result<TransitionOutcome, StoreError> {
         unimplemented!()
     }

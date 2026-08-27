@@ -28,8 +28,8 @@ use fleet_core::{
     IssueStatus, IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project,
     ProjectFilter, ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskDeleteOutcome,
     TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus,
-    TaskStatusFilter, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
-    WorkerId, WorkerStatus,
+    TaskStatusFilter, TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter,
+    WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -462,6 +462,7 @@ impl Store for PgStore {
         expected: &[TaskPhase],
         new: &TaskStatus,
         fence: Option<&ControlFence>,
+        origin: TransitionOrigin,
     ) -> Result<TransitionOutcome, StoreError> {
         // 빈 기대 집합은 어떤 현재 상태와도 일치할 수 없다. SQL로 보내면
         // `= ANY('{}')`가 항상 거짓이라 0행이 되고, 아래 재조회가 이를
@@ -512,6 +513,23 @@ impl Store for PgStore {
                 " AND EXISTS (SELECT 1 FROM control_plane_lease \
                   WHERE cluster_id = $4 AND epoch = $5)",
             );
+            // 위 술어는 "지금 내가 제어 기관인가"를 묻는다. 이 술어는 "이 결과가
+            // 내 세대의 것인가"를 묻는다 — 다른 질문이고, 위 술어가 참이어도
+            // 이쪽이 거짓일 수 있다(로드맵 #67 1단계, 불변식 ②).
+            //
+            // 같은 `$5`를 쓰지만 비교 대상이 다르다: 위는 리스 테이블의 *현재*
+            // epoch, 여기는 이 행이 디스패치될 때 적힌 epoch다. 둘이 갈리는
+            // 경우가 정확히 닫으려는 창이다.
+            //
+            // NULL을 통과시키는 것은 026이 규정한 NULL의 의미를 따른 것이다 —
+            // "제어 세대 개념이 없는 배포"에는 물어볼 세대가 없다. 이 조건을
+            // 떼면 HA를 나중에 켠 배포에서 전환 이전 작업이 전부 종료 불가가
+            // 된다.
+            if matches!(origin, TransitionOrigin::WorkerOutcome) {
+                sql.push_str(
+                    " AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)",
+                );
+            }
         }
 
         let mut query = sqlx::query(&sql)
@@ -540,6 +558,30 @@ impl Store for PgStore {
                     .await?;
             if held != Some(f.epoch) {
                 return Ok(TransitionOutcome::Fenced);
+            }
+
+            // 리스는 내 것이 맞다. 그렇다면 `WorkerOutcome`에서 0행이 나온
+            // 원인이 하나 더 있다 — dispatch 세대 술어다. 이것도 아래의 위상
+            // 재조회보다 **먼저** 확인해야 한다. 위상은 기대와 일치했을 것이
+            // 거의 확실하므로, 순서를 바꾸면 `Rejected { current: Dispatched }`가
+            // 나와 "다른 writer가 먼저 옮겼다"는 거짓을 보고하게 된다.
+            //
+            // 이 재조회는 UPDATE와 같은 트랜잭션이 아니지만, `current` 재조회와
+            // 달리 값이 흔들리지 않는다 — `dispatch_control_epoch`는 Dispatched
+            // 전이에서 한 번 쓰이고 그 뒤로 바뀌지 않는다.
+            if matches!(origin, TransitionOrigin::WorkerOutcome) {
+                let dispatched_under: Option<Option<i64>> =
+                    sqlx::query_scalar("SELECT dispatch_control_epoch FROM tasks WHERE id = $1")
+                        .bind(id.as_uuid())
+                        .fetch_optional(&self.pool)
+                        .await?;
+                if let Some(Some(under)) = dispatched_under {
+                    if under != f.epoch {
+                        return Ok(TransitionOutcome::StaleDispatchEpoch {
+                            dispatched_under: under,
+                        });
+                    }
+                }
             }
         }
 

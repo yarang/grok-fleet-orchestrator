@@ -217,7 +217,8 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 
 ## 구현 상태와 유예
 
-위 게이트 중 오늘 실제로 구현·검증된 것은 하나뿐이며, 그것도 절반이다. 이 표는 무엇을 왜
+위 게이트 중 오늘 실제로 구현·검증된 것은 넷이고, control epoch 게이트는 Task 단위에서만
+닫혀 있다. 이 표는 무엇을 왜
 미뤘는지를 남긴다 — 미구현을 "곧 할 일"로 뭉뚱그리면 **막힌 이유**가 사라지고, 그러면 같은
 설계를 다시 검토하게 된다.
 
@@ -226,7 +227,7 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | Failed 이후 늦은 Completed 거부 | 구현됨 | — (phase CAS로 성립. `crates/fleet-store/tests/task_cas.rs`) |
 | 취소·완료 경쟁의 단일 터미널 상태 | 구현됨 | — (같은 CAS) |
 | timeout 후 동일 key 재호출의 중복 방지 | 구현됨 | — (로드맵 `#62` 2단계) |
-| **이전 control epoch 이벤트 거부** | **쓰기 절반만 구현됨** | 읽기 절반은 (a) 전역 규칙이 평범한 재시작을 깨뜨리고 (b) **어떤 이벤트도 생산자 epoch를 싣지 않는다** — 아래 참고 |
+| **이전 control epoch 이벤트 거부** | **Task 단위는 구현됨** (쓰기 `#62` 3단계 · 읽기 `#67` 1단계, 2026-08-27) | Agent process 단위는 미구현 — `worker_execution_lease` 부재. 아래 참고 |
 | non-idempotent tool effect 자동 재실행 금지 | 미구현 | effect ledger 부재, 그리고 **ledger를 채울 생산자 부재** |
 | redrive Task의 external idempotency key 승계 | **설계 미결** | 새 Task ID가 키를 바꾼다. 새 Task 경계를 넘는 앵커 필드가 없음 |
 | policy revision 변경 후 redrive의 동일 key | 미구현 | `policy_revision` 개념이 저장소·코드 어디에도 없음 |
@@ -235,7 +236,7 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | cancel/timeout이 ledger를 우회하지 않음 | 미구현(결함 존재) | ledger 부재. 현재 `cancel`은 transport 실패를 로그만 남기고 `Cancelled`를 확정한다 |
 | Task 삭제 후 동일 key 재제출 | 구현됨 | — (로드맵 `#96`) |
 
-### control epoch 게이트를 절반만 닫은 이유
+### control epoch 게이트를 절반만 닫았던 이유와, 그 절반이 닫힌 경위
 
 `epoch`는 [`021_control_plane_lease.sql`](../../../crates/fleet-store/migrations/021_control_plane_lease.sql)의 정의대로
 **최초 획득을 포함해** 획득마다 1씩 증가한다. 그래서 "`dispatched_epoch`가 현재 epoch보다 작으면
@@ -248,15 +249,35 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 위상도 없고, phase CAS가 그 경쟁을 실제로 가른다. 즉 읽기 절반이 닫으려던 구체적 위협은
 `TaskAttempt` 부재 때문이 아니라 **존재하지 않기 때문에** 미구현이다.
 
-읽기 절반이 여전히 열려 있는 이유는 다른 두 가지다. 하나는 위 문단의 재시작 문제이고, 다른
-하나는 더 근본적이다 — **오늘 어떤 이벤트도 자신을 만든 control generation을 싣지 않는다.**
+읽기 절반이 열려 있던 이유는 다른 두 가지였다. 하나는 위 문단의 재시작 문제이고, 다른
+하나는 더 근본적으로 보였다 — **어떤 이벤트도 자신을 만든 control generation을 싣지 않는다.**
 싣지 않는 값은 비교할 수 없으므로, 규칙을 정교하게 다듬는 것으로는 닫히지 않는다.
 
-기록된 `dispatch_control_epoch`(마이그레이션
-[`026`](../../../crates/fleet-store/migrations/026_task_dispatch_control_epoch.sql))의 현재 용도는
-**사후 귀속**뿐이다: lease가 넘어간 뒤에도 "이 Task를 어느 control generation이 디스패치했는가"를
-답할 수 있게 한다. `control_plane_lease`는 현재 epoch만 들고 있어 이 사실을 보존하지 못한다.
-읽는 코드는 아직 없다.
+#### 읽기 절반은 `#67` 1단계로 닫혔다 (2026-08-27)
+
+위 두 반론은 **둘 다 "세대가 이벤트에 실려야 한다"를 전제**하고 있었다. 그 전제를 버리면
+동시에 풀린다. 세대는 이벤트가 아니라 **행**에 있다 — 마이그레이션
+[`026`](../../../crates/fleet-store/migrations/026_task_dispatch_control_epoch.sql)의
+`tasks.dispatch_control_epoch`가 그것이고, 위 문단이 "사후 귀속뿐"이라고 적은 바로 그 컬럼이다.
+비교는 이벤트끼리가 아니라 **행의 세대 대 지금 내 fence**로 한다. 술어와 전체 근거는
+[권한과 장애 전환](../control-plane-authority-and-failover.md)의 "`#67` 1단계" 절이 정본이다.
+
+재시작 반론도 성립하지 않는데, **이유가 술어에 있지 않다**. transport의 in-flight 레지스트리는
+프로세스 로컬이다(`AcpTransport`의 `HashMap` + `Semaphore`, 그리고 연결이 끊기면 `fail_all()`).
+그래서 control plane이 재시작하면 재시작 이전 dispatch의 워커 이벤트는 **새 프로세스에 도착할
+경로 자체가 없고**, 그 Task는 reconciler의 고아·offline 스윕이 회수한다. 그 스윕은 현재
+보유자가 지금 내리는 결정이라 술어가 면제된다. 술어가 실제로 발동하는 경우는 **프로세스가
+살아 있는 채로 리스를 잃었다 되찾은 창** 하나뿐이다.
+
+> **이 절의 하중은 다른 크레이트가 받고 있다.** 위 안전성은 `fleet-transport`가 진행 중 dispatch를
+> 프로세스 밖에 보존하지 않는다는 사실에 기대고 있다. 프로세스 간 스트림 재개나 이벤트 재전송을
+> 나중에 넣으면, 재시작 뒤 도착한 완료가 **전부 조용히 거절되고** Task는 고아 회수까지 매달린다.
+> 그 기능을 검토한다면 `#67` 1단계의 술어를 함께 다시 봐야 한다.
+
+여전히 열려 있는 것은 **Agent process 단위**다. 워커 안에서 실행 중인 프로세스에 세대를 물릴
+`worker_execution_lease`가 없고, 같은 세대 안에서의 재디스패치도 attempt 신원이 없어 가릴 수
+없다. 후자는 무재시도 정책(`#62` 4단계)이 재디스패치 자체를 막아 지금은 닫혀 있다 — 재시도
+정책을 바꾸면 다시 열린다.
 
 구현된 쓰기 절반은 이것이다: Task 상태를 쓰는 CAS에 `EXISTS (SELECT 1 FROM control_plane_lease
 WHERE cluster_id = $4 AND epoch = $5)` 술어를 **같은 문장 안에** 실어, lease를 잃은 인스턴스의 쓰기가

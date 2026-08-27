@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use fleet_core::{
     CircuitState, FailureKind, FleetEvent, IdempotentInsert, Task, TaskFailure, TaskId, TaskPhase,
-    TaskStatus, TransitionOutcome, WorkerId,
+    TaskStatus, TransitionOrigin, TransitionOutcome, WorkerId,
 };
 use fleet_transport::{DispatchRequest, TransportError, WorkerEvent};
 use tracing::{info, warn};
@@ -166,6 +166,7 @@ impl Dispatcher {
                         &[TaskPhase::Dispatched],
                         &TaskStatus::Completed(result.clone()),
                         fence.as_ref(),
+                        TransitionOrigin::WorkerOutcome,
                     )
                     .await;
 
@@ -194,7 +195,25 @@ impl Dispatcher {
                         warn!(
                             %task_id, %worker_id,
                             "completion dropped — this instance no longer holds the control \
-                             plane lease epoch it dispatched under"
+                             plane lease epoch"
+                        );
+                    }
+                    Ok(TransitionOutcome::StaleDispatchEpoch { dispatched_under }) => {
+                        // 이 인스턴스는 제어 기관이 맞지만, 이 완료는 **다른
+                        // 세대가 디스패치한** 작업의 것이다 (로드맵 #67 1단계).
+                        //
+                        // 도달 경로: epoch N으로 디스패치 → 리스를 잃음(N+1이
+                        // 이 작업을 재디스패치할 수 있음) → 다시 획득(N+2).
+                        // 그 사이에 떠 있던 N의 dispatch가 지금 완료를 보고한
+                        // 것이고, 이 결과를 적으면 N+1이 만든 진행을 덮어쓴다.
+                        //
+                        // 위 두 arm과 달리 **이 작업 하나만** 포기한다. 리스는
+                        // 정상 보유 중이므로 뒤따르는 쓰기는 성공한다.
+                        warn!(
+                            %task_id, %worker_id, dispatched_under,
+                            current_epoch = ?fence.as_ref().map(|f| f.epoch),
+                            "completion dropped — dispatched under a different control plane \
+                             epoch; another epoch may have redispatched this task"
                         );
                     }
                     Err(e) => {
@@ -254,8 +273,17 @@ impl Dispatcher {
                     attempts: 1,
                 };
                 // Completed 경로와 같은 이유로 `Dispatched`만 기대한다.
-                self.mark_failed(task_id, &[TaskPhase::Dispatched], failure)
-                    .await;
+                //
+                // `mark_failed`의 유일한 `WorkerOutcome` 호출 지점이다. 나머지는
+                // 전부 현재 보유자가 지금 내리는 결정이고, 그쪽에 dispatch 세대
+                // 술어를 걸면 낡은 세대가 디스패치한 고아를 회수할 수 없게 된다.
+                self.mark_failed(
+                    task_id,
+                    &[TaskPhase::Dispatched],
+                    failure,
+                    TransitionOrigin::WorkerOutcome,
+                )
+                .await;
 
                 // 전이 결과와 무관하게 감소 — 위 Completed 핸들러의 주석 참조.
                 dec_running();
@@ -454,8 +482,13 @@ impl Dispatcher {
                         attempts: 0,
                     };
                     // 워커를 배정하지 못했으므로 작업은 아직 Pending이다.
-                    self.mark_failed(task_id, &[TaskPhase::Pending], failure)
-                        .await;
+                    self.mark_failed(
+                        task_id,
+                        &[TaskPhase::Pending],
+                        failure,
+                        TransitionOrigin::ControlDecision,
+                    )
+                    .await;
                 }
                 return Err(DispatchError::NoWorker(e.to_string()));
             }
@@ -502,8 +535,13 @@ impl Dispatcher {
                     attempts: 0,
                 };
                 // 브레이커가 열려 dispatch를 시도조차 못 했으므로 Pending이다.
-                self.mark_failed(task_id, &[TaskPhase::Pending], failure)
-                    .await;
+                self.mark_failed(
+                    task_id,
+                    &[TaskPhase::Pending],
+                    failure,
+                    TransitionOrigin::ControlDecision,
+                )
+                .await;
             }
             return Err(DispatchError::CircuitOpen(worker_id));
         }
@@ -525,6 +563,7 @@ impl Dispatcher {
                 &[TaskPhase::Pending],
                 &task.status,
                 self.state.control_fence().as_ref(),
+                TransitionOrigin::ControlDecision,
             )
             .await
             .map_err(|e| DispatchError::Store(e.to_string()))?
@@ -537,6 +576,17 @@ impl Dispatcher {
                 // 인스턴스가 제어 기관이 아니라는 뜻이고, `lease_allows_control`
                 // 검사를 통과한 **뒤에** fenced됐을 때만 도달한다.
                 return Err(DispatchError::ControlPlaneFenced);
+            }
+            TransitionOutcome::StaleDispatchEpoch { dispatched_under } => {
+                // 저장소는 `ControlDecision`에 dispatch 세대 술어를 걸지 않으므로
+                // 이 값을 만들 수 없다. `unreachable!()` 대신 에러로 돌려주는
+                // 이유는 이 경로가 스케줄러 루프 안이기 때문이다 — 가정이
+                // 깨졌을 때 프로세스를 죽이는 것보다 이 작업 하나를 포기하고
+                // 근거를 남기는 편이 낫다.
+                return Err(DispatchError::Store(format!(
+                    "dispatch CAS reported a stale dispatch epoch ({dispatched_under}) for a \
+                     ControlDecision transition — this indicates a bug in the store"
+                )));
             }
             TransitionOutcome::Rejected { current } => {
                 // transport로 보내기 **전에** 반환한다. 상태를 차지하지 못한
@@ -619,8 +669,13 @@ impl Dispatcher {
                 attempts: 1,
             };
             // 5단계에서 이미 Dispatched로 옮긴 뒤 transport가 실패한 경로다.
-            self.mark_failed(task_id, &[TaskPhase::Dispatched], failure)
-                .await;
+            self.mark_failed(
+                task_id,
+                &[TaskPhase::Dispatched],
+                failure,
+                TransitionOrigin::ControlDecision,
+            )
+            .await;
             // 위 `inc_running()`과 짝을 이루므로 전이 결과와 무관하게 감소.
             dec_running();
             return Err(DispatchError::Transport(e.to_string()));
@@ -690,6 +745,7 @@ impl Dispatcher {
         task_id: TaskId,
         expected: &[TaskPhase],
         failure: TaskFailure,
+        origin: TransitionOrigin,
     ) -> bool {
         let fence = self.state.control_fence();
         let outcome = self
@@ -700,6 +756,7 @@ impl Dispatcher {
                 expected,
                 &TaskStatus::Failed(failure.clone()),
                 fence.as_ref(),
+                origin,
             )
             .await;
 
@@ -725,6 +782,22 @@ impl Dispatcher {
                     %task_id,
                     "failure not recorded — this instance no longer holds the control plane \
                      lease epoch"
+                );
+                false
+            }
+            Ok(TransitionOutcome::StaleDispatchEpoch { dispatched_under }) => {
+                // `WorkerOutcome`으로 호출된 경우에만 도달한다 — 즉 워커가 보고한
+                // 실패이고, 그 dispatch는 다른 세대의 것이다. Completed 쪽과 같은
+                // 이유로 이 보고 하나만 버린다.
+                //
+                // `ControlDecision` 호출자(reconciler의 스윕, dispatch 실패 확정)는
+                // 저장소가 술어를 걸지 않으므로 여기 오지 않는다. 온다면 저장소
+                // 버그이지만, 동작은 같아도 무해하다 — 어느 쪽이든 아무것도
+                // 쓰이지 않았고 `false`가 그 사실을 정확히 보고한다.
+                warn!(
+                    %task_id, dispatched_under,
+                    "failure not recorded — reported for a dispatch made under a different \
+                     control plane epoch"
                 );
                 false
             }
@@ -809,6 +882,7 @@ impl Dispatcher {
                 &[TaskPhase::Pending, TaskPhase::Dispatched],
                 &cancelled,
                 self.state.control_fence().as_ref(),
+                TransitionOrigin::ControlDecision,
             )
             .await
             .map_err(|e| CancelError::Store(e.to_string()))?
@@ -824,6 +898,15 @@ impl Dispatcher {
                 // effect rollback이 아니고(정본 "취소·timeout·redrive"),
                 // 되돌릴 대상을 이 저장소가 아직 기록하지 않는다.
                 return Err(CancelError::ControlPlaneFenced);
+            }
+            TransitionOutcome::StaleDispatchEpoch { dispatched_under } => {
+                // dispatch CAS 쪽과 같은 이유로 도달 불가이고, 같은 이유로
+                // panic 대신 에러다. 취소는 operator가 부르는 경로이므로
+                // 더더욱 프로세스를 죽여선 안 된다.
+                return Err(CancelError::Store(format!(
+                    "cancel CAS reported a stale dispatch epoch ({dispatched_under}) for a \
+                     ControlDecision transition — this indicates a bug in the store"
+                )));
             }
             TransitionOutcome::Rejected { current } => {
                 // 검사 이후에 종료 상태에 도달한 것이므로, 처음부터 종료

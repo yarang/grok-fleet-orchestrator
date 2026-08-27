@@ -59,7 +59,7 @@ pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
     FailureKind, IdempotentInsert, Labels, Task, TaskDeleteOutcome, TaskFailure, TaskFilter,
     TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest, TaskResult, TaskStatus,
-    TaskStatusFilter, TokenUsage, TransitionOutcome,
+    TaskStatusFilter, TokenUsage, TransitionOrigin, TransitionOutcome,
 };
 pub use worker::{
     mask_server_key, split_server_key, CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat,

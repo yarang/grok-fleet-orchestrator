@@ -36,7 +36,7 @@ use fleet_api::{
 };
 use fleet_core::{
     CircuitBreakerConfig, PermissionKind, TaskFilter, TaskId, TaskPhase, TaskStatus,
-    TaskStatusFilter, TransitionOutcome, WorkerFilter, WorkerStatus,
+    TaskStatusFilter, TransitionOrigin, TransitionOutcome, WorkerFilter, WorkerStatus,
 };
 // CLI 하위 명령 enum (main.rs).
 use crate::{AdminTokensAction, EventsAction, TasksAction, WorkerCredentialAction, WorkersAction};
@@ -1478,6 +1478,10 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
             &[TaskPhase::Pending, TaskPhase::Dispatched],
             &new_status,
             None,
+            // fence를 넘기지 않으므로 이 값은 저장소에서 쓰이지 않는다. 그래도
+            // `ControlDecision`이 의미상 맞다 — operator가 지금 내리는 결정이지
+            // 워커가 보고한 결과가 아니다.
+            TransitionOrigin::ControlDecision,
         )
         .await
         .context("failed to update task status")?
@@ -1490,12 +1494,18 @@ async fn run_tasks_cancel(id_str: &str, reason: Option<String>) -> Result<()> {
             "task {id} reached a terminal state ({}) while the cancel was in flight",
             current.as_str()
         )),
-        // fence를 넘기지 않았으므로 저장소가 이 값을 만들 수 없다. panic 대신
-        // 에러로 돌려주는 이유는 operator 도구이기 때문이다 — 이 가정이 언젠가
-        // 깨지더라도 취소 명령이 스택 트레이스를 뱉으며 죽는 것보다 낫다.
+        // 아래 둘은 fence를 넘기지 않았으므로 저장소가 만들 수 없는 값이다.
+        // panic 대신 에러로 돌려주는 이유는 operator 도구이기 때문이다 — 이
+        // 가정이 언젠가 깨지더라도 취소 명령이 스택 트레이스를 뱉으며 죽는
+        // 것보다 낫다.
         TransitionOutcome::Fenced => Err(anyhow!(
             "task {id} cancel was fenced by a control plane epoch, but this command \
              does not hold one — this indicates a bug in the store implementation"
+        )),
+        TransitionOutcome::StaleDispatchEpoch { dispatched_under } => Err(anyhow!(
+            "task {id} cancel was rejected as a stale dispatch epoch ({dispatched_under}), \
+             but this command does not hold a control plane epoch — this indicates a bug \
+             in the store implementation"
         )),
     }
 }

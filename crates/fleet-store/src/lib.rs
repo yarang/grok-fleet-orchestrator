@@ -44,7 +44,8 @@ use fleet_core::{
     IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
     PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
     Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskPhase,
-    TaskStatus, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    TaskStatus, TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter,
+    WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -187,15 +188,39 @@ pub trait Store: Send + Sync {
     ///
     /// **fence는 `expected`를 대체하지 않는다.** 둘은 서로 다른 경합을 막는다:
     /// `expected`는 같은 Task를 두고 경쟁하는 writer들을, `fence`는 제어권을
-    /// 잃은 인스턴스 전체를 막는다. 늦게 도착한 이벤트가 **어느 attempt의
-    /// 것인지**는 둘 다 가르지 못한다 — 그건 `attempt_id`/generation의 몫이고
-    /// 이 저장소에는 아직 없다(설계 정본의 구현 상태 표 참고).
+    /// 잃은 인스턴스 전체를 막는다.
+    ///
+    /// `origin`이 세 번째 경합을 막는다 (로드맵 #67 1단계, 불변식 ②).
+    /// [`TransitionOrigin::WorkerOutcome`]이면 `fence`가 있을 때 dispatch 세대
+    /// 술어가 하나 더 AND로 더해진다 — 작업을 디스패치한 세대
+    /// (`tasks.dispatch_control_epoch`)와 `fence.epoch`가 같아야 한다.
+    /// 이것이 막는 것은 **한 프로세스 안에서** 리스를 잃었다가 되찾는 창이다:
+    /// epoch 5로 디스패치 → 리스를 다른 인스턴스에 뺏김(epoch 6, 그쪽이 작업을
+    /// 재디스패치) → 다시 획득(epoch 7). 이때 epoch 5에 보낸 dispatch의 완료가
+    /// 도착하면 위상은 `Dispatched`로 맞고 fence 술어도 epoch 7로 성립하므로,
+    /// 이 술어가 없으면 **epoch 6이 만든 진행을 epoch 5의 결과가 덮어쓴다**.
+    ///
+    /// [`TransitionOrigin::ControlDecision`]에는 걸지 않는다. 그쪽은 현재
+    /// 보유자가 지금 내리는 결정이고, 걸면 낡은 세대가 디스패치한 고아를
+    /// 회수할 수 없게 된다 — 이유는 `TransitionOrigin`의 주석에 있다.
+    ///
+    /// `dispatch_control_epoch`가 NULL이면 술어는 통과시킨다. 026 마이그레이션이
+    /// 규정한 대로 NULL은 "값을 못 구했다"가 아니라 **"제어 세대라는 개념이 없는
+    /// 배포"**(HA 리스를 쓰지 않는 단일 인스턴스, 또는 026 이전 행)이므로,
+    /// 물어볼 세대 자체가 없다. 이 값을 거절로 읽으면 HA를 나중에 켠 배포에서
+    /// 전환 이전에 디스패치된 작업이 전부 종료 불가가 된다.
+    ///
+    /// 여전히 남는 것은 **같은 세대 안의 재디스패치**를 가르는 일이다 — 그건
+    /// attempt/generation의 몫이고 이 저장소에는 없다. `#62` 4단계가 `tasks`에
+    /// 컬럼 하나만 남긴 근거(재시도 없음 → Task당 시도 최대 하나)가 지금도
+    /// 유효하므로, 그 창은 재시도 정책이 바뀌기 전에는 열리지 않는다.
     async fn compare_and_set_task_status(
         &self,
         id: TaskId,
         expected: &[TaskPhase],
         new: &TaskStatus,
         fence: Option<&ControlFence>,
+        origin: TransitionOrigin,
     ) -> Result<TransitionOutcome, StoreError>;
 
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).

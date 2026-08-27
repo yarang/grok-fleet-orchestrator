@@ -114,7 +114,7 @@ stateDiagram-v2
 
 ## 구현 상태와 유예
 
-> 2026-08-26 기준. 이 절은 계약(위)과 오늘 저장소에 실제로 있는 코드 사이의 거리를
+> 2026-08-27 기준. 이 절은 계약(위)과 오늘 저장소에 실제로 있는 코드 사이의 거리를
 > 남긴다. 계약 문장을 약화하지 않는다 — 어디까지 강제되고 어디부터는 강제되지 않는지를
 > 밝혀, 강제되지 않는 구간이 "이미 지켜지는 것"으로 오해되지 않게 하는 것이 목적이다.
 
@@ -154,7 +154,7 @@ control_plane_lease.expires_at < NOW()`). 이 술어는 lease가 **왜** 만료�
 | --- | --- | --- |
 | 1. 동시에 둘이 lease를 획득하지 못함 | **닫힘** | `crates/fleet-scheduler/src/lease.rs`의 lease 테스트 + 2026-08-26 라이브 2-프로세스 실행(아래) |
 | 2. lease 상실 인스턴스의 신규 dispatch fail-closed | **부분** | `FleetState::lease_allows_control()`이 bool로 거절한다. 갱신 실패를 **관측한 뒤**의 제어 동작만 막으며, 관측 직전 이미 DB로 떠난 쓰기는 막지 못한다 |
-| 3. 이전 epoch completion이 최신 상태를 덮지 못함 | **부분** | **쓰기 절반은 닫혔다** — `PgStore::transition_task_status`가 epoch 술어를 `UPDATE`와 같은 문장에 넣는다(커밋 `516f85e`). **이벤트 절반은 열려 있다** — 아래 "epoch 강제" 참고. `#62` 검증 게이트 4("이전 control epoch 이벤트가 거부되는 테스트")와 같은 항목이다 |
+| 3. 이전 epoch completion이 최신 상태를 덮지 못함 | **부분** | **Task 단위는 닫혔다** — 쓰기 절반은 `516f85e`(`#62` 3단계), 이벤트 절반은 `#67` 1단계(2026-08-27)가 닫았다. 아래 "epoch 강제" 참고. **Agent process 단위는 열려 있다** — `worker_execution_lease`가 없어 워커 안에서 실행 중인 프로세스에는 세대를 물릴 수 없다. [실행 일관성](tasks/execution-consistency.md#구현-상태와-유예)의 "이전 control epoch 이벤트 거부" 게이트와 같은 항목이며, 양쪽 상태를 함께 갱신한다 |
 | 4. Primary 종료 뒤 수동 승격 · Worker 재연결 · pending reconciliation E2E | **미착수** | 라이브 실행은 lease 인수인계만 관찰했다. 수동 승격 절차, Worker 재연결, reconciliation은 어느 것도 실행하지 않았다 |
 | 5. schema/binary 비호환 Standby 기동 거부 | **부분** | **schema 절반은 닫혔다** — 아래 "기동 호환성 게이트" 참고. **binary 버전 검사는 미착수** — 버전을 DB에 쓰는 생산자가 없다 |
 | 6. partition 중 Worker self-fencing과 stale process cleanup E2E | **미착수** | Worker self-fencing 미구현 |
@@ -173,12 +173,84 @@ lease 테이블에는 `epoch` 컬럼이 있고 승격마다 증가한다. 그 �
 (이전 판의 "epoch를 읽어서 쓰기를 거르는 코드는 저장소에 하나도 없다"는 문장과 그 근거로
 든 `crates/fleet-api/src/state.rs` 경로는 둘 다 낡았다. 후자는 존재하지 않는 파일이다.)
 
-**②는 여전히 열려 있다.** ②는 dispatch 시점의 epoch를 실행 단위에 바인딩하는 것이므로
-`worker_execution_lease`의 `fencing_token`(위 "Agent execution lease와 fencing" 절)과 같은
-구조를 요구한다. 그 엔티티는 로드맵 `#67`의 범위이고 아직 없다. 바인딩할 대상이 없는
-상태에서 epoch 술어만 먼저 넣으면 항상 참인 술어가 되어 게이트를 통과한 것처럼 보이는
-죽은 검사가 된다. 그래서 **epoch 강제 전체를 `#67`에 귀속시키고 여기서는 착수하지
-않았다.**
+**②는 `#67` 1단계(2026-08-27)로 Task 단위에서 닫혔고, Agent process 단위에서는 열려 있다.**
+
+이전 판은 ②를 통째로 미루면서 그 근거로 "바인딩할 대상이 없다"를 들었다. 그 근거는
+지금 **절반만** 참이다 — `#62` 4단계가 `tasks.dispatch_control_epoch`(migration 026)를
+만들면서 dispatch 시점의 epoch를 싣고 다니는 **Task 단위의 대상은 생겼기 때문이다.**
+그래서 `#67` 1단계는 그 컬럼 위에서 ②를 Task 단위로 닫았고, 원래 근거는
+`worker_execution_lease`가 필요한 Agent process 단위에만 남는다.
+
+아래 "`#67` 1단계"가 무엇을 어떻게 닫았고 무엇이 남았는지를 적는다.
+
+### `#67` 1단계 — dispatch 세대 술어 (2026-08-27)
+
+**닫은 창.** 한 프로세스가 리스를 잃었다 되찾는 동안, 잃기 **전에** 보낸 dispatch의 결과가
+되찾은 **뒤에** 도착할 수 있다. epoch 5로 디스패치 → 6이 다른 곳에서 올라가며 그 작업을
+재디스패치할 수 있고 → 같은 프로세스가 7로 재획득. 이때 epoch 5의 결과가 도착하면 위상은
+`Dispatched`로 맞고, `516f85e`가 넣은 lease 술어(`EXISTS(control_plane_lease WHERE
+cluster_id = $4 AND epoch = $5)`)도 **성립한다** — 지금 이 인스턴스가 진짜 제어 기관이기
+때문이다. 술어가 하나뿐이면 epoch 5의 낡은 결과가 epoch 6의 진행을 덮어쓴다.
+
+두 술어가 묻는 질문이 다르다는 것이 요점이다. lease 술어는 *"지금 내가 제어 기관인가"*를,
+새 술어는 *"이 결과가 내 세대의 것인가"*를 묻는다. 앞이 참이어도 뒤가 거짓일 수 있고,
+정확히 그 조합이 닫으려는 창이다.
+
+```sql
+AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
+```
+
+**술어의 발동 조건은 목표 상태가 아니라 전이의 출처다.** `TransitionOrigin`
+(`WorkerOutcome` | `ControlDecision`)을 호출자가 선언하고, 술어는 `WorkerOutcome`에만
+걸린다. 목표 상태(`Completed`/`Failed`)로 유도하려는 설계는 검토 중 무너졌다 — `Failed`는
+워커가 보고한 실패이기도 하지만 reconciler가 고아를 회수하며 **현재 보유자가 지금 내리는
+결정**이기도 하다. 후자까지 술어에 걸면 epoch 5에 디스패치된 고아를 epoch 7 보유자가
+영원히 회수하지 못하는 라이브락이 된다. 저장소는 이 출처를 상태로부터 유도할 수 없으므로
+호출자가 선언한다. 6개 `mark_failed` 호출 중 `WorkerEvent::Failed` 핸들러 **하나**만
+`WorkerOutcome`이고, reconciler 스윕 3건과 dispatch 실패 확정 2건은 `ControlDecision`이다.
+
+**거절은 `StaleDispatchEpoch { dispatched_under }`라는 별도 결과로 보고한다.** 기존
+`Fenced`에 접으면 운영자는 "나는 더 이상 제어 기관이 아니다 — 이후 모든 쓰기도 실패한다"로
+읽는데, 실제는 정반대다(제어 기관이 맞고 다음 쓰기는 성공한다). `Rejected { current }`에
+접으면 `current: Dispatched`를 보고하게 되는데 위상은 실제로 **맞았으므로**, 없는 경합을
+조사하러 보내는 거짓 신호다. 변형을 새로 만든 덕분에 컴파일러가 영향받는 4개 match 지점을
+전부 지목했다 — 접었다면 조용히 흡수됐을 자리다.
+
+**NULL을 통과시키는 것은 migration 026이 규정한 의미를 따른 것이다.** NULL은 "값을 못
+구했다"가 아니라 "제어 세대라는 개념이 없는 배포"다(단일 인스턴스, 또는 026 이전 행).
+거절하면 HA를 나중에 켠 배포에서 전환 이전에 디스패치된 작업이 전부 종료 불가가 된다.
+
+**남은 창과 그것을 지금 막고 있는 것.** 같은 epoch 안에서의 재디스패치는 이 술어로 구분할
+수 없다 — 구분하려면 세대가 아니라 **시도(attempt) 단위의 신원**이 필요한데 그 개념이
+저장소에 없다. 지금 그 창이 닫혀 있는 이유는 술어가 아니라 정책이다: `#62` 4단계의 무재시도
+결정으로 Task당 시도는 최대 하나다. **재시도 정책이 바뀌면 이 창이 다시 열린다.**
+
+**의도적으로 만들지 않은 것.** "채울 방법이 없는 것은 미리 만들지 않는다"에 따라, 생산자가
+없는 구조는 이번에 만들지 않았다.
+
+| 미룬 것 | 만들지 않은 이유 | 귀속 |
+| --- | --- | --- |
+| `worker_execution_lease`의 CAS slot claim·`fencing_token` | Agent 엔티티가 없어 lease의 주체가 없다 | `#67` 후속 |
+| `worker_incarnation`과 Agent command ACK | 워커→오케스트레이터 **제어 스트림이 없다** — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널 자체가 없다 | `#89` |
+| Agent self-fencing | 위와 같은 이유. 워커가 자기 세대를 확인할 입력이 없다 | `#89` |
+| `agent_id`를 실은 dispatch | Agent/AgentTemplate 엔티티 미존재 | `#49` |
+| WarmIdle(=`task_id` NULL) lease 행 | 그런 행을 만드는 코드 경로가 없다 — 만들면 영원히 비는 상태 | 생산자 생김과 동시에 |
+| `OutcomeUnknown` 결과 종류 | 아래 참고 — 설계가 아직 정해지지 않았다 | `#67` 후속 |
+
+**이번에 손대지 않은 인접 결함 2건**(발견했으나 이 단계의 범위 밖이라 기록만 남긴다).
+
+1. `WorkerEvent::Failed`가 **워커가 보고한 실패**(확정)와 **관측을 잃은 것**(`session/new`
+   타임아웃, `session/prompt` 타임아웃, 연결 상실 시의 `fail_all()`)을 한 종류로 뭉친다.
+   후자는 워커에서 작업이 아직 돌고 있을 수 있으므로 `Failed` 확정이 사실과 다를 수 있다.
+2. prompt 타임아웃 경로가 `cancel`을 보내지 않은 채 transport의 용량 permit(`_permit`)만
+   놓는다. DB의 `active_tasks`는 heartbeat로 보고될 뿐이라, 어느 쪽에도 전역으로 점유된
+   슬롯이 남지 않는다.
+
+**검증 한계.** 위 시나리오는 `crates/fleet-store/tests/task_cas.rs`의 5건이 **두 백엔드
+모두에서** 커버하지만, 전부 **단일 프로세스가 순차로 리스를 뺏고 되찾는 방식**의 재구성이다.
+실제로 두 오케스트레이터 프로세스가 동시에 떠 있는 상태에서 늦은 결과가 도착하는 라이브
+실행은 하지 않았다. 즉 **술어의 정확성은 검증됐고, 이 창이 프로덕션에서 실제로 열린다는
+관측은 아직 없다** — 창의 존재는 코드 대조로만 확인했다.
 
 ### 기동 호환성 게이트(게이트 5)
 

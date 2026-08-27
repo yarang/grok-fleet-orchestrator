@@ -33,7 +33,8 @@ use fleet_core::{
     IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter,
     ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome,
     TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter,
-    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerId,
 };
 
 use crate::{
@@ -222,6 +223,7 @@ impl Store for MemStore {
         expected: &[TaskPhase],
         new: &TaskStatus,
         fence: Option<&ControlFence>,
+        origin: TransitionOrigin,
     ) -> Result<TransitionOutcome, StoreError> {
         debug_assert!(
             !expected.is_empty(),
@@ -256,6 +258,22 @@ impl Store for MemStore {
         let Some(task) = tasks.get_mut(&id) else {
             return Err(StoreError::NotFound);
         };
+
+        // dispatch 세대 술어 — Postgres의 `AND (dispatch_control_epoch IS NULL
+        // OR dispatch_control_epoch = $5)`에 대응한다. 위상 검사보다 **먼저**
+        // 두는 것이 그쪽 구현과 같은 순서다: Postgres는 두 술어가 한 문장에
+        // 있어 0행만 보고, 진단은 lease → dispatch epoch → 위상 순으로 한다.
+        // 여기서 순서를 뒤집으면 둘 다 어긋난 경우에 두 백엔드가 다른 값을
+        // 돌려주고, `both_backends!` 테스트가 그걸 잡아낸다.
+        if let (Some(f), TransitionOrigin::WorkerOutcome) = (fence, origin) {
+            if let Some(under) = task.dispatch_control_epoch {
+                if under != f.epoch {
+                    return Ok(TransitionOutcome::StaleDispatchEpoch {
+                        dispatched_under: under,
+                    });
+                }
+            }
+        }
 
         let current = task.status.phase();
         if !expected.contains(&current) {
