@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -3190,3 +3190,79 @@ CI의 판정이 아니다."
   `#49`의 실측이 보장하지만, 이번 78이라는 **숫자**에 동시 실행이 얼마나 기여했는지는 알 수 없다.
 - **나머지 14개 파일의 TRUNCATE 관례는 그대로다.** `#49`가 `agents.rs`만 UUID 격리로 바꾸며
   남긴 유예이고, 이 커밋도 손대지 않는다.
+
+---
+
+## 2026-08-28 — feat/test — 세 파일이 각자 옳았는데 합치니 죽은 워커가 영구 dispatch 대상이었다 (`#70` 게이트 1·5)
+
+`#70`의 구현 게이트 7개 중 **5개는 시험을 작성할 수조차 없다** — Reconciler, `worker_execution_lease`,
+effect ledger, `CancelUnconfirmed`가 코드에 아예 없다(`EffectLedger|PartiallyApplied|OutcomeUnknown|
+CancelUnconfirmed` grep 결과는 `lease.rs:44`의 주석 한 줄뿐). 그래서 이번에는 하부 구조에 막히지
+않은 두 개만 다뤘고, 무엇이 무엇에 막혀 있는지를 설계 정본의 "구현 상태" 표로 남겼다.
+
+### 게이트 5 — 결함은 어느 파일에도 없고 세 파일 사이에 있었다
+
+- `crates/fleet-api/src/handlers.rs`의 `build_worker`는 `liveness_mode`와 무관하게
+  `WorkerStatus::Online`을 기록한다. (등록됐으니 Online — 타당하다.)
+- `crates/fleet-scheduler/src/health.rs`는 `on_demand` 워커를 **의도적으로 강등하지 않는다**.
+  heartbeat을 보내지 않는 모드이니 누락으로 죽었다고 판단할 수 없다. (타당하다.)
+- `crates/fleet-scheduler/src/selector.rs`에는 liveness 조건이 **하나도 없었다**
+  (`grep -n liveness` 0건). Online이면 후보다. (타당하다.)
+
+셋을 합치면 "생존 여부를 확인할 수단이 없는 워커가 한 번 등록되면 영구히 dispatch 대상"이 된다.
+`worker.rs`의 `WorkerLivenessMode::OnDemand` 문서도, `handlers.rs`가 렌더링하는 worker.toml의
+"아직 프로덕션에서 쓰지 말 것" 경고도 이 배정이 범위 밖이라고 **적어 왔지만**, 강제하는 코드는
+없었다. 문서에 적힌 제약과 코드가 집행하는 제약이 갈라져 있었다.
+
+`select()` 1.5단계에 필터를 넣고 `SelectionError::AllUnprobed`를 추가했다. 세 가지 판단:
+
+- **라벨/모델 필터보다 먼저 건다.** liveness는 "이 작업에 적합한가" 이전에 "애초에 배정 가능한
+  대상인가"의 문제다. 뒤로 미루면 on_demand 워커가 라벨도 안 맞을 때 운영자에게 "라벨 불일치"로
+  보고된다 — 원인이 잘못 보고되는 것을 시험으로 고정했다.
+- **`FailureKind`를 늘리지 않았다.** dispatcher의 기존 `_ => WorkerUnavailable` 기본 arm에 그대로
+  떨어지므로 `fleet_tasks_failed_total{kind}`의 라벨 집합이 변하지 않는다. 새 variant를 만들면
+  그 자체가 metric 표면 변경이 되고, 게이트 1에서 방금 고정한 허용 목록을 같은 커밋에서 넓히게
+  된다.
+- **`Unchecked` 워커 상태는 만들지 않았다.** 설계 문서가 그 이름을 쓰지만, ACP probe(`#67` 의존)가
+  없는 한 그 상태에서 빠져나올 방법이 없다 — 도달했다가 영영 못 나오는 상태다. 상태를 늘리는
+  대신 이미 있는 `liveness_mode`를 판단 근거로 썼다. 이것은 영구 규칙이 아니라 **상태 기계의 안전한
+  절반**이고, probe가 들어오면 "probe 성공한 워커는 후보에 포함"으로 바뀐다.
+
+### 게이트 1 — 지키는 코드는 있었고, 지키게 하는 것이 없었다
+
+`/metrics`가 노출하는 라벨은 전부 정적이라(`status`/`phase`/`kind`/`type`/`le`) 금지 항목을 위반한
+적이 없다. 위반할 **기회**가 없었을 뿐, 위반을 막는 것은 없었다. 두 겹으로 고정했다.
+
+1. fixture(worker/task UUID, prompt, 리포지터리 URL, `?server-key=` secret, `created_by`)가 본문에
+   나타나지 않는지.
+2. 렌더링된 **모든 라벨 이름과 값이 유한 허용 목록 안**인지.
+
+두 번째가 왜 따로 필요한지를 변이로 확인했다. `HttpMetrics::render`에 `path="/v1/healthz"` 라벨을
+심자 — fixture의 어떤 값과도 겹치지 않으므로 — **1번은 통과하고 2번만 실패했다**. 부분문자열
+검사는 "지금 저장소에 있는 값"만 볼 수 있고, 나중에 추가될 라벨은 원리적으로 못 본다.
+
+이 변이가 `HttpMetrics::render` 안에 있었다는 것이 두 번째 발견이다. `metrics_handler`는
+`metrics_text(store)`의 결과에 `http_metrics.render()`를 이어 붙여 응답을 만드는데, 시험이
+`metrics_text`만 불렀다면 **저 변이를 한 건도 잡지 못했다**. 하필 그 절반이 고카디널리티 라벨
+(`path="/api/tasks/<uuid>"` 같은)이 붙을 가능성이 가장 높은 자리다. 조립 부분을
+`metrics_body(store, http)`로 추출해 핸들러와 시험이 **같은 함수**를 부르게 했다 — 시험이 조립
+방식을 따라 적으면 언젠가 갈라진다.
+
+### 통과하는 테스트는 아직 판정이 아니다
+
+네 개의 새 selector 시험은 필터를 지우면 4건 전부 깨지고, 두 개의 metric 시험은 위 두 변이에
+각각 반응한다(변이 1은 둘 다, 변이 2는 허용 목록만). 이 저장소가 §3.2와 §4.3에서 반복해 적어 온
+것과 같은 형태다 — 초록은 그 자체로 무엇도 증명하지 않고, **깨뜨려 봐야 판정이 된다.**
+
+### 검증 한계
+
+- **게이트 5의 E2E는 없다.** selector 단위 시험(mock Store)까지이고, 실제 on_demand 워커를 등록해
+  dispatch가 거절되는 것을 실제 Postgres·HTTP로 확인하지는 않았다.
+- **게이트 1은 HTTP로 스크레이프하지 않았다.** 핸들러가 부르는 것과 같은 `metrics_body`를 직접
+  호출한다. 인증·라우팅 계층이 본문을 바꾸지 않는다는 것은 코드로 확인했을 뿐 실측이 아니다.
+- **500 경로는 손대지 않았다.** `metrics_handler`의 오류 응답은 `format!("metrics error: {e}")`인데,
+  `MetricsError`가 감싸는 sqlx 오류에는 쿼리문이 들어갈 수 있다. 게이트 1의 표는 정상 본문의
+  노출을 다루므로 이번 범위에 넣지 않았고, 별도로 판단할 문제로 남긴다.
+- **게이트 5는 절반이다.** "probe 성공 후 dispatch 허용"은 ACP probe가 없어 미구현이고, 그동안
+  `on_demand` 워커는 등록은 되지만 어떤 작업도 받지 못한다. 이 모드를 실제로 쓰려던 운영자에게는
+  기능 후퇴로 보일 수 있다 — 다만 그 전에도 그 워커에 간 작업은 생존 확인 없이 보낸 것이었다.

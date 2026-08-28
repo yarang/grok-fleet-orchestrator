@@ -35,20 +35,15 @@ use crate::app::AppState;
 /// CF-Access-Jwt-Assertion 검증을 받습니다. 외부망 노출 시 `--cf-audience`
 /// 설정을 권장합니다.
 pub async fn metrics_handler(state: Arc<AppState>) -> Response {
-    match metrics_text(state.store.as_ref()).await {
-        Ok(mut body) => {
-            // HTTP 지연은 스토어에서 계산할 수 없으므로 인프로세스 누산기에서 붙인다.
-            body.push('\n');
-            state.http_metrics.render(&mut body);
-            (
-                [(
-                    axum::http::header::CONTENT_TYPE,
-                    "text/plain; version=0.0.4",
-                )],
-                body,
-            )
-                .into_response()
-        }
+    match metrics_body(state.store.as_ref(), &state.http_metrics).await {
+        Ok(body) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            )],
+            body,
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!(error = ?e, "metrics scrape failed");
             (
@@ -58,6 +53,22 @@ pub async fn metrics_handler(state: Arc<AppState>) -> Response {
                 .into_response()
         }
     }
+}
+
+/// `/metrics` 응답 본문 전체 — store 파생 메트릭 + 인프로세스 HTTP 히스토그램.
+///
+/// [`metrics_handler`]에서 인라인으로 조립하던 것을 함수로 뽑았다. 노출 금지
+/// 검증(로드맵 #70 게이트 1)이 **응답 본문 전체**에 걸려야 하기 때문이다 —
+/// `metrics_text`만 검사하면 `HttpMetrics::render`가 붙이는 절반이 사각지대로
+/// 남고, 하필 그쪽이 고카디널리티 라벨(`path="/api/tasks/<uuid>"` 같은)이
+/// 추가될 가능성이 가장 높은 자리다. 테스트가 핸들러와 같은 함수를 부르게
+/// 해서 조립 방식을 테스트가 따라 적는(그래서 갈라질 수 있는) 상황을 없앤다.
+async fn metrics_body(store: &dyn Store, http: &HttpMetrics) -> Result<String, MetricsError> {
+    let mut body = metrics_text(store).await?;
+    // HTTP 지연은 스토어에서 계산할 수 없으므로 인프로세스 누산기에서 붙인다.
+    body.push('\n');
+    http.render(&mut body);
+    Ok(body)
 }
 
 /// Prometheus 텍스트 포맷을 생성.
@@ -727,6 +738,230 @@ mod tests {
 
         let out = metrics_text(store.as_ref()).await.unwrap();
         assert!(out.contains("fleet_task_tokens_total{type=\"total\"} 0"));
+    }
+
+    // ── 로드맵 #70 게이트 1: metric 노출 금지 항목 ──────────────────────
+    //
+    // `docs/architecture/observability-and-reconciliation.md`의 "Metric·event·
+    // audit 규칙" 표는 metric에 넣으면 안 되는 것을 열거한다: worker/agent/task
+    // UUID label, prompt, repository URL, 사용자 입력, credential ID, secret
+    // fingerprint, token, Project name/ID label. 상관관계 ID는 조회용 structured
+    // audit/event record에만 두고 metric label에는 두지 않는다는 분업이다.
+    //
+    // 이 분업은 지금까지 코드에 우연히만 성립해 있었다 — 모든 라벨이 정적이라
+    // 위반할 기회가 없었을 뿐, 위반을 막는 것은 없었다.
+
+    /// metric 라벨 **이름**의 허용 목록.
+    ///
+    /// 새 라벨을 추가하는 변경은 여기를 함께 고쳐야 통과한다. 그 한 줄이
+    /// "이 라벨의 값 집합이 유한한가"를 묻는 자리다.
+    const ALLOWED_LABEL_NAMES: &[&str] = &["status", "phase", "kind", "type", "le"];
+
+    /// 라벨 **값**의 허용 목록. `le`는 버킷 경계 상수에서만 나오는 수치라
+    /// 별도로 다룬다(아래 `is_bucket_bound`).
+    fn allowed_label_values(name: &str) -> Option<&'static [&'static str]> {
+        match name {
+            "status" => Some(&[
+                "online",
+                "degraded",
+                "offline",
+                "circuit_open",
+                "draining",
+                "total",
+            ]),
+            "phase" => Some(&[
+                "pending",
+                "dispatched",
+                "completed",
+                "failed",
+                "cancelled",
+                "total",
+            ]),
+            "kind" => Some(&[
+                "worker_unavailable",
+                "worker_error",
+                "circuit_open",
+                "credential_missing",
+                "invalid_request",
+            ]),
+            "type" => Some(&["input", "output", "cache_read", "total"]),
+            _ => None,
+        }
+    }
+
+    fn is_bucket_bound(v: &str) -> bool {
+        v == "+Inf" || v.parse::<f64>().is_ok()
+    }
+
+    /// 본문의 모든 `name{k="v",...}` 라인에서 (라벨명, 라벨값)을 뽑는다.
+    /// `#` 주석과 빈 줄은 건너뛴다.
+    fn extract_labels(body: &str) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some(open) = line.find('{') else { continue };
+            let Some(close) = line.rfind('}') else {
+                continue;
+            };
+            for pair in line[open + 1..close].split(',') {
+                let Some((k, v)) = pair.split_once('=') else {
+                    continue;
+                };
+                found.push((k.trim().to_string(), v.trim().trim_matches('"').to_string()));
+            }
+        }
+        found
+    }
+
+    /// 노출 금지 항목이 실제로 저장소에 들어 있는 상태를 만든다.
+    ///
+    /// 반환값은 본문에 **나타나면 안 되는** 문자열들이다.
+    async fn seed_store_with_sensitive_data(store: &dyn Store) -> Vec<(&'static str, String)> {
+        // Worker endpoint에는 secret이 들어 있다(`?server-key=`). 이름도
+        // 라벨로 새어 나가는지 보려고 구별되는 값을 쓴다.
+        let mut worker = Worker::new(
+            "prod-gpu-seoul-01",
+            "wss://gpu.internal.example/ws?server-key=s3cr3t-should-never-render",
+        );
+        worker.labels.insert("model".into(), "glm-5".into());
+        store.upsert_worker(&worker).await.unwrap();
+
+        // prompt·cwd(리포지터리 경로)·created_by(사용자 입력)를 모두 채운다.
+        let mut task = Task::from_request(TaskRequest {
+            prompt: "refactor the billing ledger for acme-corp".into(),
+            cwd: Some("https://github.com/acme-corp/private-ledger".into()),
+            created_by: "yarang@example.com".into(),
+            model: Some("glm-5".into()),
+            ..Default::default()
+        });
+        task.status = TaskStatus::Completed(TaskResult {
+            output: "done".into(),
+            exit_code: 0,
+            duration_secs: 12.5,
+            token_usage: Some(TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 10,
+            }),
+            worker_id: worker.id,
+            finished_at: chrono::Utc::now(),
+        });
+        store.insert_task(&task).await.unwrap();
+
+        let mut failed = Task::from_request(TaskRequest {
+            prompt: "deploy to acme-corp production".into(),
+            ..Default::default()
+        });
+        failed.status = TaskStatus::Failed(fleet_core::TaskFailure {
+            error: "no worker has the required credential".into(),
+            kind: FailureKind::CredentialMissing,
+            worker_id: Some(worker.id),
+            attempts: 1,
+        });
+        store.insert_task(&failed).await.unwrap();
+
+        vec![
+            ("worker uuid", worker.id.to_string()),
+            ("task uuid", task.id.to_string()),
+            ("failed task uuid", failed.id.to_string()),
+            ("server-key secret", "s3cr3t-should-never-render".into()),
+            ("worker endpoint host", "gpu.internal.example".into()),
+            ("worker name", "prod-gpu-seoul-01".into()),
+            ("prompt", "refactor the billing ledger".into()),
+            (
+                "repository url",
+                "github.com/acme-corp/private-ledger".into(),
+            ),
+            ("created_by", "yarang@example.com".into()),
+            ("failure error text", "required credential".into()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn metrics_body_never_exposes_ids_prompts_or_secrets() {
+        let store = MemStore::new_arc();
+        let forbidden = seed_store_with_sensitive_data(store.as_ref()).await;
+
+        let http = HttpMetrics::new();
+        http.observe(std::time::Duration::from_millis(42));
+        let body = metrics_body(store.as_ref(), &http).await.unwrap();
+
+        for (what, needle) in forbidden {
+            assert!(
+                !body.contains(&needle),
+                "/metrics leaked {what} ({needle:?}); \
+                 correlation IDs and user input belong in audit/event records only.\n{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_body_labels_stay_within_a_bounded_allow_list() {
+        // 위 테스트는 **지금 저장소에 있는** 값이 새는지를 본다. 이 테스트는
+        // 그것으로 잡히지 않는 것을 본다 — 나중에 누군가 `path`나 `task_id`
+        // 라벨을 새로 추가하는 경우다. 그런 라벨은 이 fixture의 값과 겹치지
+        // 않아 부분문자열 검사를 통과하지만, 카디널리티가 무한하다는 문제는
+        // 똑같다. 그래서 값이 아니라 **라벨 집합 자체**를 고정한다.
+        let store = MemStore::new_arc();
+        seed_store_with_sensitive_data(store.as_ref()).await;
+
+        let http = HttpMetrics::new();
+        http.observe(std::time::Duration::from_millis(42));
+        let body = metrics_body(store.as_ref(), &http).await.unwrap();
+
+        let labels = extract_labels(&body);
+        assert!(
+            !labels.is_empty(),
+            "extractor found no labels — the parser is broken, not the metrics:\n{body}"
+        );
+
+        for (name, value) in labels {
+            assert!(
+                ALLOWED_LABEL_NAMES.contains(&name.as_str()),
+                "unexpected metric label {name:?}={value:?}. \
+                 If the label's value set is finite and safe, add it to \
+                 ALLOWED_LABEL_NAMES and allowed_label_values; if it carries an \
+                 ID, path, or user input, it must not be a label at all."
+            );
+            if name == "le" {
+                assert!(
+                    is_bucket_bound(&value),
+                    "non-numeric histogram bound {value:?}"
+                );
+                continue;
+            }
+            let allowed = allowed_label_values(&name)
+                .unwrap_or_else(|| panic!("label {name:?} has no declared value set"));
+            assert!(
+                allowed.contains(&value.as_str()),
+                "label {name:?} took an undeclared value {value:?} — the value set \
+                 must stay finite for the metric's cardinality to stay bounded"
+            );
+        }
+    }
+
+    /// `FailureKind`가 늘어나면 위 허용 목록도 함께 늘어나야 한다.
+    ///
+    /// 실제로 로드맵 #69가 `InvalidRequest`를 추가해 4개에서 5개가 됐다.
+    /// 그때 허용 목록만 낡으면 새 kind가 "선언되지 않은 값"으로 잘못
+    /// 보고되므로, 목록의 신선도를 여기서 컴파일 대신 단정으로 지킨다.
+    #[test]
+    fn failure_kind_allow_list_covers_every_variant() {
+        let allowed = allowed_label_values("kind").unwrap();
+        for kind in FailureKind::ALL {
+            assert!(
+                allowed.contains(&kind.as_str()),
+                "FailureKind::{kind:?} is missing from the metric label allow-list"
+            );
+        }
+        assert_eq!(
+            allowed.len(),
+            FailureKind::ALL.len(),
+            "allow-list has entries that are no longer FailureKind variants"
+        );
     }
 }
 

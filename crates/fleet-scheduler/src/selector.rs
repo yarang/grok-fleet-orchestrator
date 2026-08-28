@@ -1,6 +1,8 @@
 //! 워커 선택 알고리즘.
 //!
 //! 선택 순서:
+//! 0. liveness 필터 (로드맵 #70 — liveness가 확인되지 않은 워커 제외.
+//!    아래 "on_demand 워커를 후보에서 빼는 이유" 설명 참고)
 //! 1. 라벨 매칭 필터 (`required_labels`)
 //! 2. 모델 매칭 필터 (`task.model` — 지정된 경우 `labels["model"]`이 정확히
 //!    일치하는 워커만 후보로 남긴다. 지정하지 않으면 기존과 동일)
@@ -26,12 +28,38 @@
 //!    fleet가 사실상 전 모델에 credential을 프로비저닝해야 함) 문제
 //!    배경(사용자가 명시적으로 model을 지정한 경우)의 범위를 크게 벗어나고
 //!    기존 동작(및 기존 테스트 스위트 대부분)을 깨뜨린다.
+//!
+//! ## on_demand 워커를 후보에서 빼는 이유 (로드맵 #70 게이트 5)
+//!
+//! `WorkerLivenessMode::OnDemand`는 idle 시 heartbeat을 보내지 않는 모드이고,
+//! `HealthChecker`는 그 사실을 알기 때문에 이런 워커를 **강등하지 않는다**
+//! (`health.rs`의 on_demand skip). 한편 워커 등록 시점의
+//! `fleet-api`의 `build_worker`는 liveness_mode와 무관하게 `WorkerStatus::Online`을 쓴다.
+//!
+//! 두 사실을 합치면, on_demand 워커는 **한 번 등록되면 프로세스가 죽어 있어도
+//! 영구히 `Online`으로 남는다**. 그 상태에서 이 selector가 `Online`만 보고
+//! 후보로 삼으면, liveness를 확인할 수단이 없는 워커에 계속 dispatch하게 된다
+//! — `docs/architecture/observability-and-reconciliation.md`가 "on-demand
+//! Worker는 probe 성공 전까지 `Unchecked`이며 dispatch되지 않는다"로 요구하는
+//! 것과 정반대다. `worker.rs`의 `WorkerLivenessMode::OnDemand` 문서와
+//! `handlers.rs`가 렌더링하는 worker.toml의 "아직 프로덕션에서 쓰지 말 것"
+//! 경고도 이 배정이 범위 밖이라고 적어 왔지만, 강제하는 코드는 없었다.
+//!
+//! 그래서 여기서 후보에서 뺀다. **이것은 영구 규칙이 아니라 상태 기계의 안전한
+//! 절반이다** — dispatch 직전 ACP probe(로드맵 #67 의존)가 들어오면 이 필터는
+//! "probe 성공한 on_demand 워커는 후보에 포함"으로 바뀌어 `unchecked → probe →
+//! dispatch` 흐름이 완성된다. probe가 없는 지금 선택지는 "확인 없이 보낸다"와
+//! "보내지 않는다" 둘뿐이고, 후자가 안전한 쪽이다.
+//!
+//! 별도의 `Unchecked` 워커 상태를 새로 만들지는 않았다. probe가 없는 한 그
+//! 상태에서 빠져나올 방법이 없어 도달했다가 영영 못 나오는 상태가 되기
+//! 때문이다. 상태를 늘리는 대신 이미 있는 `liveness_mode`를 판단 근거로 쓴다.
 
 use std::sync::Arc;
 
 use thiserror::Error;
 
-use fleet_core::{Task, WorkerId, WorkerStatus};
+use fleet_core::{Task, WorkerId, WorkerLivenessMode, WorkerStatus};
 use fleet_store::Store;
 
 use crate::breaker::{BreakerRegistry, BreakerState};
@@ -56,6 +84,16 @@ pub enum SelectionError {
 
     #[error("no online worker holds a credential for model '{0}'")]
     NoWorkerForCredential(String),
+
+    /// liveness가 확인되지 않은 워커만 남아 후보가 소진됨 (로드맵 #70).
+    ///
+    /// 현재로서는 `on_demand` 워커가 여기에 해당한다 — heartbeat을 보내지
+    /// 않아 `Online` 표시를 신뢰할 수 없고, 이를 확인할 probe는 아직 없다
+    /// (로드맵 #67 의존). `AllOffline`과 구분하는 이유는 운영자가 볼 원인이
+    /// 다르기 때문이다: 저쪽은 "워커를 켜라"이고, 이쪽은 "probe가 구현될
+    /// 때까지 이 워커는 배정 대상이 아니다"이다.
+    #[error("no dispatchable worker: all candidates are on-demand and unprobed")]
+    AllUnprobed,
 }
 
 /// 워커 선택기.
@@ -86,6 +124,20 @@ impl WorkerSelector {
 
         if candidates.is_empty() {
             return Err(SelectionError::AllOffline);
+        }
+
+        // 1.5. liveness 필터 (로드맵 #70) — `on_demand` 워커는 heartbeat을 보내지
+        // 않으므로 `Online` 표시가 실제 생존을 뜻하지 않는다. probe(로드맵 #67)가
+        // 들어오기 전까지 후보에서 제외한다. 모듈 최상단 "on_demand 워커를
+        // 후보에서 빼는 이유" 참고.
+        //
+        // 라벨/모델 필터보다 **먼저** 건다: liveness는 워커가 이 작업에 적합한지
+        // 이전에 애초에 배정 가능한 대상인지의 문제이고, 순서를 뒤로 미루면
+        // "라벨이 안 맞아서 실패"처럼 원인이 잘못 보고된다.
+        candidates.retain(|w| w.liveness_mode != WorkerLivenessMode::OnDemand);
+
+        if candidates.is_empty() {
+            return Err(SelectionError::AllUnprobed);
         }
 
         // 2. 라벨 매칭 필터
@@ -205,7 +257,7 @@ mod tests {
     use fleet_core::{
         BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
         TaskOutput, TaskPhase, TaskRequest, TaskStatus, TransitionOutcome, Worker, WorkerFilter,
-        WorkerHeartbeat, WorkerId, WorkerStatus,
+        WorkerHeartbeat, WorkerId, WorkerLivenessMode, WorkerStatus,
     };
     use fleet_store::{Store, StoreError};
 
@@ -668,5 +720,108 @@ mod tests {
         let selected = selector.select(&task).await.unwrap();
         let plain = store.get_worker_by_name("plain-1").await.unwrap().unwrap();
         assert_eq!(selected, plain.id);
+    }
+
+    // ── 로드맵 #70 게이트 5: on_demand 워커는 probe 전까지 dispatch되지 않는다 ──
+
+    /// `make_worker`와 같지만 liveness_mode를 `OnDemand`로 둔다.
+    ///
+    /// status는 일부러 `Online`으로 남긴다 — `fleet-api`의 `build_worker`가
+    /// liveness_mode와 무관하게 `Online`을 쓰므로, 이것이 등록 직후 저장소에
+    /// 실제로 들어 있는 모양이다. 이 fixture를 `Offline`으로 만들면 1단계
+    /// 필터에 먼저 걸려 정작 검증하려는 1.5단계가 실행되지 않는다.
+    fn make_on_demand_worker(name: &str, active: u32, labels: &[(&str, &str)]) -> Worker {
+        let mut w = make_worker(name, active, labels);
+        w.liveness_mode = WorkerLivenessMode::OnDemand;
+        assert_eq!(
+            w.status,
+            WorkerStatus::Online,
+            "fixture must reproduce registration state: on_demand workers are stored as Online"
+        );
+        w
+    }
+
+    #[tokio::test]
+    async fn on_demand_worker_is_never_a_dispatch_candidate() {
+        // on_demand 워커 하나뿐인 fleet — heartbeat이 없어 Online 표시를
+        // 신뢰할 수 없고 probe(로드맵 #67)도 없으므로 배정하지 않는다.
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let task = make_task("work", None, &[]);
+
+        match selector.select(&task).await {
+            Err(SelectionError::AllUnprobed) => {}
+            other => panic!("expected AllUnprobed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn periodic_worker_is_preferred_over_idle_on_demand_worker() {
+        // 부하가 더 높아도 heartbeat을 보내는 워커가 선택되어야 한다 —
+        // least-loaded 정책보다 liveness 필터가 먼저다. 이 순서가 뒤집히면
+        // "가장 한가한 워커"가 사실은 죽어 있는 워커가 된다.
+        let workers = vec![
+            make_on_demand_worker("idle-laptop", 0, &[]),
+            // max_concurrent 기본값이 4이므로 3까지만 — 4 이상이면 용량
+            // 필터(3.5단계)에 걸려 liveness 필터가 아닌 다른 이유로 비게 된다.
+            make_worker("busy-server", 3, &[]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let task = make_task("work", None, &[]);
+
+        let selected = selector.select(&task).await.unwrap();
+        let expected = store
+            .get_worker_by_name("busy-server")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected, expected.id,
+            "liveness filter must outrank the least-loaded policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_demand_worker_cannot_be_forced_by_server_hint() {
+        // server_hint는 폴백을 막을 뿐 필터를 무시하는 권한이 아니다.
+        // 여기서는 후보가 통째로 비므로 hint 처리 이전에 AllUnprobed로 끝난다.
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let task = make_task("work", Some("laptop"), &[]);
+
+        match selector.select(&task).await {
+            Err(SelectionError::AllUnprobed) => {}
+            other => panic!(
+                "expected AllUnprobed even with an explicit hint, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_demand_exclusion_is_reported_before_label_mismatch() {
+        // 원인 보고의 정확도 검증: on_demand 워커가 라벨도 만족하지 않을 때,
+        // 운영자에게 "라벨이 안 맞는다"가 아니라 "probe되지 않았다"가 보여야
+        // 한다. 필터 순서를 뒤로 미루면 이 단정이 깨진다.
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let task = make_task("work", None, &["gpu"]);
+
+        match selector.select(&task).await {
+            Err(SelectionError::AllUnprobed) => {}
+            other => panic!("expected AllUnprobed, not a label error, got {:?}", other),
+        }
     }
 }

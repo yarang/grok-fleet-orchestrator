@@ -1,10 +1,10 @@
 ---
 type: architecture-decision
 authority: canonical
-implementation: proposed
-verification: design-reviewed
+implementation: partial
+verification: code-checked
 source: "docs/architecture/observability-and-reconciliation.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["operations", "scheduler", "security"]
 ---
@@ -128,3 +128,27 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 5. on-demand Worker가 `Unchecked`에서 probe 성공 전 dispatch되지 않는 시험
 6. audit 상관관계 필드만으로 incident의 Project·Task·lease·effect 경로를 재구성하는 시험
 7. `CancelUnconfirmed` Task가 증거 기반으로 해소되기 전까지 Project archive가 진행되지 않는 시험
+
+## 구현 상태 (2026-08-28)
+
+게이트별 현황이다. **닫힌 게이트는 두 개뿐이고, 나머지 다섯은 이 문서가 전제하는 하부 구조가
+저장소에 존재하지 않아 시험을 작성할 수조차 없다.** 없는 것을 미리 만들지 않기 위해, 무엇이
+막고 있는지를 여기에 명시한다.
+
+| 게이트 | 상태 | 근거 / 막고 있는 것 |
+| --- | --- | --- |
+| 1. metric 노출 금지 | **닫힘** | `crates/fleet-api/src/metrics.rs`의 `metrics_body_never_exposes_ids_prompts_or_secrets`(fixture의 UUID·prompt·리포지터리 URL·`?server-key=` secret이 본문에 없음)와 `metrics_body_labels_stay_within_a_bounded_allow_list`(라벨 이름·값이 유한 허용 목록 안) |
+| 2. inventory-first recovery E2E | 차단 | control epoch·fencing token을 갖는 Reconciler가 없다. `crates/fleet-scheduler/src/reconcile.rs`는 `#62`의 stale `Pending`/`Dispatched` sweeper이며 이 문서의 Reconciler가 아니다. 선행 `#63`·`#67` |
+| 3. ACK 유실·orphan·grant expiry quarantine | 차단 | `worker_incarnation`·start/stop ACK·lease quarantine이 없다. 선행 `#67`(`worker_execution_lease`)·`#89` |
+| 4. `Started` effect·archive hold 자동 redrive 금지 | 차단 | effect ledger가 코드에 존재하지 않는다(`EffectLedger`/`PartiallyApplied` grep 0건). archive hold 테이블은 `#91` |
+| 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**은 ACP probe가 없어 미구현(선행 `#67`). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 |
+| 6. audit 상관관계 필드로 경로 재구성 | 차단 | `lease_generation`·`fencing_token`·`control_epoch`와 effect 경로가 필드로 존재하지 않는다. `crates/fleet-core/src/audit.rs`는 actor·outcome 계열만 갖는다 |
+| 7. `CancelUnconfirmed` 전 archive 차단 | 차단 | `CancelUnconfirmed` 상태가 코드에 존재하지 않는다(grep 0건). 선행 `#67`·`#91` |
+
+게이트 5의 판정 근거를 남긴다: 이 차단은 새로 도입한 제약이 아니라 **이미 문서가 요구하고 있었으나
+집행되지 않던 것**이다. `fleet-api`의 `build_worker`는 `liveness_mode`와 무관하게
+`WorkerStatus::Online`을 기록하고, `HealthChecker`는 heartbeat이 없는 `on_demand` 워커를 의도적으로
+강등하지 않으며, `WorkerSelector`에는 liveness 조건이 없었다. 세 전제가 각각은 타당한데 합치면
+"생존 여부를 확인할 수단이 없는 워커가 영구히 dispatch 대상"이 된다. `worker.rs`의
+`WorkerLivenessMode::OnDemand` 문서와 `handlers.rs`가 렌더링하는 worker.toml의 경고가 이미 그
+배정을 범위 밖이라고 적어 왔지만 강제하는 코드가 없었다.
