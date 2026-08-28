@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use fleet_core::{Worker, WorkerId};
 use fleet_store::mem::MemStore;
 use fleet_store::{PgStore, Store};
@@ -69,7 +70,32 @@ macro_rules! both_backends {
 }
 
 fn seed(name: &str) -> Worker {
-    Worker::new(name, format!("wss://{name}/ws"))
+    let mut w = Worker::new(name, format!("wss://{name}/ws"));
+    // 나노초 잔여를 **일부러** 심는다. macOS의 `CLOCK_REALTIME`은 잔여가 항상
+    // 0이라, 이 줄이 없으면 Postgres의 마이크로초 절단이 로컬에서 재현되지
+    // 않는다 — 그러면 이 파일은 Linux CI에서만 깨지는 테스트가 된다.
+    // 여기서 심어 두면 어느 플랫폼에서 돌려도 같은 경로를 밟는다.
+    w.registered_at += chrono::Duration::nanoseconds(416);
+    w.incarnation_started_at += chrono::Duration::nanoseconds(416);
+    w
+}
+
+/// 두 시각을 **마이크로초 해상도**로 비교한다.
+///
+/// Postgres `timestamptz`는 마이크로초까지만 저장하므로, 메모리에 있는 나노초
+/// 값과 왕복해서 돌아온 값을 `assert_eq!`로 직접 비교하면 나노초 잔여가 있는
+/// 플랫폼에서만 깨진다. macOS의 `CLOCK_REALTIME`은 잔여가 항상 0이라 절단할
+/// 것이 없어 로컬에서는 통과하고, 진짜 나노초를 주는 Linux CI에서만 실패한다
+/// (2026-08-29 실측: left=...212633Z, right=...212633416Z).
+///
+/// 양쪽이 모두 왕복한 값이라면 이 헬퍼가 필요 없다 — 절단이 이미 대칭이기
+/// 때문이다. 메모리 값과 저장된 값을 맞대는 자리에만 쓴다.
+fn assert_same_instant(stored: DateTime<Utc>, in_memory: DateTime<Utc>, what: &str) {
+    assert_eq!(
+        stored.timestamp_micros(),
+        in_memory.timestamp_micros(),
+        "{what} (마이크로초 비교: stored={stored}, in_memory={in_memory})"
+    );
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────
@@ -78,9 +104,10 @@ both_backends!(insert_stamps_an_incarnation, |store| async move {
     let w = seed("fresh");
     store.upsert_worker(&w).await.unwrap();
     let stored = store.get_worker(w.id).await.unwrap().expect("worker");
-    assert_eq!(
-        stored.incarnation_started_at, w.incarnation_started_at,
-        "최초 INSERT는 구조체가 들고 온 값을 그대로 남겨야 한다"
+    assert_same_instant(
+        stored.incarnation_started_at,
+        w.incarnation_started_at,
+        "최초 INSERT는 구조체가 들고 온 값을 그대로 남겨야 한다",
     );
 });
 
@@ -110,9 +137,10 @@ both_backends!(upsert_does_not_move_the_incarnation, |store| async move {
         stored.active_tasks, 3,
         "다른 필드는 정상적으로 갱신돼야 한다 — 컬럼 하나만 제외되는 것이 의도"
     );
-    assert_eq!(
-        stored.registered_at, w.registered_at,
-        "registered_at도 최초 값을 보존해야 한다(선례)"
+    assert_same_instant(
+        stored.registered_at,
+        w.registered_at,
+        "registered_at도 최초 값을 보존해야 한다(선례)",
     );
 });
 
@@ -141,9 +169,10 @@ both_backends!(bump_moves_the_incarnation_forward, |store| async move {
         stored.incarnation_started_at, returned,
         "반환값과 저장된 값이 달라서는 안 된다 — 호출자가 반환값으로 판정하기 때문"
     );
-    assert_eq!(
-        stored.registered_at, w.registered_at,
-        "bump는 최초 등록 시각을 건드리면 안 된다"
+    assert_same_instant(
+        stored.registered_at,
+        w.registered_at,
+        "bump는 최초 등록 시각을 건드리면 안 된다",
     );
 });
 
