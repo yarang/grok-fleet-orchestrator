@@ -1342,17 +1342,22 @@ pub async fn get_project_detail_api(
 /// `docs/contracts/project-management.md`: "`Active → Draining` idempotent
 /// archive 요청". 재호출은 안전하다 — 이미 `Draining`/`Archived`인
 /// Project에 다시 호출해도 현재 상태를 그대로 반환한다. `Active`면
-/// `Draining`으로 전이하고, 이 Project를 참조하는 비종료 Task가 하나도
-/// 없으면(1단계의 유일한 archive 게이트) 같은 요청 안에서 곧바로
-/// `Archived`까지 진행한다 — Agent/effect ledger가 없는 지금은 그 이상
-/// 기다릴 대상이 없다.
+/// `Draining`으로 전이하고, archive 게이트(비종료 Task 없음 **그리고** 살아
+/// 있는 Agent 없음)를 통과하면 같은 요청 안에서 곧바로 `Archived`까지
+/// 진행한다 — effect ledger가 없는 지금은 그 이상 기다릴 대상이 없다.
+///
+/// 게이트가 막으면 `draining` 상태에 더해 **무엇이 막았는지**를
+/// `archive_blocked_by`로 함께 돌려준다. 두 조건은 해소 방법이 다르다 —
+/// Task는 끝나기를 기다리면 되지만 `Ready` Agent는 저절로 끝나지 않고 사람이
+/// 회수해야 한다. 사유 없이 상태만 주면 호출자가 안내할 수 있는 것은 추측뿐이고,
+/// 실제로 그렇게 틀린 안내가 나갔다.
 pub async fn delete_project_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     jar: CookieJar,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
+) -> Result<Json<crate::schema::ProjectArchiveResponse>, ApiError> {
     require_permission(&principal, PermissionKind::ProjectDelete)?;
     verify_csrf_header(&jar, &headers)?;
 
@@ -1369,11 +1374,12 @@ pub async fn delete_project_api(
     // 동작을 요구하므로 규칙을 각자 구현하지 않는다. 상태 전이는 콜백으로
     // 받아 이 표면의 감사 파이프라인에 기록한다.
     let mut transitions = Vec::new();
-    fleet_store::advance_project_archive(state.store.as_ref(), &mut project, |status| {
-        transitions.push(status)
-    })
-    .await
-    .map_err(|e| ApiError::Store(e.to_string()))?;
+    let progress =
+        fleet_store::advance_project_archive(state.store.as_ref(), &mut project, |status| {
+            transitions.push(status)
+        })
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?;
 
     for status in transitions {
         let action = match status {
@@ -1393,7 +1399,17 @@ pub async fn delete_project_api(
         .await;
     }
 
-    Ok(Json(crate::schema::ProjectSummary::from(&project)))
+    let archive_blocked_by = match progress {
+        fleet_store::ArchiveProgress::Draining(blockers) => {
+            blockers.labels().into_iter().map(str::to_string).collect()
+        }
+        fleet_store::ArchiveProgress::Archived => Vec::new(),
+    };
+
+    Ok(Json(crate::schema::ProjectArchiveResponse {
+        project: crate::schema::ProjectSummary::from(&project),
+        archive_blocked_by,
+    }))
 }
 
 fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {

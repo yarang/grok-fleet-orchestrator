@@ -73,7 +73,7 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_revoke_bootstrap_token` | `token_id` | revoke 결과 |
 | `fleet_create_project` | `name`, 선택 `description` | 생성된 Project |
 | `fleet_list_projects` | 선택 limit, offset | Project 목록 |
-| `fleet_delete_project` | `project_id` | 삭제 결과 |
+| `fleet_delete_project` | `project_id` | archive 진행 결과 — Project 상태와, `draining`에 머물렀다면 `archive_blocked_by`(`tasks`/`agents`) |
 | `fleet_create_agent` | `project_id`, `name`, 선택 `description` | 생성된 Agent |
 | `fleet_list_agents` | 선택 `project_id`, limit, offset | Agent 목록 |
 | `fleet_stop_agent` | `agent_id` | 회수 결과(`stopped`) |

@@ -2900,3 +2900,101 @@ mtime 12:16:59 / 12:18:03)는 **소스 수정 이전**의 것이었다. 지적�
 - **120회 표본은 `cargo test --workspace` 한 번의 실행 구간에서 떴다.** 다른 cargo 버전·다른 플래그
   조합에서도 항상 1인지는 확인하지 않았다.
 - 2026-08-24·08-26 항목의 문장은 **고치지 않았다**(`docs/log.md`는 append-only). 여기 실측만 남긴다.
+
+---
+
+## 2026-08-28 — fix — archive가 막힌 **사유**를 서버가 말하게 했다: 화면이 없는 Task를 기다리라고 안내하고 있었다 (`#49`)
+
+### 무엇이 잘못됐나
+
+`#49` 1단계를 커밋한 직후 실제 브라우저로 archive 게이트 두 번째 조건을 검증하다가, **방금 커밋한
+코드가 사용자에게 거짓을 말하고 있는 것**을 발견했다. Task 0건 · `Ready` Agent 1건인 Project에서
+archive를 누르면 화면은 이렇게 표시했다:
+
+> Status: `draining` · Draining — tasks still running; archive completes once they finish.
+> (같은 화면의 Tasks 절: **No tasks**)
+
+두 가지가 동시에 틀렸다. (1) 막고 있는 것은 Task가 아니라 Agent다. (2) "곧 끝난다"는 약속은 Agent에
+대해서는 **성립할 수 없다** — `Ready` Agent는 저절로 끝나지 않고 사람이 Stop을 눌러야 한다. 즉
+사용자는 존재하지도 않는 Task가 끝나기를 무한히 기다리게 된다.
+
+### 왜 생겼나 — 게이트에 조건을 더하면서 그 조건을 설명할 방법을 만들지 않았다
+
+`advance_project_archive`는 두 조건을 평가한 뒤 **사유를 버리고** 상태만 반환했다:
+
+```rust
+if store.project_has_active_tasks(...).await? || store.project_has_live_agents(...).await? {
+    return Ok(ArchiveProgress::Draining);   // ← 무엇이 막았는지가 여기서 사라진다
+}
+```
+
+사유가 응답에 없으니 화면은 지어낼 수밖에 없었고, `#48` 시절 조건이 하나뿐일 때 하드코딩한 문장이
+`#49`가 조건을 추가한 뒤에도 그대로 남았다. `ArchiveProgress::Draining`의 doc comment("비종료 Task가
+아직 남아 있어")도 같은 방식으로 낡아 있었다.
+
+이것은 `#48` 2단계가 규칙을 `project_rules`로 단일화하며 막으려 했던 바로 그 분기(divergence)다.
+**규칙만 단일화하고 사유를 표면에 맡기면 단일화는 절반만 성립한다** — 게이트의 판정은 한 곳에서
+나오는데 그 판정의 *의미*는 표면마다 따로 적혀 있기 때문이다.
+
+### 어떻게 고쳤나
+
+사유를 게이트가 말하게 했다. `ArchiveBlockers { active_tasks, live_agents }`를 만들어
+`ArchiveProgress::Draining(ArchiveBlockers)`가 실어 나르고, 두 표면은 그것을 `archive_blocked_by`
+(`["tasks"]` / `["agents"]` / 둘 다)로 옮기기만 한다. 라벨 어휘도 `ArchiveBlockers::labels()` 한
+곳에 둔다 — 표면마다 문자열을 지으면 같은 사유가 두 이름으로 갈린다.
+
+**클라이언트가 `agents`/`tasks` 목록을 보고 추론하는 방식은 택하지 않았다.** 그렇게 하면 게이트가
+JS에 세 번째로 구현되고, `#67`/`#89`가 blocker를 추가할 때 이번 버그가 **구조적으로 재발**한다.
+사유는 게이트를 평가한 쪽만 알 수 있다.
+
+**두 조건의 `||` 단락 평가도 제거했다.** 단락시키면 Task가 막고 있을 때 Agent 조건을 묻지 않으므로,
+사용자는 Task를 전부 끝낸 **뒤에야** Agent도 막고 있었다는 사실을 알게 된다. 추가 비용은 Task가
+막는 경우의 질의 한 번뿐이고, 그 대신 한 번에 조치 가능한 답이 나온다.
+
+문장도 조치별로 갈랐다 — Task는 "기다리면 끝난다", Agent는 "stop them below". 서버가 사유를 주지
+않은 경우(구버전 응답)에는 사유를 **말하지 않는다**(`Draining — archive is still blocked.`) —
+틀린 사유를 지어내는 것보다 낫다.
+
+### 실측 (실제 Postgres + 실제 브라우저)
+
+서버는 **수정된 코드로 다시 빌드해 교체한 뒤** 검증했다(낡은 바이너리로는 검증이 성립하지 않는다).
+
+| 시나리오 | 화면 문구 | 와이어 |
+|---|---|---|
+| Task 0 · `ready` Agent 1 | "live agents are still assigned; archive completes once you stop them below." | `"archive_blocked_by":["agents"]` |
+| Task 1(pending) · `ready` Agent 1 | "unfinished tasks and live agents are blocking archive; wait for the tasks and stop the agents below." | `["tasks","agents"]` |
+| Stop 누른 뒤 재시도 | "Archived" (버튼 사라짐, Agent `stopped`) | 필드 없음 |
+| archived에 재호출(idempotent) | — | `status: archived`, 필드 없음 |
+
+두 번째 행이 단락 평가 제거의 증거다. 이 상황은 **Active일 때 Task와 Agent를 함께 둔 뒤 archive를
+요청하는 경로로만** 만들 수 있다 — `draining` Project는 `ensure_project_accepts_new_tasks`가 새
+Task를 거절하므로 나중에 Task를 붙일 수 없다. 게이트의 두 조건이 서로를 가리는 구조라는 것을
+검증 경로 자체가 보여준다.
+
+### 검증 한계
+
+- **`archive_blocked_by`가 빠졌을 때의 폴백 문구는 브라우저로 확인하지 않았다.** 현재 서버는 항상
+  사유를 싣기 때문에 그 분기를 실 서버로 만들 방법이 없다. 코드 경로로만 존재한다.
+- **MCP 표면은 단위 테스트로만 확인했다.** Dashboard와 달리 실제 MCP 클라이언트로 `fleet_delete_project`를
+  호출해 사유를 받아 보지는 않았다.
+- **컴파일러가 MCP를 강제하지 못했다.** variant에 payload를 실으면 `match` 지점이 전부 에러가 되어
+  두 표면이 함께 갱신될 것으로 기대했지만, MCP 핸들러는 반환값 자체를 버리고 있어서 아무 에러도
+  나지 않았다. 대칭은 사람이 맞춰야 했다 — **반환값을 무시하는 호출자에게는 타입 시스템이 아무것도
+  강제하지 못한다.** 지금은 두 표면 모두 단정 테스트가 있어 다음 조건 추가 때는 테스트가 잡는다.
+- 이 결함은 `#49` 1단계 커밋(`295a619`) 자체에 들어 있었다. 되돌리지 않고 별도 `fix:` 커밋으로
+  남긴 것은, **브라우저 실검증이 잡아낸 결함**이라는 사실이 이력에 남아야 하기 때문이다 —
+  세 계층(store/API/MCP)의 테스트는 전부 초록이었고 상태만 단정했지 사유는 단정하지 않았다.
+
+### 부수 발견 — 게이트 로그가 트리보다 이르면 초록은 판정이 아니다
+
+커밋 직전에 게이트 로그(`exit=0` 다섯 줄)와 소스의 mtime을 나란히 보다가, 로그가 **13:34**이고
+고친 소스가 **13:51~13:57**임을 발견했다. 그 초록은 고치기 *전* 트리에 대한 것이었고, 그대로
+커밋했다면 검증된 적 없는 코드가 "게이트 통과"로 기록될 뻔했다. 전부 다시 돌려 현재 트리에서
+확인했다(rustc 1.98.0 / fmt·clippy(acp mtls)·clippy(no-default) 전부 `exit=0`, DB 주입 직렬
+`acp mtls` 70 suites 1094 passed 0 failed, `no-default-features` 70 suites 1090 passed 0 failed,
+`cross_client` 14 passed 7.16s·7.95s로 조용한 skip 아님).
+
+agent.md §4.3에 한 줄 남겼다. 그 절이 이미 모아 둔 결함군 — 플래그가 없어서, 파이프 때문에
+결과를 못 읽어서 — 의 세 번째 얼굴이기 때문이다: 여기서는 결과를 읽었지만 **대상이 이미
+바뀌어 있었다**.
+

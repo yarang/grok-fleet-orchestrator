@@ -96,6 +96,13 @@ Host/Worker 배정 MCP 도구는 범위에 포함하지 않는다. `fleet_dispat
 `JsonRpcError`)으로 옮기기만 한다 — 규칙을 표면마다 따로 구현해 시간이 지나며 갈라지는 것을
 구조적으로 막는다.
 
+`advance_project_archive`는 상태뿐 아니라 **게이트를 막은 사유**(`ArchiveBlockers` — `tasks` /
+`agents`)까지 돌려주고, 두 표면은 그것을 `archive_blocked_by`로 그대로 싣는다. 사유를 표면에서
+지어내면 규칙 단일화가 절반만 성립한다는 것이 실제로 드러났다 — `#49`가 게이트에 Agent 조건을
+추가했을 때 Dashboard 화면은 사유를 "비종료 Task"로 하드코딩하고 있어서, Task가 0건인 Project에
+없는 Task를 기다리라고 안내했다. 두 조건은 해소 방법이 다르므로(Task는 끝나기를 기다리고, `Ready`
+Agent는 사람이 회수해야 한다) 사유 없는 `draining`은 호출자에게 행동을 지시하지 못한다.
+
 ## 활성화 게이트
 
 목표 계약 전체(policy 관리, Agent admission 연동)의 게이트는 아래와 같이 남아 있다. 1단계

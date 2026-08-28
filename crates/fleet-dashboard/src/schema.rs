@@ -59,6 +59,22 @@ pub struct ProjectSummary {
     pub updated_at: DateTime<Utc>,
 }
 
+/// `DELETE /api/projects/{id}` 응답 (로드맵 #48 1단계, 사유는 `#49` 1단계 후속).
+///
+/// [`ProjectSummary`]에 **게이트를 막은 사유**를 덧붙인 것이다. 상태만
+/// 돌려주던 동안 화면은 사유를 짐작할 수밖에 없었고, 게이트에 Agent 조건이
+/// 추가되자 Task가 0건인 Project에 "tasks still running"이라고 표시했다.
+/// 사유는 게이트를 평가한 쪽이 말한다([`fleet_store::ArchiveBlockers`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectArchiveResponse {
+    #[serde(flatten)]
+    pub project: ProjectSummary,
+    /// `draining`에 머문 이유. 게이트를 통과했으면 비어 있고, 비어 있으면
+    /// 실리지 않는다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_blocked_by: Vec<String>,
+}
+
 impl From<&Project> for ProjectSummary {
     fn from(p: &Project) -> Self {
         Self {

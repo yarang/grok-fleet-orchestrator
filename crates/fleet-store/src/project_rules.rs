@@ -119,11 +119,51 @@ async fn ensure_project_active(
     Ok(project)
 }
 
+/// archive 게이트에서 실제로 막은 조건 — 각 항목은 게이트의 조건 하나에
+/// 대응한다.
+///
+/// 게이트가 `Draining`을 반환한 이유를 **호출자가 추측하지 않게** 하려고
+/// 있다. 이 구조체가 없던 동안 Dashboard는 사유를 "비종료 Task"로 하드코딩했고,
+/// `#49`가 Agent 조건을 추가하자 Task가 0건인 화면이 "tasks still running"이라고
+/// 말했다(2026-08-28 브라우저 검증에서 발견). 조건이 늘어나면 여기 필드를
+/// 추가하는 것으로 두 표면이 함께 갱신된다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArchiveBlockers {
+    /// 이 Project를 참조하는 비종료 Task가 남아 있다 (`#48` 1단계).
+    pub active_tasks: bool,
+    /// 회수되지 않은(`Ready`) Agent가 남아 있다 (`#49` 1단계).
+    pub live_agents: bool,
+}
+
+impl ArchiveBlockers {
+    /// 하나라도 막고 있는가.
+    pub fn any(&self) -> bool {
+        self.active_tasks || self.live_agents
+    }
+
+    /// 외부 표면이 그대로 실어 보내는 라벨 목록.
+    ///
+    /// 어휘를 여기 한 번만 두는 이유는 [`advance_project_archive`]를 공유하는
+    /// 이유와 같다 — Dashboard와 MCP가 각자 문자열을 지으면 같은 사유가 두
+    /// 이름으로 갈린다.
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.active_tasks {
+            out.push("tasks");
+        }
+        if self.live_agents {
+            out.push("agents");
+        }
+        out
+    }
+}
+
 /// [`advance_project_archive`]의 결과 — 이 호출로 Project가 도달한 상태.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveProgress {
-    /// 비종료 Task가 아직 남아 있어 `Draining`에 머물렀다.
-    Draining,
+    /// 게이트가 막혀 `Draining`에 머물렀다 — 무엇이 막았는지는 실린
+    /// [`ArchiveBlockers`]가 말한다.
+    Draining(ArchiveBlockers),
     /// 게이트를 통과해 `Archived`에 도달했다(또는 이미 `Archived`였다).
     Archived,
 }
@@ -149,6 +189,9 @@ pub enum ArchiveProgress {
 ///
 /// 두 조건 다 통과해야 `Archived`에 도달한다. 하나라도 막히면 `Draining`에
 /// 머물며, 호출자는 막은 쪽을 해소한 뒤 다시 호출하면 된다(idempotent).
+/// 이때 **무엇이 막았는지**를 [`ArchiveBlockers`]로 함께 돌려준다 — 두 조건은
+/// 해소 방법이 다르므로(Task는 끝나기를 기다리고, Agent는 사람이 회수한다)
+/// 사유 없이 "draining"만 알려 주면 호출자가 알릴 수 있는 것은 추측뿐이다.
 ///
 /// `on_transition`은 상태가 실제로 바뀔 때마다 호출된다(감사 기록용). 두
 /// 표면이 서로 다른 감사 파이프라인을 쓰므로(Dashboard는 `crate::audit::record`,
@@ -167,10 +210,16 @@ pub async fn advance_project_archive(
     }
 
     if project.status == ProjectStatus::Draining {
-        if store.project_has_active_tasks(project.id).await?
-            || store.project_has_live_agents(project.id).await?
-        {
-            return Ok(ArchiveProgress::Draining);
+        // 두 질의를 `||`로 단락시키지 않고 **둘 다** 평가한다. 단락시키면
+        // Task가 막고 있을 때 Agent 조건을 묻지 않은 채로 답하게 되고, 호출자는
+        // Task를 전부 끝낸 뒤에야 Agent도 막고 있었다는 사실을 알게 된다.
+        // 추가 비용은 Task가 막는 경우의 질의 한 번뿐이다.
+        let blockers = ArchiveBlockers {
+            active_tasks: store.project_has_active_tasks(project.id).await?,
+            live_agents: store.project_has_live_agents(project.id).await?,
+        };
+        if blockers.any() {
+            return Ok(ArchiveProgress::Draining(blockers));
         }
         store
             .update_project_status(project.id, ProjectStatus::Archived)
@@ -297,7 +346,14 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(progress, ArchiveProgress::Draining);
+        // 사유까지 확인한다 — Task만 막았고 Agent는 하나도 없다.
+        assert_eq!(
+            progress,
+            ArchiveProgress::Draining(ArchiveBlockers {
+                active_tasks: true,
+                live_agents: false,
+            })
+        );
         assert_eq!(project.status, ProjectStatus::Draining);
         assert_eq!(transitions, vec![ProjectStatus::Draining]);
 
@@ -357,11 +413,19 @@ mod tests {
         let agent = Agent::new(project.id, "reviewer");
         store.create_agent(&agent).await.unwrap();
 
-        // Task는 하나도 없다 — 막는 것은 오직 Agent다.
+        // Task는 하나도 없다 — 막는 것은 오직 Agent다. 게이트가 그렇게
+        // **말하는지**까지 확인한다: 이 단정이 없으면 사유가 "tasks"로
+        // 잘못 붙어도 테스트는 통과한다(2026-08-28에 실제로 그랬다).
         let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
             .await
             .unwrap();
-        assert_eq!(progress, ArchiveProgress::Draining);
+        assert_eq!(
+            progress,
+            ArchiveProgress::Draining(ArchiveBlockers {
+                active_tasks: false,
+                live_agents: true,
+            })
+        );
         assert_eq!(project.status, ProjectStatus::Draining);
 
         // Agent를 회수하면 다음 호출이 archive를 마무리한다.
@@ -373,6 +437,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(progress, ArchiveProgress::Archived);
+    }
+
+    #[tokio::test]
+    async fn both_blockers_are_reported_in_one_pass() {
+        let store = store();
+        let mut project = Project::new("doubly-blocked");
+        store.create_project(&project).await.unwrap();
+
+        let mut task = Task::from_request(TaskRequest {
+            prompt: "still running".into(),
+            created_by: "test".into(),
+            ..Default::default()
+        });
+        task.project_id = Some(project.id);
+        store.insert_task(&task).await.unwrap();
+        store
+            .create_agent(&Agent::new(project.id, "also-blocking"))
+            .await
+            .unwrap();
+
+        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+            .await
+            .unwrap();
+
+        // 두 조건을 `||`로 단락 평가하면 여기서 `live_agents: false`가 나온다 —
+        // Task가 먼저 참이라 Agent를 묻지도 않기 때문이다. 그러면 사용자는
+        // Task를 전부 끝낸 **다음에야** Agent도 막고 있었다는 것을 알게 되고,
+        // 같은 화면을 두 번 왕복해야 한다. 이 테스트가 그 회귀를 막는다.
+        assert_eq!(
+            progress,
+            ArchiveProgress::Draining(ArchiveBlockers {
+                active_tasks: true,
+                live_agents: true,
+            })
+        );
+        assert_eq!(
+            ArchiveBlockers {
+                active_tasks: true,
+                live_agents: true,
+            }
+            .labels(),
+            vec!["tasks", "agents"]
+        );
     }
 
     #[tokio::test]

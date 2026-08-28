@@ -297,13 +297,23 @@ async fn a_live_agent_holds_the_project_in_draining() {
     let agent = Agent::new(project.id, "blocker");
     store.create_agent(&agent).await.unwrap();
 
-    fleet_store::advance_project_archive(&store, &mut project, |_| {})
+    let progress = fleet_store::advance_project_archive(&store, &mut project, |_| {})
         .await
         .unwrap();
     assert_eq!(
         project.status,
         ProjectStatus::Draining,
         "Ready Agent가 남아 있으면 archive가 완료되면 안 된다"
+    );
+    // 상태뿐 아니라 **사유**도 실 DB 질의를 거쳐 나온다 — `project_has_*`
+    // 두 술어가 각각 Postgres에 묻고, 그 답이 그대로 라벨이 된다.
+    assert_eq!(
+        progress,
+        fleet_store::ArchiveProgress::Draining(fleet_store::ArchiveBlockers {
+            active_tasks: false,
+            live_agents: true,
+        }),
+        "Task가 0건이므로 게이트는 Agent만 가리켜야 한다"
     );
 
     store

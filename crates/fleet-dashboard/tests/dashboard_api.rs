@@ -1462,6 +1462,13 @@ async fn delete_project_stays_draining_when_active_tasks_exist() {
         draining["status"], "draining",
         "a project with a pending task must not archive yet"
     );
+    // 상태만으로는 화면이 사유를 지어낼 수밖에 없다 — 무엇이 막았는지도
+    // 응답에 실려야 한다.
+    assert_eq!(
+        draining["archive_blocked_by"],
+        serde_json::json!(["tasks"]),
+        "the blocker must be reported, and it is the task — no agent exists here"
+    );
 
     // 다시 호출해도(같은 pending task가 아직 남아 있으므로) 여전히 draining —
     // idempotent 재확인.
@@ -1877,6 +1884,13 @@ async fn a_ready_agent_keeps_the_project_draining() {
     assert_eq!(
         body["status"], "draining",
         "Ready Agent가 남아 있으면 archive가 완료되면 안 된다"
+    );
+    // 이 단정이 결함을 잡는 지점이다: Task가 0건인데 사유가 "tasks"로
+    // 나오면 화면은 없는 Task를 기다리라고 안내한다(2026-08-28 실제 발생).
+    assert_eq!(
+        body["archive_blocked_by"],
+        serde_json::json!(["agents"]),
+        "Task는 하나도 없으므로 사유는 Agent여야 한다"
     );
 
     authed_json(&client, reqwest::Method::DELETE, &agent_url, &cookie)

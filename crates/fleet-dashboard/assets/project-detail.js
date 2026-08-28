@@ -45,6 +45,35 @@
       return p;
     }
 
+    // archive 게이트가 막은 사유를 문장으로 옮긴다.
+    //
+    // 라벨을 만드는 곳은 서버(`fleet_store::ArchiveBlockers::labels`)다. 여기서
+    // agents/tasks 목록을 보고 **추론하지 않는 것**이 핵심이다 — 그렇게 하면
+    // 게이트가 이 파일에 세 번째로 구현되고, 서버가 조건을 추가할 때마다 조용히
+    // 틀린 말을 하게 된다. 실제로 그 형태의 결함이 있었다: 게이트에 Agent 조건이
+    // 추가됐는데 이 문구는 "tasks still running"으로 고정돼 있어, Task가 0건인
+    // Project에서 없는 Task를 기다리라고 안내했다.
+    //
+    // Task와 Agent는 해소 방법이 다르므로 문장도 갈라야 한다. `Ready` Agent는
+    // 저절로 끝나지 않는다 — 사람이 Stop을 눌러야 한다.
+    function drainingMessage(blockedBy) {
+      const blockers = Array.isArray(blockedBy) ? blockedBy : [];
+      const tasks = blockers.includes('tasks');
+      const agents = blockers.includes('agents');
+      if (tasks && agents) {
+        return 'Draining — unfinished tasks and live agents are blocking archive; wait for the tasks and stop the agents below.';
+      }
+      if (tasks) {
+        return 'Draining — tasks are still running; archive completes once they finish.';
+      }
+      if (agents) {
+        return 'Draining — live agents are still assigned; archive completes once you stop them below.';
+      }
+      // 서버가 사유를 주지 않은 경우(구버전 응답 등). 틀린 사유를 지어내는 것보다
+      // 사유를 말하지 않는 편이 낫다.
+      return 'Draining — archive is still blocked.';
+    }
+
     document.getElementById('archive-btn').addEventListener('click', async () => {
       const btn = document.getElementById('archive-btn');
       const status = document.getElementById('archive-status');
@@ -67,10 +96,10 @@
           status.style.color = 'var(--badge-failed, #c0392b)';
           return;
         }
-        // draining에 머무를 수 있다 — 비종료 Task가 남아 있으면 archive가
-        // 완료되지 않는다. 그 사실을 그대로 알려준다.
+        // draining에 머무를 수 있다. 사유는 서버가 `archive_blocked_by`로
+        // 말해 준다 — 여기서 짐작하지 않는다.
         if (body && body.status === 'draining') {
-          status.textContent = 'Draining — tasks still running; archive completes once they finish.';
+          status.textContent = drainingMessage(body.archive_blocked_by);
           status.style.color = 'var(--badge-degraded, #b08800)';
         } else {
           status.textContent = 'Archived';

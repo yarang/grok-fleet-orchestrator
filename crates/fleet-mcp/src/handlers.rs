@@ -1061,11 +1061,21 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
     // archive 절차는 Dashboard `DELETE /api/projects/{id}`와 공유한다
     // (`fleet_store::advance_project_archive`). MCP 표면에는 아직 감사
     // 파이프라인이 없어 상태 전이 콜백은 무시한다 — 감사 확장은 `#95`.
-    fleet_store::advance_project_archive(ctx.state.store.as_ref(), &mut project, |_| {})
-        .await
-        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    let progress =
+        fleet_store::advance_project_archive(ctx.state.store.as_ref(), &mut project, |_| {})
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
-    Ok(schema::tool_json(&project_json(&project)))
+    // 게이트가 막았으면 사유도 함께 싣는다 — Dashboard와 **같은 어휘**를
+    // 쓴다(`ArchiveBlockers::labels`). 여기서 문자열을 따로 지으면 같은 사유가
+    // 표면마다 다른 이름으로 갈리고, 계약이 요구하는 "두 표면의 동일 응답"이
+    // 다시 깨진다.
+    let mut body = project_json(&project);
+    if let fleet_store::ArchiveProgress::Draining(blockers) = progress {
+        body["archive_blocked_by"] = json!(blockers.labels());
+    }
+
+    Ok(schema::tool_json(&body))
 }
 
 // ── fleet_create_agent / fleet_list_agents / fleet_stop_agent ──────────
@@ -2205,6 +2215,11 @@ mod tests {
             "draining",
             "must not archive while a non-terminal task still references the project"
         );
+        assert_eq!(
+            parse_tool_json(&deleted)["archive_blocked_by"],
+            json!(["tasks"]),
+            "MCP도 Dashboard와 같은 어휘로 사유를 실어야 한다"
+        );
     }
 
     // ── fleet_create_agent / fleet_list_agents / fleet_stop_agent
@@ -2396,6 +2411,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(parse_tool_json(&deleted)["status"], "draining");
+        assert_eq!(
+            parse_tool_json(&deleted)["archive_blocked_by"],
+            json!(["agents"]),
+            "Task는 하나도 없으므로 사유는 Agent여야 한다"
+        );
 
         dispatch_tool(&ctx, TOOL_STOP_AGENT, &json!({"agent_id": agent_id}))
             .await

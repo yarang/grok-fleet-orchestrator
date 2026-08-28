@@ -82,7 +82,10 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 1. 생성 시 `ensure_project_accepts_new_agents`가 Project 상태를 검사한다 — archived/draining
    Project에는 Agent를 만들 수 없다.
 2. `advance_project_archive`가 살아 있는 Agent를 archive 게이트로 센다. 이제 archive는
-   "활성 Task 없음 **그리고** 살아 있는 Agent 없음" 두 조건이다.
+   "활성 Task 없음 **그리고** 살아 있는 Agent 없음" 두 조건이며, 막혔을 때 **어느 쪽이
+   막았는지**(`ArchiveBlockers`)를 함께 돌려준다 — 두 조건은 해소 방법이 다르다. Task는 끝나기를
+   기다리면 되지만 `Ready` Agent는 저절로 끝나지 않고 사람이 회수해야 하므로, "곧 끝난다"는 안내가
+   Agent에는 성립하지 않는다.
 3. `agent:read`/`agent:manage`가 드디어 검사할 대상을 갖는다.
 
 `project_id`는 불변이다 — Store 갱신 메서드도, API 필드도, PATCH route도 만들지 않았다.

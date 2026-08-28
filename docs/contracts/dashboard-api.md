@@ -58,6 +58,20 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 `/api/issues/{id}`의 `PATCH`는 `issue:update`를 요구하되 담당자 필드를 건드리면 `issue:assign`을
 추가로 확인한다 — 표의 한 칸에 담기지 않으므로 `handlers::update_issue_api`가 정본이다.
 
+`DELETE /api/projects/{id}`의 응답은 Project 상태에 더해 archive 게이트를 **막은 사유**를 싣는다:
+
+```json
+{ "id": "...", "name": "...", "status": "draining", "archive_blocked_by": ["agents"] }
+```
+
+`archive_blocked_by`는 `tasks`(비종료 Task가 남음)와 `agents`(회수되지 않은 `Ready` Agent가 남음)를
+값으로 가지며, 게이트를 통과했으면 비어 있어 실리지 않는다. 두 조건은 **단락 평가하지 않으므로**
+둘 다 막고 있으면 둘 다 실린다 — 하나만 알려 주면 호출자가 첫 사유를 해소한 뒤에야 두 번째를 알게
+된다. 상태만 돌려주던 동안 화면은 사유를 짐작할 수밖에 없었고, `#49`가 Agent 조건을 추가하자
+Task가 0건인 Project에 "tasks still running"이라고 표시했다. 같은 어휘를 MCP
+`fleet_delete_project`도 싣는다([MCP 도구 계약](mcp-tools.md)) — 사유를 만드는 곳은 게이트를
+평가하는 `fleet_store::ArchiveBlockers` 한 곳이다.
+
 ## 계획된 표면 — Task 삭제와 스레드 목록 (`#96`)
 
 아래는 아직 **구현되지 않았다**. 위 표는 실제 route만 담으므로 여기에 분리해 둔다.
