@@ -679,6 +679,16 @@ impl Store for BsStore {
         self.workers.lock().unwrap().insert(w.id, w.clone());
         Ok(())
     }
+    /// 이 파일에는 `/v1/workers/register`를 때리는 테스트가 없고, `join_worker`는
+    /// 중복 이름을 409로 조기 거부하므로 bump에 닿지 않는다 — 즉 도달 불가능하다.
+    /// 동작하는 mock을 두면 죽은 코드가 되므로 형제 mock들과 같이 둔다. 나중에
+    /// register 테스트가 추가되면 여기서 시끄럽게 죽으며 무엇을 채워야 할지 가리킨다.
+    async fn bump_worker_incarnation(
+        &self,
+        _: WorkerId,
+    ) -> Result<Option<chrono::DateTime<Utc>>, StoreError> {
+        unimplemented!()
+    }
     async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
         Ok(self.workers.lock().unwrap().get(&id).cloned())
     }

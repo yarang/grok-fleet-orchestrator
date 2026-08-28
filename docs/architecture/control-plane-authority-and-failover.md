@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-29"
 last_verified_commit: "working-tree"
 owners: ["architecture", "operations"]
 ---
@@ -158,7 +158,7 @@ control_plane_lease.expires_at < NOW()`). 이 술어는 lease가 **왜** 만료�
 | 4. Primary 종료 뒤 수동 승격 · Worker 재연결 · pending reconciliation E2E | **미착수** | 라이브 실행은 lease 인수인계만 관찰했다. 수동 승격 절차, Worker 재연결, reconciliation은 어느 것도 실행하지 않았다 |
 | 5. schema/binary 비호환 Standby 기동 거부 | **부분** | **schema 절반은 닫혔다** — 아래 "기동 호환성 게이트" 참고. **binary 버전 검사는 미착수** — 버전을 DB에 쓰는 생산자가 없다 |
 | 6. partition 중 Worker self-fencing과 stale process cleanup E2E | **미착수** | Worker self-fencing 미구현 |
-| 7. 동시 slot claim · ACK 유실 · Worker reincarnation에서 Agent 중복 process 없음 | **미착수** | Agent 엔티티와 `worker_execution_lease`가 아직 없다 |
+| 7. 동시 slot claim · ACK 유실 · Worker reincarnation에서 Agent 중복 process 없음 | **미착수** | `worker_execution_lease`가 없다 — Agent 엔티티는 `#49` 1단계(2026-08-28)로 생겼으므로 이 칸의 "Agent 엔티티가 없다"는 더 이상 이유가 아니다. **reincarnation의 관측 절반은 `#67` 2단계(2026-08-29)가 닫았다** — `workers.incarnation_started_at`이 워커 재시작을 오케스트레이터 관측으로 기록하고 reconciler가 그보다 앞선 dispatch를 고아로 회수한다. 그러나 그것은 **Task 회수**이지 Agent process 중복 방지가 아니다 — 워커 안에서 살아남은 프로세스를 죽일 수단은 여전히 없다 |
 
 ### epoch 강제(불변식 4·5)를 미룬 이유와 귀속
 
@@ -231,7 +231,7 @@ AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
 | 미룬 것 | 만들지 않은 이유 | 귀속 |
 | --- | --- | --- |
 | `worker_execution_lease`의 CAS slot claim·`fencing_token` | Agent 엔티티가 없어 lease의 주체가 없다 | `#67` 후속 |
-| `worker_incarnation`과 Agent command ACK | 워커→오케스트레이터 **제어 스트림이 없다** — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널 자체가 없다 | `#89` |
+| ~~`worker_incarnation`~~ (Agent command ACK는 유지) | **`worker_incarnation`은 `#67` 2단계(2026-08-29)가 만들었다.** 이 칸의 원래 판단은 "제어 스트림이 없으니 세대를 실어 나를 수 없다"였는데, 그 전제는 **워커가 자기 세대를 보고한다**는 설계(하트비트의 `process_incarnation`)에 묶여 있었다. register가 프로세스 기동 1회 이벤트라는 사실을 쓰면 오케스트레이터가 **관측만으로** 같은 신호를 만들 수 있고, 그쪽이 워커 시계도 워커가 고른 값도 술어에 들이지 않으므로 더 강하다. Agent command ACK는 그대로 남는다 — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널이 없다 | ACK는 `#89` |
 | Agent self-fencing | 위와 같은 이유. 워커가 자기 세대를 확인할 입력이 없다 | `#89` |
 | `agent_id`를 실은 dispatch | Agent/AgentTemplate 엔티티 미존재 | `#49` |
 | WarmIdle(=`task_id` NULL) lease 행 | 그런 행을 만드는 코드 경로가 없다 — 만들면 영원히 비는 상태 | 생산자 생김과 동시에 |

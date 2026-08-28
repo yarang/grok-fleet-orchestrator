@@ -840,9 +840,10 @@ impl Store for PgStore {
             r#"
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
-                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at)
+                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                 incarnation_started_at)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (id) DO UPDATE SET
                 name            = EXCLUDED.name,
                 endpoint        = EXCLUDED.endpoint,
@@ -854,6 +855,11 @@ impl Store for PgStore {
                 max_concurrent  = EXCLUDED.max_concurrent,
                 worker_version  = EXCLUDED.worker_version,
                 liveness_mode   = EXCLUDED.liveness_mode
+                -- `registered_at`과 `incarnation_started_at`은 의도적으로 제외한다.
+                -- 전자는 최초 등록 시각이라 재등록해도 바뀌면 안 되고, 후자는
+                -- 재시작 감지가 `bump_worker_incarnation`으로만 값을 움직이도록
+                -- 단일 진입점을 유지하기 위함이다. heartbeat도 이 upsert를 타므로
+                -- 여기서 EXCLUDED를 반영하면 하트비트마다 incarnation이 흔들린다.
             "#,
         )
         .bind(worker.id.as_uuid())
@@ -868,16 +874,34 @@ impl Store for PgStore {
         .bind(worker.worker_version.as_ref())
         .bind(liveness_str)
         .bind(worker.registered_at)
+        .bind(worker.incarnation_started_at)
         .execute(&self.pool)
         .await?;
 
         Ok(())
     }
 
+    async fn bump_worker_incarnation(
+        &self,
+        id: WorkerId,
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        // `NOW()`는 호출자(오케스트레이터 프로세스)가 아니라 Postgres의 시계다 —
+        // 이 값과 비교되는 `tasks.dispatched_at`도 같은 시계에서 나온다.
+        let stamped: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "UPDATE workers SET incarnation_started_at = NOW() \
+             WHERE id = $1 RETURNING incarnation_started_at",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(stamped)
+    }
+
     async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      incarnation_started_at
                FROM workers WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -890,7 +914,8 @@ impl Store for PgStore {
     async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      incarnation_started_at
                FROM workers WHERE name = $1"#,
         )
         .bind(name)
@@ -917,7 +942,8 @@ impl Store for PgStore {
 
         let rows = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at
+                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      incarnation_started_at
                FROM workers
               WHERE ($1::text IS NULL OR status = $1)
                 AND ($2::jsonb IS NULL OR labels @> $2)
@@ -1422,9 +1448,10 @@ impl Store for PgStore {
             r#"
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
-                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at)
+                 last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                 incarnation_started_at)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(worker.id.as_uuid())
@@ -1439,6 +1466,7 @@ impl Store for PgStore {
         .bind(worker.worker_version.as_ref())
         .bind(liveness_str)
         .bind(worker.registered_at)
+        .bind(worker.incarnation_started_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -3146,6 +3174,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
     let worker_version: Option<String> = row.try_get("worker_version")?;
     let liveness_str: String = row.try_get("liveness_mode")?;
     let registered_at = row.try_get("registered_at")?;
+    let incarnation_started_at = row.try_get("incarnation_started_at")?;
 
     let labels: Labels = serde_json::from_value(labels_json).unwrap_or_else(|_| HashMap::new());
 
@@ -3162,6 +3191,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
         worker_version,
         liveness_mode: str_to_liveness_mode(&liveness_str)?,
         registered_at,
+        incarnation_started_at,
     })
 }
 

@@ -52,17 +52,45 @@ pub struct Worker {
     /// 아직 안전하지 않다 — [`docs/architecture/worker-liveness-policy.md`] 참고.
     #[serde(default)]
     pub liveness_mode: WorkerLivenessMode,
-    /// 등록 시각.
+    /// 최초 등록 시각. 재등록해도 보존된다 — selector의 타이브레이크
+    /// (`sort_by_key(|w| w.registered_at)`)와 워커 목록의 `ORDER BY
+    /// registered_at DESC`가 이 의미에 의존하므로 재시작 시각으로 쓸 수 없다.
     pub registered_at: DateTime<Utc>,
+    /// 현재 워커 **프로세스**(incarnation)가 시작된 것으로 오케스트레이터가
+    /// 관측한 시각. 정본([권한과 장애 전환])의 `worker_incarnation`을
+    /// 오케스트레이터 쪽 절반만 채운 것으로, 재등록마다 갱신된다.
+    ///
+    /// 값의 출처는 워커가 아니라 오케스트레이터의 관측이다 — fleet-worker는
+    /// 기동 시 register를 정확히 1회 호출하고 `#78` 이후 종료 시 deregister를
+    /// 하지 않으므로, 이미 존재하는 row에 대한 register는 모호함 없이
+    /// "그 프로세스가 재시작했다"를 뜻한다.
+    ///
+    /// Store가 `NOW()`로 찍는다(migration 028). `upsert_worker`는 INSERT에서만
+    /// 이 값을 반영하고 `ON CONFLICT`에서는 건드리지 않으며, 갱신은 재등록을
+    /// 감지한 쪽이 `bump_worker_incarnation`으로만 수행한다 —
+    /// `tasks.dispatched_at`과 같은 취급이다.
+    #[serde(default = "unknown_incarnation")]
+    pub incarnation_started_at: DateTime<Utc>,
 }
 
 fn default_max_concurrent() -> u32 {
     4
 }
 
+/// `incarnation_started_at`이 없는 구 페이로드의 기본값.
+///
+/// `Utc::now()`가 아니라 표현 가능한 최소 시각인 이유: 이 값은 "이 시각보다
+/// 앞서 디스패치된 작업은 이전 incarnation의 고아"라는 술어에 쓰인다.
+/// `now`를 넣으면 필드를 모르는 구 페이로드 하나가 그 워커의 진행 중 작업을
+/// 전부 고아로 만든다. 모르는 값은 회수를 **유발하지 않는** 쪽으로 접는다.
+fn unknown_incarnation() -> DateTime<Utc> {
+    DateTime::<Utc>::MIN_UTC
+}
+
 impl Worker {
     /// 새 워커 등록용 생성자.
     pub fn new(name: impl Into<String>, endpoint: impl Into<String>) -> Self {
+        let now = Utc::now();
         Self {
             id: WorkerId::new(),
             name: name.into(),
@@ -75,7 +103,8 @@ impl Worker {
             circuit_state: CircuitState::Closed,
             worker_version: None,
             liveness_mode: WorkerLivenessMode::default(),
-            registered_at: Utc::now(),
+            registered_at: now,
+            incarnation_started_at: now,
         }
     }
 

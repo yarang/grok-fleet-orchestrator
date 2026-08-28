@@ -438,8 +438,32 @@ impl Store for MemStore {
     // ── Worker ─────────────────────────────────────────────────────────
 
     async fn upsert_worker(&self, w: &Worker) -> Result<(), StoreError> {
-        self.workers.lock().unwrap().insert(w.id, w.clone());
+        let mut workers = self.workers.lock().unwrap();
+        let mut next = w.clone();
+        if let Some(prev) = workers.get(&w.id) {
+            // PgStore의 `ON CONFLICT DO UPDATE`가 이 두 컬럼을 갱신 목록에서
+            // 제외하므로 여기서도 기존 값을 보존한다. 통짜 insert로 두면
+            // heartbeat 한 번에 `incarnation_started_at`이 흔들려 진행 중인
+            // 작업이 전부 고아로 판정되고, 그 차이가 MemStore를 쓰는
+            // 테스트에서만 보이지 않는다.
+            next.registered_at = prev.registered_at;
+            next.incarnation_started_at = prev.incarnation_started_at;
+        }
+        workers.insert(w.id, next);
         Ok(())
+    }
+
+    async fn bump_worker_incarnation(
+        &self,
+        id: WorkerId,
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let mut workers = self.workers.lock().unwrap();
+        let Some(w) = workers.get_mut(&id) else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        w.incarnation_started_at = now;
+        Ok(Some(now))
     }
 
     async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {

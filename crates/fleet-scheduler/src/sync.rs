@@ -204,6 +204,12 @@ mod tests {
         ) -> Result<fleet_core::TaskDeleteOutcome, fleet_store::StoreError> {
             unimplemented!()
         }
+        async fn bump_worker_incarnation(
+            &self,
+            _: fleet_core::WorkerId,
+        ) -> Result<Option<chrono::DateTime<chrono::Utc>>, fleet_store::StoreError> {
+            unimplemented!()
+        }
         async fn upsert_worker(
             &self,
             _: &fleet_core::Worker,

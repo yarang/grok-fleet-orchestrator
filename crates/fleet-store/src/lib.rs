@@ -349,6 +349,23 @@ pub trait Store: Send + Sync {
     /// 필터 조건으로 워커 목록 조회.
     async fn list_workers(&self, filter: &WorkerFilter) -> Result<Vec<Worker>, StoreError>;
 
+    /// 워커의 incarnation 시작 시각을 **지금**으로 올린다 (migration 028).
+    ///
+    /// 재등록을 감지한 쪽만 호출한다. `upsert_worker`가 이 컬럼을 건드리지 않는
+    /// 이유와 짝을 이룬다 — heartbeat도 upsert를 타므로 거기서 값이 움직이면
+    /// 하트비트마다 진행 중인 작업이 전부 고아로 판정된다.
+    ///
+    /// 시각은 호출자의 시계가 아니라 **Store의 시계**로 찍는다. 이 값은
+    /// `tasks.dispatched_at`(역시 Store가 `NOW()`로 찍는다)과 대소를 비교하므로,
+    /// 두 값이 같은 시계에서 나와야 오케스트레이터가 여러 대인 배포에서도
+    /// 호스트 간 시계 오차가 회수 판정에 들어오지 않는다.
+    ///
+    /// 대상 워커가 없으면 `None`.
+    async fn bump_worker_incarnation(
+        &self,
+        id: WorkerId,
+    ) -> Result<Option<DateTime<Utc>>, StoreError>;
+
     /// 워커 삭제 (등록 해제).
     async fn delete_worker(&self, id: WorkerId) -> Result<(), StoreError>;
 

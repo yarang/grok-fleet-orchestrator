@@ -139,11 +139,38 @@ pub async fn register_worker(
         existing_by_name.as_ref().or(existing_by_id.as_ref()),
     );
 
+    let is_new = existing_by_name.is_none() && existing_by_id.is_none();
+
+    if !is_new {
+        // 이미 존재하는 row에 register가 다시 왔다 = 그 워커 프로세스가
+        // 재시작했다. fleet-worker는 기동 시 register를 정확히 1회 호출하고
+        // (`runner.rs`의 `register_with_retry`) `#78` 이후 종료 시 deregister를
+        // 하지 않으므로 다른 해석의 여지가 없다. 이전 프로세스에 디스패치된
+        // 작업은 그 시점에 이미 고아이며, reconciler가 이 시각을 기준으로
+        // 회수한다(migration 028).
+        //
+        // upsert **앞에** 두는 이유: 재시작했다는 사실은 이후 upsert의 성패와
+        // 무관하게 참이다. 뒤에 두면 upsert 실패 시 사실이 기록되지 않고,
+        // 워커는 재시도로 다시 Online이 되어 고아가 영구히 남는다.
+        if state
+            .store
+            .bump_worker_incarnation(worker_id)
+            .await?
+            .is_none()
+        {
+            // 방금 조회에서 존재했는데 사라졌다 — 경합(삭제)이므로 신규 등록과
+            // 같은 취급으로 진행한다. 새 row가 INSERT되며 그 값이 스탬프가 된다.
+            tracing::warn!(
+                %worker_id,
+                "worker row disappeared between lookup and incarnation bump; treating as a fresh registration"
+            );
+        }
+    }
+
     let worker_id = upsert_and_register(&state, &worker).await?;
 
     // 4. WorkerJoined 이벤트 (재등록인지 신규인지 구분)
     let now = Utc::now();
-    let is_new = existing_by_name.is_none() && existing_by_id.is_none();
     let event = if is_new {
         info!(%worker_id, name = %worker.name, "worker registered");
         // 로드맵 #75 — 이벤트 로그는 append-only이므로 쓰기 시점에 마스킹한다.
@@ -1254,6 +1281,10 @@ fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worke
     } = params;
     let now = Utc::now();
     let registered_at = existing.map(|w| w.registered_at).unwrap_or(now);
+    // 재등록이면 기존 값을 그대로 넘긴다. Store의 upsert가 이 컬럼을 갱신하지
+    // 않으므로 실질적으로는 무시되지만, 구조체가 저장된 행과 어긋난 값을 들고
+    // 다니지 않도록 맞춘다. 실제 갱신은 `bump_worker_incarnation`이 한다.
+    let incarnation_started_at = existing.map(|w| w.incarnation_started_at).unwrap_or(now);
     Worker {
         id: worker_id,
         name: name.to_string(),
@@ -1267,6 +1298,7 @@ fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worke
         worker_version,
         liveness_mode,
         registered_at,
+        incarnation_started_at,
     }
 }
 

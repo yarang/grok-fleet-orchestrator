@@ -282,6 +282,7 @@ fn sample_worker(name: &str, status: WorkerStatus) -> Worker {
         worker_version: None,
         liveness_mode: fleet_core::WorkerLivenessMode::Periodic,
         registered_at: chrono::Utc::now(),
+        incarnation_started_at: chrono::Utc::now(),
     }
 }
 

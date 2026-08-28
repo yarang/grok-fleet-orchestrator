@@ -157,6 +157,11 @@ pub struct ReconcileSummary {
     pub orphaned_found: u64,
     /// 이번 라운드에 Failed로 전이시킨 orphaned dispatched 작업 수.
     pub orphaned_failed: u64,
+    /// 담당 워커가 재시작해(새 incarnation) 이전 프로세스의 고아로 발견된
+    /// dispatched 작업 수.
+    pub restarted_worker_found: u64,
+    /// 이번 라운드에 Failed로 전이시킨, 재시작한 워커 배정 작업 수.
+    pub restarted_worker_failed: u64,
     /// 담당 워커가 `Offline`으로 장기간 남아있어 발견된 stale dispatched 작업 수.
     pub offline_worker_found: u64,
     /// 이번 라운드에 Failed로 전이시킨, offline 워커 배정 작업 수.
@@ -446,6 +451,13 @@ impl Reconciler {
                 continue; // list_tasks 필터가 이미 보장하지만 방어적으로 스킵.
             };
 
+            // 회수 판정의 기준 시각. `dispatched_at`은 Store가 `NOW()`로 찍으므로
+            // `incarnation_started_at`과 같은 시계에서 나온다 — 오케스트레이터가
+            // 여러 대여도 호스트 간 시계 오차가 판정에 들어오지 않는다. 012 이전에
+            // 만들어진 행만 `None`이며, 그때는 오케스트레이터 시계인 `started_at`로
+            // 접는다.
+            let dispatched_at = task.dispatched_at.unwrap_or(started_at);
+
             if now - started_at < check_after {
                 // 방금 dispatch된 작업 — dispatch_existing()의 update_task_status
                 // 커밋과 경합하지 않도록 최소 유예 시간을 둔다.
@@ -465,12 +477,19 @@ impl Reconciler {
 
             match worker {
                 None => {
-                    // (a) 워커 row 자체가 사라짐 — 재시작으로 새 worker_id를 받은
-                    // 경우가 대표적. 강한 신호이므로 짧은 유예(check_after)만 둔다.
+                    // (a) 워커 row 자체가 사라짐 — 운영자의 `delete_worker`나
+                    // 새 이름으로 다시 조인한 경우다. 강한 신호이므로 짧은
+                    // 유예(check_after)만 둔다.
+                    //
+                    // 여기 있던 "재시작으로 새 worker_id를 받은 경우가 대표적"이라는
+                    // 설명은 사실이 아니었다. `register_worker`는 같은 `--name`이면
+                    // 기존 `worker_id`를 그대로 재사용하므로 재시작의 정상 경로는
+                    // 이 분기에 오지 않는다. 그 오해 때문에 재시작 고아를 어느
+                    // 분기도 회수하지 않는 창이 열려 있었고, 아래 (c)가 그 창이다.
                     summary.orphaned_found += 1;
                     let failure = TaskFailure {
                         error: format!(
-                            "assigned worker {worker_id} no longer registered (likely restarted with a new worker id)"
+                            "assigned worker {worker_id} no longer registered (row deleted or rejoined under a new name)"
                         ),
                         kind: FailureKind::WorkerUnavailable,
                         worker_id: Some(worker_id),
@@ -497,6 +516,48 @@ impl Reconciler {
                         warn!(
                             %task_id, %worker_id,
                             "reconciliation: dispatched task's worker no longer exists, marked failed"
+                        );
+                    }
+                }
+                // (c) 워커는 존재하지만 이 작업이 배정된 뒤 **재시작**했다.
+                // 재시작은 되돌릴 수 없는 사실이므로 (b)의 Offline 유예보다
+                // 앞에 둔다 — 뒤에 두면 재시작 후 Online으로 복귀한 워커의
+                // 고아가 맨 아래 `Some(_) => continue`로 다시 빠져나간다.
+                //
+                // 이 분기가 없는 동안 같은 이름으로 재시작한 워커의 진행 중
+                // 작업은 회수 경로가 **하나도** 없었다: row는 남아 있으니 (a)가
+                // 아니고, 재등록으로 Online에 하트비트도 새것이라 (b)도 아니다.
+                // 그 작업들은 완료되지도 실패하지도 않은 채 `Dispatched`로
+                // 영구히 남아 운영자에게 아무 신호도 주지 않는다.
+                Some(ref w) if dispatched_at < w.incarnation_started_at => {
+                    summary.restarted_worker_found += 1;
+                    let restarted_at = w.incarnation_started_at;
+                    let failure = TaskFailure {
+                        error: format!(
+                            "assigned worker {worker_id} restarted at {restarted_at} after this task \
+                             was dispatched at {dispatched_at} — the process running it is gone"
+                        ),
+                        kind: FailureKind::WorkerUnavailable,
+                        worker_id: Some(worker_id),
+                        attempts: 0,
+                    };
+                    // (a)와 같은 이유로 `[Dispatched]`, 그리고 같은 이유로
+                    // `ControlDecision` — 이 판정은 현재 보유자가 지금 내리는
+                    // 결정이지 워커가 보고한 결과가 아니다.
+                    if self
+                        .dispatcher
+                        .mark_failed(
+                            task_id,
+                            &[TaskPhase::Dispatched],
+                            failure,
+                            TransitionOrigin::ControlDecision,
+                        )
+                        .await
+                    {
+                        summary.restarted_worker_failed += 1;
+                        warn!(
+                            %task_id, %worker_id, %restarted_at, %dispatched_at,
+                            "reconciliation: dispatched task's worker restarted, marked failed"
                         );
                     }
                 }
@@ -604,9 +665,14 @@ mod tests {
         (state, dispatcher)
     }
 
+    /// 온라인 워커. `incarnation_started_at`을 충분히 과거로 밀어 둔다 —
+    /// `Worker::new`의 기본값(지금)을 그대로 쓰면 "존재하지도 않던 워커에
+    /// 120초 전에 배정된 작업"이라는 물리적으로 불가능한 픽스처가 되고,
+    /// 재시작 회수 분기가 그 관계를 정확히 보기 때문에 의도치 않게 발동한다.
     fn make_worker(name: &str) -> Worker {
         let mut w = Worker::new(name, format!("wss://{name}/ws"));
         w.status = WorkerStatus::Online;
+        w.incarnation_started_at = chrono::Utc::now() - chrono::Duration::hours(1);
         w
     }
 
@@ -959,8 +1025,9 @@ mod tests {
 
     #[tokio::test]
     async fn orphaned_dispatched_task_with_missing_worker_is_marked_failed() {
-        // 프로덕션에서 실제로 관측된 시나리오 재현: 워커가 재시작해 새
-        // worker_id로 재등록되면서, 옛 worker_id로 dispatch됐던 작업이 고아가 됨.
+        // 배정된 워커의 row 자체가 사라진 경우 — 운영자의 삭제나 새 이름으로의
+        // 재조인이다. (재시작은 같은 `worker_id`를 유지하므로 이 분기가 아니라
+        // 아래 `..._on_restarted_worker_...`가 담당한다.)
         let ghost_worker_id = WorkerId::new();
         let store = Arc::new(MemStore::new());
         // 주의: ghost_worker_id는 절대 upsert_worker되지 않음 — "존재하지 않는 워커"를 재현.
@@ -1061,6 +1128,9 @@ mod tests {
         let mut w = Worker::new(name, format!("wss://{name}/ws"));
         w.status = WorkerStatus::Offline;
         w.last_seen = Some(chrono::Utc::now() - last_seen_age);
+        // `make_worker`와 같은 이유 — Offline 유예 경로를 재현하려면 재시작
+        // 분기가 먼저 발동하지 않아야 한다.
+        w.incarnation_started_at = chrono::Utc::now() - chrono::Duration::hours(1);
         w
     }
 
@@ -1107,6 +1177,119 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatched_task_on_restarted_worker_is_marked_failed() {
+        // 이 증분 전까지 회수 경로가 **하나도 없던** 창의 회귀 테스트.
+        //
+        // 워커가 같은 `--name`으로 재시작하면 `register_worker`가 기존
+        // `worker_id`를 재사용하므로(fleet-api `handlers.rs`), row는 그대로
+        // 남고 상태는 다시 `Online`, 하트비트도 새것이다. 그래서 (a) 워커
+        // 부재에도, (b) Offline 300초 유예에도 걸리지 않는다. 그 결과 이전
+        // 프로세스에 디스패치됐던 작업은 완료되지도 실패하지도 않은 채
+        // `Dispatched`로 영구히 남았다.
+        let mut worker = make_worker("restarted-in-place");
+        // 태스크가 디스패치된 뒤(120초 전보다 나중)에 재시작했다.
+        worker.incarnation_started_at = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task(
+            "was running on the old process",
+            worker_id,
+            chrono::Duration::seconds(120),
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.restarted_worker_found, 1);
+        assert_eq!(summary.restarted_worker_failed, 1);
+        assert_eq!(
+            summary.orphaned_found, 0,
+            "워커 row는 남아 있으므로 (a) 경로가 아니다"
+        );
+        assert_eq!(
+            summary.offline_worker_found, 0,
+            "워커는 Online이므로 (b) 경로가 아니다 — 이것이 창이 열려 있던 이유다"
+        );
+
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        match failed.status {
+            TaskStatus::Failed(failure) => {
+                assert_eq!(failure.kind, FailureKind::WorkerUnavailable);
+                assert_eq!(failure.worker_id, Some(worker_id));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_dispatched_after_the_restart_is_left_alone() {
+        // 재시작 **뒤에** 디스패치된 작업은 현재 프로세스의 것이다. 술어가
+        // 방향을 잃으면 정상 작업을 매 tick마다 죽이므로, 반대 방향도 고정한다.
+        let mut worker = make_worker("restarted-then-got-work");
+        worker.incarnation_started_at = chrono::Utc::now() - chrono::Duration::seconds(600);
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task(
+            "belongs to the current process",
+            worker_id,
+            chrono::Duration::seconds(120),
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(summary.restarted_worker_found, 0);
+
+        let still_dispatched = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(
+            still_dispatched.status,
+            TaskStatus::Dispatched { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn restart_check_prefers_dispatched_at_over_started_at() {
+        // 판정 기준은 Store가 `NOW()`로 찍는 `dispatched_at`이고, 그것이 없는
+        // 구 행(migration 012 이전)에서만 오케스트레이터 시계인 `started_at`로
+        // 접는다. 두 값을 어긋나게 두어 어느 쪽을 보는지 고정한다.
+        let mut worker = make_worker("skewed");
+        worker.incarnation_started_at = chrono::Utc::now() - chrono::Duration::seconds(300);
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        // `started_at`은 재시작보다 앞서지만(회수 대상처럼 보인다),
+        // `dispatched_at`은 재시작보다 나중이다(실제로는 현재 프로세스의 작업).
+        let mut task = make_dispatched_task("skewed", worker_id, chrono::Duration::seconds(600));
+        task.dispatched_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+
+        let summary = reconciler.reconcile_once().await;
+        assert_eq!(
+            summary.restarted_worker_found, 0,
+            "dispatched_at이 아니라 started_at으로 판정하고 있다"
+        );
+        assert!(matches!(
+            state.store.get_task(task_id).await.unwrap().unwrap().status,
+            TaskStatus::Dispatched { .. }
+        ));
     }
 
     #[tokio::test]

@@ -192,6 +192,12 @@ impl Store for AttemptStore {
     async fn upsert_worker(&self, _worker: &Worker) -> Result<(), StoreError> {
         unimplemented!()
     }
+    async fn bump_worker_incarnation(
+        &self,
+        _id: WorkerId,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoreError> {
+        unimplemented!()
+    }
     async fn get_worker(&self, _id: WorkerId) -> Result<Option<Worker>, StoreError> {
         Ok(None)
     }
