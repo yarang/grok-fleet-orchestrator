@@ -108,23 +108,24 @@ impl Worker {
         }
     }
 
-    /// 추가 용량이 있는지 (활성 작업 < 최대 동시).
-    pub fn has_capacity(&self) -> bool {
-        self.active_tasks < self.max_concurrent
-    }
-
     /// 요청된 라벨 집합을 모두 만족하는지.
     pub fn matches_labels(&self, required: &[String]) -> bool {
         required.iter().all(|lbl| self.labels.contains_key(lbl))
     }
-
-    /// dispatch 가능 여부: online + 회로 닫힘 + 용량 있음.
-    pub fn is_dispatchable(&self) -> bool {
-        matches!(self.status, WorkerStatus::Online)
-            && matches!(self.circuit_state, CircuitState::Closed)
-            && self.has_capacity()
-    }
 }
+
+// `has_capacity()`와 `is_dispatchable()`은 로드맵 #67 3단계에서 삭제했다.
+//
+// 둘 다 `active_tasks`(워커 자기보고)를 근거로 삼았는데, 그 값을 용량 판단에
+// 쓰지 않기로 하면서 유일한 프로덕션 호출자였던 `fleet-scheduler`의 selector가
+// 사라졌다 (`is_dispatchable()`은 그 전부터 이미 테스트에서만 불렸다).
+//
+// 문서 주석만 달고 남겨 두지 않은 이유: `Worker`는 store에 접근할 수 없으므로
+// 이 자리에서 신뢰할 수 있는 용량 판단을 **할 수가 없다**. `has_capacity()`라는
+// 이름의 pub 메서드가 남아 있으면 다음 기여자는 그걸 부르고, 방금 신뢰할 수
+// 없다고 판정한 값을 다시 읽게 된다. 대체 경로는
+// `Store::count_dispatched_tasks_by_worker()`이며, 판단은
+// `fleet-scheduler`의 `WorkerSelector::select`에 있다.
 
 /// 워커 가용성 상태.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,8 +345,7 @@ mod tests {
         let w = Worker::new("build-farm-1", "wss://localhost:2419/ws");
         assert!(matches!(w.status, WorkerStatus::Online));
         assert!(matches!(w.circuit_state, CircuitState::Closed));
-        assert!(w.has_capacity());
-        assert!(w.is_dispatchable());
+        assert_eq!(w.active_tasks, 0);
         assert_eq!(w.max_concurrent, 4);
     }
 
@@ -359,16 +359,6 @@ mod tests {
         assert!(w.matches_labels(&["gpu".into(), "arch".into()]));
         assert!(!w.matches_labels(&["tpu".into()]));
         assert!(w.matches_labels(&[])); // 빈 라벨은 항상 매칭
-    }
-
-    #[test]
-    fn capacity_check() {
-        let mut w = Worker::new("c1", "wss://x");
-        w.max_concurrent = 2;
-        assert!(w.has_capacity());
-        w.active_tasks = 2;
-        assert!(!w.has_capacity());
-        assert!(!w.is_dispatchable());
     }
 
     #[test]

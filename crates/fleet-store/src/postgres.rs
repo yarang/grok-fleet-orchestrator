@@ -624,6 +624,45 @@ impl Store for PgStore {
         Ok(retry_count as u32)
     }
 
+    async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
+        // `status_phase`는 생성(STORED) 칼럼(`001_init.sql:43`)이고 전용 인덱스
+        // `idx_tasks_phase`(`002_indexes.sql:10`)가 있으므로 이 술어는 기존
+        // 인덱스를 탄다 — 새 인덱스를 추가하지 않았다.
+        //
+        // `TaskStatus`는 내부 태그(`#[serde(tag = "phase")]`)라 페이로드 필드가
+        // 최상위로 평탄화된다. 따라서 경로는 `status->>'worker_id'`이지
+        // `status->'Dispatched'->>'worker_id'`가 아니다 — 후자로 적어서 한 행도
+        // 매칭되지 않았던 것이 `3b0a846`의 버그였다.
+        //
+        // `IS NOT NULL`을 명시해서 NULL 그룹이 만들어질 여지를 없앤다.
+        // `Dispatched`는 `worker_id`를 필수 필드로 갖지만, 그 불변식이 SQL의
+        // GROUP BY 키를 지켜 주지는 않는다.
+        let rows = sqlx::query(
+            "SELECT status->>'worker_id' AS worker_id, COUNT(*) AS n \
+             FROM tasks \
+             WHERE status_phase = 'dispatched' AND status->>'worker_id' IS NOT NULL \
+             GROUP BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let raw: String = row.try_get("worker_id")?;
+            // 파싱 불가한 값은 조용히 건너뛰지 않고 에러로 올린다. 이 카운트가
+            // 용량 판단의 근거이므로, 일부 워커의 부하가 소리 없이 0으로
+            // 보이면 그 워커에 과다 dispatch가 일어난다.
+            let uuid = Uuid::parse_str(&raw).map_err(|e| {
+                StoreError::Decode(format!(
+                    "tasks.status->>'worker_id' is not a uuid: {raw} ({e})"
+                ))
+            })?;
+            let n: i64 = row.try_get("n")?;
+            out.insert(WorkerId(uuid), n as u32);
+        }
+        Ok(out)
+    }
+
     async fn update_task_checkpoint(
         &self,
         id: TaskId,

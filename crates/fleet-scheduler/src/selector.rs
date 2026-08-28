@@ -10,8 +10,34 @@
 //!    `Store::get_worker_credential(worker.name, model)`이 `Some`을 반환하는
 //!    워커만 후보로 남긴다. 아래 "credential 필터 기준 필드" 설명 참고)
 //! 4. 회로 차단된 워커 제외
-//! 5. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
-//! 6. 없으면 least-loaded (활성 작업 수 최소)
+//! 5. 용량 필터 (동시 상한에 도달한 워커 제외 — 아래 "부하의 출처" 설명 참고)
+//! 6. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
+//! 7. 없으면 least-loaded (부하 최소)
+//!
+//! ## 부하의 출처: store 원장 (`Worker::active_tasks` 아님) — 로드맵 #67 3단계
+//!
+//! 5번과 7번은 **같은 숫자**를 쓴다:
+//! `Store::count_dispatched_tasks_by_worker()`가 반환하는, 오케스트레이터가
+//! 직접 기록한 `Dispatched` 행의 워커별 개수다.
+//!
+//! 예전에는 둘 다 `Worker::active_tasks`를 읽었다. 그 필드는 워커의 하트비트
+//! 요청 본문(`fleet-api`의 `handlers.rs`)으로만 갱신되며 dispatch 시점에는
+//! 오케스트레이터가 건드리지 않는다. 결과적으로 (a) 하트비트 주기(기본 15초)
+//! 만큼 낡은 값을 읽어 과다 dispatch가 나고, (b) 워커가 신고하는 값이라
+//! 위조할 수 있었다. 특히 0을 신고하는 워커는 5번 필터를 통과하는 데 그치지
+//! 않고 7번 정렬에서 **가장 먼저 선택**됐다 — 그래서 필터만 고치는 것으로는
+//! 부족하고 정렬 키까지 같이 옮겨야 했다.
+//!
+//! 이 교체의 선행 조건은 #67 2단계(worker incarnation)였다. 그 전에는 같은
+//! `--name`으로 재시작한 워커가 `worker_id`를 재사용해서 이전 화신의 in-flight
+//! 작업이 영원히 `Dispatched`로 남았고, 그러면 이 카운트가 영구히 과대계상되어
+//! 그 워커는 다시는 선택되지 않았을 것이다.
+//!
+//! **남아 있는 한계**: 카운트를 읽고 dispatch하기까지가 원자적이지 않다.
+//! 동시에 도는 `select()` 둘이 같은 N을 읽고 둘 다 보낼 수 있다. 슬롯을 CAS로
+//! 선점하는 것은 #67의 나머지 절반(`worker_execution_lease`)이며 아직이다.
+//! 최종 방어선은 여전히 transport의 세마포어(`acp_transport.rs`)로, 상한을
+//! 넘긴 dispatch는 `TransportError::WorkerAtCapacity`로 거부된다.
 //!
 //! ## Credential 필터 기준 필드: `task.model` (`task.resolved_model` 아님)
 //!
@@ -94,6 +120,25 @@ pub enum SelectionError {
     /// 때까지 이 워커는 배정 대상이 아니다"이다.
     #[error("no dispatchable worker: all candidates are on-demand and unprobed")]
     AllUnprobed,
+
+    /// 살아 있고 자격도 맞는 워커가 있었지만 전부 동시 상한에 도달 (로드맵 #67 3단계).
+    ///
+    /// 3단계 전에는 이 갈래가 사실상 도달 불가였다. 용량 판단이 워커 자기보고
+    /// `active_tasks`를 읽었고 그 값은 하트비트 사이에 0 쪽으로 낡아 있어서
+    /// 필터가 거의 걸리지 않았기 때문이다. store 파생 카운트는 dispatch 즉시
+    /// 올라가므로 **포화가 후보를 비우는 흔한 경로**가 된다. 이 변형이 없으면
+    /// 운영자는 그때마다 `AllOffline`("no worker is currently online")을 보게
+    /// 되고, 멀쩡히 돌고 있는 워커를 껐다 켜는 잘못된 대응을 하게 된다.
+    #[error("all candidate workers are at their concurrency limit")]
+    AllAtCapacity,
+
+    /// 힌트된 워커가 살아 있지만 동시 상한에 도달 (로드맵 #67 3단계).
+    ///
+    /// `HintedUnavailable`("offline or circuit-open")과 나누는 이유는 위와 같다 —
+    /// 운영자가 할 일이 다르다. 저쪽은 워커를 살리는 것이고, 이쪽은 기다리거나
+    /// `max_concurrent`를 올리는 것이다.
+    #[error("hinted worker '{0}' is at its concurrency limit (not falling back, per user intent)")]
+    HintedAtCapacity(String),
 }
 
 /// 워커 선택기.
@@ -197,16 +242,45 @@ impl WorkerSelector {
         // 3. 회로 차단된 워커 제외
         candidates.retain(|w| !self.breakers.state_of(w.id).is_open());
 
-        // 3.5. (Phase 8.4) 용량이 없는 워커 제외 — 동시 상한에 도달한 워커는
-        // dispatch해도 즉시 WorkerAtCapacity 에러가 나므로 selector 단에서
-        // 사전 필터링.
-        candidates.retain(|w| w.has_capacity());
+        // 3.5. (Phase 8.4, 로드맵 #67 3단계) 용량이 없는 워커 제외.
+        //
+        // 부하의 근거는 워커 자기보고 `Worker::active_tasks`가 아니라
+        // 오케스트레이터 자신의 원장(`Dispatched` 행)이다. 자기보고는
+        //   (a) 하트비트로만 갱신되어 최대 health interval(기본 15초)만큼 낡고,
+        //   (b) 워커가 위조할 수 있으며,
+        //   (c) 0을 신고하면 이 필터를 통과할 뿐 아니라 아래 5번의 least-loaded
+        //       정렬에서 **가장 먼저 선택**된다 — 필터만 고쳐서는 부족하다.
+        // 그래서 이 카운트는 필터와 정렬 **양쪽**에 쓰인다.
+        //
+        // 여기서 실패하면 fail-open하지 않는다. 카운트를 못 읽으면 누구에 대해서도
+        // 용량을 판정할 수 없으므로, 1번의 `list_workers` 실패와 같은 취급을 한다.
+        let load = self
+            .store
+            .count_dispatched_tasks_by_worker()
+            .await
+            .map_err(|e| {
+                tracing::error!(target: "fleet::selector", error = %e, "dispatched-count store error");
+                SelectionError::AllOffline
+            })?;
+
+        let mut at_capacity: Vec<String> = Vec::new();
+        candidates.retain(|w| {
+            if load.get(&w.id).copied().unwrap_or(0) < w.max_concurrent {
+                true
+            } else {
+                at_capacity.push(w.name.clone());
+                false
+            }
+        });
 
         // 4. server_hint 처리 (폴백 없음)
         if let Some(hint) = &task.server_hint {
             let hinted = candidates.iter().find(|w| &w.name == hint);
             return match hinted {
                 Some(w) => Ok(w.id),
+                None if at_capacity.iter().any(|n| n == hint) => {
+                    Err(SelectionError::HintedAtCapacity(hint.clone()))
+                }
                 None => {
                     // 힌트 워커가 아예 존재하는지 확인 (에러 메시지 정확도)
                     let exists = self
@@ -225,10 +299,19 @@ impl WorkerSelector {
             };
         }
 
-        // 5. least-loaded 정렬 (활성 작업 수, 그 다음 이름)
+        // 4.5. 용량 때문에 후보가 비었으면 그 사실을 그대로 보고한다.
+        // 힌트 갈래보다 뒤에 두는 이유는 힌트가 있을 때는 위에서 이미
+        // `HintedAtCapacity`로 더 구체적인 답을 냈기 때문이다.
+        if candidates.is_empty() && !at_capacity.is_empty() {
+            return Err(SelectionError::AllAtCapacity);
+        }
+
+        // 5. least-loaded 정렬 (store 파생 부하, 그 다음 이름)
         candidates.sort_by(|a, b| {
-            a.active_tasks
-                .cmp(&b.active_tasks)
+            load.get(&a.id)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&load.get(&b.id).copied().unwrap_or(0))
                 .then_with(|| a.name.cmp(&b.name))
         });
 
@@ -268,6 +351,14 @@ mod tests {
         /// 로드맵 #71 — 실제 blob 내용은 selector 로직에서 쓰지 않으므로
         /// 존재 여부만 추적한다.
         credentials: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+        /// 워커별 store 파생 부하 fixture (로드맵 #67 3단계).
+        ///
+        /// 빈 맵을 반환하는 스텁으로 두지 않은 이유: 그러면 모든 테스트가
+        /// "부하가 전부 0"이라는 한 경우만 밟게 되고, 그건 교체 이전의
+        /// 동작과 구분되지 않는다 — 스위트는 초록인데 새 로직은 한 줄도
+        /// 검증되지 않는다. `Worker::active_tasks`와 **따로** 세팅할 수
+        /// 있게 해서 selector가 어느 쪽을 읽는지 테스트가 가릴 수 있게 한다.
+        dispatched: std::sync::Mutex<std::collections::HashMap<WorkerId, u32>>,
     }
 
     impl MockStore {
@@ -275,7 +366,22 @@ mod tests {
             Self {
                 workers: std::sync::Mutex::new(workers),
                 credentials: std::sync::Mutex::new(std::collections::HashSet::new()),
+                dispatched: std::sync::Mutex::new(std::collections::HashMap::new()),
             }
+        }
+
+        /// 빌더 헬퍼 — 이름으로 지목한 워커의 store 파생 `Dispatched` 건수를 세팅.
+        fn with_load(self, worker_name: &str, n: u32) -> Self {
+            let id = self
+                .workers
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|w| w.name == worker_name)
+                .unwrap_or_else(|| panic!("no fixture worker named {worker_name}"))
+                .id;
+            self.dispatched.lock().unwrap().insert(id, n);
+            self
         }
 
         /// 빌더 헬퍼 — 주어진 (worker_name, model_id)에 대한 credential이
@@ -319,6 +425,11 @@ mod tests {
         }
         async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
             unimplemented!()
+        }
+        async fn count_dispatched_tasks_by_worker(
+            &self,
+        ) -> Result<std::collections::HashMap<WorkerId, u32>, StoreError> {
+            Ok(self.dispatched.lock().unwrap().clone())
         }
         async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
             unimplemented!()
@@ -472,22 +583,96 @@ mod tests {
 
     #[tokio::test]
     async fn select_least_loaded() {
+        // 예전 이 테스트는 `assert_ne!(selected, WorkerId::nil())`만 확인해서
+        // 정렬이 어떻게 되든 통과했다. store 파생 부하로 옮기면서 실제로
+        // 어떤 워커가 뽑히는지를 단정한다.
         let workers = vec![
-            make_worker("busy", 5, &[]),
+            make_worker("busy", 0, &[]),
             make_worker("idle", 0, &[]),
-            make_worker("medium", 2, &[]),
+            make_worker("medium", 0, &[]),
         ];
-        let store = Arc::new(MockStore::new(workers));
+        let store = Arc::new(
+            MockStore::new(workers)
+                .with_load("busy", 5)
+                .with_load("medium", 2),
+        );
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = WorkerSelector::new(store.clone(), breakers);
 
         let task = make_task("work", None, &[]);
         let selected = selector.select(&task).await.unwrap();
 
-        // 가장 적게 로드된 "idle"이 선택되어야 함
-        let store = MockStore::new(vec![]); // 재바인딩 불가 — 이름으로 검증
-        let _ = store;
-        assert_ne!(selected, WorkerId::nil());
+        let idle = store.get_worker_by_name("idle").await.unwrap().unwrap();
+        assert_eq!(selected, idle.id, "부하가 가장 낮은 워커가 선택되어야 한다");
+    }
+
+    /// 로드맵 #67 3단계 — 정렬 키가 자기보고가 아니라 store 원장이어야 한다.
+    ///
+    /// 두 값을 **정반대로** 세팅한다. 자기보고를 읽으면 `liar`(0을 신고)가,
+    /// store를 읽으면 `honest`가 뽑힌다. 교체 전 코드는 이 테스트에서
+    /// `liar`를 골랐다 — 거짓말하는 워커가 필터를 통과하는 데 그치지 않고
+    /// **우대**받는다는 것이 이 3단계의 핵심 결함이었다.
+    #[tokio::test]
+    async fn least_loaded_ignores_self_reported_active_tasks() {
+        let workers = vec![
+            make_worker("honest", 9, &[]), // 자기보고 9, 실제 0
+            make_worker("liar", 0, &[]),   // 자기보고 0, 실제 4
+        ];
+        let store = Arc::new(MockStore::new(workers).with_load("liar", 4));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let selected = selector
+            .select(&make_task("work", None, &[]))
+            .await
+            .unwrap();
+
+        let honest = store.get_worker_by_name("honest").await.unwrap().unwrap();
+        assert_eq!(
+            selected, honest.id,
+            "자기보고 0을 신고한 워커가 아니라 원장상 한가한 워커가 뽑혀야 한다"
+        );
+    }
+
+    /// 로드맵 #67 3단계 — 용량 필터도 같은 숫자를 읽는다.
+    ///
+    /// `Worker::new`의 기본 `max_concurrent`만큼 store 부하를 채우면 후보가
+    /// 비어야 하고, 그때 `AllOffline`이 아니라 `AllAtCapacity`가 나와야 한다.
+    /// 자기보고 값은 0으로 두어, 그 값을 읽는 구현이라면 이 테스트가
+    /// `Ok(_)`로 통과해 버리게 만든다.
+    #[tokio::test]
+    async fn all_at_capacity_is_reported_distinctly() {
+        let w = make_worker("solo", 0, &[]);
+        let cap = w.max_concurrent;
+        let store = Arc::new(MockStore::new(vec![w]).with_load("solo", cap));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let result = selector.select(&make_task("work", None, &[])).await;
+        assert!(
+            matches!(result, Err(SelectionError::AllAtCapacity)),
+            "포화는 오프라인과 구분되어야 한다, got {result:?}"
+        );
+    }
+
+    /// 로드맵 #67 3단계 — 힌트된 워커의 포화도 `HintedUnavailable`과 구분한다.
+    #[tokio::test]
+    async fn hinted_at_capacity_is_reported_distinctly() {
+        let hinted = make_worker("gpu-1", 0, &[]);
+        let cap = hinted.max_concurrent;
+        let store = Arc::new(
+            MockStore::new(vec![hinted, make_worker("cpu-1", 0, &[])]).with_load("gpu-1", cap),
+        );
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        let result = selector
+            .select(&make_task("work", Some("gpu-1"), &[]))
+            .await;
+        assert!(
+            matches!(result, Err(SelectionError::HintedAtCapacity(ref n)) if n == "gpu-1"),
+            "포화된 힌트 워커는 offline/circuit-open과 구분되어야 한다, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -602,11 +787,19 @@ mod tests {
     async fn select_model_none_is_backward_compatible() {
         // task.model == None → model 라벨 유무와 무관하게 기존과 동일하게 동작해야 함.
         let workers = vec![
-            make_worker("busy", 5, &[("model", "gemini")]),
+            make_worker("busy", 0, &[("model", "gemini")]),
             make_worker("idle", 0, &[]),
-            make_worker("medium", 2, &[("model", "glm-5")]),
+            make_worker("medium", 0, &[("model", "glm-5")]),
         ];
-        let store = Arc::new(MockStore::new(workers));
+        // 부하는 store 파생 카운트로 심는다 (로드맵 #67 3단계). 예전에는 이
+        // 픽스처가 `active_tasks`로 부하를 표현했는데, 정렬 키가 옮겨가면서
+        // 그 값은 selector가 읽지 않는다 — 그대로 두면 세 워커가 모두 부하 0
+        // 동률이 되어 이름 순으로 "busy"가 뽑힌다.
+        let store = Arc::new(
+            MockStore::new(workers)
+                .with_load("busy", 3)
+                .with_load("medium", 2),
+        );
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
         let selector = WorkerSelector::new(store.clone(), breakers);
 
@@ -771,11 +964,12 @@ mod tests {
         // "가장 한가한 워커"가 사실은 죽어 있는 워커가 된다.
         let workers = vec![
             make_on_demand_worker("idle-laptop", 0, &[]),
-            // max_concurrent 기본값이 4이므로 3까지만 — 4 이상이면 용량
-            // 필터(3.5단계)에 걸려 liveness 필터가 아닌 다른 이유로 비게 된다.
-            make_worker("busy-server", 3, &[]),
+            make_worker("busy-server", 0, &[]),
         ];
-        let store = Arc::new(MockStore::new(workers));
+        // 부하는 store 파생 카운트로 심는다. max_concurrent 기본값이 4이므로
+        // 3까지만 — 4 이상이면 용량 필터(3.5단계)에 걸려 liveness 필터가 아닌
+        // 다른 이유로 비게 되고, 이 테스트가 검증하려는 순서를 못 보게 된다.
+        let store = Arc::new(MockStore::new(workers).with_load("busy-server", 3));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
         let selector = WorkerSelector::new(store.clone(), breakers);
 

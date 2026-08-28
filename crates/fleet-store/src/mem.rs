@@ -304,6 +304,23 @@ impl Store for MemStore {
         Ok(task.retry_count)
     }
 
+    async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
+        if self.is_failing("count_dispatched_tasks_by_worker") {
+            return Err(StoreError::Unsupported("count_dispatched_tasks_by_worker"));
+        }
+        let tasks = self.tasks.lock().unwrap();
+        let mut out: HashMap<WorkerId, u32> = HashMap::new();
+        for t in tasks.values() {
+            // `Completed`/`Failed`도 `worker_id`를 갖지만 이미 끝난 작업이므로
+            // 용량을 차지하지 않는다 — `Dispatched`만 센다. PgStore 쪽의
+            // `status_phase = 'dispatched'` 술어와 같은 의미다.
+            if let TaskStatus::Dispatched { worker_id, .. } = &t.status {
+                *out.entry(*worker_id).or_insert(0) += 1;
+            }
+        }
+        Ok(out)
+    }
+
     async fn update_task_checkpoint(
         &self,
         id: TaskId,

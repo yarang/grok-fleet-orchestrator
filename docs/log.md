@@ -3640,3 +3640,111 @@ SELECT count(*) FROM tasks WHERE status->>'worker_id' = $1;
 아니라 화면을 읽다가 잡혔다** — 마스킹 표식이 사라진 것은 SQL 수정과 아무 관계가
 없었고, 실검증을 API 응답 확인으로만 끝냈다면 `<redacted>`가 JSON에 그대로 있어
 보이지 않았을 것이다.
+
+## 2026-08-29 — `#67` 3단계: 용량 판단을 워커 자기보고에서 오케스트레이터 원장으로
+
+`has_capacity()`가 읽던 `Worker::active_tasks`는 **워커가 하트비트 본문에 담아
+보내는 값**이다(`fleet-api`의 `handlers.rs:244`·`:284`가 유일한 쓰기 경로 —
+오케스트레이터는 dispatch 시 이 값을 올리지 않는다). 세 가지가 따라온다:
+갱신이 health interval(기본 15초) 주기라 그 사이 과다 dispatch가 나고, 워커가
+위조할 수 있고, 0을 신고하면 필터를 통과하는 데 그치지 않고 least-loaded 정렬에서
+**우대**받는다. 마지막 항목 때문에 `selector.rs:203`의 필터만 고치는 것으로는
+부족했다 — 정렬 키(`:229`)도 같이 옮겨야 거짓말이 이득이 되지 않는다.
+
+`Store::count_dispatched_tasks_by_worker()`를 추가했다. PgStore는
+`WHERE status_phase = 'dispatched' AND status->>'worker_id' IS NOT NULL GROUP BY 1`
+한 번이다. `status_phase`는 생성 STORED 칼럼(`001_init.sql:43`)이고 전용 인덱스
+`idx_tasks_phase`(`002_indexes.sql:10`)가 이미 있어 **새 인덱스를 만들지 않았다**.
+
+### 용량 판단은 이 저장소에 세 군데 있고, 셋 다 다른 사실을 말한다
+
+바꾼 것은 (1)이고, (2)는 그대로 두는 것이 맞다.
+
+| # | 위치 | 세는 것 | 범위 | 위조 가능 |
+|---|------|---------|------|-----------|
+| 1 | `Worker::active_tasks` → **store 파생 카운트** | 오케스트레이터가 기록한 `Dispatched` 행 | 전역 | 아니오 |
+| 2 | `acp_transport.rs:178`의 `tokio::sync::Semaphore` | 이 프로세스가 실제로 연 세션 | **프로세스 내** | 아니오 |
+| 3 | (없음) CAS slot claim | — | — | — |
+
+(2)를 selector와 맞추지 않아도 되는 이유: 그것은 자기보고를 읽지 않고
+`try_acquire_owned()` 실패로 `TransportError::WorkerAtCapacity`를 낸다. 즉 둘이
+어긋날 여지가 애초에 없다. 다만 scale-out에서 (2)는 오케스트레이터 프로세스마다
+따로 세므로, 전역으로 맞는 숫자는 (1)뿐이다.
+
+### 함께 필요해진 변경 — 오류 메시지가 거짓말이 되는 것을 막는 쪽이 더 시급했다
+
+`candidates.retain(...)`이 목록을 비우면 제어가 흘러 `AllOffline`("no worker is
+currently online") 또는 힌트 갈래의 `HintedUnavailable`("offline or circuit-open")로
+끝난다. **자기보고 시절에는 이 갈래가 사실상 도달하지 않았다** — 값이 0 쪽으로
+낡아 있어 필터가 거의 걸리지 않았기 때문이다. store 파생 카운트는 dispatch 즉시
+오르므로 포화가 후보를 비우는 흔한 경로가 된다. 그대로 뒀다면 운영자는 포화가
+날 때마다 "워커가 오프라인"이라는 답을 받고 멀쩡히 돌고 있는 워커를 재시작했을
+것이다. **정확해진 카운트가 부정확한 메시지를 처음으로 노출시킨 형태다.**
+`AllAtCapacity`·`HintedAtCapacity`를 추가했다. 판단 기준은 `AllUnprobed`를
+나눌 때와 같다 — 운영자가 할 일이 다르면 다른 오류다.
+
+`Worker::has_capacity()`와 `is_dispatchable()`은 삭제했다. selector가 유일한
+프로덕션 호출자였고(`is_dispatchable()`은 그 전부터 테스트에서만 불렸다),
+`Worker`는 store에 접근할 수 없으므로 그 자리에서 신뢰할 수 있는 용량 판단을
+**할 수가 없다**. 주석만 달고 남겨 두면 다음 기여자는 `has_capacity()`라는
+이름을 보고 부르고, 방금 신뢰할 수 없다고 판정한 값을 다시 읽는다.
+
+### 게이지: 이름 유지, 의미 교체 (사용자 결정)
+
+`fleet_workers_active_tasks_total`을 같은 메서드로 계산하게 했다. 두 게이지로
+쪼개는 안을 제안했으나 사용자가 단일 게이지 교체를 선택했고, 그대로 따랐다.
+**받아들인 대가**: 자기보고와 관측값의 괴리 자체는 이제 관측할 수 없다 —
+워커가 거짓 `active_tasks`를 신고해도 어떤 메트릭에도 나타나지 않는다.
+기존 대시보드·알림은 이름을 바꾸지 않아도 계속 동작하지만, 측정 대상이
+"워커들이 뭐라고 말했나"에서 "오케스트레이터 원장에 무엇이 남아 있나"로 바뀌었다.
+
+`fleet_tasks_total{phase="dispatched"}`와 중복 아니냐는 의심이 들어 대조했다.
+두 가지가 다르다. (a) 새 게이지는 `list_workers` 결과를 순회하며 더하므로
+**등록된 워커에 배정된 것만** 센다 — 워커가 삭제된 뒤 남은 고아 `Dispatched`
+행은 빠진다. (b) `fleet_tasks_total`은 `list_tasks(limit: 10_000)`을 세므로 task가
+1만 건을 넘으면 과소계상되지만, 새 게이지는 SQL `COUNT(*)`라 상한이 없다.
+`fleet_tasks_total`의 이 상한은 이 작업의 범위 밖이라 고치지 않았다.
+
+### `0.16s`가 조용한 skip이 아님을 변이로 확인했다
+
+`dispatched_load.rs` 5건이 `DATABASE_URL` 주입 상태에서 `0.16s`에 끝났다.
+§4.3(3)이 기록한 조용한 skip과 같은 모양이라 SQL의 JSONB 경로를 일부러
+`status->'Dispatched'->>'worker_id'`(=`3b0a846`에서 고쳤던 그 틀린 모양)로 바꿔
+다시 돌렸다 — **3건이 실패했다**. Postgres 갈래가 실제로 돈다는 뜻이고, 0.16s는
+진짜다. 통과한 나머지 2건은 빈 맵을 기대하는 테스트였다. 즉 그 둘은 이 결함을
+**원리적으로 가릴 수 없다**. 소요 시간만으로 판정하려 했다면 여기서 막혔을
+것이고, 변이가 그 자리를 대신했다.
+
+### 기존 테스트 두 건이 정렬의 출처를 암묵적으로 단정하고 있었다
+
+`select_model_none_is_backward_compatible`이 깨졌다. 그 테스트의 의도는
+"model=None이면 model 라벨을 무시한다"인데, 부하를 `make_worker("busy", 5, ...)`
+처럼 자기보고로 표현하는 바람에 **정렬이 그 필드를 읽는다는 것까지** 같이
+단정하고 있었다. 출처를 옮기자 세 워커가 전부 부하 0 동률이 되어 tie-break인
+이름 순으로 `busy`가 뽑혔다. 픽스처를 `with_load()`로 옮겼다.
+`periodic_worker_is_preferred_over_idle_on_demand_worker`도 같은 이유로 옮겼다.
+tie-break가 결정적(이름 순)이라 이 실패는 재현 가능했다 — 무작위였다면 flaky로
+나타났을 자리다.
+
+`selector.rs`의 `MockStore`에는 빈 맵을 돌려주는 스텁을 두지 않고 `with_load()`
+빌더를 붙였다. 빈 맵이면 모든 테스트가 "부하 전부 0"이라는 한 경우만 밟게 되고,
+그건 교체 이전 동작과 구분되지 않는다 — **스위트는 초록인데 새 로직은 한 줄도
+검증되지 않는다.** 새로 넣은 `least_loaded_ignores_self_reported_active_tasks`는
+자기보고와 store 값을 **정반대로** 세팅한다(자기보고 9/실제 0 대 자기보고 0/실제 4).
+같은 방향으로 세팅하면 어느 쪽을 읽든 통과하므로, 반대로 두는 것이 판정을 만든다.
+
+`Store` 구현체는 5개가 아니라 6개였다. `impl Store for`로 grep해서
+`fleet-scheduler/src/sync.rs:148`의 `impl fleet_store::Store for NoopStore`를
+놓쳤고, 컴파일러가 잡았다.
+
+### 검증 한계
+
+- **읽고-보내는 사이는 여전히 원자적이지 않다.** 동시에 도는 `select()` 둘이
+  같은 N을 읽고 둘 다 dispatch할 수 있다. 이 창을 닫는 것은 store 파생 카운트가
+  아니라 CAS slot claim이며, 그것은 `#67`의 남은 절반(`worker_execution_lease`)이다.
+  이번 변경이 그 창을 닫았다고 읽지 말 것.
+- 라이브 fleet에서 워커가 거짓 `active_tasks`를 신고하는 상황은 재현하지 않았다.
+  테스트에서 두 값을 반대로 세팅해 selector가 어느 쪽을 읽는지로 대신 확인했다.
+- 대시보드 UI 실검증은 하지 않았다. 이번 변경의 사용자 가시면은 Prometheus 게이지
+  하나와 오류 메시지 두 개이고, 둘 다 화면 렌더링을 거치지 않는다.
+- `fleet_tasks_total`의 1만 건 상한은 대조 과정에서 확인만 하고 고치지 않았다.

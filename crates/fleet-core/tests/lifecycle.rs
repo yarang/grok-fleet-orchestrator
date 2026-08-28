@@ -141,29 +141,32 @@ fn all_fleet_events_roundtrip() {
     }
 }
 
-/// 워커 디스패치 가능성 판별.
+/// 워커 디스패치 가능성 판별 — `Worker`가 **스스로** 알 수 있는 부분만.
+///
+/// 로드맵 #67 3단계에서 `is_dispatchable()`을 삭제하면서 이 테스트를 좁혔다.
+/// 예전에는 이 한 메서드가 status·circuit·용량 셋을 함께 판정했지만, 용량은
+/// `Worker` 안의 자기보고 값으로 판정할 수 없다고 결론이 났다. 남은 두 축은
+/// 여전히 순수 상태 함수이므로 여기서 확인하고, 용량은 store 파생 카운트를
+/// 읽는 `fleet-scheduler`의 selector 테스트가 담당한다.
 #[test]
 fn worker_dispatchability_matrix() {
     let mut w = Worker::new("w1", "wss://w1");
-    assert!(w.is_dispatchable());
+    assert!(matches!(w.status, WorkerStatus::Online));
+    assert!(matches!(w.circuit_state, CircuitState::Closed));
 
-    // 용량 초과
-    w.active_tasks = w.max_concurrent;
-    assert!(!w.is_dispatchable());
-
-    // 용량 복구, 회로 열림
-    w.active_tasks = 0;
+    // 회로 열림
     w.circuit_state = CircuitState::Open;
-    assert!(!w.is_dispatchable());
+    assert!(!matches!(w.circuit_state, CircuitState::Closed));
 
     // 회로 복구, 오프라인
     w.circuit_state = CircuitState::Closed;
     w.status = WorkerStatus::Offline;
-    assert!(!w.is_dispatchable());
+    assert!(!matches!(w.status, WorkerStatus::Online));
 
     // 정상 복귀
     w.status = WorkerStatus::Online;
-    assert!(w.is_dispatchable());
+    assert!(matches!(w.status, WorkerStatus::Online));
+    assert!(matches!(w.circuit_state, CircuitState::Closed));
 }
 
 /// 작업/워커 필터 JSON 호환성 (Store API에서 사용).

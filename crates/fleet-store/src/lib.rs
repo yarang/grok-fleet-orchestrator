@@ -226,6 +226,24 @@ pub trait Store: Send + Sync {
     /// 필터 조건으로 작업 목록 조회 (생성일 역순).
     async fn list_tasks(&self, filter: &TaskFilter) -> Result<Vec<Task>, StoreError>;
 
+    /// 워커별 `Dispatched` 작업 수 — 오케스트레이터 원장이 관측한 실제 부하 (로드맵 #67 3단계).
+    ///
+    /// 스케줄러의 용량 판단은 예전에 `Worker::active_tasks`(워커 자기보고)를 읽었다.
+    /// 그 값은 하트비트로만 갱신되므로 (a) 최대 health interval(기본 15초)만큼 낡고,
+    /// (b) 워커가 위조할 수 있으며, (c) 0을 신고하면 필터를 통과할 뿐 아니라
+    /// least-loaded 정렬에서 **우대**받는다. 이 메서드는 그 판단을 오케스트레이터
+    /// 자신이 기록한 `Dispatched` 행으로 옮긴다.
+    ///
+    /// 반환 맵에 **없는 워커는 0건**을 뜻한다 (희소 맵). 호출자는
+    /// `counts.get(&id).copied().unwrap_or(0)`으로 읽는다.
+    ///
+    /// `#67` 2단계(worker incarnation)가 선행 조건이었다. 그 전에는 같은 `--name`으로
+    /// 재시작한 워커가 `worker_id`를 재사용해서 이전 화신의 in-flight 작업이 영원히
+    /// `Dispatched`로 남았고, 그러면 이 카운트가 영구히 과대계상됐다.
+    async fn count_dispatched_tasks_by_worker(
+        &self,
+    ) -> Result<std::collections::HashMap<WorkerId, u32>, StoreError>;
+
     /// `tasks.retry_count`를 원자적으로 1 증가시키고 새 값을 반환 (로드맵 #38).
     /// dispatch 재시도 상한(`max_dispatch_retries`) 판단에 사용 — `submit()`
     /// 최초 시도 또는 `Reconciler`의 stale-Pending 재시도가 `WorkerUnavailable`/

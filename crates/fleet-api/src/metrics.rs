@@ -11,7 +11,7 @@
 //! | `fleet_up`                            | gauge   | —               | 항상 1 (스크랩 성공 표시)          |
 //! | `fleet_workers_total`                 | gauge   | status          | 상태별 워커 수                    |
 //! | `fleet_workers_capacity_total`        | gauge   | —               | 모든 워커의 max_concurrent 합계    |
-//! | `fleet_workers_active_tasks_total`    | gauge   | —               | 현재 실행 중인 작업 수 합계       |
+//! | `fleet_workers_active_tasks_total`    | gauge   | —               | `Dispatched` 작업 수 합계 (오케스트레이터 원장 기준) |
 //! | `fleet_tasks_total`                   | gauge   | phase           | 위상별 작업 수                    |
 //! | `fleet_tasks_failed_total`            | gauge   | kind            | 실패 원인(`FailureKind`)별 작업 수 (로드맵 #70) |
 //! | `fleet_events_written_total`          | gauge   | —               | 가장 최근 이벤트 seq (단조 증가)  |
@@ -89,13 +89,20 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
 
     let events = store.list_events(0, 1).await?;
 
+    // 로드맵 #67 3단계 — `fleet_workers_active_tasks_total`의 근거를 워커
+    // 자기보고(`Worker::active_tasks`)에서 오케스트레이터 원장으로 옮겼다.
+    // 스케줄러가 용량 판단에 쓰는 것과 **같은 메서드**를 부른다: 게이지와
+    // 스케줄러가 서로 다른 숫자를 보면 대시보드로 스케줄러의 결정을
+    // 설명할 수 없기 때문이다.
+    let dispatched_by_worker = store.count_dispatched_tasks_by_worker().await?;
+
     let mut w_counts = WorkerCounts::default();
     let mut capacity: u64 = 0;
     let mut active: u64 = 0;
     for w in &workers {
         w_counts.total += 1;
         capacity += w.max_concurrent as u64;
-        active += w.active_tasks as u64;
+        active += dispatched_by_worker.get(&w.id).copied().unwrap_or(0) as u64;
         match w.status {
             WorkerStatus::Online => w_counts.online += 1,
             WorkerStatus::Degraded => w_counts.degraded += 1,
@@ -197,7 +204,7 @@ pub async fn metrics_text(store: &dyn Store) -> Result<String, MetricsError> {
 
     // fleet_workers_active_tasks_total
     out.push_str(
-        "# HELP fleet_workers_active_tasks_total Sum of currently active tasks across workers.\n",
+        "# HELP fleet_workers_active_tasks_total Sum of tasks the orchestrator has dispatched to registered workers and not yet resolved.\n",
     );
     out.push_str("# TYPE fleet_workers_active_tasks_total gauge\n");
     push_gauge(&mut out, "fleet_workers_active_tasks_total", &[], active);

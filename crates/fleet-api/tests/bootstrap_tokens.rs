@@ -666,6 +666,15 @@ impl Store for BsStore {
     async fn list_tasks(&self, _: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         unimplemented!()
     }
+    async fn count_dispatched_tasks_by_worker(
+        &self,
+    ) -> Result<std::collections::HashMap<fleet_core::WorkerId, u32>, StoreError> {
+        // 이 목은 bootstrap 토큰 경로만 검증한다 — 스케줄러를 돌리지 않으므로
+        // 부하 카운트는 호출되지 않는다. 빈 맵이 아니라 unimplemented!()로 두어
+        // 나중에 이 경로가 실제로 쓰이면 조용히 "부하 0"으로 오답하는 대신
+        // 즉시 드러나게 한다.
+        unimplemented!()
+    }
     async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
         unimplemented!()
     }

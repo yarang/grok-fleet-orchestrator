@@ -176,6 +176,13 @@ impl Store for AttemptStore {
     async fn list_tasks(&self, _filter: &TaskFilter) -> Result<Vec<Task>, StoreError> {
         Ok(Vec::new())
     }
+    async fn count_dispatched_tasks_by_worker(
+        &self,
+    ) -> Result<std::collections::HashMap<fleet_core::WorkerId, u32>, StoreError> {
+        // 이 목은 task를 하나도 갖지 않는다(`list_tasks`가 빈 벡터). 빈 맵은
+        // 그 fixture와 일관된 답이지 스텁이 아니다.
+        Ok(std::collections::HashMap::new())
+    }
     async fn increment_task_retry_count(&self, _id: TaskId) -> Result<u32, StoreError> {
         unimplemented!()
     }

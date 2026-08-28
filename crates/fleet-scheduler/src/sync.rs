@@ -156,6 +156,13 @@ mod tests {
         async fn insert_task(&self, _: &fleet_core::Task) -> Result<(), fleet_store::StoreError> {
             unimplemented!()
         }
+        async fn count_dispatched_tasks_by_worker(
+            &self,
+        ) -> Result<std::collections::HashMap<fleet_core::WorkerId, u32>, fleet_store::StoreError>
+        {
+            // 이 목은 scale-out 동기화 경로만 검증하고 task를 하나도 갖지 않는다.
+            Ok(std::collections::HashMap::new())
+        }
         async fn get_task(
             &self,
             _: TaskId,
