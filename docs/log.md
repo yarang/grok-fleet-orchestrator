@@ -2732,3 +2732,78 @@ truncate가 B의 시드를 지운다. 파일 상단 주석에만 `--test-threads
 **남길 교훈은 "틀렸다"가 아니라 "맞았지만 몰랐다"이다.** 원인 귀속이 결과적으로 옳았다는 것은
 적을 당시에 근거가 있었다는 뜻이 아니다. 근거 없이 적힌 옳은 문장과 근거 없이 적힌 틀린 문장은
 **쓰는 시점에 구별할 수 없고**, 그래서 둘 다 같은 결함이다.
+
+---
+
+## 2026-08-28 — feat/test — Agent 엔티티 1단계, 그리고 테스트 격리가 CI 설정에 숨어 있다는 것 (`#49`)
+
+`#49`의 1단계로 Agent 엔티티(`agents` 테이블, Store 6개 메서드, MCP 도구 3종, Dashboard API 3종,
+Project 상세의 Agents 절)를 넣었다. 상태는 목표 설계의 8종이 아니라 `ready`/`stopped` **둘뿐**이고,
+나머지는 각각을 막고 있는 로드맵 ID와 함께 [provisioning.md](architecture/agents/provisioning.md)의
+유예 표에 남겼다 — 채울 방법이 없는 상태를 미리 만들지 않는다.
+
+`022`가 `tasks.project_id`를 "순수 미검증 메타데이터"로 남긴 전례가 있어서, 이번에는 **읽는 쪽을
+같은 커밋에 넣었다**: `ensure_project_accepts_new_agents`, archive 게이트의 두 번째 조건
+(`project_has_live_agents`), 그리고 `agent:read`/`agent:manage`가 드디어 검사할 대상. FK도 `022`와
+반대로 **실제로 걸었다** — 근거는 같다. `022`는 컬럼이 마이그레이션보다 먼저 존재해서 검증되지 않은
+기존 데이터가 있을 수 있었고, `027`은 컬럼을 이 마이그레이션이 만들므로 그런 데이터가 존재할 수 없다.
+
+### 새 테스트가 관례를 그대로 베꼈다가 깨진 것
+
+`tests/agents.rs`는 `tests/projects.rs`를 본떠 매 테스트 시작 시
+`TRUNCATE agents, tasks, projects CASCADE`를 돌렸다. 단독 실행(`--test-threads=1`)에서 10/10 통과했다.
+스레드 수를 지정하지 않은 `cargo test --workspace`에서는 **10건 중 6건이 실패**했고 전부 같은
+메시지였다:
+
+```
+Conflict("no such project for agent: insert or update on table \"agents\"
+         violates foreign key constraint \"agents_project_id_fkey\"")
+```
+
+cargo는 한 바이너리 안의 테스트를 기본으로 **병렬** 실행한다. A가 만든 Project 행을 B의 TRUNCATE가
+지우고, 그 사이 A가 Agent를 INSERT한다.
+
+### 그런데 이건 내가 만든 결함이 아니라 저장소의 관례였다
+
+원인을 그렇게만 적었으면 절반만 맞았을 것이다. 실제로 확인해 보니:
+
+- `TRUNCATE`를 쓰는 통합 테스트가 **15개 파일**(`fleet-store` 14 + `fleet-scheduler`의 `scaleout_sync`).
+- `ci.yml`은 세 잡 모두 `cargo test ... -- --test-threads=1`로 돌리며, 주석에
+  "`--test-threads=1` 필수: fleet-store integration test 가 TRUNCATE ... CASCADE 로"라고 적혀 있다.
+- 실측: `projects.rs`는 병렬에서 8건 중 3~4건 실패(3회), 직렬에서 8건 통과.
+  `audit_integration`은 병렬에서 6~7건 실패, 직렬에서 7건 통과.
+
+즉 **관례는 의도된 것이고 CI가 그것을 강제한다.** 내 로컬 게이트가 `--test-threads=1`을 빠뜨려
+CI보다 **엄격했던** 것이다. §4.3이 기록해 온 드리프트는 늘 "로컬이 CI보다 약해서" 생겼는데,
+이번에는 방향이 반대다 — 그리고 그 방향에서도 결과는 같다. **게이트와 CI가 다르면, 어느 쪽이
+엄격하든 로컬의 판정은 CI의 판정이 아니다.** 판정은 CI 형태로 다시 돌려 받았다(70 스위트 전부 ok).
+
+`audit_integration`이 직전 실행에서 안 보였던 이유도 여기 있다. `cargo test`는 기본이 fail-fast라
+24번째 타깃(`agents`)에서 멈췄고, 25번째(`audit_integration`)를 **한 번도 실행하지 않았다.**
+`git stash -u`로 HEAD를 복원하고 새 DB에서 돌려 이것이 내 변경과 무관함을 확인했다
+(HEAD·fresh DB·병렬 2회 모두 6 failed, 직렬 7 passed).
+
+### 그래도 `agents.rs`는 관례를 따르지 않기로 했다
+
+TRUNCATE를 되돌리는 대신 걷어내고, 각 테스트가 UUID 접미사를 붙인 유일한 Project를 만들도록 했다
+(`projects.name`이 전역 UNIQUE라 접미사가 필요하다). 이유는 취향이 아니다 — `027`의 FK 때문에 이
+파일에서는 경합이 조용한 오답이 아니라 즉시 터지고, 그러면 "이 파일은 특정 스레드 수에서만
+통과한다"는 전제가 **파일 밖 CI 설정에 숨는다.** 공유 상태를 지우는 대신 애초에 공유하지 않으면
+그 전제 자체가 없어진다.
+
+함께 죽는 단언이 하나 있었다. `all.len() == 3`은 "테이블이 비어 있다"에 기대는 단언이라, 비우기를
+멈추면 근거를 잃는다. `우리 행만 있다` → `우리 행이 빠지지 않는다`로 약화시켰다. 결과는 스레드 수와
+무관하게 10/10이고 연속 재실행에서도 통과한다.
+
+### 검증 한계
+
+- **나머지 14개 파일은 그대로 뒀다.** `#49`의 범위가 아니고, 한 번에 바꾸면 이 커밋의 판정이
+  Agent 기능이 아니라 하네스 리팩터링에 대한 것이 된다. 그 파일들은 병렬에서 계속 깨지며,
+  CI는 `--test-threads=1` 때문에 그 사실을 **구조적으로 볼 수 없다.**
+- **`agents.rs`의 6건 실패는 한 번 관측하고 고쳤다.** 수정 후 통과는 여러 번 확인했지만, 수정 전
+  실패율이 스레드 수·머신 부하에 따라 어떻게 변하는지는 재지 않았다.
+- 1단계 Agent는 **실행되지 않는다.** archive 게이트를 붙잡는 것은 Agent *행*이지 Agent *프로세스*가
+  아니다. `#48`의 미해결 조건 2·3은 이 커밋으로 풀리지 않는다 — 조건 2가 시험하는 *자동* provisioning
+  경로 자체가 없고, 조건 3은 execution lease(`#67` 후속)에 걸려 있다.
+- `authorization-and-audit.md`의 게이트 9는 여전히 **시험 불가**다. `agent:manage`는 생겼지만
+  `project:policy_manage`도 정책 컬럼도 없어서 바꿔 볼 필드가 없다.

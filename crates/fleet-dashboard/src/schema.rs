@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use fleet_core::{Project, WorkerStatus};
+use fleet_core::{Agent, Project, WorkerStatus};
 
 /// `/api/overview` 응답.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +76,53 @@ impl From<&Project> for ProjectSummary {
 /// `POST /api/projects` 요청 본문.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateProjectRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+// ── Agent (로드맵 #49, 1단계) ──────────────────────────────────────────
+
+/// `/api/agents` 배열 요소 (로드맵 #49, 1단계).
+///
+/// `project_id`는 응답에 항상 들어간다 — 불변 필드라 "이 Agent가 어느
+/// 경계 안에 있는가"가 그 Agent에 대해 영구히 참인 사실이고, 목록을
+/// Project로 필터링한 뒤에도 클라이언트가 그것을 다시 확인할 수 있어야
+/// 한다. 갱신 요청 본문(`UpdateAgentRequest`)은 없다 — `project_id`를
+/// 바꿀 수 없다는 규칙을 표면에서도 "경로가 아예 없음"으로 집행한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Agent> for AgentSummary {
+    fn from(a: &Agent) -> Self {
+        Self {
+            id: a.id.to_string(),
+            project_id: a.project_id.to_string(),
+            name: a.name.clone(),
+            description: a.description.clone(),
+            created_by: a.created_by.clone(),
+            status: a.status.as_str().to_string(),
+            created_at: a.created_at,
+            updated_at: a.updated_at,
+        }
+    }
+}
+
+/// `POST /api/agents` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentRequest {
+    pub project_id: String,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,

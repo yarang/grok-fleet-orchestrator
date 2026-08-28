@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/mcp-tools.md"
-last_verified: "2026-08-25"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["fleet-mcp"]
 ---
@@ -74,6 +74,9 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_create_project` | `name`, 선택 `description` | 생성된 Project |
 | `fleet_list_projects` | 선택 limit, offset | Project 목록 |
 | `fleet_delete_project` | `project_id` | 삭제 결과 |
+| `fleet_create_agent` | `project_id`, `name`, 선택 `description` | 생성된 Agent |
+| `fleet_list_agents` | 선택 `project_id`, limit, offset | Agent 목록 |
+| `fleet_stop_agent` | `agent_id` | 회수 결과(`stopped`) |
 | `fleet_list_issues` | 선택 `project_id`, `status`, `open_only` | Issue 목록 |
 | `fleet_create_issue` | `project_id`, `title`, 선택 `body`, `severity`, labels | 생성된 Issue |
 | `fleet_transition_issue` | `issue_id`, `status`, 선택 `close_reason` | 전이 결과 |
@@ -86,6 +89,9 @@ Project·Issue 도구는 `project:*`/`issue:*` capability를 부여하지 않은
 `required_permission`이 정하지만, `fleet_transition_issue`만은 요구 capability가 목표 상태에
 따라 달라지므로 `fleet-core`의 `required_capability_for_transition`이 정본이고
 `required_permission`은 그 도구에 `None`을 반환한다(위 "전송과 오류" 절 참고).
+Agent 도구는 `#49` 1단계 범위다 — Agent를 **정의**로 만들고 회수할 뿐이며, 뒤에 프로세스가
+없으므로 시작·attach·Task 배정이 없다. 수명주기는 `ready → stopped` 둘뿐이고, `project_id`를
+바꾸는 도구는 만들지 않았다(불변). 명령/ACK 도구는 워커 제어 스트림(`#89`)이 선행이다.
 AgentTemplate 관리 도구는 아직 제안 계약일 뿐 구현돼 있지 않다(로드맵 `#92`, `#86` 선행).
 새 도구는 여기 표, `tools/list` schema, handler 테스트를 한 변경으로 갱신한다.
 

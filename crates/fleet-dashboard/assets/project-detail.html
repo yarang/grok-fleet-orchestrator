@@ -56,6 +56,29 @@
       </div>
     </div>
 
+    <h2 style="font-size:17px;margin:24px 0 8px;">Agents</h2>
+    <div id="agent-table" class="table">
+      <div class="row header">
+        <div>Name</div>
+        <div>Status</div>
+        <div>Created by</div>
+        <div>Created</div>
+        <div></div>
+      </div>
+    </div>
+    <div id="agents-empty" class="empty-state" style="display:none;">
+      <h3>No agents</h3>
+      <p>Agents belong permanently to this project. Create one below.</p>
+    </div>
+    <form id="agent-create" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;align-items:flex-start;">
+      <input type="text" id="agent-name" placeholder="Agent name" maxlength="120" required
+             style="flex:0 0 220px;" />
+      <input type="text" id="agent-description" placeholder="Description (optional)" maxlength="500"
+             style="flex:1 1 260px;" />
+      <button type="submit" class="btn">Create agent</button>
+      <span id="agent-create-status" style="font-size:13px;align-self:center;"></span>
+    </form>
+
     <h2 style="font-size:17px;margin:24px 0 8px;">Issues</h2>
     <div id="issue-table" class="table">
       <div class="row header">

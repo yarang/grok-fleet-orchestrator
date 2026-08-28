@@ -4,8 +4,8 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/dashboard-api.md"
-last_verified: "2026-08-26"
-last_verified_commit: "0b641c7"
+last_verified: "2026-08-28"
+last_verified_commit: "working-tree"
 owners: ["fleet-dashboard"]
 ---
 
@@ -33,8 +33,17 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/workers`, `/api/workers/{id}` | GET | `WorkerList` | Worker 목록·상세 |
 | `/api/tasks` | GET, POST | `TaskList`, `TaskCreate` | Task 목록·제출 |
 | `/api/tasks/{id}`, `/api/tasks/{id}/thread` | GET | `TaskRead`; output은 `TaskOutput` | Task 상세·thread 조회 |
+| `/api/task-threads` | GET | `TaskList` | 스레드 목록 |
 | `/api/events`, `/api/events/stream` | GET | `EventsList` | 이벤트 목록·SSE stream |
 | `/api/hosts`, `/api/hosts/{hostname}` | GET | `DashboardView` | Host 목록·상세 |
+| `/api/projects` | GET, POST | `project:read`, `project:create` | Project 목록·생성 (로드맵 #48) |
+| `/api/projects/{id}` | GET, DELETE | `project:read`, `project:delete` | Project 상세·archive 요청 |
+| `/api/agents` | GET, POST | `agent:read`, `agent:manage` | Agent 목록(`project_id` 필터)·생성 (로드맵 #49) |
+| `/api/agents/{id}` | DELETE | `agent:manage` | Agent 회수(`ready → stopped`, idempotent) |
+| `/api/issues`, `/api/issues/{id}` | GET, POST, PATCH | `issue:read`, `issue:create`, `issue:update` | Issue 목록·생성·수정 (로드맵 #92) |
+| `/api/issues/{id}/transition` | POST | 목표 상태별 (`required_capability_for_transition`) | Issue 상태 전이 |
+| `/api/issues/{id}/comments` | GET, POST | `issue:read`, `issue:comment` | Issue 코멘트 |
+| `/api/issues/{id}/links`, `/api/issues/{id}/links/{task_id}` | GET, POST, DELETE | `issue:read`, `issue:link` | Issue↔Task 연결 |
 | `/api/audit` | GET | `AuditRead` | 인증·권한 감사 로그 |
 | `/api/tools` | GET | `DashboardView` | MCP 도구 카탈로그 |
 | `/api/users` | GET, POST | `UserRead`, `UserCreate` | 사용자 목록·생성 |
@@ -42,6 +51,12 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/ssh-keys`, `/api/ssh-keys/{name}` | GET, POST, DELETE | `HostProvision` | 프로비저닝용 SSH 비밀키 관리 |
 | `/api/hosts/provision` | POST | `HostProvision` | 원격 host provisioning 요청 |
 | `/api/users/resend-verification` | POST | public; 현재 rate limit 없음 | 인증 전 이메일 재전송 |
+
+`/api/agents`에 `PATCH`가 없는 것은 미구현이 아니라 규칙이다 — Agent의 `project_id`는 불변이라
+갱신 경로 자체를 만들지 않았다. 옮기려면 대상 Project에 새 Agent를 만든다. Project·Issue 행은
+`#48`/`#92`가 route를 낼 때 이 표에 반영되지 않았던 것을 `#49` 1단계에서 함께 채운 것이다.
+`/api/issues/{id}`의 `PATCH`는 `issue:update`를 요구하되 담당자 필드를 건드리면 `issue:assign`을
+추가로 확인한다 — 표의 한 칸에 담기지 않으므로 `handlers::update_issue_api`가 정본이다.
 
 ## 계획된 표면 — Task 삭제와 스레드 목록 (`#96`)
 

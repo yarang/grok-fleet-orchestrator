@@ -1541,6 +1541,361 @@ async fn delete_project_on_already_archived_project_is_a_harmless_noop() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  Agent API (로드맵 #49, 1단계)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Project를 만들고 그 id를 돌려준다 — Agent는 반드시 Project 안에서만
+/// 생성되므로 모든 Agent 테스트의 전제다.
+async fn create_project_via_api(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    cookie: &str,
+    name: &str,
+) -> String {
+    let created: serde_json::Value = authed_json(
+        client,
+        reqwest::Method::POST,
+        &format!("http://{addr}/api/projects"),
+        cookie,
+    )
+    .json(&serde_json::json!({ "name": name }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    created["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn list_agents_requires_agent_read_permission() {
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::DashboardView]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_agent_requires_agent_manage_permission() {
+    // `agent:read`만으로는 만들 수 없다 — 읽기와 생성·회수를 다른
+    // capability로 나눈 것을 표면에서 확인한다.
+    let (store, cookie) = seed_test_session_with_perms(
+        MemStore::new(),
+        &[PermissionKind::ProjectRead, PermissionKind::AgentRead],
+    )
+    .await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": fleet_core::ProjectId::new().to_string(),
+        "name": "should-not-be-created",
+    }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_list_and_stop_agent_roundtrip() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "agent-home").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": project_id,
+        "name": "builder",
+        "description": "builds things",
+    }))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(created["name"], "builder");
+    assert_eq!(created["project_id"], project_id);
+    assert_eq!(created["status"], "ready");
+    let agent_id = created["id"].as_str().unwrap().to_string();
+
+    let listed: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/agents?project_id={}",
+            server.addr, project_id
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], agent_id);
+
+    let stopped: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/agents/{}", server.addr, agent_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(stopped["status"], "stopped");
+}
+
+#[tokio::test]
+async fn create_agent_without_csrf_header_is_rejected() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "csrf-guard").await;
+
+    let resp = client
+        .post(format!("http://{}/api/agents", server.addr))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .json(&serde_json::json!({"project_id": project_id, "name": "no-csrf"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn create_agent_rejects_unknown_project() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({
+        "project_id": fleet_core::ProjectId::new().to_string(),
+        "name": "orphan",
+    }))
+    .send()
+    .await
+    .unwrap();
+    // `project_id`는 불변이라 생성 시점이 이 값을 검증할 수 있는 유일한
+    // 순간이다 — 통과시키면 되돌릴 방법이 없다.
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_agent_rejects_archived_project() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "closed-shop").await;
+
+    authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/projects/{}", server.addr, project_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "too-late"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn create_agent_conflicts_on_duplicate_name_within_a_project() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let a = create_project_via_api(&client, server.addr, &cookie, "dup-a").await;
+    let b = create_project_via_api(&client, server.addr, &cookie, "dup-b").await;
+
+    let post = |project_id: String| {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            &format!("http://{}/api/agents", server.addr),
+            &cookie,
+        )
+        .json(&serde_json::json!({"project_id": project_id, "name": "worker"}))
+    };
+
+    assert_eq!(post(a.clone()).send().await.unwrap().status(), 200);
+    assert_eq!(
+        post(a).send().await.unwrap().status(),
+        409,
+        "같은 Project 안의 중복 이름은 409여야 한다"
+    );
+    assert_eq!(
+        post(b).send().await.unwrap().status(),
+        200,
+        "이름 유일성은 Project 범위다 — 다른 Project에서는 허용된다"
+    );
+}
+
+#[tokio::test]
+async fn stop_agent_is_idempotent() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "idempotent").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "once"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let url = format!(
+        "http://{}/api/agents/{}",
+        server.addr,
+        created["id"].as_str().unwrap()
+    );
+
+    let mut seen: Option<String> = None;
+    for _ in 0..2 {
+        let body: serde_json::Value = authed_json(&client, reqwest::Method::DELETE, &url, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["status"], "stopped");
+        let updated_at = body["updated_at"].as_str().unwrap().to_string();
+        // 재호출이 `updated_at`을 밀면 "언제 회수됐는가"가 호출 횟수만큼
+        // 뒤로 이동한다.
+        if let Some(first) = &seen {
+            assert_eq!(first, &updated_at, "재호출은 회수 시각을 갱신하지 않는다");
+        }
+        seen = Some(updated_at);
+    }
+}
+
+#[tokio::test]
+async fn stop_agent_returns_404_for_unknown_id() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!(
+            "http://{}/api/agents/{}",
+            server.addr,
+            fleet_core::AgentId::new()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn a_ready_agent_keeps_the_project_draining() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "held-open").await;
+
+    // Task는 하나도 만들지 않는다 — Project를 draining에 붙잡는 것이 오직
+    // Agent 행뿐임을 이 표면에서도 증명한다.
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "holder"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_url = format!(
+        "http://{}/api/agents/{}",
+        server.addr,
+        created["id"].as_str().unwrap()
+    );
+    let project_url = format!("http://{}/api/projects/{}", server.addr, project_id);
+
+    let body: serde_json::Value =
+        authed_json(&client, reqwest::Method::DELETE, &project_url, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(
+        body["status"], "draining",
+        "Ready Agent가 남아 있으면 archive가 완료되면 안 된다"
+    );
+
+    authed_json(&client, reqwest::Method::DELETE, &agent_url, &cookie)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value =
+        authed_json(&client, reqwest::Method::DELETE, &project_url, &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(body["status"], "archived");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Task 제출의 project_id 검증 (로드맵 #48, 2단계)
 // ═══════════════════════════════════════════════════════════════════════
 

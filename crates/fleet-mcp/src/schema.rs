@@ -54,6 +54,12 @@ pub const TOOL_CREATE_PROJECT: &str = "fleet_create_project";
 pub const TOOL_LIST_PROJECTS: &str = "fleet_list_projects";
 /// Project archive 요청 도구 (로드맵 #48, 1단계). 영구 삭제가 아니다.
 pub const TOOL_DELETE_PROJECT: &str = "fleet_delete_project";
+/// Agent 생성 도구 (로드맵 #49, 1단계).
+pub const TOOL_CREATE_AGENT: &str = "fleet_create_agent";
+/// Agent 목록 조회 도구 (로드맵 #49, 1단계).
+pub const TOOL_LIST_AGENTS: &str = "fleet_list_agents";
+/// Agent 회수 도구 (로드맵 #49, 1단계).
+pub const TOOL_STOP_AGENT: &str = "fleet_stop_agent";
 /// Issue 목록 조회 도구 (로드맵 #92).
 pub const TOOL_LIST_ISSUES: &str = "fleet_list_issues";
 /// Issue 생성 도구 (로드맵 #92).
@@ -537,7 +543,7 @@ pub fn all_tools() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: TOOL_DELETE_PROJECT,
-            description: "Request that a Project be archived (not permanently deleted). Active projects transition to draining and stop accepting new tasks; once every task that referenced the project has reached a terminal state, it finishes archiving to archived. Safe to call again on the same project_id — it reports current progress rather than erroring.",
+            description: "Request that a Project be archived (not permanently deleted). Active projects transition to draining and stop accepting new tasks or agents; it finishes archiving to archived once every task that referenced the project has reached a terminal state AND every agent in it has been stopped (fleet_stop_agent). Safe to call again on the same project_id — it reports current progress rather than erroring.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -547,6 +553,63 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     }
                 },
                 "required": ["project_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_CREATE_AGENT,
+            description: "Create an Agent inside a Project — a named role with its own policy and context. The project_id is fixed at creation and can never be changed; to move work to another Project, create a new Agent there. This is stage-1 support: the Agent is a definition only. There is no process behind it yet, so it cannot be started, attached to, or assigned a task — its lifecycle here is ready -> stopped. Runtime/image, isolation, workspace, and tool bindings are not settable yet.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "UUID of the owning project (as returned by fleet_create_project or fleet_list_projects). Must be an active project — draining and archived projects reject new agents."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Display name, unique within the project (not globally)."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional free-text description of the agent's role."
+                    }
+                },
+                "required": ["project_id", "name"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_LIST_AGENTS,
+            description: "List Agents, newest first. Omit project_id to list agents across all projects.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "string",
+                        "description": "Only agents in this project (UUID). Omit for all projects."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of agents to return (default 100)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of agents to skip (pagination)."
+                    }
+                }
+            }),
+        },
+        ToolInfo {
+            name: TOOL_STOP_AGENT,
+            description: "Reclaim an Agent, moving it to stopped. A stopped Agent no longer blocks its Project from finishing archiving. Safe to call again — it reports the current state rather than erroring. In this stage there is no process to terminate, so reclaiming is immediate; once agents run for real, this will additionally require cleanup evidence before reaching stopped.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "UUID of the agent (as returned by fleet_create_agent or fleet_list_agents)."
+                    }
+                },
+                "required": ["agent_id"]
             }),
         },
         ToolInfo {

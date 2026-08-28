@@ -1401,6 +1401,180 @@ fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
         .map_err(|_| ApiError::BadRequest("invalid project id".into()))
 }
 
+// ── Agent (로드맵 #49, 1단계) ──────────────────────────────────────────
+//
+// `PATCH /api/agents/{id}`가 없는 것은 미구현이 아니라 규칙이다 — Agent의
+// `project_id`는 불변이고, 이름/설명만 고칠 수 있는 endpoint를 지금 만들면
+// 나중에 "무엇은 고칠 수 있고 무엇은 못 고치는가"를 필드별로 방어해야
+// 한다. 옮기고 싶으면 대상 Project에 새 Agent를 만든다.
+
+/// `GET /api/agents` 쿼리 파라미터.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListAgentsQuery {
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// GET /api/agents — Agent 목록 JSON API.
+///
+/// `project_id` 쿼리 파라미터로 필터링한다. Project 상세 화면이 유일한
+/// 소비자라 Task 목록처럼 클라이언트에서 거를 수도 있었지만, Agent는
+/// **항상** 하나의 Project에 속하므로 서버측 필터가 자연스럽고
+/// `idx_agents_project_status`가 그대로 쓰인다.
+pub async fn list_agents_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<ListAgentsQuery>,
+) -> Result<Json<Vec<crate::schema::AgentSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentRead)?;
+    let project_id = match query.project_id.as_deref() {
+        Some(raw) => Some(parse_project_id(raw)?),
+        None => None,
+    };
+    let agents = state
+        .store
+        .list_agents(&fleet_core::AgentFilter {
+            project_id,
+            status: None,
+            limit: 1000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_agents failed");
+            ApiError::Store(e.to_string())
+        })?;
+    Ok(Json(
+        agents
+            .iter()
+            .map(crate::schema::AgentSummary::from)
+            .collect(),
+    ))
+}
+
+/// POST /api/agents — Agent 생성 JSON API.
+pub async fn create_agent_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<crate::schema::CreateAgentRequest>,
+) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentManage)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let project_id = parse_project_id(&body.project_id)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+
+    // 소속 Project 검증은 MCP `fleet_create_agent`와 같은 함수를 쓴다 —
+    // 두 표면이 같은 규칙을 집행해야 하므로 술어를 복제하지 않는다.
+    // 이 검사는 되돌릴 수 없다: 통과하면 그 `project_id`가 확정된다.
+    fleet_store::ensure_project_accepts_new_agents(state.store.as_ref(), project_id)
+        .await
+        .map_err(|e| match e {
+            fleet_store::ProjectAdmissionError::NotFound(_)
+            | fleet_store::ProjectAdmissionError::NotAccepting { .. } => {
+                ApiError::BadRequest(e.to_string())
+            }
+            fleet_store::ProjectAdmissionError::Store(inner) => ApiError::Store(inner.to_string()),
+        })?;
+
+    let mut agent = fleet_core::Agent::new(project_id, name);
+    if let Some(description) = body.description.as_deref().map(str::trim) {
+        if !description.is_empty() {
+            agent = agent.with_description(description);
+        }
+    }
+    agent = agent.with_created_by(principal.user.username.clone());
+
+    state.store.create_agent(&agent).await.map_err(|e| {
+        if let fleet_store::StoreError::Conflict(msg) = &e {
+            return ApiError::Conflict(msg.clone());
+        }
+        tracing::error!(error = %e, "create_agent failed");
+        ApiError::Store(e.to_string())
+    })?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("agent", agent.id.to_string())
+        .detail(serde_json::json!({
+            "name": agent.name,
+            "project_id": agent.project_id.to_string(),
+        })),
+    )
+    .await;
+
+    Ok(Json(crate::schema::AgentSummary::from(&agent)))
+}
+
+/// DELETE /api/agents/:id — Agent 회수(`Ready → Stopped`).
+///
+/// idempotent다 — 이미 `Stopped`면 아무것도 쓰지 않고 현재 상태를
+/// 반환한다. 재호출마다 `updated_at`을 갱신하면 "언제 회수됐는가"라는
+/// 기록이 계속 밀리기 때문이다. 행을 지우지 않는 이유는 감사 대상이기
+/// 때문이며, `Stopped`가 된 Agent는 소속 Project의 archive를 더는 막지
+/// 않는다([`fleet_store::advance_project_archive`]).
+pub async fn stop_agent_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentManage)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let agent_id = id
+        .parse::<fleet_core::AgentId>()
+        .map_err(|_| ApiError::BadRequest("invalid agent id".into()))?;
+    let mut agent = state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id}")))?;
+
+    if agent.status != fleet_core::AgentStatus::Stopped {
+        state
+            .store
+            .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?;
+        // 로컬 필드만 고치면 응답의 `updated_at`이 회수 이전 값이 된다 —
+        // idempotent 재호출이 다른 값을 돌려주지 않도록 저장된 행을 다시
+        // 읽는다(MCP `fleet_stop_agent`와 동일).
+        agent = state
+            .store
+            .get_agent(agent.id)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?
+            .ok_or_else(|| ApiError::Store("agent disappeared during stop".into()))?;
+
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::AGENT_STOP,
+            )
+            .actor(principal.user.id)
+            .target("agent", agent.id.to_string())
+            .detail(serde_json::json!({ "project_id": agent.project_id.to_string() })),
+        )
+        .await;
+    }
+
+    Ok(Json(crate::schema::AgentSummary::from(&agent)))
+}
+
 // ── Issue (로드맵 #92, Issue 표면) ──────────────────────────────────────
 //
 // `#92`는 AgentTemplate 표면도 함께 소유하지만 그쪽은 `#86`(AgentTemplate

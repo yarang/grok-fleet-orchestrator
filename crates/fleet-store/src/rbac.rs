@@ -99,6 +99,8 @@ fn permission_description(kind: PermissionKind) -> String {
         PermissionKind::ProjectDelete => {
             "Archive projects (request draining, not permanent delete)"
         }
+        PermissionKind::AgentRead => "List/read agents within a project",
+        PermissionKind::AgentManage => "Create and reclaim agents",
         PermissionKind::IssueRead => "List/read issues within a project",
         PermissionKind::IssueCreate => "Open new issues",
         PermissionKind::IssueComment => "Append comments to issues",

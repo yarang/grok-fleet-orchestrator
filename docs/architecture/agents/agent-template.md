@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/agent-template.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["agent-platform", "security", "architecture"]
 ---
@@ -53,8 +53,9 @@ Agent는 기본적으로 revision을 **pin**한다(`template_upgrade_policy: pin
 ## 권한 상승 차단 (핵심 보안 불변식)
 
 **템플릿 편집 권한이 tool 부여 권한이 되어서는 안 된다.** 그렇지 않으면
-`agent_template:update`가 `AgentCreate`를 우회하며, 이는 [Project 기능 설계](../project-feature-design.md)가
-구현을 차단한 것과 같은 구조의 우회로다.
+`agent_template:update`가 `agent:manage`를 우회하며, 이는 [Project 기능 설계](../project-feature-design.md)가
+구현을 차단한 것과 같은 구조의 우회로다. (`agent:manage`는 `#49` 1단계에서 실제로 만들어졌다 —
+이 문서가 작성될 당시의 `AgentCreate`는 존재하지 않는 이름이었다.)
 
 실효 tool 집합의 계산은 교집합과 차집합만 사용한다.
 
@@ -110,7 +111,8 @@ tools_effective = tools_template ∩ allow_project \ deny_project
    tool 필드를 바꾸는 편집에 그 권한을 요구하지 않으면 기존 정본과 충돌한다.
 3. **[Project 기능 설계](../project-feature-design.md)의 구현 차단 조건은 이 경우에 적용하지
    않는다.** 그 차단은 "Project 정책 변경과 Task 생성이 **자동 Agent provisioning을 통해**
-   `AgentCreate`를 우회"하는 경로를 겨냥한다. 템플릿 편집은 Agent를 만들지 않으므로 다른
+   Agent 생성 권한(당시 문언은 `AgentCreate`, 현재 이름은 `agent:manage`)을 우회"하는 경로를
+   겨냥한다. 템플릿 편집은 Agent를 만들지 않으므로 다른
    메커니즘이며, 같은 차단을 적용하면 과잉이다.
 
 남는 위험은 prompt authorship — 허용된 tool 범위 안에서 행동을 지시하는 힘 — 이다. 이는

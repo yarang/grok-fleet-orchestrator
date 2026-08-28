@@ -25,6 +25,7 @@
 // `#![warn(missing_docs)]`로 전환. 현재는 API가 변동 중이므로 임시 허용.
 #![allow(missing_docs)]
 
+pub mod agent;
 pub mod audit;
 pub mod auth;
 pub mod bootstrap_token;
@@ -39,6 +40,7 @@ pub mod task;
 pub mod worker;
 
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
+pub use agent::{Agent, AgentFilter, AgentStatus};
 pub use audit::{AuditEvent, AuditFilter, AuditOutcome};
 pub use auth::{
     password, AuthError, BootstrapPurpose, BuiltinRole, EmailVerificationToken, LoginAttempt,
@@ -50,7 +52,7 @@ pub use config::{validate_env_with, validate_orchestrator_env, CircuitBreakerCon
 pub use error::{FleetError, Result, SelectionError};
 pub use events::{EventEntry, FleetEvent};
 pub use host::{EventSeverity, Host, HostEvent, HostMetrics, HostStatus, SshKey, SshKeySummary};
-pub use ids::{IssueId, ProjectId, TaskId, WorkerId};
+pub use ids::{AgentId, IssueId, ProjectId, TaskId, WorkerId};
 pub use issue::{
     required_capability_for_transition, CloseReason, Issue, IssueComment, IssueFilter,
     IssueSeverity, IssueStatus, IssueTaskLink, TransitionError,

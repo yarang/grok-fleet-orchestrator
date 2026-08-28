@@ -85,6 +85,133 @@
       }
     });
 
+    // Agent 섹션 (로드맵 #49, 1단계). 여기 있는 이유는 Agent가 생성 시점에
+    // 정해진 하나의 Project에 영구히 속하기 때문이다 — fleet 전역 목록보다
+    // 이 화면이 정확한 자리이고, "왜 archive가 draining에 멈춰 있는가"를
+    // 같은 화면에서 확인할 수 있다.
+    let agentManageAllowed = false;
+
+    async function fetchAgents() {
+      const table = document.getElementById('agent-table');
+      const empty = document.getElementById('agents-empty');
+      table.querySelectorAll('.row:not(.header)').forEach(r => r.remove());
+      let agents = [];
+      try {
+        const resp = await fetch('api/agents?project_id=' + encodeURIComponent(projectId));
+        if (!resp.ok) {
+          // agent:read가 없으면 섹션을 숨긴다 — 빈 목록으로 오해하게 두지
+          // 않는다(Issue 섹션과 같은 처리).
+          if (resp.status === 403) {
+            table.style.display = 'none';
+            empty.querySelector('h3').textContent = 'Not permitted';
+            empty.querySelector('p').textContent = 'You do not have permission to view agents.';
+            empty.style.display = 'block';
+          }
+          return;
+        }
+        agents = await resp.json();
+      } catch (e) { console.error('fetch agents', e); return; }
+
+      if (!agents.length) {
+        table.style.display = 'none';
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      table.style.display = 'grid';
+      for (const a of agents) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        const cls = a.status === 'ready' ? 'badge-online' : 'badge-cancelled';
+        // 회수는 되돌릴 수 없다 — 다시 Ready로 만드는 경로가 없으므로
+        // 이미 stopped면 버튼 자체를 내보내지 않는다.
+        const stopBtn = (agentManageAllowed && a.status === 'ready')
+          ? '<button type="button" class="btn" data-stop="' + escapeHtml(a.id) + '">Stop</button>'
+          : '';
+        row.innerHTML = `
+          <div style="font-weight:600;">${escapeHtml(a.name)}</div>
+          <div><span class="badge ${cls}">${escapeHtml(a.status)}</span></div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(a.created_by || '—')}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(a.created_at)}</div>
+          <div>${stopBtn}</div>
+        `;
+        table.appendChild(row);
+      }
+      table.querySelectorAll('button[data-stop]').forEach(b => {
+        b.addEventListener('click', () => stopAgent(b.getAttribute('data-stop'), b));
+      });
+    }
+
+    async function stopAgent(agentId, btn) {
+      if (!window.confirm('Stop this agent? It cannot be restarted.')) return;
+      btn.disabled = true;
+      try {
+        const resp = await fetch('api/agents/' + encodeURIComponent(agentId), {
+          method: 'DELETE',
+          headers: { 'X-CSRF-Token': getCsrf() },
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          window.alert('Failed to stop agent: ' + t);
+          btn.disabled = false;
+          return;
+        }
+      } catch (e) {
+        window.alert('Failed to stop agent: ' + e.message);
+        btn.disabled = false;
+        return;
+      }
+      await fetchAgents();
+    }
+
+    document.getElementById('agent-create').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const status = document.getElementById('agent-create-status');
+      const nameEl = document.getElementById('agent-name');
+      const descEl = document.getElementById('agent-description');
+      status.textContent = 'Creating…';
+      status.style.color = 'var(--ink-muted-48)';
+      try {
+        const resp = await fetch('api/agents', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf() },
+          body: JSON.stringify({
+            project_id: projectId,
+            name: nameEl.value,
+            description: descEl.value || null,
+          }),
+        });
+        const rawText = await resp.text();
+        let body = null;
+        try { body = JSON.parse(rawText); } catch (_) {}
+        if (!resp.ok) {
+          const msg = (body && body.error && body.error.message) || rawText || ('HTTP ' + resp.status);
+          status.textContent = 'Error: ' + msg;
+          status.style.color = 'var(--badge-failed, #c0392b)';
+          return;
+        }
+        status.textContent = '';
+        nameEl.value = '';
+        descEl.value = '';
+        await fetchAgents();
+      } catch (e) {
+        status.textContent = 'Error: ' + e.message;
+        status.style.color = 'var(--badge-failed, #c0392b)';
+      }
+    });
+
+    async function loadAgentPermissions() {
+      try {
+        const resp = await fetch('api/me');
+        if (!resp.ok) return;
+        const me = await resp.json();
+        const perms = (me && me.permissions) || [];
+        agentManageAllowed = perms.indexOf('agent:manage') !== -1;
+      } catch (e) { /* 권한을 모르면 생성 폼을 숨긴 채로 둔다 */ }
+      document.getElementById('agent-create').style.display =
+        agentManageAllowed ? 'flex' : 'none';
+    }
+
     async function fetchIssues() {
       const table = document.getElementById('issue-table');
       const empty = document.getElementById('issues-empty');
@@ -167,10 +294,11 @@
 
     async function refresh() {
       await fetchProject();
+      await fetchAgents();
       await fetchIssues();
       await fetchTasks();
     }
-    refresh();
+    loadAgentPermissions().then(refresh);
     setInterval(refresh, 10000);
 
     // SSE

@@ -23,13 +23,13 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    AuditEvent, AuditFilter, AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry,
-    FleetEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity,
-    IssueStatus, IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project,
-    ProjectFilter, ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskDeleteOutcome,
-    TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus,
-    TaskStatusFilter, TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId, WorkerStatus,
+    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, AuditOutcome,
+    BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent, IdempotentInsert, Issue,
+    IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus, IssueTaskLink, Labels,
+    LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus,
+    Role, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter, TransitionOrigin,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -2720,6 +2720,120 @@ impl Store for PgStore {
         Ok(exists)
     }
 
+    // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
+
+    async fn create_agent(&self, agent: &Agent) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO agents
+                (id, project_id, name, description, created_by, status, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(agent.id.0)
+        .bind(agent.project_id.0)
+        .bind(&agent.name)
+        .bind(agent.description.as_ref())
+        .bind(agent.created_by.as_ref())
+        .bind(agent.status.as_str())
+        .bind(agent.created_at)
+        .bind(agent.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!(
+                    "agent name already exists in this project: {}",
+                    db.message()
+                ))
+            }
+            // `agents.project_id`의 FK 위반 — 호출부의 사전 검사와 INSERT
+            // 사이에 Project가 사라진 경우에만 도달한다(오늘은 Project 물리
+            // 삭제 경로가 없어 실제로는 도달 불가). `Conflict`로 옮기는 이유는
+            // 이것이 서버 결함이 아니라 호출자 입력이 더 이상 유효하지 않다는
+            // 뜻이기 때문이다.
+            sqlx::Error::Database(ref db) if db.is_foreign_key_violation() => {
+                StoreError::Conflict(format!("no such project for agent: {}", db.message()))
+            }
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+               FROM agents WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_agent).transpose()
+    }
+
+    async fn get_agent_by_name(
+        &self,
+        project_id: ProjectId,
+        name: &str,
+    ) -> Result<Option<Agent>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+               FROM agents WHERE project_id = $1 AND name = $2",
+        )
+        .bind(project_id.0)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_agent).transpose()
+    }
+
+    async fn list_agents(&self, filter: &AgentFilter) -> Result<Vec<Agent>, StoreError> {
+        let limit = filter.limit.clamp(1, 1000) as i64;
+        let offset = filter.offset as i64;
+        let status_str = filter.status.map(|s| s.as_str());
+        let project_id = filter.project_id.map(|p| p.0);
+
+        let rows = sqlx::query(
+            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+               FROM agents \
+              WHERE ($1::uuid IS NULL OR project_id = $1) \
+                AND ($2::text IS NULL OR status = $2) \
+              ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+        )
+        .bind(project_id)
+        .bind(status_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(row_to_agent).collect()
+    }
+
+    async fn update_agent_status(
+        &self,
+        id: AgentId,
+        status: AgentStatus,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query("UPDATE agents SET status = $2, updated_at = NOW() WHERE id = $1")
+            .bind(id.0)
+            .bind(status.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn project_has_live_agents(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        // `idx_agents_project_status`(027)가 이 조회를 덮는다.
+        let (exists,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE project_id = $1 AND status <> 'stopped')",
+        )
+        .bind(project_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     // ── Issue (로드맵 #88) ────────────────────────────────────────────
 
     async fn create_issue(&self, issue: &Issue) -> Result<(), StoreError> {
@@ -3116,6 +3230,24 @@ fn row_to_project(row: sqlx::postgres::PgRow) -> Result<Project, StoreError> {
         .ok_or_else(|| StoreError::Decode(format!("unknown project status in DB: {status_str}")))?;
     Ok(Project {
         id: ProjectId(id),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        created_by: row.try_get("created_by")?,
+        status,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let project_id: Uuid = row.try_get("project_id")?;
+    let status_str: String = row.try_get("status")?;
+    let status = AgentStatus::parse_str(&status_str)
+        .ok_or_else(|| StoreError::Decode(format!("unknown agent status in DB: {status_str}")))?;
+    Ok(Agent {
+        id: AgentId(id),
+        project_id: ProjectId(project_id),
         name: row.try_get("name")?,
         description: row.try_get("description")?,
         created_by: row.try_get("created_by")?,

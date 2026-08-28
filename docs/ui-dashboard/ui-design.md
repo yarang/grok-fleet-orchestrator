@@ -109,9 +109,9 @@ auth.rs`)입니다.
 | `/projects`      | ✓    | viewer       | `project:read` — 읽기 전용 (✅ 구현, #48) |
 | `/projects/:id`  | ✓    | viewer       | `project:read`, archive 액션은 `project:delete` (배정 액션은 공유 실행 풀 불변식에 따라 없음) (✅ 구현) |
 | `/projects/new`  | ✓    | admin        | `project:create` 권한 필요(기본 admin 전용, operator는 열람만) (✅ 구현 — 권한 없으면 페이지 자체가 403) |
-| `/agents`        | ✓    | viewer       | `AgentRead` — 읽기 전용 (⚠️ 미구현, #49) |
-| `/agents/:id`    | ✓    | viewer       | `AgentRead`, 정지/편집은 `AgentDelete`/`AgentManage` (⚠️ 미구현) |
-| `/agents/new`    | ✓    | admin        | `AgentCreate` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
+| `/agents`        | ✓    | viewer       | `agent:read` — 읽기 전용 (⚠️ 미구현, #49 — 1단계는 Project 상세 안의 Agents 절로 대체) |
+| `/agents/:id`    | ✓    | viewer       | `agent:read`, 정지/편집은 `agent:manage` (⚠️ 미구현) |
+| `/agents/new`    | ✓    | admin        | `agent:manage` 권한 필요(기본 admin 전용) (⚠️ 미구현 — 1단계는 Project 상세의 인라인 폼) |
 | `/admin/agent-templates` | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
 | `/admin/mcp-servers`     | ✓ | admin  | `AgentTemplateManage` 권한 필요(기본 admin 전용) (⚠️ 미구현) |
 | `/admin/skills`          | ✓ | admin  | `SkillManage` 권한 필요(기본 admin 전용) (⚠️ 미구현, #51) |
@@ -850,6 +850,20 @@ flowchart TD
 - 권한: `/projects`·`/projects/:id`는 `project:read`, `/projects/new`는 `project:create`가
   없으면 **페이지 자체가 403**이다 — 폼을 보여준 뒤 제출 시점에 거절하지 않는다.
 
+#### 구현 상태 (2026-08-28, `#49` 1단계) — Agent 화면
+
+`/agents`·`/agents/new`·`/agents/:id` 세 화면은 **만들지 않았다.** 대신 `/projects/:id` 상세에
+Agents 절(목록 + 인라인 생성 폼 + Stop 버튼)을 넣었다. 이유는 1단계 Agent가 런타임 상태를 하나도
+갖지 않기 때문이다 — Host도, `provisioned_by`도, 메모리도, 터미널도 없고 상태는 `ready`/`stopped`
+둘뿐이라 독립 화면이 보여줄 것이 이름과 상태뿐이다. 반대로 Project 상세에서는 "archive가 왜
+draining에 머무는가"의 답(살아 있는 Agent)이 같은 화면 안에 있다.
+
+위 §3.12/§3.13 명세가 요구하는 Host 드롭다운, template 프리필, Status pill 6종, Memory 목록,
+Terminal 패널은 전부 1단계 범위 밖이다(각각 `#89`, `#86`, `#89`, `#49` 후속, `#50`). 그 요소들이
+생기면 독립 `/agents` 화면이 의미를 갖고, 그때 이 절을 갱신한다. 생성 폼도 `name` +
+`description`뿐이며 `project_id`는 URL의 Project로 고정된다 — Agent의 `project_id`가 불변이라
+드롭다운으로 고를 값이 아니다.
+
 #### 레이아웃 (SVG wireframe)
 
 <svg viewBox="0 0 900 480" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg">
@@ -938,7 +952,7 @@ flowchart TD
    숨겨둠).
 3. **실행 중 Agent**: `agents` 테이블(project_id 일치) DataTable — Name,
    Status pill(Pending/Starting/Running/Stopping/Stopped/Failed), Host,
-   `provisioned_by` Badge, Stop 버튼(`AgentDelete`). 행 클릭 시 §3.13
+   `provisioned_by` Badge, Stop 버튼(`agent:manage`). 행 클릭 시 §3.13
    에이전트 상세로 이동(메모리는 거기서 확인). `+ New Agent` → §3.12.
 4. **최근 태스크**: 기존 §3.3 태스크 큐 DataTable을 `project_id` 필터로
    재사용(별도 컴포넌트 신설 없음). 아래 "하드 격리 대기 상태 표시" 참고.
@@ -1028,7 +1042,7 @@ pending_no_project_worker =
 > (host→project는 자동 파생, template은 선택적 프리필일 뿐).
 
 **라우트**: `/agents/new`(`?project_id=`, `?host_id=` 쿼리로 사전 필터 가능)
-**권한**: `AgentCreate`(admin 기본)  **스타일**: Apple auth surface(단일 폼 레이아웃)
+**권한**: `agent:manage`(admin 기본)  **스타일**: Apple auth surface(단일 폼 레이아웃)
 
 #### 폼 구성 (위→아래)
 
@@ -1074,7 +1088,7 @@ pending_no_project_worker =
 > `agent-provisioning-design.md` §12 열린 질문, 구현 전까지는 이 수동 삭제가
 > 유일한 정리 수단).
 
-**라우트**: `/agents/:id`  **권한**: `AgentRead`(viewer+), Stop/편집은 `AgentDelete`/`AgentManage`  **스타일**: Apple tile system
+**라우트**: `/agents/:id`  **권한**: `agent:read`(viewer+), Stop/편집은 `agent:manage`  **스타일**: Apple tile system
 
 #### 레이아웃 (SVG wireframe)
 
@@ -1104,12 +1118,12 @@ pending_no_project_worker =
 
 | 요소 | 동작 |
 | --- | --- |
-| `Manage` | 모달 — custom_prompt 편집, 옵션 도구/Skill 토글(필수 도구·Skill은 여기서도 해제 불가, 2026-08-15 팀 검토로 Skill 토글 추가) — `AgentManage` |
+| `Manage` | 모달 — custom_prompt 편집, 옵션 도구/Skill 토글(필수 도구·Skill은 여기서도 해제 불가, 2026-08-15 팀 검토로 Skill 토글 추가) — `agent:manage` |
 | 헤더 runtime Badge | `agent_runtimes.name`(예: `grok`, `gemini-cli`) 표시, 2026-08-15 팀 검토로 추가 — `agent-runtime-vendor-design.md` §6 참고 |
 | Memory kind 필터 | note / summary / fact 드롭다운 |
-| Memory 행 `🗑` | `DELETE /api/agents/:id/memory/:entry_id` 확인 후 즉시 목록에서 제거 — `AgentManage` |
+| Memory 행 `🗑` | `DELETE /api/agents/:id/memory/:entry_id` 확인 후 즉시 목록에서 제거 — `agent:manage` |
 | Memory 행 텍스트 클릭 | 잘린 content 전체 펼침(inline expand) |
-| `Stop` (헤더) | `agent_commands`(stop) 발행 확인 모달, 상태를 `Stopping`으로 즉시 반영 — `AgentDelete` |
+| `Stop` (헤더) | `agent_commands`(stop) 발행 확인 모달, 상태를 `Stopping`으로 즉시 반영 — `agent:manage` |
 | 데이터 갱신 주기 | 10s 폴링(상태), Memory는 진입 시 1회 로드 + 수동 새로고침 |
 
 #### Terminal 패널 (2026-08-14 신설, `#50` 참고)

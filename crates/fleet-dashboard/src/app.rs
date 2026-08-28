@@ -9,7 +9,7 @@ use axum::http::{HeaderName, HeaderValue};
 use axum::middleware;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::{get, post, Router};
+use axum::routing::{delete, get, post, Router};
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -272,6 +272,13 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             "/api/projects/:id",
             get(handlers::get_project_detail_api).delete(handlers::delete_project_api),
         )
+        // Agent (로드맵 #49, 1단계). PATCH가 없는 것은 규칙이다 —
+        // `project_id`가 불변이라 갱신 경로 자체를 만들지 않는다.
+        .route(
+            "/api/agents",
+            get(handlers::list_agents_api).post(handlers::create_agent_api),
+        )
+        .route("/api/agents/:id", delete(handlers::stop_agent_api))
         // Issue (로드맵 #92, Issue 표면). 상태 전이는 PATCH가 아니라 별도
         // endpoint다 — 목표 상태마다 요구 capability가 다르기 때문
         // (handlers::required_capability_for_transition).

@@ -20,12 +20,21 @@ pub struct TaskId(pub Uuid);
 #[repr(transparent)]
 pub struct WorkerId(pub Uuid);
 
-/// 프로젝트 식별자. 아직 project 기능은 없지만, `Task.project_id`가 나중에
-/// project 도입 시 재귀 backfill 없이 바로 채워질 수 있도록 타입만 미리
-/// 예약해둔다 — [`TaskId`]/[`WorkerId`]와 동일한 newtype 패턴.
+/// 프로젝트 식별자 (로드맵 #48). 이 타입은 `Project` 엔티티보다 먼저
+/// 예약돼 있었고(`Task.project_id`가 backfill 없이 채워질 수 있도록),
+/// `#48` 1단계에서 실제 엔티티가 생겼다 — [`TaskId`]/[`WorkerId`]와 동일한
+/// newtype 패턴.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct ProjectId(pub Uuid);
+
+/// Agent 식별자 (로드맵 #49). Agent는 Host에 상주하는 프로세스가 아니라
+/// 역할·정책·컨텍스트를 담은 논리 엔티티이며, 생성 시점에 정해진 하나의
+/// Project에 영구히 속한다 —
+/// [배치와 컨텍스트](../../../docs/architecture/entity-placement-and-context.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct AgentId(pub Uuid);
 
 /// Issue 식별자 (로드맵 #88). Project가 해결해야 할 일감 하나를 가리킨다 —
 /// 인프라 장애 추적이 아니다([Issue 추적 계약](../../../docs/architecture/issues.md)).
@@ -235,6 +244,55 @@ impl Serialize for IssueId {
 }
 
 impl<'de> Deserialize<'de> for IssueId {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Uuid::deserialize(de).map(Self)
+    }
+}
+
+// ── AgentId ──────────────────────────────────────────────────────────────
+
+impl AgentId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for AgentId {
+    fn from(u: Uuid) -> Self {
+        Self(u)
+    }
+}
+
+impl FromStr for AgentId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
+impl Serialize for AgentId {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentId {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         Uuid::deserialize(de).map(Self)
     }

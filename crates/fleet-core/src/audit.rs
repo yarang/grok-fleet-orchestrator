@@ -103,6 +103,12 @@ pub mod action {
     pub const PROJECT_ARCHIVE_REQUESTED: &str = "project.archive_requested";
     /// Project가 실제로 `Archived`에 도달함 (로드맵 #48).
     pub const PROJECT_ARCHIVED: &str = "project.archived";
+    /// Agent 생성 (로드맵 #49). `detail.project_id`에 불변 소속 Project가
+    /// 들어간다 — Agent는 옮길 수 없으므로 이 한 줄이 그 Agent가 어느 경계
+    /// 안에서 만들어졌는지에 대한 영구 기록이다.
+    pub const AGENT_CREATE: &str = "agent.create";
+    /// Agent 회수(`Ready → Stopped`) (로드맵 #49).
+    pub const AGENT_STOP: &str = "agent.stop";
     /// Issue 생성 (로드맵 #92).
     pub const ISSUE_CREATE: &str = "issue.create";
     /// Issue 상태 전이 (로드맵 #92). `detail.to`에 목표 상태가 들어간다 —

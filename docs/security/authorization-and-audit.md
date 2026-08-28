@@ -1,10 +1,10 @@
 ---
 type: security-architecture
 authority: canonical
-implementation: proposed
+implementation: partial
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
@@ -154,17 +154,31 @@ credential 삭제를 흡수한 경로다. [UI 설계](../ui-dashboard/ui-design.
 `AgentCreate`/`AgentDelete` 구분, 그리고 아직 열려 있는 차단 조건 2를 서술하며 같은 이름을 쓰는
 [AgentTemplate 계약](../architecture/agents/agent-template.md)·[Issue 추적](../architecture/issues.md)의
 표기는 Agent 엔티티가 랜딩할 때 이 표와 대조해 함께 정리한다 — 지금은 두 표기가 공존하므로
-그때 한 번에 끊지 않으면 재발견될 드리프트다. 마찬가지로
+그때 한 번에 끊지 않으면 재발견될 드리프트다. **`#49` 1단계(2026-08-28)가 그 시점이며, 위
+문서들의 `AgentCreate`/`agent:create` 표기를 `agent:manage`로 정리했다.** 코드가 만든 이름은
+`agent:read`와 `agent:manage` 둘뿐이므로 이제 두 표기의 공존은 끝났다. 마찬가지로
 `project:assign`도 이 표에 없으며, 그 대상이었던 host·worker의 Project 배정은 [공유 실행 풀
 불변식](../architecture/project-feature-design.md)이 "Host와 Worker에는 `project_id`를 두지
 않는다"로 이미 배제했다 — 승인 대기가 아니라 설계상 존재하지 않는다.
 
-**구현 상태.** 이 승인은 capability를 만들지 않는다. `project:policy_manage`가 관리할 정책 필드가
-`projects` 테이블에 하나도 없고(migration 022는 `id`/`name`/`description`/`created_by`/`status`/
-시각뿐), `agent:manage`의 대상인 Agent 엔티티도 없다. 지금 둘을 만들면 검사할 대상이 없어 항상
-통과하거나 아무도 쓰지 않는 죽은 권한이 된다 — `issue:archive_hold_manage`를 만들지 않은 것과 같은
-판정이다. 규칙이 집행되는 시점은 Agent 엔티티와 정책 컬럼이 랜딩할 때이며, 그때의 검증은 아래
-게이트 9다.
+**구현 상태 (2026-08-28 갱신).** 승인 당시에는 두 capability 모두 만들지 않았다 —
+`project:policy_manage`가 관리할 정책 필드가 `projects` 테이블에 하나도 없고(migration 022는
+`id`/`name`/`description`/`created_by`/`status`/시각뿐), `agent:manage`의 대상인 Agent 엔티티도
+없었기 때문이다. 검사할 대상이 없는 권한은 항상 통과하거나 아무도 쓰지 않는 죽은 권한이 된다 —
+`issue:archive_hold_manage`를 만들지 않은 것과 같은 판정이다.
+
+`#49` 1단계에서 **`agent:manage`(와 `agent:read`)는 만들어졌다.** Agent 엔티티가 생겨 검사할
+대상이 존재하기 때문이다. 현재 `agent:manage`는 Agent 생성과 회수를 가리고, `agent:read`는
+목록·조회를 가린다. `agent:manage`는 Admin 전용이고 `agent:read`는 Operator·Viewer 기본이다.
+
+`project:policy_manage`는 **여전히 만들지 않았다.** `projects`에 정책 컬럼이 하나도 없다는 사실은
+1단계에서 바뀌지 않았다. 따라서 게이트 9도 아직 시험할 수 없다 — 결정 1이 거는 "Agent 수·
+provisioning 대상 정책 필드"가 존재하지 않으므로 "그 필드를 바꾸지 못한다"를 증명할 대상이 없다.
+게이트 9가 발동하는 시점은 정책 컬럼이 랜딩할 때다.
+
+1단계가 실제로 확정한 것은 결정 2의 **반대 방향** 하나다. Task 제출은 Agent를 만들지 않으므로
+제출자에게 `agent:manage`를 요구하지 않는다는 규칙이 자명하게 성립한다 — 자동 provisioning 경로
+자체가 없기 때문이다. 이는 규칙의 증명이 아니라 규칙이 아직 시험되지 않았다는 뜻으로 읽어야 한다.
 
 ## Transport 적용
 
@@ -284,4 +298,5 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 8. principal→capability 매핑이 없는 인증 주체가 write·export capability를 얻지 못하는 시험
 9. `project:policy_manage`만 가진 principal이 Agent 수·provisioning 대상 정책 필드를 바꾸지 못하고
    (`agent:manage`를 추가로 요구), 그 필드가 바뀐 뒤의 Task 제출이 제출자의 권한으로 Agent를 만들지
-   않는 시험 — 위 "Project 정책 변경과 Agent 생성의 관계"의 집행 증명
+   않는 시험 — 위 "Project 정책 변경과 Agent 생성의 관계"의 집행 증명.
+   `#49` 1단계 기준 **아직 시험 불가**: `projects`에 정책 컬럼이 없어 바꿀 필드가 없다.

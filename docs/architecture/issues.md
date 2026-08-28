@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/issues.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["architecture", "agent-platform", "security"]
 ---
@@ -137,8 +137,9 @@ Agent는 Issue를 **읽고 착수한다.** 이것이 이 기능의 핵심이며,
 
 - "누가 이 일을 승인했는가"가 Issue 이력에 명시적으로 남는다. Agent가 스스로 만든 Issue를 스스로
   착수하려면 사람의 승인 전이를 반드시 거친다.
-- [Project 기능 설계](project-feature-design.md)가 "자동 provisioning이 `AgentCreate` 우회 경로가
-  아님을 증명하기 전에는 구현하지 않는다"고 건 차단 조건과 같은 종류의 위험이므로, 같은 방식으로
+- [Project 기능 설계](project-feature-design.md)가 "자동 provisioning이 Agent 생성 권한(당시 문언은
+  `AgentCreate`, 현재 이름은 `agent:manage`) 우회 경로가 아님을 증명하기 전에는 구현하지 않는다"고
+  건 차단 조건과 같은 종류의 위험이므로, 같은 방식으로
   **명시적 승인 지점**을 둔다.
 - Project 정책으로 특정 label을 자동 승인하고 싶다면 그것은 정책 revision 변경이며
   `project:policy_manage` 권한 아래 놓인다 — Agent가 얻을 수 없다.

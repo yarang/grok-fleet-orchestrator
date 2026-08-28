@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/project-feature-design.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 ---
 
@@ -41,7 +41,7 @@ flowchart LR
 | `tasks` | nullable `project_id` | 값이 없으면 일반 풀 Task. **1단계**: 존재만 검증한다(제출 시 project 존재·`active` 상태 확인) — Agent/Worker 후보를 Project로 제한하는 디스패치 자격(아래 절)은 아직 미구현 |
 | `agents` | immutable `project_id`, role/context, 상태 | Project가 소유하는 논리 실행 주체. **미구현** — `Agent` 엔티티 자체가 이 저장소에 없다 |
 | `worker_execution_leases` | `agent_id`, `worker_id`, generation, 상태, 시각 | 활성 Agent의 일시적 Worker slot 점유. **미구현** — 로드맵 `#67` |
-| `project_archive_holds` | `project_id`, kind, reason, opened/resolved 시각, actor, evidence | effect·cleanup·security/legal hold가 archive를 막는 기록. **미구현** — 1단계의 archive 게이트는 "이 project를 참조하는 비종료 Task 없음" 하나뿐이다(`Store::project_has_active_tasks`) |
+| `project_archive_holds` | `project_id`, kind, reason, opened/resolved 시각, actor, evidence | effect·cleanup·security/legal hold가 archive를 막는 기록. **미구현** — 현재 archive 게이트는 "비종료 Task 없음"(`Store::project_has_active_tasks`)과 "살아 있는 Agent 없음"(`Store::project_has_live_agents`, `#49` 1단계) 두 조건이며, 둘 다 hold 기록이 아니라 즉석 조회다 |
 
 Agent provisioning 관련 기본 템플릿, 유휴 시간, 작업 디렉터리 같은 설정은 Project가 정책 값으로 제공할 수 있지만, Agent 템플릿과 실행 수명은 Agent 도메인이 소유한다. 정책이 바뀌면 revision을 올리고 새 Task에만 적용한다. 이미 실행 중인 Task는 제출 시점 snapshot을 유지한다.
 
@@ -63,7 +63,7 @@ Project가 Task 하나를 제출했다고 Agent process를 계속 상주시켜�
 
 `task.project_id`가 있으면 해당 Project의 Agent와 정책을 통해서만 실행한다. 후보 Worker는 Project capability·격리·slot 조건으로 선택하며, 후보가 없더라도 일반 풀 context로 폴백하지 않는다. 이 경우의 재시도, 최종 실패, dead-letter 처리는 [실행 일관성](tasks/execution-consistency.md)의 `WorkerUnavailable` 경로를 따른다. `project_id`가 없는 Task는 기존 일반 풀 선택 규칙을 그대로 따른다.
 
-**1·2단계(#48, 완료) 구현**: 이 절의 자격 검증(Project capability·격리·slot 조건으로 Worker 후보를 제한하는 것)은 아직 없다 — Agent가 없어 "Project의 Agent"라는 개념 자체가 성립하지 않는다. 지금 실제로 검증하는 건 제출 시점 하나뿐이다: `project_id`가 존재하지 않거나 해당 Project가 `active`가 아니면(`draining`/`archived`) 제출 자체를 거절한다. **2단계로 이 검증이 두 표면 모두에 적용된다** — Dashboard `POST /api/tasks`와 MCP `fleet_dispatch_task`가 `fleet_store::ensure_project_accepts_new_tasks` 한 구현을 공유한다(계약 문서가 요구하는 "Dashboard와 MCP의 동일한 권한·오류 응답"). 이어가기(`parent_task_id`)는 부모의 Project 경계를 상속하며, 상속된 값도 명시 입력과 똑같이 검증한다 — 부모의 Project가 그 사이 닫혔으면 이어가기도 거절된다. 통과한 Task는 여전히 기존 일반 풀 선택 규칙 그대로 dispatch된다 — Project는 지금은 "이 Task가 어느 개발 목표에 속하는가"를 기록하는 경계일 뿐, 실행 후보를 좁히지 않는다.
+**1·2단계(#48, 완료) 구현**: 이 절의 자격 검증(Project capability·격리·slot 조건으로 Worker 후보를 제한하는 것)은 아직 없다. `#49` 1단계로 "Project의 Agent"는 생겼지만 그 Agent는 실행되지 않으므로 Worker 후보를 좁힐 근거가 되지 못한다 — dispatch는 여전히 Agent를 고르지 않는다. 지금 실제로 검증하는 건 제출 시점 하나뿐이다: `project_id`가 존재하지 않거나 해당 Project가 `active`가 아니면(`draining`/`archived`) 제출 자체를 거절한다. **2단계로 이 검증이 두 표면 모두에 적용된다** — Dashboard `POST /api/tasks`와 MCP `fleet_dispatch_task`가 `fleet_store::ensure_project_accepts_new_tasks` 한 구현을 공유한다(계약 문서가 요구하는 "Dashboard와 MCP의 동일한 권한·오류 응답"). 이어가기(`parent_task_id`)는 부모의 Project 경계를 상속하며, 상속된 값도 명시 입력과 똑같이 검증한다 — 부모의 Project가 그 사이 닫혔으면 이어가기도 거절된다. 통과한 Task는 여전히 기존 일반 풀 선택 규칙 그대로 dispatch된다 — Project는 지금은 "이 Task가 어느 개발 목표에 속하는가"를 기록하는 경계일 뿐, 실행 후보를 좁히지 않는다.
 
 Project가 `Draining`이면 새 Task, 새 Agent, 새 자원 배정을 받지 않는다. `Archived` 전이와 보존·정리 순서는 [Lifecycle 계약](project-task-agent-lifecycle.md)을 따른다.
 
@@ -84,9 +84,14 @@ Project 권한 종류는 `project:create`, `project:read`, `project:update`, `pr
 2. 자동 provisioning이 배정·Task 요청자의 권한 상승 경로가 아님을 테스트로 증명한다.
 3. agent slot 경쟁, lease 회수, Project Worker 부재 경로를 통합 테스트로 검증한다.
 
-**1번이 닫혀도 정책 변경 표면은 열리지 않는다.** 2·3번은 사람 결정이 아니라 테스트 조건이고, 그
-대상인 `agents`와 `worker_execution_leases`(로드맵 `#67`)가 아직 없어 지금은 작성할 수조차 없다.
-승인이 세 조건을 한꺼번에 해소한 것으로 읽지 않는다.
+**1번이 닫혀도 정책 변경 표면은 열리지 않는다.** 2·3번은 사람 결정이 아니라 테스트 조건이고,
+그 대상이 없어 작성할 수조차 없다. 승인이 세 조건을 한꺼번에 해소한 것으로 읽지 않는다.
+
+**`#49` 1단계(2026-08-28)로 `agents` 테이블이 생겼지만 2·3번은 그대로다.** 2번이 시험하는 것은
+*자동* provisioning 경로인데 1단계에는 그 경로가 없다 — Agent는 `agent:manage` 보유자가 명시적으로
+만들 때만 생기고 Task 제출은 Agent를 만들지 않는다. 3번의 agent slot 경쟁·lease 회수는
+`worker_execution_leases`(`#67` 후속)가 여전히 없다. 엔티티의 존재가 아니라 **자동 provisioning과
+lease**가 이 차단을 푸는 조건이다.
 
 **이 차단은 정책 변경에만 걸린다.** `name`·`description` 같은 Project 메타데이터 편집은 Agent를
 만들지 않으므로 이 조건의 대상이 아니다(승인 결정 3). `#86`의 템플릿 편집을 같은 이유로 이 차단에서

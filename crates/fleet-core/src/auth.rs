@@ -436,6 +436,20 @@ pub enum PermissionKind {
     /// — [`crate::project::ProjectStatus`] 참고.
     #[serde(rename = "project:delete")]
     ProjectDelete,
+    // Agent (로드맵 #49 1단계). `agent:attach`는 아직 만들지 않는다 — attach의
+    // 대상인 terminal 세션(`#50`)이 없고, 정본이 요구하는 step-up 인증과 짧은
+    // grant를 발급할 주체도 없다. `agent:manage`는 1단계에서 Agent 생성·회수
+    // 하나만 게이팅한다. Project 정책 필드 변경에 `project:policy_manage`와
+    // 함께 요구된다는 2026-08-27 승인 규칙(docs/security/
+    // authorization-and-audit.md)은 그 정책 컬럼이 생길 때 집행된다.
+    #[serde(rename = "agent:read")]
+    AgentRead,
+    /// Agent를 생성하고 `Stopped`로 회수한다.
+    ///
+    /// 이름은 `agent:create`가 아니라 `agent:manage`다 — 생성과 회수를 한
+    /// capability가 덮는다.
+    #[serde(rename = "agent:manage")]
+    AgentManage,
     // Issue (로드맵 #88). `issue:archive_hold_manage`는 아직 만들지 않는다 —
     // 그 대상인 `project_archive_holds` 테이블이 없다(`#91`). 없는 것을
     // 토글하는 capability를 미리 만들면 항상 도달 불가능한 권한이 된다.
@@ -514,6 +528,8 @@ impl PermissionKind {
             Self::ProjectRead => "project:read",
             Self::ProjectCreate => "project:create",
             Self::ProjectDelete => "project:delete",
+            Self::AgentRead => "agent:read",
+            Self::AgentManage => "agent:manage",
             Self::IssueRead => "issue:read",
             Self::IssueCreate => "issue:create",
             Self::IssueComment => "issue:comment",
@@ -562,6 +578,8 @@ impl PermissionKind {
             Self::ProjectRead,
             Self::ProjectCreate,
             Self::ProjectDelete,
+            Self::AgentRead,
+            Self::AgentManage,
             Self::IssueRead,
             Self::IssueCreate,
             Self::IssueComment,
@@ -625,6 +643,7 @@ impl BuiltinRole {
                 PermissionKind::TaskOutput,
                 PermissionKind::WorkerList,
                 PermissionKind::ProjectRead,
+                PermissionKind::AgentRead,
                 PermissionKind::EventsList,
                 PermissionKind::MetricsView,
             ],
@@ -634,6 +653,7 @@ impl BuiltinRole {
                 PermissionKind::TaskRead,
                 PermissionKind::WorkerList,
                 PermissionKind::ProjectRead,
+                PermissionKind::AgentRead,
                 PermissionKind::EventsList,
             ],
         }

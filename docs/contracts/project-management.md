@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/project-management.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 owners: ["project-platform", "api-contracts"]
 ---
@@ -28,8 +28,11 @@ owners: ["project-platform", "api-contracts"]
 **목표 계약과의 차이(1단계)**: 목표는 `DELETE`가 `request_id`를 받는 `Active → Draining` idempotent
 archive 요청이며 `202 Accepted`와 archive progress를 반환하고, 모든 Task가 terminal이고 effect
 hold가 해소되고 Agent process·lease·credential grant cleanup이 확인된 뒤에만 `Archived`가 되는
-것이다. 1단계 구현은 이 중 "Task가 전부 terminal인가"만 확인한다(effect ledger·Agent process
-cleanup은 그 대상 자체가 아직 없다). 실행 관점에서는 이 조건이 **완전하다** — [흡수
+것이다. 1단계 구현은 이 중 "Task가 전부 terminal인가"만 확인했다(effect ledger·Agent process
+cleanup은 그 대상 자체가 없었다). **`#49` 1단계(2026-08-28)로 게이트가 두 조건이 됐다** —
+"비종료 Task 없음 **그리고** 살아 있는(`ready`) Agent 없음"이다(`Store::project_has_live_agents`).
+Agent process cleanup 증거는 여전히 확인하지 않는다 — 뒤에 프로세스가 없어 정리할 대상이 없고,
+확인하는 것은 Agent **행**이 회수됐는지뿐이다. 실행 관점에서 Task 조건은 **완전하다** — [흡수
 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)으로 따로 확인할 비터미널
 Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같은 요청 안에서 곧바로
 `Draining → Archived`까지 진행하고, 항상 `200`과 현재 Project 상태를 반환한다(`202`+비동기 progress
@@ -41,8 +44,13 @@ Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같�
 
 `fleet_update_project_policy`를 비롯한 **정책 변경** 표면은 여전히 구현하거나 노출하지 않는다.
 [Project 기능 설계](../architecture/project-feature-design.md)의 차단 조건 2·3(자동 provisioning이
-권한 상승 경로가 아님을 증명, agent slot 경쟁·lease 회수 통합 검증)이 남아 있고, 그 대상인 Agent
-엔티티와 `worker_execution_leases`가 없어 테스트를 작성할 수조차 없다.
+권한 상승 경로가 아님을 증명, agent slot 경쟁·lease 회수 통합 검증)이 남아 있다.
+
+**`#49` 1단계로 Agent 엔티티는 생겼지만 두 조건은 그대로 열려 있다.** 조건 2는 *자동*
+provisioning 경로를 시험하는데 그 경로가 없다 — Task 제출은 Agent를 만들지 않고, Agent는
+`agent:manage` 보유자가 명시적으로 만들 때만 생긴다. 조건 3의 agent slot 경쟁·lease 회수는
+`worker_execution_leases`(`#67` 후속)가 여전히 없다. 즉 차단을 푸는 것은 Agent 엔티티가 아니라
+**자동 provisioning과 lease**이며, 그 둘은 `#89`·`#67` 후속에 걸려 있다.
 
 **2026-08-27 승인으로 이 절의 범위가 좁아졌다.** 이전 문언은 `PATCH /api/projects/{id}`와
 host·worker Project 배정·해제 endpoint를 `project:assign`·`agent:create`의 관계 승인까지 함께
@@ -96,8 +104,8 @@ policy revision)가 없어 해당하지 않는다 — 대신 1단계 자체의 �
 `crates/fleet-dashboard/tests/dashboard_api.rs`, `crates/fleet-mcp/src/handlers.rs`의 단위/통합
 테스트가 담당한다.
 
-- Project 데이터와 agent slot·Worker lease 불변식의 저장·통합 테스트 — **미해당(Agent 없음)**
-- `project:policy_manage`로 `agent:manage`를 우회할 수 없다는 권한 테스트 — **규칙은 승인됨(2026-08-27), 시험은 미해당**(두 capability 다 없고 집행 대상인 정책 컬럼·Agent 엔티티도 없다). 시험 형태는 [감사 계약](../security/authorization-and-audit.md)의 구현 게이트 9가 소유한다
+- Project 데이터와 agent slot·Worker lease 불변식의 저장·통합 테스트 — **여전히 미해당(agent slot·Worker lease 없음)**. `#49` 1단계가 만든 것은 Agent 행과 archive 게이트이며 그 부분은 `crates/fleet-store/tests/agents.rs`가 검증한다
+- `project:policy_manage`로 `agent:manage`를 우회할 수 없다는 권한 테스트 — **규칙은 승인됨(2026-08-27), 시험은 여전히 미해당**. `#49` 1단계로 `agent:manage`는 생겼지만 `project:policy_manage`와 집행 대상인 정책 컬럼이 없어 우회할 대상이 없다. 시험 형태는 [감사 계약](../security/authorization-and-audit.md)의 구현 게이트 9가 소유한다
 - Project의 capability·slot 조건 부재 시 일반 풀 context로 폴백하지 않는 디스패치 테스트 — **미해당(그 자격 검증 자체가 아직 없음 — 지금은 애초에 project 무관 일반 풀 규칙만 있다)**
 - Dashboard와 MCP의 동일한 권한·오류 응답 검증 — 확인됨(둘 다 `project:{read,create,delete}` 사용). 2단계에서 검증·archive 규칙을 `fleet_store::project_rules`로 단일화해 구조적으로 보장한다
 - 목록 pagination·caller Project scope와 삭제 lifecycle의 revision/충돌 검증 — pagination(limit/offset)은 확인됨; Project scope(호출자가 자기 Project만 보는 것)는 아직 모든 인증된 호출자가 전체 Project를 본다(RBAC의 Project 단위 scope는 미구현); revision/충돌은 정책 revision 자체가 없어 미해당

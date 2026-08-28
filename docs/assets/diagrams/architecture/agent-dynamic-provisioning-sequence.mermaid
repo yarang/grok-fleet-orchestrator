@@ -8,7 +8,7 @@ sequenceDiagram
     Note over Admin,Store: 제어 플레인(등록/하트비트)은 아웃바운드 폴링만 쓴다는<br/>원칙(#42)은 유지하되, 2026-08-14 재검토로 범위를 정정 —<br/>mTLS 배포는 실제로 인바운드 리스너(MtlsProxy, 기본 2420포트)가<br/>이미 존재한다(태스크/세션 데이터 플레인용). 다만 그건 grok 세션<br/>프로토콜 전용이라 agent 제어 커맨드에는 부적합 — 기존 heartbeat<br/>폴링에 얹는 선택 자체는 유지, 근거만 "인바운드 자체가 없다"에서<br/>"제어 커맨드 채널로 쓸 인바운드가 없다"로 좁힘.
 
     Admin->>API: POST /api/agents {host_id, project_id?, custom_prompt}
-    API->>API: require_permission(AgentCreate)
+    API->>API: require_permission(agent:manage)
     API->>Store: BEGIN; SELECT hosts WHERE id=host_id FOR UPDATE;<br/>count(agents WHERE host_id=? AND status NOT IN ('stopped','failed')) 확인<br/>(2026-08-14 재검토: 락 없이 count만 하면 동시 요청 2개가<br/>둘 다 "여유 있음"으로 읽어 max_agents를 초과하는 TOCTOU 레이스 — FOR UPDATE로 차단)
     alt 여유 없음
         Store-->>API: 거부, ROLLBACK

@@ -29,8 +29,8 @@ pub use error::StoreError;
 pub use listener::listen_events;
 pub use postgres::{PgStore, PoolConfig};
 pub use project_rules::{
-    advance_project_archive, ensure_project_accepts_new_tasks, task_project_matches_issue_project,
-    ArchiveProgress, ProjectAdmissionError,
+    advance_project_archive, ensure_project_accepts_new_agents, ensure_project_accepts_new_tasks,
+    task_project_matches_issue_project, ArchiveProgress, ProjectAdmissionError,
 };
 pub use rbac::{
     consume_bootstrap_and_create_admin, issue_admin_bootstrap_token, seed_builtin_roles,
@@ -40,12 +40,12 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry, FleetEvent, Issue,
-    IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
-    PermissionId, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
-    Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskPhase,
-    TaskStatus, TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter,
-    WorkerHeartbeat, WorkerId,
+    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
+    EventEntry, FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
+    LoginAttempt, Permission, PermissionId, PermissionKind, Project, ProjectFilter, ProjectId,
+    ProjectStatus, Role, RoleId, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId,
+    TaskOutput, TaskPhase, TaskStatus, TransitionOrigin, TransitionOutcome, User, UserId, Worker,
+    WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -1051,6 +1051,61 @@ pub trait Store: Send + Sync {
     /// cleanup 증거)는 그 하부 구조가 생기기 전까지 없다.
     async fn project_has_active_tasks(&self, _project_id: ProjectId) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("project_has_active_tasks"))
+    }
+
+    // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — Project와 같은 관례.
+    //
+    // **여기에 Agent를 다른 Project로 옮기는 메서드는 없다.** `project_id`는
+    // 생성 시점에 고정되며 정본은 이동 대신 새 Agent 생성을 규정한다
+    // (docs/architecture/entity-placement-and-context.md). 갱신 경로를 두지
+    // 않는 것이 그 불변식의 집행 방법이다.
+
+    /// Agent를 생성한다. 같은 Project에 같은 `name`이 이미 있으면
+    /// `StoreError::Conflict`. `project_id`가 실재하는지는 호출부가
+    /// `project_rules::ensure_project_accepts_new_agents`로 먼저 검사한다 —
+    /// FK 위반은 그 검사를 통과한 뒤의 경합에서만 나타나는 2차 방어선이다.
+    async fn create_agent(&self, _agent: &Agent) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_agent"))
+    }
+
+    /// id로 단건 조회.
+    async fn get_agent(&self, _id: AgentId) -> Result<Option<Agent>, StoreError> {
+        Err(StoreError::Unsupported("get_agent"))
+    }
+
+    /// Project 안에서 이름으로 단건 조회. 이름은 Project 범위에서만 유일하므로
+    /// `project_id` 없이는 조회할 수 없다.
+    async fn get_agent_by_name(
+        &self,
+        _project_id: ProjectId,
+        _name: &str,
+    ) -> Result<Option<Agent>, StoreError> {
+        Err(StoreError::Unsupported("get_agent_by_name"))
+    }
+
+    /// 목록 조회 (최신순).
+    async fn list_agents(&self, _filter: &AgentFilter) -> Result<Vec<Agent>, StoreError> {
+        Err(StoreError::Unsupported("list_agents"))
+    }
+
+    /// 상태를 전이하고 `updated_at`을 갱신한다. Project와 같이 Store는 CAS
+    /// 없는 단순 쓰기이며 전이 유효성은 호출부가 검사한다. 존재하지 않는
+    /// id면 `false`.
+    async fn update_agent_status(
+        &self,
+        _id: AgentId,
+        _status: AgentStatus,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("update_agent_status"))
+    }
+
+    /// 이 Project에 아직 회수되지 않은(`Ready`) Agent가 하나라도 있는지.
+    /// `Draining → Archived` 전이의 두 번째 게이트 — 정본의 `ArchiveBlocked`
+    /// 조건 중 "Agent cleanup 증거"의, 1단계에서 실제로 확인 가능한 부분이다.
+    async fn project_has_live_agents(&self, _project_id: ProjectId) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("project_has_live_agents"))
     }
 
     // ── Issue (로드맵 #88) ────────────────────────────────────────────

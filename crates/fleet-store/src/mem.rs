@@ -28,13 +28,13 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use fleet_core::{
-    AuditEvent, AuditFilter, BootstrapToken, CloseReason, EmailVerificationToken, EventEntry,
-    FleetEvent, Host, HostEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId,
-    IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter,
-    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome,
-    TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter,
-    TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
-    WorkerId,
+    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
+    EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent, IdempotentInsert, Issue,
+    IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
+    PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId, Session,
+    SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskOutputChunk,
+    TaskPhase, TaskStatus, TaskStatusFilter, TransitionOrigin, TransitionOutcome, User, UserId,
+    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -74,6 +74,7 @@ pub struct MemStore {
     ssh_keys: Mutex<HashMap<String, SshKey>>,
     control_leases: Mutex<HashMap<String, ControlLease>>,
     projects: Mutex<HashMap<ProjectId, Project>>,
+    agents: Mutex<HashMap<AgentId, Agent>>,
     issues: Mutex<HashMap<IssueId, Issue>>,
     issue_comments: Mutex<Vec<IssueComment>>,
     issue_task_links: Mutex<Vec<IssueTaskLink>>,
@@ -1612,6 +1613,85 @@ impl Store for MemStore {
                     TaskStatus::Pending | TaskStatus::Dispatched { .. }
                 )
         }))
+    }
+
+    // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
+
+    async fn create_agent(&self, agent: &Agent) -> Result<(), StoreError> {
+        let mut agents = self.agents.lock().unwrap();
+        // 유일성은 이름 전역이 아니라 `(project_id, name)` — Postgres의
+        // UNIQUE 제약과 같은 범위여야 두 Store가 같은 입력에 같은 답을 낸다.
+        if agents
+            .values()
+            .any(|a| a.project_id == agent.project_id && a.name == agent.name)
+        {
+            return Err(StoreError::Conflict(format!(
+                "agent name already exists in this project: {}",
+                agent.name
+            )));
+        }
+        agents.insert(agent.id, agent.clone());
+        Ok(())
+    }
+
+    async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
+        Ok(self.agents.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn get_agent_by_name(
+        &self,
+        project_id: ProjectId,
+        name: &str,
+    ) -> Result<Option<Agent>, StoreError> {
+        Ok(self
+            .agents
+            .lock()
+            .unwrap()
+            .values()
+            .find(|a| a.project_id == project_id && a.name == name)
+            .cloned())
+    }
+
+    async fn list_agents(&self, filter: &AgentFilter) -> Result<Vec<Agent>, StoreError> {
+        let agents = self.agents.lock().unwrap();
+        let mut out: Vec<Agent> = agents
+            .values()
+            .filter(|a| match filter.project_id {
+                Some(project_id) => a.project_id == project_id,
+                None => true,
+            })
+            .filter(|a| match filter.status {
+                Some(status) => a.status == status,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+        let limit = filter.limit.max(1);
+        Ok(out.into_iter().skip(filter.offset).take(limit).collect())
+    }
+
+    async fn update_agent_status(
+        &self,
+        id: AgentId,
+        status: AgentStatus,
+    ) -> Result<bool, StoreError> {
+        let mut agents = self.agents.lock().unwrap();
+        match agents.get_mut(&id) {
+            Some(a) => {
+                a.status = status;
+                a.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn project_has_live_agents(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents
+            .values()
+            .any(|a| a.project_id == project_id && a.status.blocks_project_archive()))
     }
 
     // ── Issue (로드맵 #88) ────────────────────────────────────────────

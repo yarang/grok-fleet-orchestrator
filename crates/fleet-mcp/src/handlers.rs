@@ -24,11 +24,11 @@ use tracing::debug;
 
 use crate::schema::{
     self, JsonRpcError, TOOL_CANCEL_TASK, TOOL_COLLECT_RESULTS, TOOL_COMMENT_ISSUE,
-    TOOL_CREATE_ISSUE, TOOL_CREATE_PROJECT, TOOL_DELETE_PROJECT, TOOL_DISPATCH_TASK,
-    TOOL_GET_TASK_STATUS, TOOL_LIST_BOOTSTRAP_TOKENS, TOOL_LIST_HOSTS, TOOL_LIST_ISSUES,
-    TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS, TOOL_RESET_WORKER_BREAKER,
-    TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE,
-    TOOL_WAIT_FOR_TASK,
+    TOOL_CREATE_AGENT, TOOL_CREATE_ISSUE, TOOL_CREATE_PROJECT, TOOL_DELETE_PROJECT,
+    TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_AGENTS, TOOL_LIST_BOOTSTRAP_TOKENS,
+    TOOL_LIST_HOSTS, TOOL_LIST_ISSUES, TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS,
+    TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STOP_AGENT,
+    TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE, TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -94,6 +94,9 @@ pub async fn dispatch_tool(
         TOOL_CREATE_PROJECT => handle_create_project(ctx, arguments).await,
         TOOL_LIST_PROJECTS => handle_list_projects(ctx, arguments).await,
         TOOL_DELETE_PROJECT => handle_delete_project(ctx, arguments).await,
+        TOOL_CREATE_AGENT => handle_create_agent(ctx, arguments).await,
+        TOOL_LIST_AGENTS => handle_list_agents(ctx, arguments).await,
+        TOOL_STOP_AGENT => handle_stop_agent(ctx, arguments).await,
         TOOL_LIST_ISSUES => handle_list_issues(ctx, arguments).await,
         TOOL_CREATE_ISSUE => handle_create_issue(ctx, arguments).await,
         TOOL_TRANSITION_ISSUE => handle_transition_issue(ctx, arguments).await,
@@ -1065,6 +1068,163 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
     Ok(schema::tool_json(&project_json(&project)))
 }
 
+// ── fleet_create_agent / fleet_list_agents / fleet_stop_agent ──────────
+// (로드맵 #49, 1단계)
+//
+// Dashboard `/api/agents`와 **같은 규칙**을 쓴다 — Project admission은
+// `fleet_store::ensure_project_accepts_new_agents`가 단일 구현이다.
+
+fn agent_json(a: &fleet_core::Agent) -> Value {
+    json!({
+        "id": a.id.to_string(),
+        "project_id": a.project_id.to_string(),
+        "name": a.name,
+        "description": a.description,
+        "created_by": a.created_by,
+        "status": a.status.as_str(),
+        "created_at": a.created_at.to_rfc3339(),
+        "updated_at": a.updated_at.to_rfc3339(),
+    })
+}
+
+async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let project_id: ProjectId = args
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: project_id"))?
+        .parse()
+        .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?;
+
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: name"))?
+        .trim();
+    if name.is_empty() {
+        return Err(JsonRpcError::invalid_params("name must not be empty"));
+    }
+
+    // Project가 실재하고 새 Agent를 받는 상태인지 — Agent의 `project_id`는
+    // 불변이므로 이 검사를 통과시키면 되돌릴 방법이 없다.
+    fleet_store::ensure_project_accepts_new_agents(ctx.state.store.as_ref(), project_id)
+        .await
+        .map_err(|e| match e {
+            fleet_store::ProjectAdmissionError::NotFound(_)
+            | fleet_store::ProjectAdmissionError::NotAccepting { .. } => {
+                JsonRpcError::invalid_params(e.to_string())
+            }
+            fleet_store::ProjectAdmissionError::Store(inner) => {
+                JsonRpcError::internal(format!("store error: {inner}"))
+            }
+        })?;
+
+    let mut agent = fleet_core::Agent::new(project_id, name);
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+        let description = description.trim();
+        if !description.is_empty() {
+            agent = agent.with_description(description);
+        }
+    }
+
+    ctx.state
+        .store
+        .create_agent(&agent)
+        .await
+        .map_err(|e| match e {
+            fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
+            other => JsonRpcError::internal(format!("store error: {other}")),
+        })?;
+
+    Ok(schema::tool_json(&agent_json(&agent)))
+}
+
+async fn handle_list_agents(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let project_id = match args.get("project_id").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            raw.parse::<ProjectId>()
+                .map_err(|_| JsonRpcError::invalid_params("project_id must be a UUID"))?,
+        ),
+        None => None,
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(100);
+    let offset = args
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(0);
+
+    let agents = ctx
+        .state
+        .store
+        .list_agents(&fleet_core::AgentFilter {
+            project_id,
+            status: None,
+            limit,
+            offset,
+        })
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    let summary: Vec<Value> = agents.iter().map(agent_json).collect();
+    Ok(schema::tool_json(&json!({
+        "agents": summary,
+        "count": summary.len(),
+    })))
+}
+
+async fn handle_stop_agent(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let agent_id: fleet_core::AgentId = args
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: agent_id"))?
+        .parse()
+        .map_err(|_| JsonRpcError::invalid_params("agent_id must be a UUID"))?;
+
+    let Some(mut agent) = ctx
+        .state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+    else {
+        return Ok(schema::tool_error("agent not found"));
+    };
+
+    // 이미 `Stopped`면 쓰지 않는다 — `updated_at`을 무의미하게 갱신하면
+    // "언제 회수됐는가"라는 기록이 재호출마다 밀린다.
+    if agent.status != fleet_core::AgentStatus::Stopped {
+        ctx.state
+            .store
+            .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        // 로컬 필드만 고치면 응답의 `updated_at`이 회수 **이전** 값이라
+        // 재호출 때 다른 값이 나온다. 저장된 행을 다시 읽어 두 호출이
+        // 같은 답을 주도록 한다.
+        agent = ctx
+            .state
+            .store
+            .get_agent(agent.id)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+            .ok_or_else(|| JsonRpcError::internal("agent disappeared during stop"))?;
+    }
+
+    Ok(schema::tool_json(&agent_json(&agent)))
+}
+
 // ── Issue 도구 (로드맵 #92) ─────────────────────────────────────────────
 //
 // Dashboard HTTP 표면과 **같은 규칙**을 쓴다 — 상태 기계는
@@ -1391,7 +1551,7 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 22);
     }
 
     #[test]
@@ -2045,6 +2205,209 @@ mod tests {
             "draining",
             "must not archive while a non-terminal task still references the project"
         );
+    }
+
+    // ── fleet_create_agent / fleet_list_agents / fleet_stop_agent
+    // (로드맵 #49, 1단계) ─────────────────────────────────────────────
+
+    async fn create_project_for_agents(ctx: &ToolContext, name: &str) -> String {
+        let created = dispatch_tool(ctx, TOOL_CREATE_PROJECT, &json!({"name": name}))
+            .await
+            .unwrap();
+        parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn create_list_and_stop_agent_round_trip() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = create_project_for_agents(&ctx, "agent-home").await;
+
+        let created = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id, "name": "builder", "description": "builds"}),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&created);
+        assert_eq!(body["name"], "builder");
+        assert_eq!(body["project_id"], project_id);
+        assert_eq!(body["status"], "ready");
+        let agent_id = body["id"].as_str().unwrap().to_string();
+
+        let listed = dispatch_tool(&ctx, TOOL_LIST_AGENTS, &json!({"project_id": project_id}))
+            .await
+            .unwrap();
+        let body = parse_tool_json(&listed);
+        assert_eq!(body["count"], 1);
+        assert_eq!(body["agents"][0]["id"], agent_id);
+
+        let stopped = dispatch_tool(&ctx, TOOL_STOP_AGENT, &json!({"agent_id": agent_id}))
+            .await
+            .unwrap();
+        assert_eq!(parse_tool_json(&stopped)["status"], "stopped");
+    }
+
+    #[tokio::test]
+    async fn stop_agent_is_idempotent_and_does_not_move_the_reclaim_time() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = create_project_for_agents(&ctx, "idempotent").await;
+        let created = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id, "name": "once"}),
+        )
+        .await
+        .unwrap();
+        let agent_id = parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let first = parse_tool_json(
+            &dispatch_tool(&ctx, TOOL_STOP_AGENT, &json!({"agent_id": agent_id}))
+                .await
+                .unwrap(),
+        );
+        let second = parse_tool_json(
+            &dispatch_tool(&ctx, TOOL_STOP_AGENT, &json!({"agent_id": agent_id}))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(second["status"], "stopped");
+        // 재호출이 `updated_at`을 밀면 "언제 회수됐는가"라는 기록이 호출
+        // 횟수만큼 뒤로 이동한다 — 그래서 이미 Stopped면 쓰지 않는다.
+        assert_eq!(
+            first["updated_at"], second["updated_at"],
+            "재호출은 회수 시각을 갱신하지 않아야 한다"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_agent_rejects_unknown_project() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({
+                "project_id": fleet_core::ProjectId::new().to_string(),
+                "name": "orphan",
+            }),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "Agent의 project_id는 불변이라 생성 시점이 검증할 수 있는 유일한 순간이다"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_agent_rejects_archived_project() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = create_project_for_agents(&ctx, "closed").await;
+        dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id}),
+        )
+        .await
+        .unwrap();
+
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id, "name": "too-late"}),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_agent_rejects_duplicate_name_within_the_project() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let a = create_project_for_agents(&ctx, "dup-a").await;
+        let b = create_project_for_agents(&ctx, "dup-b").await;
+
+        dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": a, "name": "worker"}),
+        )
+        .await
+        .unwrap();
+        let dup = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": a, "name": "worker"}),
+        )
+        .await;
+        assert!(dup.is_err());
+
+        // 다른 Project에서는 같은 이름이 허용된다 — MemStore와 Postgres의
+        // 유일성 범위가 같아야 두 Store가 같은 입력에 같은 답을 준다.
+        dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": b, "name": "worker"}),
+        )
+        .await
+        .expect("same name in another project must be allowed");
+    }
+
+    #[tokio::test]
+    async fn stop_unknown_agent_returns_tool_error() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_STOP_AGENT,
+            &json!({"agent_id": fleet_core::AgentId::new().to_string()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn a_ready_agent_keeps_delete_project_in_draining() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project_id = create_project_for_agents(&ctx, "held-open").await;
+        // Task는 하나도 만들지 않는다 — archive를 막는 것이 오직 Agent임을
+        // 이 도구 표면에서도 증명한다.
+        let created = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id, "name": "holder"}),
+        )
+        .await
+        .unwrap();
+        let agent_id = parse_tool_json(&created)["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let deleted = dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_tool_json(&deleted)["status"], "draining");
+
+        dispatch_tool(&ctx, TOOL_STOP_AGENT, &json!({"agent_id": agent_id}))
+            .await
+            .unwrap();
+        let deleted = dispatch_tool(
+            &ctx,
+            TOOL_DELETE_PROJECT,
+            &json!({"project_id": project_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(parse_tool_json(&deleted)["status"], "archived");
     }
 
     #[tokio::test]
