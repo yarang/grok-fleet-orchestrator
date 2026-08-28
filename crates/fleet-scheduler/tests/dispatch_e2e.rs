@@ -117,6 +117,8 @@ async fn dispatch_completes_successfully() {
     let task = Task::from_request(TaskRequest {
         prompt: "echo hello".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -156,6 +158,8 @@ async fn threaded_reply_dispatch_includes_parent_context() {
     let parent = Task::from_request(TaskRequest {
         prompt: "1부터 5까지 더해줘".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let parent_id = parent.id;
@@ -216,6 +220,8 @@ async fn dispatch_records_completed_event() {
     let task = Task::from_request(TaskRequest {
         prompt: "work".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -250,6 +256,8 @@ async fn dispatch_with_server_hint_picks_hinted_worker() {
         prompt: "gpu work".into(),
         server_hint: Some("gpu-1".into()),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -281,6 +289,8 @@ async fn dispatch_with_unavailable_hint_fails() {
         prompt: "work".into(),
         server_hint: Some("offline-1".into()),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -310,6 +320,8 @@ async fn dispatch_failure_marks_task_failed_and_records_breaker() {
     let task = Task::from_request(TaskRequest {
         prompt: "doomed".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -348,6 +360,8 @@ async fn multiple_failures_trip_circuit_breaker() {
         let task = Task::from_request(TaskRequest {
             prompt: format!("fail-{i}"),
             created_by: "test".into(),
+            // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         let task_id = task.id;
@@ -365,6 +379,8 @@ async fn multiple_failures_trip_circuit_breaker() {
     let task = Task::from_request(TaskRequest {
         prompt: "blocked".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let result = dispatcher.submit(task).await;
@@ -397,6 +413,8 @@ async fn label_filtering_selects_only_matching_worker() {
         prompt: "train model".into(),
         required_labels: vec!["gpu".into()],
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -431,6 +449,8 @@ async fn dispatch_with_unmatched_model_marks_task_failed() {
         prompt: "gemini-only work".into(),
         model: Some("gemini".into()),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -474,6 +494,8 @@ async fn cancel_dispatched_task_transitions_to_cancelled() {
     let task = Task::from_request(TaskRequest {
         prompt: "long-running work".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -530,6 +552,8 @@ async fn cancel_pending_task_succeeds_without_transport_call() {
     let task = Task::from_request(TaskRequest {
         prompt: "manually inserted".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -555,6 +579,8 @@ async fn cancel_already_completed_returns_error() {
     let task = Task::from_request(TaskRequest {
         prompt: "echo done".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -598,6 +624,8 @@ async fn wait_for_task_returns_completed_task() {
     let task = Task::from_request(TaskRequest {
         prompt: "fast work".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -624,6 +652,8 @@ async fn wait_for_task_times_out_when_still_running() {
     let task = Task::from_request(TaskRequest {
         prompt: "slow".into(),
         created_by: "test".into(),
+        // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     let task_id = task.id;
@@ -677,6 +707,8 @@ async fn cancel_does_not_record_breaker_failure() {
         let task = Task::from_request(TaskRequest {
             prompt: "to-be-cancelled".into(),
             created_by: "test".into(),
+            // 로드맵 #69 — `submit()`의 입국 심사가 절대 경로 cwd를 요구한다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         let task_id = task.id;

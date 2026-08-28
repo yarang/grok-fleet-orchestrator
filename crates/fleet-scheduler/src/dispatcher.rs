@@ -318,7 +318,24 @@ impl Dispatcher {
     pub async fn submit(&self, mut task: Task) -> Result<TaskId, DispatchError> {
         let task_id = task.id;
 
-        // 0. 지능형 라우터를 통해 프로파일/모델/예산 결정
+        // 0-a. 입국 심사 — 저장 **전에** 판정한다 (로드맵 #69).
+        //
+        // 거절이 `insert_task_idempotent` 앞에 있어야 Task 행 자체가 생기지
+        // 않는다. 뒤에 두면 영원히 dispatch될 수 없는 행이 Pending으로 남아
+        // 재조정 루프가 매 tick마다 같은 실패를 반복한다.
+        //
+        // 호출자가 `inherit_from_parent`로 부모의 `cwd`를 물려준 뒤라는 점이
+        // 중요하다 — 상속된 값도 명시 입력과 똑같이 검증 대상이며(`project_id`가
+        // 이미 같은 규칙을 따른다), 그래서 이 게이트는 상속 **뒤**에 있는
+        // 이 지점에 있어야 한다.
+        //
+        // 이것이 유일한 관문은 아니다. `fleet tasks submit`은 `submit()`을
+        // 지나지 않고 store에 직접 쓰고, 이 검증 이전에 저장된 행도 남아 있다.
+        // 최종 관문은 `AcpTransport::dispatch()`다.
+        fleet_core::validate_workspace_cwd(task.cwd.as_deref())
+            .map_err(|e| DispatchError::InvalidRequest(format!("cwd: {e}")))?;
+
+        // 0-b. 지능형 라우터를 통해 프로파일/모델/예산 결정
         let router = crate::router::HeuristicTaskRouter::new();
         let decision = router.resolve_routing(&task);
         if task.routing_profile.is_none() {
@@ -631,10 +648,21 @@ impl Dispatcher {
         inc_running();
 
         if let Err(e) = self.state.transport.dispatch(req).await {
+            // 요청 결함인가, 워커 결함인가 (로드맵 #69).
+            //
+            // 회로 차단기는 **워커의 건강도**를 재는 장치다. 요청이 규칙을
+            // 어겨 워커에 보내지지도 않은 실패를 여기에 기록하면, 클라이언트가
+            // 잘못된 `cwd`를 반복 제출하는 것만으로 멀쩡한 워커의 회로를 열 수
+            // 있다 — 검증을 추가하면서 새 DoS 경로를 만드는 셈이다. 그래서
+            // 이 갈래만 차단기와 상태 전이 기록 전체를 건너뛴다.
+            let invalid_request = matches!(e, TransportError::InvalidRequest(_));
+
             // dispatch 자체 실패 (연결 등) — 재조정 여부와 무관하게 항상 실제
             // 실패로 취급한다.
             let old_state = cb.state();
-            cb.record(Outcome::Failure);
+            if !invalid_request {
+                cb.record(Outcome::Failure);
+            }
             let new_state = cb.state();
 
             if old_state != new_state {
@@ -664,7 +692,13 @@ impl Dispatcher {
 
             let failure = TaskFailure {
                 error: e.to_string(),
-                kind: FailureKind::WorkerError,
+                kind: if invalid_request {
+                    // `WorkerError`로 적으면 운영자가 워커 로그를 뒤진다 —
+                    // 워커는 이 요청을 본 적이 없다.
+                    FailureKind::InvalidRequest
+                } else {
+                    FailureKind::WorkerError
+                },
                 worker_id: Some(worker_id),
                 attempts: 1,
             };
@@ -678,7 +712,9 @@ impl Dispatcher {
             .await;
             // 위 `inc_running()`과 짝을 이루므로 전이 결과와 무관하게 감소.
             dec_running();
-            return Err(DispatchError::Transport(e.to_string()));
+            // `From<TransportError>`가 `InvalidRequest`를 보존하므로, 여기서
+            // `e.to_string()`으로 접지 않고 그대로 변환한다.
+            return Err(DispatchError::from(e));
         }
 
         info!(%task_id, %worker_id, "task dispatched");
@@ -1065,11 +1101,24 @@ pub enum DispatchError {
     /// 인스턴스가 dispatch를 대신 수행하면 안 된다.
     #[error("this instance does not currently hold the control plane lease")]
     ControlPlaneFenced,
+
+    /// 제출된 요청 자체가 규칙을 어겨 거절됐다 (로드맵 #69).
+    ///
+    /// 재시도해서는 안 된다 — 같은 페이로드는 항상 같은 판정을 받는다.
+    /// [`DispatchError::NoWorker`]/[`DispatchError::CircuitOpen`]과 달리
+    /// 시간이 지난다고 해소되지 않으므로 `#38`의 재시도 대상이 아니다.
+    #[error("invalid task request: {0}")]
+    InvalidRequest(String),
 }
 
 impl From<TransportError> for DispatchError {
     fn from(e: TransportError) -> Self {
-        DispatchError::Transport(e.to_string())
+        match e {
+            // 요청 결함은 워커 결함이 아니다 — 뭉뜽그려 `Transport`로 접으면
+            // 호출자가 둘을 구분할 수 없고, 재시도·회로 판단이 전부 틀린다.
+            TransportError::InvalidRequest(msg) => DispatchError::InvalidRequest(msg),
+            other => DispatchError::Transport(other.to_string()),
+        }
     }
 }
 
@@ -1136,8 +1185,57 @@ mod tests {
         Task::from_request(TaskRequest {
             prompt: "hello".into(),
             created_by: "test".into(),
+            // 로드맵 #69 — `cwd`는 더 이상 생략할 수 없다. 이 헬퍼가 값을
+            // 채우므로 아래 테스트 대부분은 이 규칙과 무관하게 예전 의미를
+            // 그대로 유지한다. 생략 자체를 검사하는 것은 아래
+            // `submit_rejects_a_task_without_cwd_before_it_is_stored`뿐이다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         })
+    }
+
+    // 로드맵 #69 — 입국 심사는 저장 **전에** 걸려야 한다. 뒤에 있으면 영원히
+    // dispatch될 수 없는 행이 Pending으로 남아 재조정 루프가 매 tick마다 같은
+    // 실패를 반복한다. 그래서 "Err를 받았다"만으로는 부족하고 "행이 없다"까지
+    // 확인한다.
+    #[tokio::test]
+    async fn submit_rejects_a_task_without_cwd_before_it_is_stored() {
+        let (state, dispatcher) = setup_no_workers(0);
+        let mut task = sample_task();
+        task.cwd = None;
+        let task_id = task.id;
+
+        let err = dispatcher
+            .submit(task)
+            .await
+            .expect_err("cwd is required — submit() must fail");
+        assert!(
+            matches!(err, DispatchError::InvalidRequest(_)),
+            "expected InvalidRequest, got {err:?}"
+        );
+
+        assert!(
+            state.store.get_task(task_id).await.unwrap().is_none(),
+            "a rejected submit must not leave a Task row behind"
+        );
+    }
+
+    // 파일시스템 루트는 명시해도 거절된다. 이 변경이 없애려는 상태(루트에서
+    // 열린 에이전트 세션)를 클라이언트가 이름을 대어 되살릴 수 있으면 수정이
+    // 반쪽이 된다.
+    #[tokio::test]
+    async fn submit_rejects_filesystem_root_as_cwd() {
+        let (state, dispatcher) = setup_no_workers(0);
+        let mut task = sample_task();
+        task.cwd = Some("/".into());
+        let task_id = task.id;
+
+        let err = dispatcher.submit(task).await.expect_err("'/' is rejected");
+        assert!(
+            matches!(err, DispatchError::InvalidRequest(_)),
+            "expected InvalidRequest, got {err:?}"
+        );
+        assert!(state.store.get_task(task_id).await.unwrap().is_none());
     }
 
     // 로드맵 #38: 재시도 비활성(기본값, max_dispatch_retries == 0)일 때는 이
@@ -1184,6 +1282,125 @@ mod tests {
             stored.status
         );
         assert_eq!(stored.retry_count, 1);
+    }
+
+    // 로드맵 #69 — 회로 차단기 오염 방지.
+    //
+    // 검증을 추가하면 새 DoS 경로가 열릴 수 있다: 클라이언트가 잘못된 `cwd`를
+    // 반복 제출하는 것만으로 멀쩡한 워커의 회로를 열 수 있다면, 방어가 공격
+    // 표면이 된다. 그래서 **요청 결함**은 차단기에 기록하지 않는다.
+    //
+    // 대조군을 같은 테스트에 둔다. 대조군이 없으면 "회로가 안 열렸다"가
+    // 면제 때문인지 애초에 이 설정에서 회로가 열리지 않기 때문인지 구분되지
+    // 않는다 — 통과하지만 아무것도 증명하지 않는 테스트가 된다.
+    #[tokio::test]
+    async fn invalid_request_does_not_open_the_circuit_but_a_worker_fault_does() {
+        use fleet_transport::WorkerTransport as _;
+
+        // 실패 1건으로 곧장 열리는 설정.
+        let cb_config = CircuitBreakerConfig {
+            enabled: true,
+            min_samples: 1,
+            error_rate_threshold: 0.1,
+            ..CircuitBreakerConfig::default()
+        };
+
+        // ── 실험군: 잘못된 cwd ──────────────────────────────────────────
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker = fleet_core::Worker::new("w-invalid", "wss://w/ws");
+        worker.status = fleet_core::WorkerStatus::Online;
+        store.upsert_worker(&worker).await.unwrap();
+
+        let mock = fleet_transport::MockTransport::new();
+        mock.register(worker.id, "wss://w/ws", 4).await.unwrap();
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(mock);
+        let state = Arc::new(FleetState::new(store.clone(), transport, cb_config.clone()));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        // 검증 이전에 저장된 행을 흉내 낸다 — `submit()`의 입국 심사를
+        // 우회해 store에 직접 넣는다. 실제로 이 경로로 들어오는 것이
+        // `fleet tasks submit` 경유분과 레거시 행이다.
+        let mut task = sample_task();
+        task.cwd = None;
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let err = dispatcher
+            .dispatch_existing(task, true)
+            .await
+            .expect_err("invalid cwd must fail the dispatch");
+        assert!(
+            matches!(err, DispatchError::InvalidRequest(_)),
+            "expected InvalidRequest (not collapsed into Transport), got {err:?}"
+        );
+
+        let stored = store.get_task(task_id).await.unwrap().unwrap();
+        match stored.status {
+            TaskStatus::Failed(f) => assert_eq!(
+                f.kind,
+                fleet_core::FailureKind::InvalidRequest,
+                "the worker never saw this request — WorkerError would send the \
+                 operator to the worker logs"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // 회로 상태는 **이벤트 로그**로 관찰한다. `MemStore`는
+        // `update_worker_circuit_state`의 트레이트 기본 구현(no-op)을 그대로
+        // 쓰므로 `get_worker().circuit_state`는 무엇을 해도 Closed로 남는다 —
+        // 그걸로 판정하면 면제가 동작하든 말든 통과하는 테스트가 된다.
+        assert!(
+            !circuit_opened(state.store.as_ref(), worker.id).await,
+            "a malformed request must not count against the worker's health"
+        );
+
+        // ── 대조군: 워커 결함(용량 소진) ────────────────────────────────
+        let store2: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker2 = fleet_core::Worker::new("w-fault", "wss://w2/ws");
+        worker2.status = fleet_core::WorkerStatus::Online;
+        store2.upsert_worker(&worker2).await.unwrap();
+
+        // store에는 Online으로 넣되 transport에는 등록하지 않는다 — selector는
+        // 이 워커를 고르지만 dispatch는 `WorkerNotRegistered`로 실패한다.
+        // 명백히 **워커 쪽** 결함이다.
+        let mock2 = fleet_transport::MockTransport::new();
+        let transport2: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(mock2);
+        let state2 = Arc::new(FleetState::new(store2.clone(), transport2, cb_config));
+        let dispatcher2 = Dispatcher::new(state2.clone());
+
+        let task2 = sample_task(); // cwd는 유효하다.
+        store2.insert_task(&task2).await.unwrap();
+        let err2 = dispatcher2
+            .dispatch_existing(task2, true)
+            .await
+            .expect_err("an unregistered worker must fail the dispatch");
+        assert!(
+            matches!(err2, DispatchError::Transport(_)),
+            "expected Transport, got {err2:?}"
+        );
+
+        assert!(
+            circuit_opened(state2.store.as_ref(), worker2.id).await,
+            "control: a genuine worker fault under this config does open the circuit"
+        );
+    }
+
+    /// 이벤트 로그에서 해당 워커의 회로가 Open으로 전이한 적이 있는지.
+    async fn circuit_opened(store: &dyn Store, worker_id: WorkerId) -> bool {
+        store
+            .list_events(0, 1000)
+            .await
+            .expect("events")
+            .into_iter()
+            .any(|e| {
+                matches!(
+                    e.event,
+                    fleet_core::FleetEvent::WorkerCircuitChanged {
+                        worker_id: w,
+                        to: fleet_core::CircuitState::Open,
+                        ..
+                    } if w == worker_id
+                )
+            })
     }
 
     // 로드맵 #71 — worker는 온라인이고 `model` 라벨도 일치하지만 해당 model의
@@ -1533,6 +1750,7 @@ mod tests {
             prompt: "build the thing".into(),
             created_by: "alice".into(),
             idempotency_key: Some("submit-once".into()),
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         };
 
@@ -1627,6 +1845,7 @@ mod tests {
             prompt: "build the thing".into(),
             created_by: "alice".into(),
             idempotency_key: Some("submit-once".into()),
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         let first_id = first.id;
@@ -1647,6 +1866,7 @@ mod tests {
             prompt: "delete the thing".into(),
             created_by: "alice".into(),
             idempotency_key: Some("submit-once".into()),
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         let conflicting_id = conflicting.id;

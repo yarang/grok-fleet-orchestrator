@@ -1026,7 +1026,11 @@ async fn submit_task_reply_inherits_thread_from_parent() {
         &client,
         &format!("http://{}/api/tasks", server.addr),
         &cookie,
-        &[("prompt", "1부터 5까지 더해줘"), ("csrf_token", TEST_CSRF)],
+        &[
+            ("prompt", "1부터 5까지 더해줘"),
+            ("cwd", "/srv/fleet/workspaces/test"),
+            ("csrf_token", TEST_CSRF),
+        ],
     )
     .send()
     .await
@@ -1984,6 +1988,7 @@ async fn submit_task_with_active_project_id_records_it_on_the_task() {
         &cookie,
         &[
             ("prompt", "scoped work"),
+            ("cwd", "/srv/fleet/workspaces/test"),
             ("project_id", &project.id.to_string()),
             ("csrf_token", TEST_CSRF),
         ],
@@ -2110,6 +2115,11 @@ async fn reply_inherits_project_from_parent_task() {
         prompt: "parent".into(),
         created_by: "test_admin".into(),
         project_id: Some(project.id),
+        // 로드맵 #69 — 이어가기는 부모의 `cwd`를 물려받는다. 부모에 없으면
+        // 상속 결과도 비어 이어가기가 `cwd` 게이트에서 400으로 거절되고,
+        // 그러면 이 테스트가 재려던 판정(project 경계)이 아니라 엉뚱한
+        // 이유로 초록/빨강이 갈린다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     parent.status = fleet_core::TaskStatus::Cancelled {
@@ -2158,6 +2168,11 @@ async fn reply_is_rejected_when_the_parents_project_has_since_been_archived() {
         prompt: "parent".into(),
         created_by: "test_admin".into(),
         project_id: Some(project.id),
+        // 로드맵 #69 — 이어가기는 부모의 `cwd`를 물려받는다. 부모에 없으면
+        // 상속 결과도 비어 이어가기가 `cwd` 게이트에서 400으로 거절되고,
+        // 그러면 이 테스트가 재려던 판정(project 경계)이 아니라 엉뚱한
+        // 이유로 초록/빨강이 갈린다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         ..Default::default()
     });
     parent.status = fleet_core::TaskStatus::Cancelled {
@@ -3047,6 +3062,7 @@ async fn submit_task_with_same_idempotency_key_returns_the_same_task() {
 
     let form = [
         ("prompt", "build the thing"),
+        ("cwd", "/srv/fleet/workspaces/test"),
         ("csrf_token", TEST_CSRF),
         ("idempotency_key", "dash-once"),
     ];
@@ -3115,6 +3131,7 @@ async fn submit_task_with_conflicting_payload_returns_409() {
         &cookie,
         &[
             ("prompt", "build the thing"),
+            ("cwd", "/srv/fleet/workspaces/test"),
             ("csrf_token", TEST_CSRF),
             ("idempotency_key", "dash-once"),
         ],
@@ -3130,6 +3147,7 @@ async fn submit_task_with_conflicting_payload_returns_409() {
         &cookie,
         &[
             ("prompt", "delete the thing"),
+            ("cwd", "/srv/fleet/workspaces/test"),
             ("csrf_token", TEST_CSRF),
             ("idempotency_key", "dash-once"),
         ],
@@ -3170,6 +3188,7 @@ async fn empty_idempotency_key_does_not_deduplicate() {
             &cookie,
             &[
                 ("prompt", prompt),
+                ("cwd", "/srv/fleet/workspaces/test"),
                 ("csrf_token", TEST_CSRF),
                 ("idempotency_key", ""),
             ],
@@ -3190,6 +3209,51 @@ async fn empty_idempotency_key_does_not_deduplicate() {
         .await
         .unwrap();
     assert_eq!(tasks.len(), 2, "두 제출 모두 살아 있어야 한다: {tasks:?}");
+}
+
+/// 로드맵 #69 — `cwd` 없는/잘못된 제출은 400이고 **행을 남기지 않는다**.
+///
+/// 게이트가 `Dispatcher::submit()` 안에도 있지만, 대시보드 핸들러에서 먼저
+/// 판정해야 사용자가 `dispatch failed`가 아니라 400을 본다. 그리고 판정이
+/// `insert_task_idempotent` **앞**이어야 영원히 디스패치될 수 없는 Pending
+/// 행이 남지 않는다 — 그 점을 store를 직접 조회해 확인한다.
+#[tokio::test]
+async fn submit_task_without_a_valid_cwd_is_rejected_and_creates_nothing() {
+    let worker = sample_worker("cwd-w", WorkerStatus::Online);
+    let (server, cookie, store) = spawn_dispatcher_server_with_store(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    // 빈 문자열은 "폼에 입력하지 않음"이고, 나머지는 규칙 위반이다.
+    for bad in ["", "relative/path", "/srv/../etc", "/", "."] {
+        let resp = authed_post_form(
+            &client,
+            &format!("http://{}/api/tasks", server.addr),
+            &cookie,
+            &[
+                ("prompt", "do something"),
+                ("cwd", bad),
+                ("csrf_token", TEST_CSRF),
+            ],
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(resp.status(), 400, "cwd={bad:?} must be refused");
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("cwd"),
+            "the refusal must name cwd so the operator knows which field to fix: {body}"
+        );
+    }
+
+    let tasks = store
+        .list_tasks(&fleet_core::TaskFilter::default())
+        .await
+        .unwrap();
+    assert!(
+        tasks.is_empty(),
+        "a refused submission must not leave a row behind: {tasks:?}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════

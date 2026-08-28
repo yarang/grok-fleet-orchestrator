@@ -639,6 +639,13 @@ pub async fn submit_task_api(
             })?;
     }
 
+    // 로드맵 #69 — 같은 이유로 상속 **뒤**에 검증한다. 이어가기 작업은
+    // 부모의 `cwd`를 물려받으므로, 폼이 비어 있어도 최종 값이 존재할 수 있고
+    // 반대로 부모에도 없으면 여기서 걸린다. `submit()` 안에도 같은 게이트가
+    // 있지만, 여기서 판정해야 `dispatch failed`가 아니라 400으로 돌아간다.
+    fleet_core::validate_workspace_cwd(task.cwd.as_deref())
+        .map_err(|e| ApiError::BadRequest(format!("cwd: {e}")))?;
+
     let task_id = task.id;
 
     match dispatcher.submit(task).await {

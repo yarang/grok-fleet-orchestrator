@@ -96,7 +96,8 @@ async fn e2e_dispatch_to_real_grok() {
         task_id,
         worker_id: worker,
         prompt: "Say exactly: hello from grok".to_string(),
-        cwd: None,
+        // 로드맵 #69 — dispatch 게이트가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         model: None,
         max_turns: Some(1),
         timeout_secs: Some(60),

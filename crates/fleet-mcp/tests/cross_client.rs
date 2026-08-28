@@ -387,7 +387,12 @@ async fn grok_build_tools_call_no_arguments() {
     assert_eq!(result["isError"], false);
 }
 
-/// Codex 스타일: tools/call로 fleet_dispatch_task 호출 시 prompt만 최소 제공.
+/// Codex 스타일: tools/call로 fleet_dispatch_task 호출 시 최소 인자만 제공.
+///
+/// 로드맵 #69 이후 "최소"는 `prompt` 하나가 아니라 `prompt` + `cwd`다 —
+/// 오케스트레이터는 워커의 파일시스템을 모르므로 작업 디렉터리를 지어내지
+/// 않는다. prompt만 보내는 경우는 아래
+/// `dispatch_without_cwd_is_a_protocol_error`가 따로 고정한다.
 #[tokio::test]
 async fn codex_dispatch_task_minimal_prompt() {
     let Some(mut fx) = ServerFixture::start().await else {
@@ -408,7 +413,7 @@ async fn codex_dispatch_task_minimal_prompt() {
         "method": "tools/call",
         "params": {
             "name": "fleet_dispatch_task",
-            "arguments": { "prompt": "test prompt" }
+            "arguments": { "prompt": "test prompt", "cwd": "/srv/fleet/workspaces/test" }
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
@@ -546,7 +551,10 @@ async fn empty_prompt_rejected() {
         "method": "tools/call",
         "params": {
             "name": "fleet_dispatch_task",
-            "arguments": { "prompt": "   " }
+            // `cwd`를 채워 보낸다 — 로드맵 #69의 게이트가 함께 걸리면
+            // -32602가 prompt 때문인지 cwd 때문인지 구분할 수 없고,
+            // prompt 검증을 지워도 이 테스트가 초록으로 남는다.
+            "arguments": { "prompt": "   ", "cwd": "/srv/fleet/workspaces/test" }
         }
     });
     write_line(&mut stdin, &req).await.unwrap();
@@ -556,6 +564,66 @@ async fn empty_prompt_rejected() {
 
     let err = resp.get("error").expect("empty prompt must be rejected");
     assert_eq!(err["code"], -32602, "invalid_params code");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("prompt"),
+        "the rejection must name prompt, not some other field: {err}"
+    );
+}
+
+/// 로드맵 #69 — `cwd` 없는 dispatch는 프로토콜 수준 오류다.
+///
+/// 저장·디스패치까지 흘려보낸 뒤 `isError=true`로 돌려주면 만들어진 적 없는
+/// `task_id`를 인용하게 되므로, 인자 파싱 자리에서 `invalid_params`로 끊는다.
+/// 상대 경로·`..`·`/` 자체도 같은 자리에서 같은 코드로 거절된다.
+#[tokio::test]
+async fn dispatch_without_cwd_is_a_protocol_error() {
+    let Some(mut fx) = ServerFixture::start().await else {
+        eprintln!("skipping");
+        return;
+    };
+    let mut stdin = fx.stdin.take().unwrap();
+    let stdout = fx.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    standard_initialize(&mut stdin, &mut reader, json!(1)).await;
+
+    // 인자 없음(= cwd 부재), 상대 경로, 상위 탈출, 파일시스템 루트.
+    let cases = [
+        json!({ "prompt": "x" }),
+        json!({ "prompt": "x", "cwd": "relative/path" }),
+        json!({ "prompt": "x", "cwd": "/srv/../etc" }),
+        json!({ "prompt": "x", "cwd": "/" }),
+    ];
+    for (i, arguments) in cases.iter().enumerate() {
+        let id = json!(100 + i as i64);
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": "fleet_dispatch_task", "arguments": arguments }
+        });
+        write_line(&mut stdin, &req).await.unwrap();
+        let resp = read_response_for_id(&mut reader, &id)
+            .await
+            .expect("no response");
+
+        let err = resp
+            .get("error")
+            .unwrap_or_else(|| panic!("{arguments} must be rejected, got {resp}"));
+        assert_eq!(err["code"], -32602, "invalid_params code for {arguments}");
+        assert!(
+            err["message"].as_str().unwrap_or_default().contains("cwd"),
+            "the rejection must name cwd: {err}"
+        );
+        // 태스크가 만들어진 적 없으므로 응답에 task_id가 실려서는 안 된다.
+        assert!(
+            resp.get("result").is_none(),
+            "a rejected dispatch must not carry a result: {resp}"
+        );
+    }
 }
 
 /// notification (id 없음) — 응답 없음 검증.

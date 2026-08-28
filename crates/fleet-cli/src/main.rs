@@ -666,7 +666,10 @@ enum TasksAction {
         #[arg(long = "label", value_name = "LABEL")]
         required_labels: Vec<String>,
 
-        /// 작업 디렉토리 (워커에 전달).
+        /// 워커에서 에이전트를 띄울 작업 디렉토리. **필수**이며 절대 경로여야
+        /// 한다(로드맵 #69). `..` 세그먼트와 `/` 자체는 거절한다. clap이 아니라
+        /// 제출 직전에 검증하는 이유는, 이 값이 없을 때 예전처럼 `/`를 지어내는
+        /// 대신 어디서 왜 거절됐는지를 알려주기 위해서다.
         #[arg(long)]
         cwd: Option<String>,
 

@@ -615,6 +615,8 @@ mod tests {
         let mut task = Task::from_request(TaskRequest {
             prompt: prompt.into(),
             created_by: "test".into(),
+            // 로드맵 #69 — dispatch 경로가 `cwd`를 요구한다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         task.created_at = chrono::Utc::now() - age;
@@ -626,6 +628,8 @@ mod tests {
         let mut task = Task::from_request(TaskRequest {
             prompt: prompt.into(),
             created_by: "test".into(),
+            // 로드맵 #69 — dispatch 경로가 `cwd`를 요구한다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             ..Default::default()
         });
         task.status = TaskStatus::Dispatched {

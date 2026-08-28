@@ -176,7 +176,8 @@ fn dispatch_req(task_id: TaskId, worker_id: WorkerId, prompt: &str) -> DispatchR
         task_id,
         worker_id,
         prompt: prompt.to_string(),
-        cwd: None,
+        // 로드맵 #69 — dispatch 게이트가 절대 경로 cwd를 요구한다.
+        cwd: Some("/srv/fleet/workspaces/test".into()),
         model: None,
         max_turns: None,
         timeout_secs: Some(30),

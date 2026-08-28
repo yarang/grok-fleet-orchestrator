@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::ids::{ProjectId, TaskId, WorkerId};
 
@@ -782,17 +783,27 @@ pub enum FailureKind {
     /// `fleet provision`의 `PushCredentials` 스텝으로 해당 워커에 credential을
     /// 배포해야 해소된다.
     CredentialMissing,
+    /// 요청 자체가 규칙을 어겨 워커에 **보내지지도 않았다** (로드맵 #69).
+    ///
+    /// `WorkerError`와 반드시 구분해야 한다: 저 이름은 워커가 실행을 시도했다가
+    /// 실패했다고 주장하지만, 이 실패는 워커가 요청을 본 적조차 없다. 운영자가
+    /// 워커 로그를 뒤지게 만드는 오분류다. `CredentialMissing`과 같은 계열이며
+    /// — 원인이 워커의 건강도가 아니라 dispatch 전제에 있다 — 재시도로 해소되지
+    /// 않는다는 성질도 같다. 다만 해소 방법이 다르다: 저쪽은 프로비저닝이고,
+    /// 이쪽은 요청을 고쳐 다시 제출하는 것뿐이다.
+    InvalidRequest,
 }
 
 impl FailureKind {
     /// 모든 variant를 순서대로 나열 — metric label 등 전량 순회가 필요한
     /// 곳에서 사용(새 variant 추가를 컴파일러가 강제하도록 이 배열도 함께
     /// 갱신해야 한다).
-    pub const ALL: [FailureKind; 4] = [
+    pub const ALL: [FailureKind; 5] = [
         FailureKind::WorkerUnavailable,
         FailureKind::WorkerError,
         FailureKind::CircuitOpen,
         FailureKind::CredentialMissing,
+        FailureKind::InvalidRequest,
     ];
 
     /// Prometheus label 등 안정적인 텍스트 표현이 필요한 곳에서 사용.
@@ -804,6 +815,7 @@ impl FailureKind {
             Self::WorkerError => "worker_error",
             Self::CircuitOpen => "circuit_open",
             Self::CredentialMissing => "credential_missing",
+            Self::InvalidRequest => "invalid_request",
         }
     }
 }
@@ -879,6 +891,119 @@ pub struct TaskOutput {
 // HashMap alias for label maps (worker 쪽과 공유).
 pub type Labels = HashMap<String, String>;
 
+/// 워커에서 실행할 작업 디렉터리(`TaskRequest::cwd`)가 거부된 이유.
+///
+/// 로드맵 #69 — [실행 격리](../../../docs/architecture/agents/execution-isolation.md)가
+/// 요구하는 workspace 봉쇄의 **어휘 검증(lexical) 부분**이다. 봉쇄의 나머지
+/// 절반(정규화된 경로가 Fleet workspace root 아래인지)은 이 저장소에서 아직
+/// 수행할 수 있는 지점이 없다 — 자세한 근거는 [`validate_workspace_cwd`] 참고.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum WorkspacePathError {
+    /// `cwd`가 아예 없다.
+    ///
+    /// ACP `session/new`의 `cwd`는 **필수 필드**(`Option`이 아니다)이므로,
+    /// 값이 없으면 오케스트레이터가 무언가를 지어내 채워야 한다. 지어낼 수
+    /// 있는 정직한 값이 없다 — 오케스트레이터는 워커의 파일시스템을 모른다.
+    #[error(
+        "cwd is required: the orchestrator cannot invent a working directory for the worker \
+         (ACP session/new requires an absolute cwd)"
+    )]
+    Missing,
+
+    /// 절대 경로가 아니다(`/`로 시작하지 않는다).
+    #[error("cwd must be an absolute path starting with '/', got {0:?}")]
+    NotAbsolute(String),
+
+    /// `..` 세그먼트를 포함한다.
+    #[error("cwd must not contain '..' path segments, got {0:?}")]
+    ParentTraversal(String),
+
+    /// NUL 바이트를 포함한다.
+    #[error("cwd must not contain NUL bytes")]
+    InteriorNul,
+
+    /// 파일시스템 루트 자체다.
+    #[error(
+        "cwd must not be the filesystem root '/': opening an agent session at the root exposes \
+         the entire worker filesystem"
+    )]
+    FilesystemRoot,
+}
+
+/// 워커에서 열릴 작업 디렉터리를 어휘적으로 검증한다.
+///
+/// # 왜 이 검증이 필요한가
+///
+/// `cwd`는 클라이언트가 자유롭게 채우는 문자열이며, 오케스트레이터를 거쳐
+/// 워커 호스트의 grok 프로세스로 그대로 전달돼 ACP `session/new`의 작업
+/// 디렉터리가 된다. 이 함수가 생기기 전까지 그 경로에는 **어떤 검증도 없었고**,
+/// `cwd`를 생략하면 오케스트레이터가 `/`를 넣어 에이전트 세션이 파일시스템
+/// 루트에서 열렸다.
+///
+/// ACP 타입 이름이 주는 인상은 방어가 아니다: 스키마의 `NewSessionRequest.cwd`는
+/// `AbsolutePath` 타입이지만 그 타입은 `pub struct AbsolutePath(pub PathBuf)`에
+/// `#[from(forward)]`가 붙은 순수 newtype이라 상대 경로도 그대로 통과시킨다.
+/// "Must be an absolute path"는 프로토콜 **문서**의 문장일 뿐 강제가 아니다.
+///
+/// # 왜 `Path::is_absolute`/`Path::components`를 쓰지 않는가
+///
+/// 판정 대상은 **워커 호스트의 경로**이고, 이 코드는 **오케스트레이터 호스트**에서
+/// 돈다. `std::path`의 절대성·컴포넌트 해석은 컴파일 타깃의 규칙을 따르므로,
+/// 오케스트레이터가 Windows에서 빌드되면 워커(Unix)에서 완벽히 유효한 `/srv/x`가
+/// "절대 경로 아님"으로 판정된다. 그래서 POSIX 규칙을 문자열 수준에서 직접
+/// 적용한다 — 이 함수가 흉내 내는 것은 실행 호스트가 아니라 목적지 호스트다.
+///
+/// # 이 함수가 하지 **않는** 것 (검증 한계)
+///
+/// 봉쇄(containment)를 하지 않는다. `/etc`나 `/`(루트를 제외하면) 어떤 절대
+/// 경로든 어휘적으로는 유효하므로 통과한다. 정본이 요구하는 "canonical path가
+/// Fleet workspace root 아래임을 확인한다"를 만족하려면 (a) 워커별 workspace
+/// root를 오케스트레이터가 알아야 하고 (b) symlink를 따라가는 정규화를 워커
+/// 파일시스템 위에서 수행해야 하는데, 이 저장소에는 둘 다 없다: `WorkerConfig`에
+/// workspace root 설정이 없고, `RegisterRequest`/`HeartbeatRequest`도 파일시스템
+/// 정보를 보고하지 않으며, dispatch 경로에서 워커 호스트 위에 도는 Fleet 코드가
+/// 없다(오케스트레이터의 `AcpTransport`가 워커의 grok ACP 엔드포인트로 직접
+/// `session/new`을 보낸다). 그 절반은 `#64`의 container 경계나 워커측 중계
+/// 계층이 생긴 뒤에야 구현 지점을 갖는다.
+///
+/// # 반환값
+///
+/// 검증에 성공하면 **검증된 경로 자체**를 돌려준다. `Result<(), _>`가 아닌
+/// 이유는 호출부에서 `unwrap()`/`expect()`가 필요해지기 때문이다 — 검증이
+/// 통과했다는 사실과 값이 `Some`이라는 사실이 타입으로 연결되지 않으면,
+/// 그 연결은 주석과 panic으로만 남는다.
+pub fn validate_workspace_cwd(cwd: Option<&str>) -> Result<&str, WorkspacePathError> {
+    let raw = cwd.ok_or(WorkspacePathError::Missing)?;
+
+    // 빈 문자열은 "없음"과 같은 실패다 — 생산자들이 대부분 빈 입력을 `None`으로
+    // 접지만, 접지 않는 경로가 하나라도 생기면 여기서 같은 결론에 도달해야 한다.
+    if raw.is_empty() {
+        return Err(WorkspacePathError::Missing);
+    }
+    if raw.contains('\0') {
+        return Err(WorkspacePathError::InteriorNul);
+    }
+    if !raw.starts_with('/') {
+        return Err(WorkspacePathError::NotAbsolute(raw.to_string()));
+    }
+    // 세그먼트를 직접 쪼갠다(위 "왜 `Path`를 쓰지 않는가" 참고). 빈 세그먼트는
+    // `//`나 뒤따르는 `/`에서 나오며 POSIX에서 무해하므로 통과시킨다.
+    if raw.split('/').any(|segment| segment == "..") {
+        return Err(WorkspacePathError::ParentTraversal(raw.to_string()));
+    }
+    // 이 시점에서 남은 `/`-만-있는 형태(`/`, `//`, `/./`...)를 루트로 판정한다.
+    // 어휘 검증만으로 봉쇄를 흉내 낼 수는 없지만, **이 변경이 없애려는 바로 그
+    // 상태**(루트에서 열린 세션)를 클라이언트가 명시적으로 요청해 되살릴 수
+    // 있으면 수정이 반쪽이 된다.
+    if raw
+        .split('/')
+        .all(|segment| segment.is_empty() || segment == ".")
+    {
+        return Err(WorkspacePathError::FilesystemRoot);
+    }
+    Ok(raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,6 +1019,103 @@ mod tests {
         assert!(matches!(task.status, TaskStatus::Pending));
         assert!(!task.is_terminal());
         assert!(!task.is_running());
+    }
+
+    // ── 로드맵 #69: workspace cwd 어휘 검증 ─────────────────────────────
+
+    #[test]
+    fn cwd_absent_is_rejected() {
+        // ACP `session/new`의 cwd는 필수라 "생략하면 워커 기본값이 쓰인다"는
+        // 경로가 없다. 예전에는 오케스트레이터가 `/`를 지어냈다.
+        assert_eq!(
+            validate_workspace_cwd(None),
+            Err(WorkspacePathError::Missing)
+        );
+        assert_eq!(
+            validate_workspace_cwd(Some("")),
+            Err(WorkspacePathError::Missing)
+        );
+    }
+
+    #[test]
+    fn cwd_filesystem_root_is_rejected() {
+        // 이 변경이 없애려는 상태를 클라이언트가 명시적으로 되살릴 수 없어야 한다.
+        for raw in ["/", "//", "/.", "/./", "/././."] {
+            assert_eq!(
+                validate_workspace_cwd(Some(raw)),
+                Err(WorkspacePathError::FilesystemRoot),
+                "expected {raw:?} to be rejected as the filesystem root"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_relative_paths_are_rejected() {
+        for raw in ["srv/agent", "./srv", "../srv", "~/srv", "C:\\srv"] {
+            assert!(
+                matches!(
+                    validate_workspace_cwd(Some(raw)),
+                    Err(WorkspacePathError::NotAbsolute(_))
+                ),
+                "expected {raw:?} to be rejected as non-absolute"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_parent_traversal_is_rejected() {
+        for raw in ["/srv/../etc", "/srv/agent/..", "/../etc", "/srv/../../etc"] {
+            assert!(
+                matches!(
+                    validate_workspace_cwd(Some(raw)),
+                    Err(WorkspacePathError::ParentTraversal(_))
+                ),
+                "expected {raw:?} to be rejected for '..' traversal"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_traversal_check_does_not_reject_dotdot_inside_a_name() {
+        // `..`는 **세그먼트 전체**일 때만 상위 이동이다. 부분 문자열로 검사하면
+        // `/srv/my..repo` 같은 정상 경로를 거부한다(예전 skill_loader의
+        // `name.contains("..")`가 이름에 대해 그렇게 한다 — 그 함수는 이름
+        // 하나를 보므로 정당하지만, 경로에 같은 방식을 쓰면 과잉 차단이다).
+        assert!(validate_workspace_cwd(Some("/srv/my..repo")).is_ok());
+        assert!(validate_workspace_cwd(Some("/srv/..repo")).is_ok());
+        assert!(validate_workspace_cwd(Some("/srv/repo..")).is_ok());
+    }
+
+    #[test]
+    fn cwd_interior_nul_is_rejected() {
+        assert_eq!(
+            validate_workspace_cwd(Some("/srv/agent\0/etc")),
+            Err(WorkspacePathError::InteriorNul)
+        );
+    }
+
+    #[test]
+    fn cwd_ordinary_absolute_paths_are_accepted() {
+        for raw in [
+            "/srv/fleet/workspaces/agent-1",
+            "/home/worker/repo",
+            "/srv//fleet/",
+            "/srv/./fleet",
+        ] {
+            assert!(
+                validate_workspace_cwd(Some(raw)).is_ok(),
+                "expected {raw:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_validation_is_lexical_only_and_does_not_contain() {
+        // 검증 한계를 테스트로 고정한다: 이 함수는 봉쇄를 하지 않는다.
+        // 나중에 누군가 "cwd는 검증된다"를 봉쇄로 오해하지 않도록,
+        // 통과하는 위험 경로를 명시적으로 기록해 둔다.
+        assert!(validate_workspace_cwd(Some("/etc")).is_ok());
+        assert!(validate_workspace_cwd(Some("/root/.ssh")).is_ok());
     }
 
     #[test]

@@ -698,6 +698,9 @@ mod tests {
         // 없는 것과 0건인 것을 대시보드/alert가 구분할 수 있어야 한다.
         assert!(out.contains("fleet_tasks_failed_total{kind=\"worker_unavailable\"} 0"));
         assert!(out.contains("fleet_tasks_failed_total{kind=\"circuit_open\"} 0"));
+        // 로드맵 #69로 신설된 kind도 같은 규칙을 따라야 한다. `FailureKind::ALL`이
+        // 5개로 늘었는데 metric이 4줄만 찍으면 신규 variant는 관측 불가능해진다.
+        assert!(out.contains("fleet_tasks_failed_total{kind=\"invalid_request\"} 0"));
     }
 
     #[tokio::test]

@@ -127,6 +127,12 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         ..Default::default()
     };
     req.cwd = args.get("cwd").and_then(|v| v.as_str()).map(String::from);
+    // 로드맵 #69 — 인자 파싱 자리에서 판정한다. `Dispatcher::submit()`에도
+    // 같은 게이트가 있지만, 거기서 걸리면 이 핸들러의 Err 갈래가 "dispatch
+    // failed ... (task_id=…)"를 돌려준다 — 만들어진 적 없는 task_id를 인용하는
+    // 셈이다. `project_id` 검증과 같은 층에 두어 프로토콜 수준 오류로 돌린다.
+    fleet_core::validate_workspace_cwd(req.cwd.as_deref())
+        .map_err(|e| JsonRpcError::invalid_params(format!("cwd: {e}")))?;
     req.model = args.get("model").and_then(|v| v.as_str()).map(String::from);
     req.server_hint = args
         .get("server_hint")

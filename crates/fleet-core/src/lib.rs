@@ -59,9 +59,10 @@ pub use issue::{
 };
 pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
-    FailureKind, IdempotentInsert, Labels, Task, TaskDeleteOutcome, TaskFailure, TaskFilter,
-    TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest, TaskResult, TaskStatus,
-    TaskStatusFilter, TokenUsage, TransitionOrigin, TransitionOutcome,
+    validate_workspace_cwd, FailureKind, IdempotentInsert, Labels, Task, TaskDeleteOutcome,
+    TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest,
+    TaskResult, TaskStatus, TaskStatusFilter, TokenUsage, TransitionOrigin, TransitionOutcome,
+    WorkspacePathError,
 };
 pub use worker::{
     mask_server_key, split_server_key, CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat,

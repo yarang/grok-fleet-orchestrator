@@ -1570,6 +1570,16 @@ async fn run_tasks_submit(
     });
     let task_id = task.id;
 
+    // 로드맵 #69 — 이 경로는 `Dispatcher::submit()`을 지나지 않으므로
+    // 거기 있는 입국 심사가 걸리지 않는다. 아래 `insert_task` **전에** 여기서
+    // 같은 규칙을 직접 건다. 없으면 CLI 사용자는 태스크가 만들어진 뒤
+    // dispatch 시점에야 실패를 보게 되고, 그 실패는 워커 쪽 실패처럼 보인다.
+    //
+    // 메시지에 `task_id`를 넣지 않는다. 위에서 id를 만들긴 했지만 이 갈래는
+    // 저장하지 않고 반환하므로, 인용하면 DB에 없는 UUID를 운영자가 쫓게 된다
+    // (MCP 핸들러에서 게이트를 인자 파싱 자리로 올린 것과 같은 이유다).
+    fleet_core::validate_workspace_cwd(task.cwd.as_deref()).context("invalid --cwd")?;
+
     // 로드맵 #62 2단계 — 이 경로는 의도적으로 멱등하지 않다. CLI에는
     // `--idempotency-key` 인자가 없고, 사람이 터미널에서 한 번 실행하는
     // 호출이라 "timeout 후 자동 재시도"라는 시나리오 자체가 없다. 채울 사람이

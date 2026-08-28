@@ -2998,3 +2998,133 @@ agent.md §4.3에 한 줄 남겼다. 그 절이 이미 모아 둔 결함군 — 
 결과를 못 읽어서 — 의 세 번째 얼굴이기 때문이다: 여기서는 결과를 읽었지만 **대상이 이미
 바뀌어 있었다**.
 
+
+---
+
+## 2026-08-28 — feat — 오케스트레이터가 워커의 작업 디렉터리를 지어내고 있었다: 그 자리에 `/`가 있었다 (`#69` 전제)
+
+### 무엇이 있었나
+
+`AcpTransport::dispatch`에 이런 줄이 있었다.
+
+```rust
+cwd: req.cwd.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/")),
+```
+
+`Task.cwd`는 클라이언트가 채우거나 말거나인 `Option<String>`이고, MCP·Dashboard·CLI 세 표면
+어디에도 요구 사항이 없었다. 비어 있으면 에이전트 세션이 **파일시스템 루트**에서 열렸다.
+mount 경계가 아직 없으므로(로드맵 `#64`·`#49` 2단계) 이는 워커의 홈, `~/.ssh`, Fleet 자신의 설정,
+다른 Project의 작업물이 전부 그 에이전트의 작업 디렉터리라는 뜻이다.
+
+정본 [실행 격리](architecture/agents/execution-isolation.md)는 "Worker는 Agent별 worktree를 만들고
+해당 Task 실행에는 그 경로만 mount한다. Project root, 다른 Agent worktree, Worker 설정 디렉터리,
+credential backend는 mount하지 않는다"고 정해 두었다. 구현은 그 정반대의 최대값을 기본값으로
+쓰고 있었다.
+
+### 왜 `Option`이었나 — 전제 자체가 틀렸다
+
+"보내지 않으면 워커가 알아서 하겠지"가 성립하려면 프로토콜이 생략을 허용해야 한다. 벤더된
+ACP SDK를 열어 확인했다: `NewSessionRequest.cwd`는 v1에서 `pub cwd: PathBuf`, v2에서
+`pub cwd: AbsolutePath`로 **양쪽 다 필수**다. 생략은 애초에 선택지가 아니었고, 그래서 코드가
+값을 지어내는 것 말고 할 수 있는 일이 없었다. `Option`은 프로토콜의 사실을 반영한 적이 없다.
+
+덤으로 `AbsolutePath`는 이름이 주는 인상과 달리 **아무 검증도 하지 않는다** —
+`#[serde(transparent)]`에 `#[from(forward)]`가 붙은 `pub struct AbsolutePath(pub PathBuf)`이라
+상대 경로도 그대로 통과한다. 타입 이름을 안전 장치로 읽으면 안 된다.
+
+### 무엇을 했나
+
+지어내는 것을 그만두고 거절한다. `fleet-core::validate_workspace_cwd`가 정본이며 어휘적으로
+네 가지만 본다: 절대 경로일 것, `..` 세그먼트가 없을 것, `/` 자체가 아닐 것, interior NUL이
+없을 것. 게이트는 다섯 자리에 있다.
+
+| 자리 | 위치 | 반환 | 그 자리여야 하는 이유 |
+|---|---|---|---|
+| MCP | `handle_dispatch_task`, 인자 파싱 | `invalid_params` | 아래로 흘리면 핸들러의 Err 갈래가 `dispatch failed … (task_id=…)`로 **만들어진 적 없는 task_id를 인용**한다 |
+| Dashboard | `submit_task_api`, 상속 뒤 | `400` | 이어가기가 부모의 `cwd`를 물려받으므로 상속 뒤여야 한다(`project_id`가 이미 같은 규칙) |
+| CLI | `run_tasks_submit`, `insert_task` 앞 | `anyhow` | 이 경로는 `Dispatcher::submit()`을 **지나지 않는다** |
+| Scheduler | `Dispatcher::submit()`, 저장 앞 | `InvalidRequest` | 뒤에 두면 영원히 디스패치될 수 없는 Pending 행이 남아 재조정 루프가 매 tick 같은 실패를 반복한다 |
+| Transport | `AcpTransport`/`MockTransport::dispatch()`, 워커 상태 조회 앞 | `InvalidRequest` | 기존에 저장된 행과 CLI 우회 경로의 최종 관문 |
+
+관문이 다섯인 것은 방어의 중복이 아니라 **경로가 실제로 갈라지기 때문**이다. 워커 상태보다
+앞에 두는 이유는, 뒤에 두면 같은 잘못된 요청이 워커가 온라인이냐에 따라 다른 에러를 받게
+되어서다.
+
+### 회로 차단기를 오염시키지 않기 위해 variant를 새로 만들었다
+
+이것이 이 작업에서 가장 조심한 부분이다. transport 실패를 뭉뚱그려 `Transport`로 접으면
+`dispatch_existing`이 `cb.record(Outcome::Failure)`를 부른다. 그러면 **클라이언트가 잘못된 `cwd`를
+반복 제출하는 것만으로 멀쩡한 워커의 회로를 열 수 있다** — 검증을 추가하면서 자해형 DoS 경로를
+만드는 셈이다. `TransportError::InvalidRequest`와 `FailureKind::InvalidRequest`를 신설하고,
+`From<TransportError>`가 variant를 보존하게 하고, 이 갈래만 차단기 기록과 상태 전이를 건너뛴다.
+`FailureKind`를 나눈 이유는 `CredentialMissing`과 같다 — `WorkerError`로 적으면 운영자가 워커
+로그를 뒤지지만, **워커는 이 요청을 본 적이 없다.**
+
+### 대조군이 테스트를 구했다
+
+`invalid_request_does_not_open_the_circuit_but_a_worker_fault_does`를 처음에는 실험군만으로
+썼다. "잘못된 `cwd`로 dispatch → 회로가 열리지 않는다." 초록이었다. 그런데 대조군(워커 결함이면
+열린다)을 붙이자 그쪽도 열리지 않았다.
+
+원인은 관측 수단이었다. 판정을 `store.get_worker(id).circuit_state`로 읽고 있었는데,
+`Store::update_worker_circuit_state`는 트레이트에 **no-op 기본 구현**이 있고
+(`crates/fleet-store/src/lib.rs:363`) `MemStore`는 그것을 재정의하지 않는다. 그 필드는 MemStore
+아래에서 **영원히 `Closed`**다. 실험군만 있었다면 면제 로직을 통째로 지워도 통과하는 테스트를
+초록으로 받아들이고 넘어갔을 것이다. 판정을 이벤트 로그의
+`FleetEvent::WorkerCircuitChanged { to: Open }`로 옮겨 고쳤다.
+
+같은 형태의 결함을 픽스처에서도 한 건 발견했다. `reply_into_archived_project…`는 실패하지
+**않았지만**, 부모에 `cwd`가 없으면 그 400은 archive 검사가 아니라 새 `cwd` 게이트가 낸 것이라
+archive 검사를 지워도 초록으로 남는다. 실패한 픽스처만 고쳤다면 통과하는 거짓말이 남았을
+것이다 — **상태 코드만 단정하는 테스트는 게이트를 하나 더 얹는 것만으로 조용히 무의미해진다.**
+
+### 검증 한계
+
+- **containment는 판정하지 못한다.** 검증은 어휘적일 뿐이고, 경로가 Fleet workspace root 아래인지는
+  보지 않는다. 오케스트레이터의 `canonicalize`는 자기 파일시스템을 보므로 워커의 경로에 대해
+  아무것도 말하지 않고, symlink 해석은 그 경로가 존재하는 쪽에서만 가능하다. 워커측 relay나
+  `#64`의 container mount 경계가 선행이다. 그래서 `/home/other-user/secrets`처럼 규칙을 전부
+  지키면서 경계 밖인 경로는 지금도 통과한다. 이 한계를
+  `cwd_validation_is_lexical_only_and_does_not_contain` 테스트가 명시적으로 고정한다.
+- **CLI 게이트에는 자동화된 테스트가 없다.** `fleet-cli`는 `[[bin]]`만 있는 크레이트라 통합
+  테스트 타깃이 `run_tasks_submit`에 닿지 못하고, `connect_and_migrate`가 먼저 걸려 DB 없이는
+  호출도 되지 않는다. `cross_client`처럼 바이너리를 subprocess로 띄우는 방식은 가능하지만,
+  agent.md §4.3 (3)이 기록한 "Cargo 의존성 그래프에 잡히지 않는 런타임 참조" 위험을 하나 더
+  늘리는 선택이라 하지 않았다. 대신 실제 바이너리로 수동 확인했다(아래).
+- **`#69`의 완료 게이트 4종은 하나도 닫히지 않았다.** 이번 것은 그 앞의 전제다.
+
+### 실검증
+
+실제 Postgres(`fleet_live69`)와 실제 바이너리로 확인했다. 자동 테스트가 없는 CLI 게이트가
+이 절의 주된 이유지만, 확인하는 김에 대시보드도 브라우저로 끝까지 몰아봤다.
+
+**CLI** — `fleet tasks submit`을 5가지 잘못된 `cwd`로 호출했고 전부 서로 다른 메시지로 거절됐다:
+생략(`cwd is required: the orchestrator cannot invent a working directory for the worker`),
+`relative/path`·`.`(`must be an absolute path starting with '/'`),
+`/srv/../etc`(`must not contain '..' path segments`),
+`/`(`must not be the filesystem root '/'`). 정상 경로 1건만 성공했고, 그 뒤
+`select count(*) from tasks`가 **1**이었다 — 거절된 5건은 행을 하나도 남기지 않았다.
+
+**이 실검증이 결함 하나를 잡았다.** 처음 구현에서 CLI 오류가
+`invalid --cwd for task d3ac2286-…`처럼 **저장된 적 없는 task_id를 인용**했다. `task.id`는
+`insert_task` 전에 이미 만들어지지만 이 갈래는 저장하지 않고 반환하므로, 운영자가 저 UUID로
+DB를 뒤지면 아무것도 나오지 않는다. MCP 핸들러에서 게이트를 인자 파싱 자리로 올린 이유가
+정확히 이것이었는데 CLI에서 같은 실수를 했다. 메시지에서 task_id를 뺐다. 코드를 읽어서는
+보이지 않았고 실제로 실행해서야 보였다.
+
+**대시보드** — bootstrap → 로그인 → `/tasks/new`까지 브라우저로 진행했다.
+빈 `cwd`는 HTML5 `required`가 클라이언트에서 막았고(폼이 제출되지 않고 필드가 강조됨),
+`required`를 통과하는 `/srv/../etc`와 `/`는 서버가 400으로 거절하며 그 사유를 화면에
+그대로 렌더링했다(`Error: bad request: cwd: cwd must not contain '..' path segments, got
+"/srv/../etc"`). **두 겹이 서로를 대체하지 않는다는 것이 여기서 갈린다** — 하나만 있었으면
+각각 다른 구멍이 남는다. 또한 오류 본문이 실제로 메시지를 담는다는 사실이
+`submit_task_without_a_valid_cwd_is_rejected_and_creates_nothing`의 `body.contains("cwd")`
+단정을 뒷받침한다(HTML 오류 페이지로 감쌌다면 그 단정이 헛돈다).
+
+**상속** — 정상 `cwd`로 제출한 뒤 Task 상세의 Reply 폼(=`cwd` 입력이 **없는** 화면)으로
+이어가기를 보냈고 통과했다. DB 확인 결과 자식 행의 `cwd`가 부모와 같은
+`/srv/fleet/workspaces/browser`였다. 게이트를 상속 **앞**에 뒀다면 이 reply가 400으로
+죽었을 것이고, 이어가기 기능 전체를 망가뜨린 채 "검증을 추가했다"고 기록됐을 것이다.
+
+최종 상태는 행 3개(CLI 정상 1, 대시보드 정상 1, 이어가기 1)였다. 확인 후 서버를 내리고
+`dropdb fleet_live69`로 정리했다.

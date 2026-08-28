@@ -253,7 +253,7 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "Working directory on the worker (optional)."
+                        "description": "Absolute working directory on the worker where the agent session is opened. Required — the orchestrator does not know the worker's filesystem and will not invent a default. Must start with '/', must not contain '..' segments, and must not be '/' itself. Note this is validated lexically only: the orchestrator cannot confirm the path exists on the worker or that it lies inside a workspace."
                     },
                     "model": {
                         "type": "string",
@@ -288,7 +288,7 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "description": "Client-chosen key making this submit idempotent (optional). Resending the same key with the same payload returns the existing task instead of creating a duplicate — use it when a call may time out and be retried. Reusing the key with a different payload is rejected. Note: all MCP submissions share one key namespace per orchestrator, so pick keys that are unlikely to collide (e.g. include a UUID)."
                     }
                 },
-                "required": ["prompt"]
+                "required": ["prompt", "cwd"]
             }),
         },
         ToolInfo {

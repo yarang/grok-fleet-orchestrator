@@ -284,7 +284,8 @@ async fn acp_transport_with_client_tls_dispatches_task_end_to_end() {
             task_id,
             worker_id,
             prompt: "ping".to_string(),
-            cwd: None,
+            // 로드맵 #69 — dispatch 게이트가 절대 경로 cwd를 요구한다.
+            cwd: Some("/srv/fleet/workspaces/test".into()),
             model: None,
             max_turns: None,
             timeout_secs: Some(10),

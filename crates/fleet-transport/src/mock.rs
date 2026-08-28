@@ -152,6 +152,16 @@ impl WorkerTransport for MockTransport {
     }
 
     async fn dispatch(&self, req: DispatchRequest) -> Result<(), TransportError> {
+        // 로드맵 #69 — 실제 transport(`AcpTransport::dispatch`)가 워커 상태를
+        // 보기 **전에** 거는 것과 같은 게이트를, 같은 순서로 건다.
+        //
+        // 테스트 더블이 프로덕션이 거절하는 요청을 받아주면, 그 더블 위에서
+        // 도는 테스트는 자기가 증명한다고 주장하는 것보다 적게 증명한다 —
+        // 여기서는 특히 "잘못된 cwd로 dispatch하면 어떻게 되는가"를 mock 위에서
+        // 관찰할 방법 자체가 없어진다.
+        fleet_core::validate_workspace_cwd(req.cwd.as_deref())
+            .map_err(|e| TransportError::InvalidRequest(format!("task {}: {e}", req.task_id)))?;
+
         let worker_config: MockWorker;
         let event_tx: broadcast::Sender<WorkerEvent>;
 
@@ -309,7 +319,7 @@ mod tests {
             task_id: TaskId::new(),
             worker_id,
             prompt: "hello".into(),
-            cwd: None,
+            cwd: Some("/srv/mock".into()),
             model: None,
             max_turns: None,
             timeout_secs: None,
@@ -340,7 +350,7 @@ mod tests {
             task_id: TaskId::new(),
             worker_id: WorkerId::new(),
             prompt: "x".into(),
-            cwd: None,
+            cwd: Some("/srv/mock".into()),
             model: None,
             max_turns: None,
             timeout_secs: None,
@@ -348,6 +358,44 @@ mod tests {
             skills_required: vec![],
         };
         let result = transport.dispatch(req).await;
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(TransportError::WorkerNotRegistered(_))
+        ));
+    }
+
+    /// 로드맵 #69 — mock도 실제 transport와 같은 게이트를 갖는다. 그리고 그
+    /// 게이트는 **워커 상태보다 먼저** 걸린다: 워커가 등록조차 되지 않은
+    /// 상태에서도 판정이 `WorkerNotRegistered`가 아니라 `InvalidRequest`여야
+    /// 한다. 원인은 요청에 있지 워커에 있지 않고, 무효한 요청이 워커 상태에
+    /// 따라 다른 에러를 받으면 클라이언트가 원인을 오독한다.
+    #[tokio::test]
+    async fn invalid_cwd_is_rejected_before_worker_state_is_consulted() {
+        let transport = MockTransport::new();
+        let worker_id = WorkerId::new();
+        transport
+            .register(worker_id, "wss://mock/ws", 4)
+            .await
+            .unwrap();
+
+        for bad in [None, Some("/"), Some("relative/path"), Some("/srv/../etc")] {
+            let req = DispatchRequest {
+                task_id: TaskId::new(),
+                // 등록되지 않은 워커 — 그런데도 InvalidRequest가 나와야 한다.
+                worker_id: WorkerId::new(),
+                prompt: "x".into(),
+                cwd: bad.map(String::from),
+                model: None,
+                max_turns: None,
+                timeout_secs: None,
+                checkpoint_branch: None,
+                skills_required: vec![],
+            };
+            let result = transport.dispatch(req).await;
+            assert!(
+                matches!(result, Err(TransportError::InvalidRequest(_))),
+                "cwd {bad:?} should be rejected as InvalidRequest, got {result:?}"
+            );
+        }
     }
 }

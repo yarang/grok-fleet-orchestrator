@@ -391,6 +391,23 @@ impl WorkerTransport for AcpTransport {
         let worker_id = req.worker_id;
         let task_id = req.task_id;
 
+        // 로드맵 #69 — 워커에 도달하는 **마지막 관문**. 제출 시점(Dispatcher,
+        // CLI)에도 같은 규칙을 걸지만 그것만으로는 부족하다: 이 검증이 생기기
+        // 전에 저장된 Task 행과, 저장소에 직접 쓰는 경로(`fleet tasks submit`은
+        // `Dispatcher::submit`을 지나지 않는다)가 재조정 루프를 타고 여기로
+        // 들어온다. 워커 상태를 보기 **전에** 판정하는 이유는, 무효한 요청이
+        // 워커 연결 상태에 따라 다른 에러를 받으면 안 되기 때문이다 — 원인은
+        // 요청에 있지 워커에 있지 않다.
+        let cwd = match fleet_core::validate_workspace_cwd(req.cwd.as_deref()) {
+            Ok(validated) => PathBuf::from(validated),
+            Err(e) => {
+                warn!(%task_id, %worker_id, error = %e, "refusing to dispatch: invalid cwd");
+                return Err(TransportError::InvalidRequest(format!(
+                    "task {task_id}: {e}"
+                )));
+            }
+        };
+
         let session = {
             let clients = self.clients.read().await;
             clients
@@ -431,11 +448,11 @@ impl WorkerTransport for AcpTransport {
         // max_turns는 grok 자체 세션 옵션 밖) — 예전 구현도 이 두 필드를
         // 사용하지 않았으므로 회귀는 아니다. cwd는 이번에 처음으로 실제
         // session/new에 연결된다(예전엔 워커당 공유 세션이라 무시됐음).
-        let cwd = req
-            .cwd
-            .clone()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
+        //
+        // `cwd`는 이 함수 최상단에서 이미 검증·확정됐다. 예전에는 여기서
+        // `unwrap_or_else(|| PathBuf::from("/"))`로 기본값을 지어냈고, 그 결과
+        // `cwd`를 생략한 모든 태스크의 에이전트 세션이 파일시스템 루트에서
+        // 열렸다.
         let prompt_text = req.prompt.clone();
 
         tokio::spawn(async move {

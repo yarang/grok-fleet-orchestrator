@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/execution-isolation.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-28"
 last_verified_commit: "working-tree"
 ---
 
@@ -61,6 +61,24 @@ redirect도 policy enforcement 지점에서 검사하며, container 내부의 �
   credential store·SSH agent forwarding·repository config의 embedded token을 사용하지 않는다.
 - cleanup은 opaque workspace/container ID로만 수행하고 canonical path가 Fleet workspace root 아래임을
   확인한다. glob·사용자 입력 path·symlink 추적 삭제는 금지한다.
+
+### 현재 구현 (2026-08-28, 로드맵 `#69` 전제)
+
+위 결정은 아직 구현되지 않았다 — Agent별 worktree를 만들려면 dispatch가 어떤 Agent의 것인지
+알아야 하고, 그 바인딩은 `#49` 2단계에 있다. 그때까지 Task의 작업 디렉터리는 **클라이언트가
+제출한 `Task.cwd`** 하나이며, Worker가 만들거나 검증한 경로가 아니다.
+
+2026-08-28 이전에는 그 값이 없으면 `AcpTransport::dispatch`가 `PathBuf::from("/")`로 대체해
+파일시스템 루트에서 세션을 열었다. 지금은 지어내지 않고 거절한다. 검증은 `fleet-core`의
+`validate_workspace_cwd`가 정본이고, 생산 표면 3곳(MCP·Dashboard·CLI)과 `Dispatcher::submit()`,
+그리고 transport 두 구현이 같은 규칙을 건다.
+
+**이 검증은 어휘적(lexical)이다.** 절대 경로일 것, `..` 세그먼트가 없을 것, `/` 자체가 아닐 것,
+interior NUL이 없을 것만 본다. 위 절이 요구하는 **containment**(canonical path가 Fleet workspace
+root 아래인가)는 판정하지 못한다 — 오케스트레이터의 `canonicalize`는 자기 파일시스템을 보므로
+워커의 경로에 대해 아무것도 말하지 않고, symlink 해석은 그 경로가 존재하는 쪽에서만 가능하다.
+따라서 워커측 relay나 `#64`의 container mount 경계 중 하나가 선행이며, **지금 상태는 "경계가
+있다"가 아니라 "지어낸 루트는 더 이상 쓰지 않는다"까지다.**
 
 ## sudo와 privileged operation
 

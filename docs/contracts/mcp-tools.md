@@ -59,7 +59,7 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 
 | 도구 | 주요 입력 | 결과 범주 |
 |---|---|---|
-| `fleet_dispatch_task` | `prompt`, 선택 `cwd`, `model`, `server_hint`, labels, turn·timeout | 비동기 `task_id` |
+| `fleet_dispatch_task` | `prompt`, **필수** `cwd`, 선택 `model`, `server_hint`, labels, turn·timeout | 비동기 `task_id` |
 | `fleet_get_task_status` | `task_id` | Task 상태·결과 |
 | `fleet_list_tasks` | 선택 status, limit, offset | Task 목록 |
 | `fleet_cancel_task` | `task_id`, 선택 reason | 취소 결과 |
@@ -94,6 +94,16 @@ Agent 도구는 `#49` 1단계 범위다 — Agent를 **정의**로 만들고 회
 바꾸는 도구는 만들지 않았다(불변). 명령/ACK 도구는 워커 제어 스트림(`#89`)이 선행이다.
 AgentTemplate 관리 도구는 아직 제안 계약일 뿐 구현돼 있지 않다(로드맵 `#92`, `#86` 선행).
 새 도구는 여기 표, `tools/list` schema, handler 테스트를 한 변경으로 갱신한다.
+
+`fleet_dispatch_task`의 `cwd`는 **2026-08-28(로드맵 `#69` 전제)부터 필수다** — 기존 클라이언트에
+대한 파괴적 변경이며, `cwd` 없이 호출하면 `-32602 invalid_params`를 받는다. 선택 인자였을 때
+오케스트레이터는 값이 없으면 `/`를 지어내 파일시스템 루트에서 ACP 세션을 열었고, 그것이
+실행 격리 정본을 정면으로 어겼다. ACP `NewSessionRequest.cwd`는 프로토콜 양쪽 버전에서 필수라
+"보내지 않는다"는 선택지가 없으므로, 지어내지 않으려면 요청을 거절하는 수밖에 없다. 검증은
+어휘적이다 — 절대 경로여야 하고, `..` 세그먼트와 interior NUL을 금지하며, `/` 자체는 거절한다.
+경로가 실제로 워커의 workspace 안인지(canonical containment)는 **검사하지 않는다**: 그 판정은
+워커의 파일시스템에서만 가능하다. 정본 규칙은 `fleet-core`의 `validate_workspace_cwd`이며
+Dashboard `POST /api/tasks`와 `fleet tasks submit`도 같은 규칙을 쓴다.
 
 ## 보안 상태
 
