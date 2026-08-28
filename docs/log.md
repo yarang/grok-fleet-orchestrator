@@ -3478,3 +3478,165 @@ w.registered_at += chrono::Duration::nanoseconds(416);
   `>=` 부등호에 create·update 왕복 시간만큼(밀리초 규모) 여유가 있어 999ns 절단이 이를
   뒤집을 수 없다. **다만 이것은 구조가 아니라 여유 폭으로 얻은 안전이다** — 저 줄을
   `assert_eq!`로 조이는 순간 Linux에서 깨진다.
+
+---
+
+## 2026-08-29 — fix — 워커 상세의 "최근 태스크"는 Postgres에서 **언제나 비어 있었다**: SQL이 다른 직렬화 형식을 보고 있었다
+
+`#67`의 다음 게이트(자기보고 `active_tasks`를 store 파생 카운트로 교체)를 스코핑하면서
+"태스크를 워커별로 어떻게 세는가"를 확인하러 `PgStore::list_tasks`를 읽다가 발견했다.
+`#67` 작업 자체는 아직 시작하지 않았다.
+
+### 무엇이 틀렸나
+
+`WORKER_WHERE` 상수는 externally-tagged JSONB를 전제하고 있었다:
+
+```sql
+(status->'Dispatched'->>'worker_id' = $1
+ OR status->'Completed'->>'worker_id' = $1
+ OR status->'Failed'->>'worker_id' = $1)
+```
+
+그런데 `TaskStatus`는 `#[serde(tag = "phase", rename_all = "snake_case")]` —
+**internally-tagged**다. 페이로드는 중첩 객체가 아니라 최상위로 평탄화된다. 여섯 variant를
+전부 직렬화해서 실측했다:
+
+```
+{"phase":"pending"}
+{"phase":"dispatched","worker_id":"...","started_at":"..."}
+{"phase":"completed","output":"o","exit_code":0,...,"worker_id":"...","finished_at":"..."}
+{"phase":"failed","error":"e","kind":"worker_unavailable","worker_id":"...","attempts":0}
+{"phase":"failed","error":"e","kind":"worker_unavailable","attempts":0}
+{"phase":"cancelled","reason":"r","cancelled_at":"..."}
+```
+
+`status->'Dispatched'`는 존재하지 않는 키라 항상 NULL이고, `NULL = $1`은 참이 되지 않는다.
+즉 **`list_tasks(worker_id: Some(..))`는 조건과 무관하게 0행**이었다. 추론이 아니라
+직렬화 출력으로 확정했다 — 저장된 행으로 확인하려 했으나 테스트 DB가 비어 있어 증거가
+되지 못했고, serde를 직접 왕복시켰다.
+
+주석이 틀린 것이 아니라 **주석과 코드가 같은 오해를 공유**하고 있었다. 코드만 보고는
+어느 쪽이 사실인지 알 수 없어서, 판정은 코드도 주석도 아닌 직렬화 실측에서 나와야 했다.
+
+### 두 번째 결함 — 자리 번호가 상수 안에 박혀 있었다
+
+회귀 테스트를 붙이자 첫 단정은 통과하는데 다음 단정에서 다른 오류가 나왔다:
+
+```
+argument of LIMIT must be type bigint, not type text  (SQLSTATE 42804)
+```
+
+`WORKER_WHERE`가 `$1`을 하드코딩하는데, `created_by`와 함께 거는 갈래에서는 `created_by`도
+`$1`을 쓴다. sqlx의 `bind`는 위치 기반이라 bind 넷이 `$1..$4`로 가는데 쿼리에는 `$3`까지만
+있어 `wid`(text)가 그대로 `LIMIT`에 꽂혔다. 자리 번호를 상수에서 빼내 갈래마다 직접 쓰게
+고쳤다.
+
+**두 결함의 증상이 정반대다.** 워커만 거는 갈래는 조용히 빈 목록(사용자는 "이 워커는 아직
+아무것도 안 했구나"로 읽는다), 둘 다 거는 갈래는 500 에러. 조용한 쪽이 오래 살아남은 이유가
+바로 그것이다 — 시끄러운 쪽은 프로덕션에서 호출자가 없어서 살아남았다.
+
+### 왜 아무 테스트도 잡지 못했나
+
+저장소 전체에서 `TaskFilter.worker_id`에 `Some(..)`을 넣는 테스트가 **한 건도 없었다**.
+그리고 `MemStore`는 같은 필터를 Rust `match`로 올바르게 구현한다(`mem.rs:398-411`) —
+`Dispatched`/`Completed`/`Failed(Some)` 세 위상을 `created_by`와 AND로 묶는 것까지 Pg와
+같다. 이 필터를 쓰는 유일한 프로덕션 소비자는 대시보드 워커 상세의 "최근 태스크"
+목록(`fleet-dashboard/src/handlers.rs:877`)인데, 대시보드 테스트는 MemStore를 쓴다.
+
+즉 **저장 표현을 검증하는 단정이 MemStore 쪽에만 있으면 그것은 검증이 아니다.** MemStore는
+JSONB를 거치지 않으므로 직렬화 형식에 대해 아무것도 말하지 않는다. 로드맵이 `upsert_worker`
+에서 기록한 mem/pg 드리프트와 같은 계열이고, 이번 것은 그중에서도 **양쪽 다 통과하는데
+프로덕션만 틀린** 모양이다.
+
+새 테스트 `task_list_filters_by_worker_id`는 여섯 위상을 전부 넣고 세 개만 매치하는지,
+`created_by`와 AND가 되는지, 무관한 워커는 빈 목록인지를 Postgres에 대고 확인한다.
+RED를 먼저 봤다 — 수정 전 `left: []`.
+
+### 적용된 마이그레이션 파일은 주석조차 고치면 안 된다
+
+`026_task_dispatch_control_epoch.sql:10`과 `docs/reviews/task-retry-policy-decision-2026-08-26.md`,
+`CHANGELOG.md:23`이 같은 잘못된 경로를 인용하고 있다. 이 중 `026`을 고치려다 멈췄다 —
+`sqlx::migrate!`는 파일 **전체 바이트**의 체크섬을 `_sqlx_migrations`에 저장하고, SQL 파서를
+거치지 않으므로 주석과 공백도 체크섬에 들어간다. 실측했다: 임시 DB에 마이그레이션을 적용한
+뒤 `026`의 주석 한 줄만 바꾸고 다시 `migrate()`를 부르면
+
+```
+migration error: migration 26 was previously applied but has been modified
+```
+
+로 기동이 거부된다. 그대로 커밋했다면 배포된 DB가 전부 기동 불가가 됐을 것이다.
+`docs/reviews/`와 `CHANGELOG.md`는 그 시점의 판단을 보존하는 역사 기록이라 손대지 않았다.
+정정은 `postgres.rs`의 주석에 남겼다.
+
+### 인덱스를 추가하지 않은 이유
+
+`002_indexes.sql`은 `status_phase`만 인덱싱하고 status 페이로드 필드는 다루지 않는다.
+`status->>'worker_id'`에는 인덱스가 없어 seq scan이 된다. 유일한 호출자가 `limit: 20`의
+워커 상세 페이지라 GIN 인덱스는 지금 필요하지 않다고 보고 추가하지 않았다. `#67`의
+store 파생 카운트는 `status_phase = 'dispatched'`로 좁힌 뒤 집계하므로 `idx_tasks_phase`를
+탄다 — 그쪽도 새 인덱스를 요구하지 않는다.
+
+### 검증 한계
+
+- **`worker_id` 값이 UUID 문자열로 저장된다는 것에 의존한다.** `->>`가 text를 주므로
+  `WorkerId`의 직렬화 표현이 바뀌면 조용히 다시 깨진다. 새 테스트가 이를 잡지만,
+  그것은 테스트가 있을 때의 이야기다.
+- **`Completed`/`Failed`의 페이로드 필드 이름이 `worker_id`로 유지되는 것에 의존한다.**
+  세 구조체가 우연히 같은 이름을 쓰고 있어 술어 하나로 묶이는 것이고, 이 등가성은
+  타입 시스템이 아니라 새 테스트가 지킨다.
+- **`created_by` 단독 갈래와 무필터 갈래는 이번 변경으로 바뀌지 않았고, 기존 테스트가
+  그대로 덮는다.**
+
+### 브라우저 실검증 — 같은 DB, 같은 데이터에서 0행 → 3행
+
+임시 Postgres(`fleet_wd_test`)에 워커 1개와 태스크 5개를 심고 대시보드를 띄워
+bootstrap → 로그인 → `/workers/{id}`까지 실제로 진행했다. 심은 5개는 의도적으로
+**매칭 3 / 비매칭 2**로 구성했다 — `dispatched`(created_by `alice`),
+`completed`(`alice`), `failed`(`bob`)는 대상 워커를 갖고, `pending`과
+`worker_id`가 **없는** `failed`는 갖지 않는다. 마지막 것이 특히 중요하다:
+`TaskFailure.worker_id`는 `skip_serializing_if`가 붙어 `None`이면 키 자체가
+사라지므로, 술어가 `IS NOT NULL`처럼 헐겁게 동작하면 이 행이 섞여 들어온다.
+
+화면은 정확히 3행을 렌더링했고 2행은 나타나지 않았다. `/api/workers/{id}` 응답의
+`recent_tasks`도 같은 3건이었으며, `endpoint`는 `server-key=<redacted>`로 마스킹된
+채였다(`#75`의 경계가 이 경로에서도 유지됨을 확인).
+
+**수정 전후를 같은 DB·같은 행에 대고 직접 쟀다.** 이 검증의 값은 여기에 있다 —
+회귀 테스트의 RED는 수정을 되돌린 트리에서 잰 것이지만, 아래는 UI가 방금 3행을
+그린 바로 그 데이터에 옛 술어를 직접 던진 결과다:
+
+```
+-- 수정 전(외부 태그 경로)
+SELECT count(*) FROM tasks WHERE (status->'Dispatched'->>'worker_id' = $1
+   OR status->'Completed'->>'worker_id' = $1 OR status->'Failed'->>'worker_id' = $1);
+ → 0
+
+-- 수정 후(내부 태그 경로)
+SELECT count(*) FROM tasks WHERE status->>'worker_id' = $1;
+ → 3
+```
+
+검증 후 서버를 내리고 `dropdb fleet_wd_test`로 정리했다.
+
+### 이 검증이 **범위 밖의 결함 하나를 드러냈다** — 워커 상세 화면의 저장형 XSS
+
+화면을 읽다가 `ENDPOINT` 칸이 `http://127.0.0.1:9999?server-key=`로 끝나고
+마스킹 표식 `<redacted>`가 **사라진 것**을 발견했다. 값이 텍스트가 아니라 HTML로
+파싱되고 있다는 뜻이다. `crates/fleet-dashboard/assets/worker-detail.js:50`의
+`grid.innerHTML = details.map(...)`이 `w.endpoint`·`w.status`·`w.circuit_state`·
+`w.worker_version`을 **이스케이프 없이** 문자열 보간한다. 바로 아래 `labels`(63행)와
+`renderTasks`의 `prompt`(94행)는 `escapeHtml()`을 통과하므로, 빠뜨린 것이지
+의도한 설계가 아니다.
+
+실행되지 않는 무해한 표식으로 실측했다 — `worker_version`을
+`<i id=ztmp-xss-probe>PARSED</i>`로 바꾸고 페이지를 다시 열자
+`document.getElementById('ztmp-xss-probe')`가 **실제 DOM 요소를 반환**했다.
+`worker_version`은 워커가 자기 신고하는 값이고 `endpoint`도 등록 시 워커가 준
+문자열이므로(마스킹은 `server-key` 값만 지우고 나머지는 보존한다), 워커 하나를
+장악하면 그 워커 상세를 여는 **관리자 세션에서 스크립트가 돈다**.
+
+이번 커밋의 범위(`PgStore::list_tasks`) 밖이라 고치지 않고 분리했다. 확인 뒤
+`worker_version`은 `0.1.0`으로 되돌렸고 DB는 통째로 삭제했다. **코드를 읽어서가
+아니라 화면을 읽다가 잡혔다** — 마스킹 표식이 사라진 것은 SQL 수정과 아무 관계가
+없었고, 실검증을 API 응답 확인으로만 끝냈다면 `<redacted>`가 JSON에 그대로 있어
+보이지 않았을 것이다.

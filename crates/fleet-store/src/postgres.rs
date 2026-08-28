@@ -648,25 +648,44 @@ impl Store for PgStore {
         let worker_id_str = filter.worker_id.map(|w| w.0.to_string());
 
         // worker_id를 SQL JSONB 필터로 푸시하여 LIMIT 전에 올바르게 필터링.
-        // status 컬럼은 externallly-tagged enum JSONB:
-        //   {"Dispatched": {"worker_id": "..."}}
-        //   {"Completed": {"worker_id": "..."}}
-        //   {"Failed": {"worker_id": "..."}}
+        //
+        // status 컬럼은 **internally-tagged** enum JSONB다 (`TaskStatus`는
+        // `#[serde(tag = "phase", rename_all = "snake_case")]`). 페이로드는
+        // 중첩 객체가 아니라 최상위로 평탄화된다 — 실측한 여섯 variant 전부:
+        //   {"phase":"pending"}
+        //   {"phase":"dispatched","worker_id":"...","started_at":"..."}
+        //   {"phase":"completed","output":...,"worker_id":"...",...}
+        //   {"phase":"failed","error":...,"worker_id":"...",...}   (Some일 때)
+        //   {"phase":"failed","error":...,"attempts":0}            (None이면 키 자체가 없음)
+        //   {"phase":"cancelled","reason":"...","cancelled_at":"..."}
+        //
+        // 따라서 `status->>'worker_id'` 한 술어가 dispatched/completed/failed
+        // 세 갈래 OR과 등가다 — 의미를 좁힌 것이 아니다. worker_id를 갖지
+        // 않는 pending/cancelled와 failed(None)는 이 키가 없어 NULL이 되고,
+        // `NULL = $1`은 참이 되지 않는다.
+        //
+        // 인덱스는 없다. `002_indexes.sql`은 `status_phase`만 인덱싱하고
+        // status 페이로드 필드는 다루지 않는다. 유일한 호출자가 워커 상세
+        // 페이지의 `limit: 20`이라 seq scan으로 충분하다고 보고 GIN 인덱스를
+        // 추가하지 않았다.
         const SELECT_COLS: &str = r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                           requested_profile, resolved_model, token_budget, partial_output,
                       idempotency_key, idempotency_payload_hash, dispatch_control_epoch
                    FROM tasks"#;
-        const WORKER_WHERE: &str = r#"(status->'Dispatched'->>'worker_id' = $1
-                       OR status->'Completed'->>'worker_id' = $1
-                       OR status->'Failed'->>'worker_id' = $1)"#;
+
+        // 자리 번호는 상수에 넣지 않는다. 예전에는 `$1`이 상수 안에 박혀 있었고,
+        // created_by와 함께 거는 갈래에서 `created_by`도 `$1`을 쓰는 바람에 bind
+        // 넷이 `$1..$4`로 가는데 쿼리에는 `$3`까지만 있어 `wid`(text)가 LIMIT에
+        // 꽂혔다 — `argument of LIMIT must be type bigint, not type text`. 갈래마다
+        // 번호가 다르므로 각 쿼리에서 직접 쓴다.
 
         let rows = match (&filter.created_by, &worker_id_str) {
             (Some(created_by), Some(wid)) => {
                 sqlx::query(&format!(
-                    "{SELECT_COLS} WHERE created_by = $1 AND {WORKER_WHERE} \
-                     ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+                    "{SELECT_COLS} WHERE created_by = $1 AND status->>'worker_id' = $2 \
+                     ORDER BY created_at DESC LIMIT $3 OFFSET $4"
                 ))
                 .bind(created_by)
                 .bind(wid)
@@ -688,7 +707,7 @@ impl Store for PgStore {
             }
             (None, Some(wid)) => {
                 sqlx::query(&format!(
-                    "{SELECT_COLS} WHERE {WORKER_WHERE} \
+                    "{SELECT_COLS} WHERE status->>'worker_id' = $1 \
                      ORDER BY created_at DESC LIMIT $2 OFFSET $3"
                 ))
                 .bind(wid)

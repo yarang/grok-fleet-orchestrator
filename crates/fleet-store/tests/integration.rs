@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use fleet_core::{
-    FleetEvent, Task, TaskFilter, TaskId, TaskRequest, TaskResult, TaskStatus, TaskStatusFilter,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    FailureKind, FleetEvent, Task, TaskFailure, TaskFilter, TaskId, TaskRequest, TaskResult,
+    TaskStatus, TaskStatusFilter, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
@@ -286,6 +286,123 @@ async fn task_list_respects_limit_and_offset() {
         4,
         "limit < total must not include the last row"
     );
+}
+
+#[tokio::test]
+async fn task_list_filters_by_worker_id() {
+    // 이 테스트가 없던 동안 `PgStore::list_tasks`의 worker_id 필터는 **항상 0행**을
+    // 돌려주고 있었다. `WORKER_WHERE`가 externally-tagged JSONB
+    // (`status->'Dispatched'->>'worker_id'`)를 전제했는데 `TaskStatus`는
+    // `#[serde(tag = "phase")]`로 internally-tagged라 그 경로가 언제나 NULL이다.
+    //
+    // `MemStore`는 같은 필터를 Rust `match`로 올바르게 구현하고, 이 필터를 쓰는
+    // 유일한 소비자(대시보드 워커 상세의 "최근 태스크")에는 MemStore 테스트만
+    // 있었다 — 그래서 Postgres에서만 빈 목록이 나오는데도 전부 초록이었다.
+    // 저장 표현을 검증하는 단정은 반드시 **Postgres 쪽에** 있어야 한다.
+    require_db!(store);
+
+    let target = WorkerId::new();
+    let other = WorkerId::new();
+    let now = Utc::now();
+
+    let result_for = |worker_id| TaskResult {
+        output: "done".into(),
+        exit_code: 0,
+        duration_secs: 1.0,
+        token_usage: None,
+        worker_id,
+        finished_at: now,
+    };
+    let failure_for = |worker_id| TaskFailure {
+        error: "boom".into(),
+        kind: FailureKind::WorkerUnavailable,
+        worker_id,
+        attempts: 0,
+    };
+
+    // target 워커가 실제로 손댄 세 위상 — 전부 매치해야 한다.
+    let mut dispatched = sample_task("dispatched", "alice");
+    dispatched.status = TaskStatus::Dispatched {
+        worker_id: target,
+        started_at: now,
+    };
+    let mut completed = sample_task("completed", "alice");
+    completed.status = TaskStatus::Completed(result_for(target));
+    let mut failed = sample_task("failed", "bob");
+    failed.status = TaskStatus::Failed(failure_for(Some(target)));
+
+    // 매치되면 안 되는 것들.
+    let pending = sample_task("pending", "alice"); // worker_id 키 자체가 없음
+    let mut cancelled = sample_task("cancelled", "alice"); // 마찬가지
+    cancelled.status = TaskStatus::Cancelled {
+        reason: "user".into(),
+        cancelled_at: now,
+    };
+    let mut orphan_failure = sample_task("orphan", "alice"); // worker_id: None → 키 없음
+    orphan_failure.status = TaskStatus::Failed(failure_for(None));
+    let mut other_worker = sample_task("other", "alice"); // 다른 워커
+    other_worker.status = TaskStatus::Dispatched {
+        worker_id: other,
+        started_at: now,
+    };
+
+    for t in [
+        &dispatched,
+        &completed,
+        &failed,
+        &pending,
+        &cancelled,
+        &orphan_failure,
+        &other_worker,
+    ] {
+        store.insert_task(t).await.unwrap();
+    }
+
+    let mut prompts: Vec<String> = store
+        .list_tasks(&TaskFilter {
+            worker_id: Some(target),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.prompt)
+        .collect();
+    prompts.sort();
+    assert_eq!(
+        prompts,
+        vec![
+            "completed".to_string(),
+            "dispatched".to_string(),
+            "failed".to_string()
+        ],
+        "worker_id filter must match dispatched/completed/failed(Some) and nothing else"
+    );
+
+    // created_by와 함께 거는 갈래도 같은 상수를 쓴다 — 별도로 확인한다.
+    let both = store
+        .list_tasks(&TaskFilter {
+            worker_id: Some(target),
+            created_by: Some("bob".into()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(both.len(), 1, "created_by + worker_id must AND together");
+    assert_eq!(both[0].prompt, "failed");
+
+    // 아무 작업도 하지 않은 워커는 빈 목록 — 필터가 무조건 참이 아님을 보인다.
+    let none = store
+        .list_tasks(&TaskFilter {
+            worker_id: Some(WorkerId::new()),
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "an unrelated worker must match no tasks");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
