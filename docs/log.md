@@ -4163,3 +4163,87 @@ cargo clippy -p fleet-transport --no-default-features --all-targets -- -D warnin
 
 이번 변경의 범위 밖이라 게이트 목록은 고치지 않았다 — 별도 작업으로 분리한다. 이번 변경에
 대해서는 이것이 위험을 만들지 않는다(추가한 코드가 전부 `acp` 안에 있다).
+
+## 2026-08-29 — lint — 코드 근거를 자처하던 문서가 코드에 대해 여섯 군데 거짓이었다
+
+`docs/architecture/agents/README.md`가 도메인 진입점에서 "현재 코드에는 Agent 엔티티, 명령 ACK,
+다중 runtime catalog, Agent API가 없다"고 단언하고 있었다. `#49` 1단계(2026-08-28)가 `agents`
+테이블·`fleet-core/src/agent.rs`·MCP 3종·Dashboard `/api/agents`를 랜딩시켰으므로 네 항목 중 둘이
+거짓이다. 그 문서가 "현재 코드 근거"로 지목하는 `implementation-reference.md`도 같은 상태였다.
+
+### 대조 결과
+
+| 문서 | 적혀 있던 것 | 코드 |
+|---|---|---|
+| `agents/README.md` | Agent 엔티티·Agent API가 **없다** | 둘 다 있다. 없는 것은 그 뒤의 **실행**이다 |
+| `implementation-reference.md` Core 행 | Project·Agent 모델은 **목표 계약** | `project.rs`/`agent.rs` 실재. 다만 목표보다 좁다(3-상태·2-상태) |
+| 같은 문서 Scheduler 행 | Task 실행 CAS는 **아직 목표 계약** | `tasks.dispatch_control_epoch`·`fleet-store/tests/task_cas.rs`로 구현됨. fencing만 미구현 |
+| 같은 문서 join 문단 | join은 Worker-scoped credential로 **전환하지 않는다** | `join_worker`가 `fwo_` 토큰을 발급하고 `enroll_worker`가 원자적으로 저장한다 |
+| 같은 문서 Agent 문단 | Agent 엔티티는 **구현되지 않았다** | 엔티티는 구현됨. ACK·runtime catalog·terminal attach·장기 메모리는 미구현 |
+| 같은 문서 다이어그램 | `CLI·MCP·Dashboard → fleet-api → Store` | `fleet-mcp`/`fleet-dashboard`는 `fleet-api`에 **의존하지 않고** Store를 직접 잡는다 |
+
+### 다이어그램 오류가 보안 판단으로 번지는 자리
+
+여섯 번째가 단순 작도 오류가 아닌 이유는 표면마다 인가를 각자 구현하기 때문이다. `fleet-mcp`와
+`fleet-dashboard`의 `Cargo.toml`에는 `fleet-api`가 없고 두 크레이트 모두 `state.store`를 직접
+호출한다. 그래서 `#73`이 `fleet-api`에 default-deny capability 행렬을 깔았을 때 Dashboard의 29곳
+산재한 `PermissionKind` 검사는 하나도 덮이지 않았고 `#92`로 넘어갔다. 다이어그램대로라면
+"행렬 하나 고치면 전부 덮인다"는 결론이 나온다 — 구조도가 틀리면 그 위의 판단이 함께 틀린다.
+
+### 이름이 겹쳐서 생기는 오독을 미리 끊었다
+
+`tasks.dispatch_control_epoch`는 `#67` 1단계로 실재하지만 그것은 **Task dispatch 세대**이고,
+`provisioning.md`의 9-필드 명령 봉투가 요구하는 `control_epoch`는 **Agent 명령**의 것이다. 같은
+단어라서 "control_epoch가 있으니 명령 봉투도 일부 있다"로 읽히기 쉬워, 진입점에 넷(`generation`·
+`control_epoch`·`worker_incarnation`·`fencing_token`) 전부 없음을 명시했다.
+
+### 검증 기준 절도 함께 되돌렸다
+
+`implementation-reference.md`의 "검증 기준" 1·2번이 `cargo test --workspace`와 "해당 통합 테스트"로
+적혀 있었다. 이는 `agent.md` §3.2·§4.3이 요구하는 게이트(피처 세트 두 벌, `DATABASE_URL` 무조건
+주입, `--test-threads=1`, `fleet-cli` 선행 빌드)보다 **약한 축약본**이다. 약한 축약본이 문서에
+남아 있으면 그것을 보고 명령을 만드는 세션이 생긴다 — `agent.md`가 반복해 기록해 온 재발 법칙
+그대로다. 축약본을 지우고 정본을 가리키게 했다(§5의 "정책 전문을 복제하지 않는다"와도 같은 방향).
+
+### 이 항목의 범위
+
+문서만 고쳤고 코드는 한 줄도 바꾸지 않았다. `tool-catalog.md`가 `authority: canonical`인데
+소유 로드맵 항목이 없는 문제는 이번에 손대지 않았다 — 그것은 서술의 참·거짓 문제가 아니라
+소유권 배정 문제이며 `#86`의 범위다.
+
+### 검토에서 이 커밋 자신이 같은 결함을 두 개 저질렀다
+
+작성한 diff를 다시 읽었더니 **이 커밋이 고치려는 바로 그 결함**이 커밋 안에 두 건 있었다.
+
+1. `agents/README.md`의 본문이 "그 문서만 `implementation: partial`이고 나머지는 `proposed`다"라고
+   적었는데, 같은 diff의 스무 줄 위에서 **그 README 자신을** `proposed` → `partial`로 바꿨다.
+   frontmatter를 고치고 그것을 가리키던 산문을 다시 읽지 않은 것이다. `grep -l 'implementation: partial'
+   docs/architecture/agents/*.md`가 README와 provisioning 둘을 돌려준다. "하위 설계 문서 중에서는 그
+   문서만"으로 좁히고 개수(일곱)를 실측해 적었다.
+2. 다이어그램 문단에 "`fleet-cli`가 이 셋을 한 프로세스에 함께 띄운다"를 근거 없이 적었다 — 같은
+   커밋이 검증 기준 2번으로 "현재 사실에는 코드 경로를 함께 적는다"를 새로 넣으면서. 게다가 이
+   문장은 위 대조표 셋째 행(CAS)과 같은 종류로 **반쪽만 참**이었다: `run_serve`는 MCP stdio 서버만 무조건
+   그 프로세스의 전경에서 돌리고, `fleet-api`와 `fleet-dashboard`는 각각 `--http-bind`·
+   `--dashboard-bind`가 주어졌을 때만 `tokio::spawn`으로 덧붙인다. 플래그 없이 `fleet serve`를
+   띄우면 MCP 하나뿐이다. 조건절을 붙이고 `fleet-cli/src/runtime.rs`의 `run_serve`를 근거로 달았다.
+
+문서의 현재 서술이 조용히 거짓이 되는 경로는 "코드가 나중에 바뀌어서"만이 아니다 — **같은
+커밋 안에서 내가 방금 바꾼 값을 가리키던 문장을 다시 읽지 않아서**가 더 빠르다. 정정 커밋일수록
+그렇다: 고치는 대상에 주의가 쏠려 새로 쓰는 문장은 검토를 덜 받는다.
+
+상대 링크는 두 파일 22개 전부 재검사했다(검증 기준에 새로 넣은 `../../agent.md` 포함). 링크
+검사도 게이트와 같아서, 문장을 더 고친 뒤에는 다시 돌려야 그 트리에 대한 판정이 된다.
+
+
+### 검증 한계
+
+- 대조 대상은 `agents/README.md`와 `implementation-reference.md` 두 문서의 **현재-사실 서술**로
+  한정했다. 두 문서가 가리키는 하위 8개 설계 문서의 본문은 전수 대조하지 않았다.
+- 다이어그램의 화살표는 크레이트 의존성과 `state.store` 직접 호출로 확인했다. 런타임에 실제로
+  그 경로만 쓰이는지는 실행으로 확인하지 않았다.
+- 게이트는 세 번 돌렸고 마지막 두 번은 `.md` 산문만 바뀐 트리에 대한 것이다. Rust 게이트가
+  이 변경에 대해 말해 주는 것은 사실 없다 — `crates/`의 `include_str!`은 `openapi.yaml`
+  하나뿐이고 `.md` 매치는 전부 tempdir 런타임 경로이며 `build.rs`도 없어서, `docs/*.md`는
+  컴파일 입력이 아니다. 이 항목의 실질 검증은 게이트가 아니라 위의 여섯 건 대조와 링크
+  재검사다. 그럼에도 돌린 이유는 게이트가 트리 전체에 대한 판정이기 때문이지, 이 변경을
+  검증하기 때문이 아니다.
