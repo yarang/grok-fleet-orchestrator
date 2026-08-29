@@ -28,7 +28,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
+    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
+    AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision, AgentTemplateRevisionId,
+    AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
     EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent, IdempotentInsert, Issue,
     IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
     PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId, Session,
@@ -75,6 +77,8 @@ pub struct MemStore {
     control_leases: Mutex<HashMap<String, ControlLease>>,
     projects: Mutex<HashMap<ProjectId, Project>>,
     agents: Mutex<HashMap<AgentId, Agent>>,
+    agent_templates: Mutex<HashMap<AgentTemplateId, AgentTemplate>>,
+    agent_template_revisions: Mutex<HashMap<AgentTemplateRevisionId, AgentTemplateRevision>>,
     issues: Mutex<HashMap<IssueId, Issue>>,
     issue_comments: Mutex<Vec<IssueComment>>,
     issue_task_links: Mutex<Vec<IssueTaskLink>>,
@@ -1671,6 +1675,39 @@ impl Store for MemStore {
                 agent.name
             )));
         }
+        // pin 검증은 PgStore와 **같은 판정**이어야 한다 — 두 Store가 같은
+        // 입력에 다른 답을 내면 MemStore로 통과한 테스트가 아무것도 증명하지
+        // 못한다. 검사 항목: revision이 그 템플릿의 것인지, revoke되지
+        // 않았는지, 템플릿이 새 pin을 받는 상태인지.
+        if let Some(pin) = agent.template_pin {
+            let revisions = self.agent_template_revisions.lock().unwrap();
+            let rev = revisions
+                .get(&pin.revision_id)
+                .filter(|r| r.template_id == pin.template_id)
+                .ok_or_else(|| {
+                    StoreError::Conflict(format!(
+                        "no such template revision for agent pin: template={} revision={}",
+                        pin.template_id, pin.revision_id
+                    ))
+                })?;
+            if rev.is_revoked() {
+                return Err(StoreError::Conflict(format!(
+                    "template revision {} is revoked and cannot be pinned",
+                    pin.revision_id
+                )));
+            }
+            let templates = self.agent_templates.lock().unwrap();
+            let template = templates.get(&pin.template_id).ok_or_else(|| {
+                StoreError::Conflict(format!("no such agent template: {}", pin.template_id))
+            })?;
+            if !template.status.accepts_new_pins() {
+                return Err(StoreError::Conflict(format!(
+                    "template {} is {} and does not accept new pins",
+                    pin.template_id,
+                    template.status.as_str()
+                )));
+            }
+        }
         agents.insert(agent.id, agent.clone());
         Ok(())
     }
@@ -1733,6 +1770,202 @@ impl Store for MemStore {
         Ok(agents
             .values()
             .any(|a| a.project_id == project_id && a.status.blocks_project_archive()))
+    }
+
+    // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
+
+    async fn create_agent_template(&self, template: &AgentTemplate) -> Result<(), StoreError> {
+        let mut templates = self.agent_templates.lock().unwrap();
+        // 범위는 `project_id`가 있으면 그 Project, 없으면 전역 — 029의 부분
+        // 유니크 인덱스 두 장과 같은 범위여야 두 Store가 같은 답을 낸다.
+        // `Option == Option`이 NULL을 같은 값으로 보므로 전역끼리도 걸린다.
+        if templates
+            .values()
+            .any(|t| t.project_id == template.project_id && t.name == template.name)
+        {
+            return Err(StoreError::Conflict(format!(
+                "agent template name already exists in this scope: {}",
+                template.name
+            )));
+        }
+        templates.insert(template.id, template.clone());
+        Ok(())
+    }
+
+    async fn get_agent_template(
+        &self,
+        id: AgentTemplateId,
+    ) -> Result<Option<AgentTemplate>, StoreError> {
+        Ok(self.agent_templates.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn list_agent_templates(
+        &self,
+        filter: &AgentTemplateFilter,
+    ) -> Result<Vec<AgentTemplate>, StoreError> {
+        let templates = self.agent_templates.lock().unwrap();
+        let mut out: Vec<AgentTemplate> = templates
+            .values()
+            .filter(|t| match filter.project_scope {
+                Some(scope) => t.project_id == scope,
+                None => true,
+            })
+            .filter(|t| match filter.status {
+                Some(status) => t.status == status,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+        let limit = filter.limit.max(1);
+        Ok(out.into_iter().skip(filter.offset).take(limit).collect())
+    }
+
+    async fn update_agent_template_status(
+        &self,
+        id: AgentTemplateId,
+        status: AgentTemplateStatus,
+    ) -> Result<bool, StoreError> {
+        let mut templates = self.agent_templates.lock().unwrap();
+        match templates.get_mut(&id) {
+            Some(t) => {
+                t.status = status;
+                t.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn agent_template_dependents(
+        &self,
+        id: AgentTemplateId,
+    ) -> Result<Vec<AgentId>, StoreError> {
+        let agents = self.agents.lock().unwrap();
+        let mut out: Vec<AgentId> = agents
+            .values()
+            .filter(|a| a.template_pin.map(|p| p.template_id) == Some(id))
+            .map(|a| a.id)
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
+    async fn retire_agent_template(
+        &self,
+        id: AgentTemplateId,
+        expected_dependent_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let mut templates = self.agent_templates.lock().unwrap();
+        if !templates.contains_key(&id) {
+            return Ok(false);
+        }
+        let dependents = {
+            let agents = self.agents.lock().unwrap();
+            let mut out: Vec<AgentId> = agents
+                .values()
+                .filter(|a| a.template_pin.map(|p| p.template_id) == Some(id))
+                .map(|a| a.id)
+                .collect();
+            out.sort();
+            out
+        };
+        if fleet_core::dependent_set_hash(&dependents) != expected_dependent_hash {
+            return Err(StoreError::Conflict(format!(
+                "agent template dependents changed since it was shown: {} agent(s) now depend on {}",
+                dependents.len(),
+                id
+            )));
+        }
+        let t = templates.get_mut(&id).expect("checked above");
+        t.status = AgentTemplateStatus::Retired;
+        t.updated_at = Utc::now();
+        Ok(true)
+    }
+
+    async fn create_agent_template_revision(
+        &self,
+        template_id: AgentTemplateId,
+        body: &AgentTemplateBody,
+        created_by: Option<&str>,
+    ) -> Result<AgentTemplateRevision, StoreError> {
+        let status = {
+            let templates = self.agent_templates.lock().unwrap();
+            templates
+                .get(&template_id)
+                .map(|t| t.status)
+                .ok_or_else(|| {
+                    StoreError::Conflict(format!("no such agent template: {template_id}"))
+                })?
+        };
+        if !status.accepts_new_revisions() {
+            return Err(StoreError::Conflict(format!(
+                "agent template {template_id} is {} and accepts no new revisions",
+                status.as_str()
+            )));
+        }
+        let mut revisions = self.agent_template_revisions.lock().unwrap();
+        let next = revisions
+            .values()
+            .filter(|r| r.template_id == template_id)
+            .map(|r| r.content_revision)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let normalized = body.normalized();
+        let revision = AgentTemplateRevision {
+            id: AgentTemplateRevisionId::new(),
+            template_id,
+            content_revision: next,
+            content_hash: normalized.content_hash(),
+            body: normalized,
+            revoked_at: None,
+            created_by: created_by.map(|s| s.to_string()),
+            created_at: Utc::now(),
+        };
+        revisions.insert(revision.id, revision.clone());
+        Ok(revision)
+    }
+
+    async fn list_agent_template_revisions(
+        &self,
+        template_id: AgentTemplateId,
+    ) -> Result<Vec<AgentTemplateRevision>, StoreError> {
+        let revisions = self.agent_template_revisions.lock().unwrap();
+        let mut out: Vec<AgentTemplateRevision> = revisions
+            .values()
+            .filter(|r| r.template_id == template_id)
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| std::cmp::Reverse(r.content_revision));
+        Ok(out)
+    }
+
+    async fn get_agent_template_revision(
+        &self,
+        id: AgentTemplateRevisionId,
+    ) -> Result<Option<AgentTemplateRevision>, StoreError> {
+        Ok(self
+            .agent_template_revisions
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned())
+    }
+
+    async fn revoke_agent_template_revision(
+        &self,
+        id: AgentTemplateRevisionId,
+    ) -> Result<bool, StoreError> {
+        let mut revisions = self.agent_template_revisions.lock().unwrap();
+        match revisions.get_mut(&id) {
+            // 이미 revoke된 것은 `false` — PgStore의 `revoked_at IS NULL`과 같다.
+            Some(r) if r.revoked_at.is_none() => {
+                r.revoked_at = Some(Utc::now());
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     // ── Issue (로드맵 #88) ────────────────────────────────────────────

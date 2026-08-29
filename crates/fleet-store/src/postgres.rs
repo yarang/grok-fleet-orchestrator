@@ -23,7 +23,9 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, AuditOutcome,
+    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
+    AgentTemplateFilter, AgentTemplateId, AgentTemplatePin, AgentTemplateRevision,
+    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, AuditOutcome,
     BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent, IdempotentInsert, Issue,
     IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus, IssueTaskLink, Labels,
     LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus,
@@ -2809,11 +2811,57 @@ impl Store for PgStore {
     // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
 
     async fn create_agent(&self, agent: &Agent) -> Result<(), StoreError> {
+        // pin 검증을 INSERT와 **같은 트랜잭션 안에서** 한다. 표면이 둘
+        // (MCP·Dashboard)이므로 검증을 표면에 두면 한쪽만 고쳐지는 순간
+        // 불변식이 깨지고, 트랜잭션 밖에 두면 검증과 INSERT 사이에 revision이
+        // revoke될 수 있다. FK RESTRICT는 "그 행이 존재하는가"만 보고
+        // revoke·retire 여부는 보지 않으므로 여기가 유일한 집행 지점이다.
+        let mut tx = self.pool.begin().await?;
+        if let Some(pin) = agent.template_pin {
+            let row = sqlx::query(
+                r#"
+                SELECT r.revoked_at, t.status
+                  FROM agent_template_revisions r
+                  JOIN agent_templates t ON t.id = r.template_id
+                 WHERE r.id = $1 AND r.template_id = $2
+                 FOR SHARE OF r, t
+                "#,
+            )
+            .bind(pin.revision_id.0)
+            .bind(pin.template_id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let row = row.ok_or_else(|| {
+                StoreError::Conflict(format!(
+                    "no such template revision for agent pin: template={} revision={}",
+                    pin.template_id, pin.revision_id
+                ))
+            })?;
+            let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
+            if revoked_at.is_some() {
+                return Err(StoreError::Conflict(format!(
+                    "template revision {} is revoked and cannot be pinned",
+                    pin.revision_id
+                )));
+            }
+            let status_str: String = row.try_get("status")?;
+            let status = AgentTemplateStatus::parse_str(&status_str).ok_or_else(|| {
+                StoreError::Decode(format!("unknown agent template status in DB: {status_str}"))
+            })?;
+            if !status.accepts_new_pins() {
+                return Err(StoreError::Conflict(format!(
+                    "template {} is {} and does not accept new pins",
+                    pin.template_id,
+                    status.as_str()
+                )));
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO agents
-                (id, project_id, name, description, created_by, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                (id, project_id, name, description, created_by, status,
+                 agent_template_id, agent_template_revision_id, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(agent.id.0)
@@ -2822,9 +2870,11 @@ impl Store for PgStore {
         .bind(agent.description.as_ref())
         .bind(agent.created_by.as_ref())
         .bind(agent.status.as_str())
+        .bind(agent.template_pin.map(|p| p.template_id.0))
+        .bind(agent.template_pin.map(|p| p.revision_id.0))
         .bind(agent.created_at)
         .bind(agent.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db) if db.is_unique_violation() => {
@@ -2843,12 +2893,14 @@ impl Store for PgStore {
             }
             other => StoreError::Sqlx(other),
         })?;
+        tx.commit().await?;
         Ok(())
     }
 
     async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+            "SELECT id, project_id, name, description, created_by, status, \
+                agent_template_id, agent_template_revision_id, created_at, updated_at \
                FROM agents WHERE id = $1",
         )
         .bind(id.0)
@@ -2863,7 +2915,8 @@ impl Store for PgStore {
         name: &str,
     ) -> Result<Option<Agent>, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+            "SELECT id, project_id, name, description, created_by, status, \
+                agent_template_id, agent_template_revision_id, created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id.0)
@@ -2880,7 +2933,8 @@ impl Store for PgStore {
         let project_id = filter.project_id.map(|p| p.0);
 
         let rows = sqlx::query(
-            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+            "SELECT id, project_id, name, description, created_by, status, \
+                agent_template_id, agent_template_revision_id, created_at, updated_at \
                FROM agents \
               WHERE ($1::uuid IS NULL OR project_id = $1) \
                 AND ($2::text IS NULL OR status = $2) \
@@ -2918,6 +2972,279 @@ impl Store for PgStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(exists)
+    }
+
+    // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
+
+    async fn create_agent_template(&self, template: &AgentTemplate) -> Result<(), StoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_templates
+                (id, project_id, name, description, created_by, status, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(template.id.0)
+        .bind(template.project_id.map(|p| p.0))
+        .bind(&template.name)
+        .bind(template.description.as_ref())
+        .bind(template.created_by.as_ref())
+        .bind(template.status.as_str())
+        .bind(template.created_at)
+        .bind(template.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            // 029의 부분 유니크 인덱스 두 장 중 하나 — Project 범위와 전역
+            // 범위가 각각 걸린다.
+            sqlx::Error::Database(ref db) if db.is_unique_violation() => {
+                StoreError::Conflict(format!(
+                    "agent template name already exists in this scope: {}",
+                    db.message()
+                ))
+            }
+            sqlx::Error::Database(ref db) if db.is_foreign_key_violation() => StoreError::Conflict(
+                format!("no such project for agent template: {}", db.message()),
+            ),
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(())
+    }
+
+    async fn get_agent_template(
+        &self,
+        id: AgentTemplateId,
+    ) -> Result<Option<AgentTemplate>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, description, created_by, status, created_at, updated_at \
+               FROM agent_templates WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_agent_template).transpose()
+    }
+
+    async fn list_agent_templates(
+        &self,
+        filter: &AgentTemplateFilter,
+    ) -> Result<Vec<AgentTemplate>, StoreError> {
+        let limit = filter.limit.clamp(1, 1000) as i64;
+        // `project_scope`의 두 겹 Option을 SQL 두 파라미터로 편다:
+        //   None            → ($1=false, $2=NULL) → 전부
+        //   Some(None)      → ($1=true,  $2=NULL) → 전역만
+        //   Some(Some(p))   → ($1=true,  $2=p)    → 그 Project만
+        // `project_id = $2`만으로는 전역(NULL)을 고를 수 없다 — NULL과의 `=`는
+        // 참이 아니라 NULL이기 때문이다.
+        let scoped = filter.project_scope.is_some();
+        let scope_id = filter.project_scope.flatten().map(|p| p.0);
+        let rows = sqlx::query(
+            r#"
+            SELECT id, project_id, name, description, created_by, status, created_at, updated_at
+              FROM agent_templates
+             WHERE (NOT $1 OR project_id IS NOT DISTINCT FROM $2)
+               AND ($3::text IS NULL OR status = $3)
+             ORDER BY created_at DESC
+             LIMIT $4 OFFSET $5
+            "#,
+        )
+        .bind(scoped)
+        .bind(scope_id)
+        .bind(filter.status.map(|s| s.as_str()))
+        .bind(limit)
+        .bind(filter.offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_agent_template).collect()
+    }
+
+    async fn update_agent_template_status(
+        &self,
+        id: AgentTemplateId,
+        status: AgentTemplateStatus,
+    ) -> Result<bool, StoreError> {
+        let result =
+            sqlx::query("UPDATE agent_templates SET status = $2, updated_at = NOW() WHERE id = $1")
+                .bind(id.0)
+                .bind(status.as_str())
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn agent_template_dependents(
+        &self,
+        id: AgentTemplateId,
+    ) -> Result<Vec<AgentId>, StoreError> {
+        // `idx_agents_agent_template_id`(029)가 이 조회를 덮는다.
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM agents WHERE agent_template_id = $1 ORDER BY id")
+                .bind(id.0)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(u,)| AgentId(u)).collect())
+    }
+
+    async fn retire_agent_template(
+        &self,
+        id: AgentTemplateId,
+        expected_dependent_hash: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // 템플릿 행을 먼저 잠근다. 그래야 이 트랜잭션이 세는 동안 새 pin이
+        // 끼어들어도 — 그쪽은 `create_agent`에서 같은 행을 `FOR SHARE`로
+        // 잡으므로 — 직렬화된다.
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM agent_templates WHERE id = $1 FOR UPDATE")
+                .bind(id.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((_status,)) = existing else {
+            return Ok(false);
+        };
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM agents WHERE agent_template_id = $1 ORDER BY id")
+                .bind(id.0)
+                .fetch_all(&mut *tx)
+                .await?;
+        let dependents: Vec<AgentId> = rows.into_iter().map(|(u,)| AgentId(u)).collect();
+        let actual = fleet_core::dependent_set_hash(&dependents);
+        if actual != expected_dependent_hash {
+            return Err(StoreError::Conflict(format!(
+                "agent template dependents changed since it was shown: {} agent(s) now depend on {}",
+                dependents.len(),
+                id
+            )));
+        }
+        sqlx::query(
+            "UPDATE agent_templates SET status = 'retired', updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id.0)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn create_agent_template_revision(
+        &self,
+        template_id: AgentTemplateId,
+        body: &AgentTemplateBody,
+        created_by: Option<&str>,
+    ) -> Result<AgentTemplateRevision, StoreError> {
+        let normalized = body.normalized();
+        let content_hash = normalized.content_hash();
+        let mut tx = self.pool.begin().await?;
+        // 템플릿 행을 잠그고 상태를 본 뒤 번호를 매긴다. `FOR UPDATE`가 없으면
+        // 동시 발행 둘이 같은 `content_revision`을 계산하고, 그러면
+        // `UNIQUE (template_id, content_revision)`이 한쪽을 거절해 사용자에게는
+        // 원인 불명의 충돌로 보인다.
+        let existing: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM agent_templates WHERE id = $1 FOR UPDATE")
+                .bind(template_id.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some((status_str,)) = existing else {
+            return Err(StoreError::Conflict(format!(
+                "no such agent template: {template_id}"
+            )));
+        };
+        let status = AgentTemplateStatus::parse_str(&status_str).ok_or_else(|| {
+            StoreError::Decode(format!("unknown agent template status in DB: {status_str}"))
+        })?;
+        if !status.accepts_new_revisions() {
+            return Err(StoreError::Conflict(format!(
+                "agent template {template_id} is {} and accepts no new revisions",
+                status.as_str()
+            )));
+        }
+        let (next,): (i32,) = sqlx::query_as(
+            "SELECT COALESCE(MAX(content_revision), 0) + 1 FROM agent_template_revisions \
+               WHERE template_id = $1",
+        )
+        .bind(template_id.0)
+        .fetch_one(&mut *tx)
+        .await?;
+        let revision = AgentTemplateRevision {
+            id: AgentTemplateRevisionId::new(),
+            template_id,
+            content_revision: next,
+            content_hash,
+            body: normalized,
+            revoked_at: None,
+            created_by: created_by.map(|s| s.to_string()),
+            created_at: Utc::now(),
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO agent_template_revisions
+                (id, template_id, content_revision, content_hash, role_prompt, tools, skills,
+                 revoked_at, created_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9)
+            "#,
+        )
+        .bind(revision.id.0)
+        .bind(revision.template_id.0)
+        .bind(revision.content_revision)
+        .bind(&revision.content_hash)
+        .bind(&revision.body.role_prompt)
+        .bind(&revision.body.tools)
+        .bind(&revision.body.skills)
+        .bind(revision.created_by.as_ref())
+        .bind(revision.created_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(revision)
+    }
+
+    async fn list_agent_template_revisions(
+        &self,
+        template_id: AgentTemplateId,
+    ) -> Result<Vec<AgentTemplateRevision>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, template_id, content_revision, content_hash, role_prompt, tools, skills, \
+                    revoked_at, created_by, created_at \
+               FROM agent_template_revisions WHERE template_id = $1 \
+              ORDER BY content_revision DESC",
+        )
+        .bind(template_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(row_to_agent_template_revision)
+            .collect()
+    }
+
+    async fn get_agent_template_revision(
+        &self,
+        id: AgentTemplateRevisionId,
+    ) -> Result<Option<AgentTemplateRevision>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, template_id, content_revision, content_hash, role_prompt, tools, skills, \
+                    revoked_at, created_by, created_at \
+               FROM agent_template_revisions WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_agent_template_revision).transpose()
+    }
+
+    async fn revoke_agent_template_revision(
+        &self,
+        id: AgentTemplateRevisionId,
+    ) -> Result<bool, StoreError> {
+        // `revoked_at IS NULL` 조건이 재-revoke를 `false`로 만든다. 없으면 두 번째
+        // 호출이 시각만 밀어 "언제부터 막혔나"의 답이 바뀐다.
+        let result = sqlx::query(
+            "UPDATE agent_template_revisions SET revoked_at = NOW() \
+              WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     // ── Issue (로드맵 #88) ────────────────────────────────────────────
@@ -3333,6 +3660,24 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
     let status_str: String = row.try_get("status")?;
     let status = AgentStatus::parse_str(&status_str)
         .ok_or_else(|| StoreError::Decode(format!("unknown agent status in DB: {status_str}")))?;
+    // 029의 `agents_template_pin_complete` CHECK가 절반만 채워진 행을 막으므로
+    // 여기서 둘 다 있는 경우만 pin으로 읽는다. 한쪽만 있는 행은 그 CHECK를
+    // 우회해 들어온 것이므로 조용히 `None`으로 넘기지 않고 Decode 오류를 낸다 —
+    // 조용히 넘기면 Agent가 템플릿 없이 만들어진 것처럼 보인다.
+    let template_id: Option<Uuid> = row.try_get("agent_template_id")?;
+    let revision_id: Option<Uuid> = row.try_get("agent_template_revision_id")?;
+    let template_pin = match (template_id, revision_id) {
+        (Some(t), Some(r)) => Some(AgentTemplatePin {
+            template_id: AgentTemplateId(t),
+            revision_id: AgentTemplateRevisionId(r),
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(StoreError::Decode(format!(
+                "agent {id} has a half-populated template pin: template={template_id:?} revision={revision_id:?}"
+            )))
+        }
+    };
     Ok(Agent {
         id: AgentId(id),
         project_id: ProjectId(project_id),
@@ -3340,8 +3685,49 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         description: row.try_get("description")?,
         created_by: row.try_get("created_by")?,
         status,
+        template_pin,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_agent_template(row: sqlx::postgres::PgRow) -> Result<AgentTemplate, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let project_id: Option<Uuid> = row.try_get("project_id")?;
+    let status_str: String = row.try_get("status")?;
+    let status = AgentTemplateStatus::parse_str(&status_str).ok_or_else(|| {
+        StoreError::Decode(format!("unknown agent template status in DB: {status_str}"))
+    })?;
+    Ok(AgentTemplate {
+        id: AgentTemplateId(id),
+        project_id: project_id.map(ProjectId),
+        name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        created_by: row.try_get("created_by")?,
+        status,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_agent_template_revision(
+    row: sqlx::postgres::PgRow,
+) -> Result<AgentTemplateRevision, StoreError> {
+    let id: Uuid = row.try_get("id")?;
+    let template_id: Uuid = row.try_get("template_id")?;
+    Ok(AgentTemplateRevision {
+        id: AgentTemplateRevisionId(id),
+        template_id: AgentTemplateId(template_id),
+        content_revision: row.try_get("content_revision")?,
+        content_hash: row.try_get("content_hash")?,
+        body: AgentTemplateBody {
+            role_prompt: row.try_get("role_prompt")?,
+            tools: row.try_get("tools")?,
+            skills: row.try_get("skills")?,
+        },
+        revoked_at: row.try_get("revoked_at")?,
+        created_by: row.try_get("created_by")?,
+        created_at: row.try_get("created_at")?,
     })
 }
 

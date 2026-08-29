@@ -1513,6 +1513,33 @@ pub async fn create_agent_api(
     }
     agent = agent.with_created_by(principal.user.username.clone());
 
+    // 템플릿 pin (로드맵 #86). 한쪽만 준 요청은 여기서 400으로 끊는다 —
+    // 코어의 `AgentTemplatePin`이 절반만 채워진 상태를 표현할 수 없으므로
+    // 이 자리에서 거르지 않으면 조용히 무시되어 pin 없는 Agent가 만들어진다.
+    match (
+        body.agent_template_id.as_deref(),
+        body.agent_template_revision_id.as_deref(),
+    ) {
+        (Some(t), Some(r)) => {
+            let template_id = parse_agent_template_id(t)?;
+            let revision_id = r
+                .parse::<fleet_core::AgentTemplateRevisionId>()
+                .map_err(|_| ApiError::BadRequest("invalid revision id".into()))?;
+            agent = agent.with_template_pin(fleet_core::AgentTemplatePin {
+                template_id,
+                revision_id,
+            });
+        }
+        (None, None) => {}
+        _ => {
+            return Err(ApiError::BadRequest(
+                "agent_template_id and agent_template_revision_id must be given together".into(),
+            ))
+        }
+    }
+
+    // pin이 지금도 유효한지(revoke·retire 여부)는 Store가 트랜잭션 안에서
+    // 본다. 여기서 미리 읽어 검사하면 그 사이에 revoke가 끼어들 수 있다.
     state.store.create_agent(&agent).await.map_err(|e| {
         if let fleet_store::StoreError::Conflict(msg) = &e {
             return ApiError::Conflict(msg.clone());
@@ -1598,11 +1625,494 @@ pub async fn stop_agent_api(
     Ok(Json(crate::schema::AgentSummary::from(&agent)))
 }
 
+// ── AgentTemplate (로드맵 #86, 1단계) ──────────────────────────────────
+//
+// capability 여섯 종이 검사받는 자리다. 표면 없이 권한만 추가하면
+// `auth.rs`가 네 번 명시적으로 거절해 온 "죽은 권한"이 되므로 같은
+// 커밋에 들어간다.
+//
+// **MCP 표면은 의도적으로 없다.** LLM이 직접 부르는 표면에 템플릿 편집
+// 권한을 주면 Agent가 자기 role prompt와 도구 목록을 스스로 고칠 수 있고,
+// 그것이 정확히 이 도메인이 막으려는 권한 상승 경로다.
+//
+// 편집(`PATCH`)이 없는 것도 규칙이다 — 본문은 revision으로만 바뀐다.
+// 정체성 행(`name`/`description`)의 수정은 revision 이력에 남지 않아
+// 감사에서 본문 변경과 구분이 안 되므로, 필요해질 때 별도로 설계한다.
+
+/// 전역 템플릿(`project_id IS NULL`)을 건드리려면 추가 capability를 요구한다.
+///
+/// 전역 템플릿은 모든 Project가 볼 수 있으므로, Project 하나에 대한 권한으로
+/// 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다. Project
+/// 범위 템플릿은 이 검사를 통과시키고, Project별 세분화는 `#48`의 정책
+/// 컬럼이 생긴 뒤에 붙인다(그 전에는 검사할 대상이 없다).
+fn authorize_template_scope(
+    principal: &AuthPrincipal,
+    project_id: Option<fleet_core::ProjectId>,
+) -> Result<(), ApiError> {
+    if project_id.is_none() {
+        require_permission(principal, PermissionKind::AgentTemplateManageGlobal)?;
+    }
+    Ok(())
+}
+
+fn parse_agent_template_id(raw: &str) -> Result<fleet_core::AgentTemplateId, ApiError> {
+    raw.parse::<fleet_core::AgentTemplateId>()
+        .map_err(|_| ApiError::BadRequest("invalid agent template id".into()))
+}
+
+async fn load_agent_template(
+    state: &DashboardState,
+    id: fleet_core::AgentTemplateId,
+) -> Result<fleet_core::AgentTemplate, ApiError> {
+    state
+        .store
+        .get_agent_template(id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_agent_template failed");
+            ApiError::Store(e.to_string())
+        })?
+        .ok_or_else(|| ApiError::NotFound("agent template not found".into()))
+}
+
+/// `GET /api/agent-templates` 쿼리 파라미터.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListAgentTemplatesQuery {
+    /// 주면 그 Project의 템플릿만, `global=true`면 전역만, 둘 다 없으면 전부.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub global: Option<bool>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// GET /api/agent-templates — 템플릿 목록.
+pub async fn list_agent_templates_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Query(query): Query<ListAgentTemplatesQuery>,
+) -> Result<Json<Vec<crate::schema::AgentTemplateSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+
+    // `project_scope`는 3상태다: `None`=전부, `Some(None)`=전역만,
+    // `Some(Some(p))`=그 Project만. 쿼리 문자열은 그것을 직접 표현할 수
+    // 없으므로 두 파라미터로 편다.
+    let project_scope = match (query.project_id.as_deref(), query.global) {
+        (Some(_), Some(true)) => {
+            return Err(ApiError::BadRequest(
+                "project_id and global=true are mutually exclusive".into(),
+            ))
+        }
+        (Some(raw), _) => Some(Some(parse_project_id(raw)?)),
+        (None, Some(true)) => Some(None),
+        (None, _) => None,
+    };
+    let status = match query.status.as_deref() {
+        Some(raw) => Some(
+            fleet_core::AgentTemplateStatus::parse_str(raw)
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown status: {raw}")))?,
+        ),
+        None => None,
+    };
+
+    let templates = state
+        .store
+        .list_agent_templates(&fleet_core::AgentTemplateFilter {
+            project_scope,
+            status,
+            limit: 1000,
+            offset: 0,
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_agent_templates failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    Ok(Json(
+        templates
+            .iter()
+            .map(crate::schema::AgentTemplateSummary::from)
+            .collect(),
+    ))
+}
+
+/// POST /api/agent-templates — 템플릿 정체성 생성 (항상 `Draft`).
+///
+/// 본문은 여기서 만들지 않는다. 정체성과 본문을 한 번에 만들면 "본문 없는
+/// 템플릿"이라는 상태가 없어져 편하지만, 그 대신 첫 본문만 다른 경로로
+/// 저장되어 revision 이력의 시작점이 두 종류가 된다.
+pub async fn create_agent_template_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<crate::schema::CreateAgentTemplateRequest>,
+) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateCreate)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let project_id = match body.project_id.as_deref() {
+        Some(raw) => Some(parse_project_id(raw)?),
+        None => None,
+    };
+    authorize_template_scope(&principal, project_id)?;
+
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name must not be empty".into()));
+    }
+
+    let mut template = fleet_core::AgentTemplate::new(project_id, name);
+    if let Some(description) = body.description.as_deref().map(str::trim) {
+        if !description.is_empty() {
+            template = template.with_description(description);
+        }
+    }
+    template = template.with_created_by(principal.user.username.clone());
+
+    state
+        .store
+        .create_agent_template(&template)
+        .await
+        .map_err(|e| {
+            if let fleet_store::StoreError::Conflict(msg) = &e {
+                return ApiError::Conflict(msg.clone());
+            }
+            tracing::error!(error = %e, "create_agent_template failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_TEMPLATE_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("agent_template", template.id.to_string())
+        .detail(serde_json::json!({
+            "name": template.name,
+            "project_id": template.project_id.map(|p| p.to_string()),
+        })),
+    )
+    .await;
+
+    Ok(Json(crate::schema::AgentTemplateSummary::from(&template)))
+}
+
+/// GET /api/agent-templates/:id/revisions — revision 이력.
+pub async fn list_agent_template_revisions_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::schema::AgentTemplateRevisionSummary>>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    let template_id = parse_agent_template_id(&id)?;
+    // 없는 템플릿과 revision이 0건인 템플릿을 구분한다 — 전자는 404여야
+    // 하고, 빈 배열은 후자만을 뜻해야 한다.
+    load_agent_template(&state, template_id).await?;
+
+    let revisions = state
+        .store
+        .list_agent_template_revisions(template_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_agent_template_revisions failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    Ok(Json(
+        revisions
+            .iter()
+            .map(crate::schema::AgentTemplateRevisionSummary::from)
+            .collect(),
+    ))
+}
+
+/// POST /api/agent-templates/:id/revisions — 새 revision 발행.
+///
+/// 요구 capability는 **무엇이 바뀌었는지에 따라 달라진다**
+/// ([`fleet_core::AgentTemplateBody::required_permissions_for_change`]).
+/// role prompt만 고치면 `agent_template:update`로 충분하지만, 도구/스킬
+/// 목록이 바뀌면 `agent:manage`를 추가로 요구한다 — 그쪽은 Agent가 무엇을
+/// 실행할 수 있는지를 넓히는 변경이라 문구 교정과 같은 등급일 수 없다.
+///
+/// 첫 revision은 빈 본문에서의 변경으로 취급한다. 따라서 도구를 하나라도
+/// 실은 첫 revision은 처음부터 `agent:manage`를 요구한다.
+pub async fn create_agent_template_revision_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::CreateAgentTemplateRevisionRequest>,
+) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateUpdate)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let template_id = parse_agent_template_id(&id)?;
+    let template = load_agent_template(&state, template_id).await?;
+    authorize_template_scope(&principal, template.project_id)?;
+
+    let next = fleet_core::AgentTemplateBody::new(body.role_prompt.clone())
+        .with_tools(body.tools.clone())
+        .with_skills(body.skills.clone());
+
+    let revisions = state
+        .store
+        .list_agent_template_revisions(template_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "list_agent_template_revisions failed");
+            ApiError::Store(e.to_string())
+        })?;
+    let current = revisions
+        .first()
+        .map(|r| r.body.clone())
+        .unwrap_or_else(|| fleet_core::AgentTemplateBody::new(""));
+
+    for needed in current.required_permissions_for_change(&next) {
+        require_permission(&principal, needed)?;
+    }
+
+    let revision = state
+        .store
+        .create_agent_template_revision(template_id, &next, Some(principal.user.username.as_str()))
+        .await
+        .map_err(|e| {
+            if let fleet_store::StoreError::Conflict(msg) = &e {
+                return ApiError::Conflict(msg.clone());
+            }
+            tracing::error!(error = %e, "create_agent_template_revision failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_TEMPLATE_REVISION_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("agent_template", template_id.to_string())
+        .detail(serde_json::json!({
+            "revision_id": revision.id.to_string(),
+            "content_revision": revision.content_revision,
+            "content_hash": revision.content_hash,
+        })),
+    )
+    .await;
+
+    Ok(Json(crate::schema::AgentTemplateRevisionSummary::from(
+        &revision,
+    )))
+}
+
+/// POST /api/agent-templates/:id/revisions/:revision_id/revoke — 새 pin 차단.
+///
+/// idempotent다 — 이미 revoke된 revision이면 아무것도 쓰지 않고 현재
+/// 상태를 돌려준다. 이미 이 revision을 pin한 Agent는 영향받지 않는다.
+pub async fn revoke_agent_template_revision_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path((id, revision_id)): Path<(String, String)>,
+) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateRevisionRevoke)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let template_id = parse_agent_template_id(&id)?;
+    let template = load_agent_template(&state, template_id).await?;
+    authorize_template_scope(&principal, template.project_id)?;
+
+    let revision_id = revision_id
+        .parse::<fleet_core::AgentTemplateRevisionId>()
+        .map_err(|_| ApiError::BadRequest("invalid revision id".into()))?;
+
+    let revision = state
+        .store
+        .get_agent_template_revision(revision_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_agent_template_revision failed");
+            ApiError::Store(e.to_string())
+        })?
+        .ok_or_else(|| ApiError::NotFound("revision not found".into()))?;
+    // 경로의 템플릿에 속하지 않는 revision을 그 템플릿의 권한으로 revoke하면
+    // 범위 검사를 우회하게 된다.
+    if revision.template_id != template_id {
+        return Err(ApiError::NotFound("revision not found".into()));
+    }
+
+    let changed = state
+        .store
+        .revoke_agent_template_revision(revision_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "revoke_agent_template_revision failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    if !changed {
+        return Ok(Json(crate::schema::AgentTemplateRevisionSummary::from(
+            &revision,
+        )));
+    }
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_TEMPLATE_REVISION_REVOKE,
+        )
+        .actor(principal.user.id)
+        .target("agent_template", template_id.to_string())
+        .detail(serde_json::json!({
+            "revision_id": revision_id.to_string(),
+            "content_revision": revision.content_revision,
+        })),
+    )
+    .await;
+
+    // 저장된 값을 다시 읽어 `revoked_at`을 응답에 담는다 — 메모리의 사본은
+    // 그 시각을 모른다.
+    let stored = state
+        .store
+        .get_agent_template_revision(revision_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "get_agent_template_revision failed");
+            ApiError::Store(e.to_string())
+        })?
+        .ok_or_else(|| ApiError::NotFound("revision not found".into()))?;
+    Ok(Json(crate::schema::AgentTemplateRevisionSummary::from(
+        &stored,
+    )))
+}
+
+/// GET /api/agent-templates/:id/dependents — 이 템플릿에 pin한 Agent 목록.
+///
+/// retire 확인 화면이 쓰는 값이며, 함께 돌려주는 `dependent_set_hash`를
+/// 그대로 retire 요청에 실어야 한다.
+pub async fn agent_template_dependents_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::AgentTemplateDependents>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    let template_id = parse_agent_template_id(&id)?;
+    load_agent_template(&state, template_id).await?;
+
+    let dependents = state
+        .store
+        .agent_template_dependents(template_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "agent_template_dependents failed");
+            ApiError::Store(e.to_string())
+        })?;
+
+    Ok(Json(crate::schema::AgentTemplateDependents {
+        template_id: template_id.to_string(),
+        dependent_set_hash: fleet_core::dependent_set_hash(&dependents),
+        agent_ids: dependents.iter().map(|a| a.to_string()).collect(),
+    }))
+}
+
+/// POST /api/agent-templates/:id/status — 수명 주기 전이.
+///
+/// 전이 유효성은 코어의 표(`can_transition_to`)가 정한다. 표면이 자기
+/// 판단을 갖지 않아야 MCP나 CLI가 나중에 붙어도 같은 규칙이 걸린다.
+///
+/// `retired`만 `dependent_set_hash`를 요구한다. 나머지 전이는 이미 만들어진
+/// Agent를 못 쓰게 만들지 않으므로 확인시킬 대상이 없다.
+pub async fn change_agent_template_status_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::AgentTemplateStatusRequest>,
+) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateLifecycle)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let template_id = parse_agent_template_id(&id)?;
+    let template = load_agent_template(&state, template_id).await?;
+    authorize_template_scope(&principal, template.project_id)?;
+
+    let next = fleet_core::AgentTemplateStatus::parse_str(&body.status)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown status: {}", body.status)))?;
+    if next == template.status {
+        // idempotent — 같은 상태로의 전이는 표에 없지만 오류도 아니다.
+        return Ok(Json(crate::schema::AgentTemplateSummary::from(&template)));
+    }
+    if !template.status.can_transition_to(next) {
+        return Err(ApiError::Conflict(format!(
+            "cannot transition from {} to {}",
+            template.status.as_str(),
+            next.as_str()
+        )));
+    }
+
+    let changed = if next == fleet_core::AgentTemplateStatus::Retired {
+        let expected = body.dependent_set_hash.as_deref().ok_or_else(|| {
+            ApiError::BadRequest("dependent_set_hash is required to retire a template".into())
+        })?;
+        state
+            .store
+            .retire_agent_template(template_id, expected)
+            .await
+            .map_err(|e| {
+                if let fleet_store::StoreError::Conflict(msg) = &e {
+                    return ApiError::Conflict(msg.clone());
+                }
+                tracing::error!(error = %e, "retire_agent_template failed");
+                ApiError::Store(e.to_string())
+            })?
+    } else {
+        state
+            .store
+            .update_agent_template_status(template_id, next)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "update_agent_template_status failed");
+                ApiError::Store(e.to_string())
+            })?
+    };
+    if !changed {
+        return Err(ApiError::NotFound("agent template not found".into()));
+    }
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_TEMPLATE_STATUS_CHANGE,
+        )
+        .actor(principal.user.id)
+        .target("agent_template", template_id.to_string())
+        .detail(serde_json::json!({
+            "from": template.status.as_str(),
+            "to": next.as_str(),
+            "dependent_set_hash": body.dependent_set_hash,
+        })),
+    )
+    .await;
+
+    let stored = load_agent_template(&state, template_id).await?;
+    Ok(Json(crate::schema::AgentTemplateSummary::from(&stored)))
+}
+
 // ── Issue (로드맵 #92, Issue 표면) ──────────────────────────────────────
 //
-// `#92`는 AgentTemplate 표면도 함께 소유하지만 그쪽은 `#86`(AgentTemplate
-// 엔티티)에 막혀 있다. 두 도메인은 "관리 표면"이라는 주제만 공유할 뿐
-// 서로 독립이므로 그 경계로 갈라 Issue 쪽만 먼저 노출한다.
+// `#92`는 AgentTemplate 표면도 함께 소유한다. 그쪽은 `#86`(AgentTemplate
+// 엔티티)이 들어오면서 바로 위 절에 함께 났다 — 권한만 추가하고 검사받는
+// 자리를 안 만들면 죽은 권한이 되기 때문이다. 두 도메인은 "관리 표면"이라는
+// 주제만 공유할 뿐 서로 독립이다.
 //
 // 상태 전이는 `PATCH`(필드 수정)와 **분리된** endpoint다 — 계약이
 // `issue:update`(오탈자 수정)와 `issue:close`(문제 종결)를 다른 capability로

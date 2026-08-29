@@ -73,6 +73,7 @@ Capability는 역할명이 아니라 최소 동작 단위이며, Project scope�
 | Project | `project:read`, `project:create`, `project:update`, `project:archive`, `project:policy_manage` | read/update/archive는 해당 Project; policy는 revision CAS |
 | Task | `task:read`, `task:create`, `task:cancel`, `task:output`, `task:redrive` | Task의 저장된 Project scope; redrive는 effect disposition 확인 |
 | Agent | `agent:read`, `agent:manage`, `agent:attach` | Agent immutable Project; attach는 step-up·짧은 grant |
+| AgentTemplate | `agent_template:read`, `agent_template:create`, `agent_template:update`, `agent_template:lifecycle`, `agent_template:revision_revoke`, `agent_template:manage_global` | 편집은 **필드별 게이팅** — 도구/스킬 변경은 `agent:manage`를 추가 요구. `manage_global`은 `project_id IS NULL` 템플릿 |
 | Worker/Fleet | `worker:read`, `worker:provision`, `worker:operate`, `worker:self` | `worker:self`은 mTLS subject와 동일 worker_id만 |
 | Credential | `credential:read_metadata`, `credential:grant`, `credential:rotate`, `credential:revoke`, `credential:break_glass_export` | grant는 Project/Agent/Tool subset; export는 dual approval |
 | Effect/archive | `effect:resolve`, `project:hold_manage` | `PartiallyApplied` evidence, reason, approval 필요 |

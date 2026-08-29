@@ -40,8 +40,10 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
-    EventEntry, FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
+    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
+    AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision, AgentTemplateRevisionId,
+    AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry,
+    FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
     LoginAttempt, Permission, PermissionId, PermissionKind, Project, ProjectFilter, ProjectId,
     ProjectStatus, Role, RoleId, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId,
     TaskOutput, TaskPhase, TaskStatus, TransitionOrigin, TransitionOutcome, User, UserId, Worker,
@@ -1141,6 +1143,116 @@ pub trait Store: Send + Sync {
     /// 조건 중 "Agent cleanup 증거"의, 1단계에서 실제로 확인 가능한 부분이다.
     async fn project_has_live_agents(&self, _project_id: ProjectId) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("project_has_live_agents"))
+    }
+
+    // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
+    //
+    // 기본 구현은 `Unsupported` — 다른 신규 도메인과 같은 관례.
+    //
+    // **여기에 revision 본문을 고치는 메서드는 없다.** revision immutability는
+    // DB 트리거가 아니라 "그런 함수가 존재하지 않음"으로 집행한다. `Agent`의
+    // `project_id`가 불변인 것과 같은 방식이며, 두 Store 구현 중 하나가
+    // 실수로 UPDATE를 넣는 사고를 트레이트 차원에서 막는다.
+
+    /// 템플릿 정체성을 생성한다(항상 `Draft`). 같은 범위에 같은 `name`이 있으면
+    /// `Conflict` — 범위는 `project_id`가 있으면 그 Project, 없으면 전역이다.
+    async fn create_agent_template(&self, _template: &AgentTemplate) -> Result<(), StoreError> {
+        Err(StoreError::Unsupported("create_agent_template"))
+    }
+
+    async fn get_agent_template(
+        &self,
+        _id: AgentTemplateId,
+    ) -> Result<Option<AgentTemplate>, StoreError> {
+        Err(StoreError::Unsupported("get_agent_template"))
+    }
+
+    /// 목록 조회 (최신순).
+    async fn list_agent_templates(
+        &self,
+        _filter: &AgentTemplateFilter,
+    ) -> Result<Vec<AgentTemplate>, StoreError> {
+        Err(StoreError::Unsupported("list_agent_templates"))
+    }
+
+    /// 수명 주기 전이. 전이 유효성(`can_transition_to`)은 호출부가 검사하며,
+    /// Store는 `retire`만 특별 취급한다(아래 [`Store::retire_agent_template`]).
+    /// 존재하지 않는 id면 `false`.
+    async fn update_agent_template_status(
+        &self,
+        _id: AgentTemplateId,
+        _status: AgentTemplateStatus,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("update_agent_template_status"))
+    }
+
+    /// 이 템플릿에 pin한 Agent id 목록 (정렬됨).
+    ///
+    /// 1단계의 의존 집합은 이것이 전부다. `#87`의 Attempt pin이 들어오면 그
+    /// 종류가 추가된다.
+    async fn agent_template_dependents(
+        &self,
+        _id: AgentTemplateId,
+    ) -> Result<Vec<AgentId>, StoreError> {
+        Err(StoreError::Unsupported("agent_template_dependents"))
+    }
+
+    /// 의존 집합 해시를 제시하고 retire한다.
+    ///
+    /// 트랜잭션 안에서 의존 집합을 **다시** 계산해 `expected_dependent_hash`와
+    /// 대조하고, 다르면 `Conflict`를 낸다. 확인 화면이 보여준 목록과 실제로
+    /// 못 쓰게 되는 목록이 다를 수 있기 때문이다 — 그 사이에 누군가 이 템플릿을
+    /// pin한 Agent를 새로 만들었다면, 조작자는 자기가 승인하지 않은 회수를
+    /// 집행하게 된다.
+    ///
+    /// 존재하지 않는 id면 `false`.
+    async fn retire_agent_template(
+        &self,
+        _id: AgentTemplateId,
+        _expected_dependent_hash: &str,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("retire_agent_template"))
+    }
+
+    /// 새 revision을 발행한다. `content_revision`은 **Store가** 트랜잭션 안에서
+    /// 할당한다 — 호출부가 정하면 경합에서 같은 번호 두 개가 생긴다.
+    ///
+    /// `body`는 저장 전에 정규화된다. 정규화 전 형태를 저장하면 저장된 값에서
+    /// `content_hash`를 재계산할 수 없어 감사 대조가 불가능해진다.
+    ///
+    /// 템플릿이 `Retired`/`Discarded`면 `Conflict`.
+    async fn create_agent_template_revision(
+        &self,
+        _template_id: AgentTemplateId,
+        _body: &AgentTemplateBody,
+        _created_by: Option<&str>,
+    ) -> Result<AgentTemplateRevision, StoreError> {
+        Err(StoreError::Unsupported("create_agent_template_revision"))
+    }
+
+    /// 템플릿의 revision 목록 (`content_revision` 내림차순).
+    async fn list_agent_template_revisions(
+        &self,
+        _template_id: AgentTemplateId,
+    ) -> Result<Vec<AgentTemplateRevision>, StoreError> {
+        Err(StoreError::Unsupported("list_agent_template_revisions"))
+    }
+
+    async fn get_agent_template_revision(
+        &self,
+        _id: AgentTemplateRevisionId,
+    ) -> Result<Option<AgentTemplateRevision>, StoreError> {
+        Err(StoreError::Unsupported("get_agent_template_revision"))
+    }
+
+    /// revision에 `revoked_at`을 찍어 **새 pin을 막는다**. 이미 pin한 Agent는
+    /// 영향받지 않는다 — 과거 실행의 재현성을 사후에 깨뜨리지 않는 것이
+    /// revision immutability의 요지다. 이미 revoke됐거나 없는 id면 `false`.
+    async fn revoke_agent_template_revision(
+        &self,
+        _id: AgentTemplateRevisionId,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("revoke_agent_template_revision"))
     }
 
     // ── Issue (로드맵 #88) ────────────────────────────────────────────

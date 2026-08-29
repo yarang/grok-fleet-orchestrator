@@ -40,6 +40,11 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/projects/{id}` | GET, DELETE | `project:read`, `project:delete` | Project 상세·archive 요청 |
 | `/api/agents` | GET, POST | `agent:read`, `agent:manage` | Agent 목록(`project_id` 필터)·생성 (로드맵 #49) |
 | `/api/agents/{id}` | DELETE | `agent:manage` | Agent 회수(`ready → stopped`, idempotent) |
+| `/api/agent-templates` | GET, POST | `agent_template:read`, `agent_template:create` | 템플릿 목록(`project_id` 또는 `global=true` 필터)·정체성 생성 (로드맵 #86) |
+| `/api/agent-templates/{id}/revisions` | GET, POST | `agent_template:read`, `agent_template:update` (+ 도구/스킬 변경 시 `agent:manage`) | revision 이력·새 revision 발행 |
+| `/api/agent-templates/{id}/revisions/{revision_id}/revoke` | POST | `agent_template:revision_revoke` | 그 revision의 신규 pin 금지 (idempotent) |
+| `/api/agent-templates/{id}/dependents` | GET | `agent_template:read` | 이 템플릿에 pin한 Agent 목록과 `dependent_set_hash` |
+| `/api/agent-templates/{id}/status` | POST | `agent_template:lifecycle` | 수명 주기 전이. `retired`는 `dependent_set_hash` 필수 |
 | `/api/issues`, `/api/issues/{id}` | GET, POST, PATCH | `issue:read`, `issue:create`, `issue:update` | Issue 목록·생성·수정 (로드맵 #92) |
 | `/api/issues/{id}/transition` | POST | 목표 상태별 (`required_capability_for_transition`) | Issue 상태 전이 |
 | `/api/issues/{id}/comments` | GET, POST | `issue:read`, `issue:comment` | Issue 코멘트 |
@@ -51,6 +56,16 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/ssh-keys`, `/api/ssh-keys/{name}` | GET, POST, DELETE | `HostProvision` | 프로비저닝용 SSH 비밀키 관리 |
 | `/api/hosts/provision` | POST | `HostProvision` | 원격 host provisioning 요청 |
 | `/api/users/resend-verification` | POST | public; 현재 rate limit 없음 | 인증 전 이메일 재전송 |
+
+`project_id`가 없는(전역) 템플릿을 만들거나 고치려면 위 표의 capability에 더해
+`agent_template:manage_global`이 필요하다. 전역 템플릿은 모든 Project가 보므로, Project 하나에
+대한 권한으로 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다.
+
+`/api/agent-templates`에 `PATCH`가 없는 것도 규칙이다 — 본문은 revision으로만 바뀐다. `POST
+/api/agents`는 `agent_template_id`와 `agent_template_revision_id`를 **함께** 받거나 둘 다
+생략해야 하며, 한쪽만 주면 400이다. pin이 지금도 유효한지(revoke·retire 여부)는 저장소가
+`create_agent` 트랜잭션 안에서 보고 위반 시 409다 — 표면이 미리 읽어 검사하면 그 사이에
+revoke가 끼어들 수 있다.
 
 `/api/agents`에 `PATCH`가 없는 것은 미구현이 아니라 규칙이다 — Agent의 `project_id`는 불변이라
 갱신 경로 자체를 만들지 않았다. 옮기려면 대상 Project에 새 Agent를 만든다. Project·Issue 행은

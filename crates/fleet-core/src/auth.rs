@@ -450,6 +450,37 @@ pub enum PermissionKind {
     /// capability가 덮는다.
     #[serde(rename = "agent:manage")]
     AgentManage,
+    // AgentTemplate (로드맵 #86). 여섯 항목 전부 이 커밋의 Dashboard 표면이
+    // 검사한다 — 검사하는 자리가 없는 capability는 `project:policy_manage`가
+    // 거절당한 것과 같은 죽은 권한이 되므로, 표면과 같은 커밋에서만 만든다.
+    #[serde(rename = "agent_template:read")]
+    AgentTemplateRead,
+    #[serde(rename = "agent_template:create")]
+    AgentTemplateCreate,
+    /// 템플릿 메타데이터를 고치고 새 revision을 붙인다.
+    ///
+    /// **이것만으로는 tool·skill을 바꿀 수 없다.** 그 두 필드는 Agent가 무엇을
+    /// 할 수 있는지를 정하므로 [`PermissionKind::AgentManage`]를 함께 요구한다
+    /// ([`crate::agent_template::AgentTemplateBody::required_permissions_for_change`]).
+    /// 그래서 operator는 `role_prompt`만 고칠 수 있다 — 필드별 게이팅이
+    /// admin 외의 역할에서 실제로 작동하는 지점이다.
+    #[serde(rename = "agent_template:update")]
+    AgentTemplateUpdate,
+    /// 수명 주기 전이(publish·deprecate·retire·discard).
+    ///
+    /// `update`와 분리한 이유는 retire가 **다른 사람의 Agent를 못 쓰게
+    /// 만들기** 때문이다. 본문 오타 수정과 같은 등급일 수 없다.
+    #[serde(rename = "agent_template:lifecycle")]
+    AgentTemplateLifecycle,
+    /// revision 하나에 `revoked_at`을 찍어 새 pin을 막는다.
+    #[serde(rename = "agent_template:revision_revoke")]
+    AgentTemplateRevisionRevoke,
+    /// `project_id`가 NULL인 **전역** 템플릿을 만들거나 고친다.
+    ///
+    /// Project 관리자가 전역 템플릿을 고칠 수 있으면 자기 경계 밖의 Project에
+    /// 영향을 준다. 그래서 위 다섯 capability에 더해 이것을 함께 요구한다.
+    #[serde(rename = "agent_template:manage_global")]
+    AgentTemplateManageGlobal,
     // Issue (로드맵 #88). `issue:archive_hold_manage`는 아직 만들지 않는다 —
     // 그 대상인 `project_archive_holds` 테이블이 없다(`#91`). 없는 것을
     // 토글하는 capability를 미리 만들면 항상 도달 불가능한 권한이 된다.
@@ -530,6 +561,12 @@ impl PermissionKind {
             Self::ProjectDelete => "project:delete",
             Self::AgentRead => "agent:read",
             Self::AgentManage => "agent:manage",
+            Self::AgentTemplateRead => "agent_template:read",
+            Self::AgentTemplateCreate => "agent_template:create",
+            Self::AgentTemplateUpdate => "agent_template:update",
+            Self::AgentTemplateLifecycle => "agent_template:lifecycle",
+            Self::AgentTemplateRevisionRevoke => "agent_template:revision_revoke",
+            Self::AgentTemplateManageGlobal => "agent_template:manage_global",
             Self::IssueRead => "issue:read",
             Self::IssueCreate => "issue:create",
             Self::IssueComment => "issue:comment",
@@ -580,6 +617,12 @@ impl PermissionKind {
             Self::ProjectDelete,
             Self::AgentRead,
             Self::AgentManage,
+            Self::AgentTemplateRead,
+            Self::AgentTemplateCreate,
+            Self::AgentTemplateUpdate,
+            Self::AgentTemplateLifecycle,
+            Self::AgentTemplateRevisionRevoke,
+            Self::AgentTemplateManageGlobal,
             Self::IssueRead,
             Self::IssueCreate,
             Self::IssueComment,
@@ -644,6 +687,11 @@ impl BuiltinRole {
                 PermissionKind::WorkerList,
                 PermissionKind::ProjectRead,
                 PermissionKind::AgentRead,
+                // operator는 템플릿을 읽고 `role_prompt`를 고칠 수 있다.
+                // tool·skill 변경은 `agent:manage`를 함께 요구하는데 operator는
+                // 그것을 갖지 않으므로, 필드별 게이팅이 여기서 실제로 작동한다.
+                PermissionKind::AgentTemplateRead,
+                PermissionKind::AgentTemplateUpdate,
                 PermissionKind::EventsList,
                 PermissionKind::MetricsView,
             ],
@@ -654,6 +702,7 @@ impl BuiltinRole {
                 PermissionKind::WorkerList,
                 PermissionKind::ProjectRead,
                 PermissionKind::AgentRead,
+                PermissionKind::AgentTemplateRead,
                 PermissionKind::EventsList,
             ],
         }

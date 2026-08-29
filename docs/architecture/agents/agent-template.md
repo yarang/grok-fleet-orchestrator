@@ -1,10 +1,10 @@
 ---
 type: architecture-decision
 authority: canonical
-implementation: proposed
+implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/agent-template.md"
-last_verified: "2026-08-28"
+last_verified: "2026-08-29"
 last_verified_commit: "working-tree"
 owners: ["agent-platform", "security", "architecture"]
 ---
@@ -82,8 +82,8 @@ tools_effective = tools_template ∩ allow_project \ deny_project
 | `agent_template:read` | 목록·상세·revision 이력 조회 |
 | `agent_template:create` | 새 템플릿 정체성 생성 |
 | `agent_template:update` | 메타데이터 수정과 새 revision 생성 |
-| `agent_template:archive` | 소프트 종료 |
-| `agent_template:revision:revoke` | 특정 revision의 신규 pin 금지 |
+| `agent_template:lifecycle` | 수명 주기 전이(publish·deprecate·retire·discard) |
+| `agent_template:revision_revoke` | 특정 revision의 신규 pin 금지 |
 | `agent_template:manage_global` | `project_id IS NULL` 템플릿 관리 |
 
 [UI 설계](../../ui-dashboard/ui-design.md)가 쓰는 단일 `AgentTemplateManage`는 채택하지 않는다.
@@ -125,17 +125,50 @@ tools_effective = tools_template ∩ allow_project \ deny_project
 |---|---|
 | `admin` | 전부 (`BuiltinRole::Admin`이 `PermissionKind::all()`이며 `builtin_roles_cover_all_permissions` 테스트가 이를 강제하므로 자동) |
 | `operator` | `agent_template:read` + `agent_template:update`. tool-binding 권한은 주지 않으므로 **실질적으로 prompt 편집만 가능**하다 |
-| `viewer` | 없음 |
+| `viewer` | `agent_template:read` |
 
 Operator에게 `update`를 주는 것은 운영 중 프롬프트 개선을 admin 없이 할 수 있게 하려는 것이며,
 필드별 게이팅이 tool 선택 변경을 자동으로 막는다. `BuiltinRole::Operator`의 고정 목록에 두 항목을
 추가해야 한다 — 추가하지 않으면 operator는 아무것도 받지 못한다.
+
+**viewer의 `read`는 2026-08-29 구현에서 이 표를 고친 것이다.** 원안은 "없음"이었으나, viewer는
+이미 `agent:read`를 갖고 Agent 상세에 `agent_template_id`/`agent_template_revision_id`가 노출된다.
+template read가 없으면 viewer는 **풀 수 없는 참조**를 보게 된다 — 그 pin이 무엇을 뜻하는지
+물어볼 방법이 없다. 템플릿 본문은 비밀이 아니며(비밀은 credential 쪽 capability가 따로 지킨다)
+`agent:read`를 이미 준 이상 숨겨서 얻는 것이 없다. 필드별 게이팅이 지키려는 것은 **쓰기**이고,
+그 성질은 read를 주더라도 유지된다.
 
 ## FK 정책
 
 이 도메인의 FK에는 **`CASCADE`를 쓰지 않는다.** 전부 `RESTRICT` 또는 `SET NULL`이다. `#78`에서
 worker 삭제 한 번이 두 개의 `CASCADE`를 타고 암호화된 LLM credential을 파괴한 사례가 있으므로,
 FK마다 폭발 반경을 논증하지 않은 `CASCADE`는 허용하지 않는다.
+
+## 구현 상태 (2026-08-29, 1단계)
+
+정체성·revision·pin과 그 관리 표면이 랜딩했다. 코드 기준 정본은
+`crates/fleet-core/src/agent_template.rs`, migration `029_agent_templates.sql`,
+`Store`의 AgentTemplate 절, Dashboard `/api/agent-templates` 계열이다.
+
+**표면은 Dashboard뿐이며 MCP에는 의도적으로 없다.** LLM이 직접 부르는 표면에 템플릿 편집
+권한을 주면 Agent가 자기 role prompt와 도구 목록을 스스로 고칠 수 있고, 그것이 이 문서가
+막으려는 권한 상승 경로다.
+
+`agents.agent_template_id`/`agent_template_revision_id`를 **같은 커밋에** 만든 이유는
+`027_agents.sql`이 남긴 유예를 갚기 위해서다. 그 마이그레이션은 "채울 주체가 없어 항상 NULL이
+되는 컬럼은 만들지 않는다"며 이 컬럼을 미뤘고, `#86`이 그 주체다. 컬럼 없이 템플릿만 만들면
+게이트 3(의존 집합 해시)의 의존 집합이 영원히 비어 그 시험이 공허해진다.
+
+### 미룬 것
+
+| 항목 | 왜 미뤘나 | 선행 |
+|---|---|---|
+| `isolation_class` | 격리 등급을 해석·집행할 주체가 없다. 지금 만들면 아무도 읽지 않는 컬럼이다 | `#52` |
+| Project 정책과의 tool 교집합 | `projects`에 정책 컬럼이 하나도 없어 교집합의 한쪽 항이 없다 | `#48` |
+| `projects.default_agent_template_id` | Agent를 자동으로 만드는 경로가 없어 기본값을 읽을 주체가 없다 | `#49` 2단계 |
+| `builtin/default@1` 시드 삽입 | 본문(`AgentTemplateBody::builtin_default`)과 그 `content_hash`는 코어에 있고 테스트가 고정하지만, 행을 넣는 주체가 없다 | `#52` |
+| retire 의존 집합에 Attempt pin 포함 | 1단계의 의존자는 Agent뿐이다. Attempt가 revision을 materialize하면 종류가 는다 | `#87` |
+| 템플릿 정체성 편집(`PATCH`) | 이름·설명 수정은 revision 이력에 남지 않아 감사에서 본문 변경과 구분되지 않는다. 동시 편집 의미와 함께 설계한다 | — |
 
 ## 구현 게이트
 
@@ -153,6 +186,20 @@ FK마다 폭발 반경을 논증하지 않은 `CASCADE`는 허용하지 않는�
 7. `builtin/default@1` 시드가 MemStore/PgStore에서 같은 `content_hash`이고 tool binding이
    `ReadOnly` 등급으로 한정됨
 8. MemStore/PgStore 공유 행동 테스트 (`#78`의 교훈)
+
+### 1단계에서 도달한 게이트
+
+| 게이트 | 상태 | 증적 |
+|---|---|---|
+| 1 전이표 | 통과 | `agent_template.rs`의 `transition_table_matches_canon`·`retired_is_terminal_and_never_returns_to_published`, `tests/agent_templates.rs::gate1` |
+| 2 revision immutability | 통과 | `tests/agent_templates.rs::gate2` — 본문을 바꾸는 Store 메서드가 **존재하지 않는 것**이 집행 수단이다 |
+| 3 dependent set 해시 | 통과 | `tests/agent_templates.rs::gate3` |
+| 6b 필드별 게이팅 | 통과(권한 판정 절반) | `required_permissions_for_change`의 단위 테스트 3건 + Dashboard revision 생성 핸들러 |
+| 8 두 store 공유 행동 | 통과 | 시나리오 5개를 MemStore/PgStore에 **같은 함수로** 건다 |
+| 4 실행 중 retire와 manifest hash | 미도달 | 실행 중인 Agent 프로세스가 없다(`#89`) |
+| 5 `TemplateUnavailable` admission 거절 | 미도달 | 같은 이유. `FailureKind`에 그 variant를 미리 만들지 않았다 |
+| 6 Project grant 교집합 | 미도달 | `projects`에 정책 컬럼이 없다(`#48`) |
+| 7 `builtin/default@1` 시드와 `ReadOnly` 등급 | 부분 | 본문 해시는 고정했으나 시드 행이 없고, `ReadOnly` 등급을 나타내는 타입 자체가 코드에 없다(`tool-catalog.md`는 정본이나 소유 로드맵 항목이 없다) |
 
 ## 관련 문서
 

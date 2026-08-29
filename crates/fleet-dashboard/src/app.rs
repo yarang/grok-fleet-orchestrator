@@ -279,6 +279,27 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             get(handlers::list_agents_api).post(handlers::create_agent_api),
         )
         .route("/api/agents/:id", delete(handlers::stop_agent_api))
+        .route(
+            "/api/agent-templates",
+            get(handlers::list_agent_templates_api).post(handlers::create_agent_template_api),
+        )
+        .route(
+            "/api/agent-templates/:id/revisions",
+            get(handlers::list_agent_template_revisions_api)
+                .post(handlers::create_agent_template_revision_api),
+        )
+        .route(
+            "/api/agent-templates/:id/revisions/:revision_id/revoke",
+            post(handlers::revoke_agent_template_revision_api),
+        )
+        .route(
+            "/api/agent-templates/:id/dependents",
+            get(handlers::agent_template_dependents_api),
+        )
+        .route(
+            "/api/agent-templates/:id/status",
+            post(handlers::change_agent_template_status_api),
+        )
         // Issue (로드맵 #92, Issue 표면). 상태 전이는 PATCH가 아니라 별도
         // endpoint다 — 목표 상태마다 요구 capability가 다르기 때문
         // (handlers::required_capability_for_transition).

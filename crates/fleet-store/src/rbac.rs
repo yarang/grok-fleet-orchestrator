@@ -101,6 +101,20 @@ fn permission_description(kind: PermissionKind) -> String {
         }
         PermissionKind::AgentRead => "List/read agents within a project",
         PermissionKind::AgentManage => "Create and reclaim agents",
+        PermissionKind::AgentTemplateRead => "List/read agent templates and their revisions",
+        PermissionKind::AgentTemplateCreate => "Create agent template identities",
+        PermissionKind::AgentTemplateUpdate => {
+            "Edit template metadata and publish revisions (tool/skill changes also need agent:manage)"
+        }
+        PermissionKind::AgentTemplateLifecycle => {
+            "Publish, deprecate, retire, or discard agent templates"
+        }
+        PermissionKind::AgentTemplateRevisionRevoke => {
+            "Revoke a template revision so it can no longer be pinned"
+        }
+        PermissionKind::AgentTemplateManageGlobal => {
+            "Create or modify templates that are not scoped to a project"
+        }
         PermissionKind::IssueRead => "List/read issues within a project",
         PermissionKind::IssueCreate => "Open new issues",
         PermissionKind::IssueComment => "Append comments to issues",

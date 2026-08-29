@@ -44,6 +44,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_template::AgentTemplatePin;
 use crate::ids::{AgentId, ProjectId};
 
 /// Agent 운영 상태 (목표 8-상태의 1단계 부분집합 — 위 모듈 문서 참고).
@@ -106,6 +107,16 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     pub status: AgentStatus,
+    /// 어느 AgentTemplate revision으로 만들어졌는지 (로드맵 #86).
+    ///
+    /// `None`은 템플릿 없이 만든 Agent다 — `027`이 이 컬럼을 만들기 전에
+    /// 생성된 행이 그렇고, 앞으로도 템플릿을 지정하지 않은 생성은 허용된다.
+    ///
+    /// **`project_id`와 마찬가지로 갱신 경로를 두지 않는다.** 나중에 pin을
+    /// 바꿀 수 있으면 "이 Agent는 어떤 본문으로 만들어졌나"에 대한 답이
+    /// 시간에 따라 달라져 감사 기록이 무의미해진다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_pin: Option<AgentTemplatePin>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -121,6 +132,7 @@ impl Agent {
             description: None,
             created_by: None,
             status: AgentStatus::Ready,
+            template_pin: None,
             created_at: now,
             updated_at: now,
         }
@@ -133,6 +145,15 @@ impl Agent {
 
     pub fn with_created_by(mut self, created_by: impl Into<String>) -> Self {
         self.created_by = Some(created_by.into());
+        self
+    }
+
+    /// 템플릿 revision에 pin한다. 유효성(템플릿이 새 pin을 받는 상태인지,
+    /// revision이 revoke되지 않았는지)은 Store가 `create_agent` 안에서
+    /// 검사한다 — 표면이 둘(MCP·Dashboard)이므로 각자 검사하게 두면 한쪽만
+    /// 고쳐지는 순간 불변식이 깨진다.
+    pub fn with_template_pin(mut self, pin: AgentTemplatePin) -> Self {
+        self.template_pin = Some(pin);
         self
     }
 }

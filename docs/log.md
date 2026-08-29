@@ -4247,3 +4247,118 @@ cargo clippy -p fleet-transport --no-default-features --all-targets -- -D warnin
   컴파일 입력이 아니다. 이 항목의 실질 검증은 게이트가 아니라 위의 여섯 건 대조와 링크
   재검사다. 그럼에도 돌린 이유는 게이트가 트리 전체에 대한 판정이기 때문이지, 이 변경을
   검증하기 때문이 아니다.
+
+---
+
+## 2026-08-29 — `#86` AgentTemplate 1단계: 한 커밋의 경계를 죽은 구조가 정했다
+
+### 무엇이 문제였나
+
+`#86`을 어디까지 한 커밋에 넣을지가 처음부터 순환이었다. 셋 중 어느 하나를 빼도 나머지가 죽은
+구조가 된다.
+
+- `agents.agent_template_id`를 빼면 → 게이트 3(retire의 dependent set 해시)의 의존 집합이 항상
+  비고, 그 시험은 "빈 집합의 해시가 빈 집합의 해시와 같다"를 확인하는 공허한 테스트가 된다.
+- 컬럼은 만들되 표면을 빼면 → 템플릿을 만들 주체가 없으므로 pin할 대상도 없고, 그 컬럼은
+  **항상 NULL**이다. `022_projects.sql`이 `tasks.project_id`에서 겪은 결함 그대로다.
+- capability 6종만 추가하면 → 검사받는 자리가 없는 죽은 권한이다. `auth.rs`는 이미 그런 권한을
+  네 번 명시적으로 거절해 뒀다(`project:policy_manage`, `project:assign`, `agent:attach`,
+  `issue:archive_hold_manage`).
+
+그래서 경계는 취향이 아니라 "죽은 구조가 생기지 않는 최소 집합"으로 정해졌다: migration + 코어
+모델 + Store 양쪽 + pin 집행 + Dashboard 표면 + capability.
+
+### `027`이 예약해 둔 유예를 갚는다
+
+`027_agents.sql`의 주석은 자기가 무엇을 왜 미뤘는지와 **누가 그것을 갚을지**까지 적어 뒀다:
+"`agent_template_id` … 컬럼은 만들지 않는다. 채울 주체(AgentTemplate `#86`, harness 구성 `#51`,
+isolation `#52`)가 전부 없어 항상 NULL인 컬럼이 된다." `#86`이 그 주체이므로 `029`가 그 컬럼을
+만든다. 유예를 표로 남겨 두면 다음 사람이 "왜 없지"가 아니라 "이제 갚을 차례인가"를 묻게 된다.
+
+### pin 유효성은 FK도 표면도 아닌 트랜잭션 안에 있다
+
+네 자리를 놓고 고른 결과다.
+
+| 자리 | 왜 안 되나 |
+|---|---|
+| FK `RESTRICT` | revision 행의 **존재**만 본다. `revoked_at`이 찍혔는지, 템플릿이 `Retired`인지는 보지 못한다 |
+| 두 표면(Dashboard·MCP) | 같은 술어를 두 번 쓰면 갈라진다. `#48`이 `project_rules`로 추출한 이유와 같다 |
+| 트랜잭션 **밖**의 사전 조회 | 검사와 INSERT 사이에 revoke가 끼어든다 |
+| `create_agent` 트랜잭션 안 | ← 채택 |
+
+잠금은 `FOR SHARE OF r, t`다. pin끼리는 서로 호환되고(동시에 여러 Agent가 같은 revision을 pin해도
+문제없다) retire의 `FOR UPDATE`와만 직렬화된다. 이것이 닫는 창은 구체적이다: 확인 화면이 "의존
+Agent 0건"을 보여준 뒤 조작자가 승인 버튼을 누르기 전에 누군가 그 템플릿을 pin한 Agent를 만들면,
+조작자는 **자기가 승인하지 않은 회수**를 집행하게 된다. `dependent_set_hash`를 요청 본문에 싣게
+한 것도 같은 창을 다른 각도에서 닫는다.
+
+### NULL이 두 번 다르게 굴었다
+
+같은 SQL NULL 의미론이 이 커밋에서 정반대 방향으로 두 번 문제를 만들었다.
+
+1. **`UNIQUE (project_id, name)`은 전역 템플릿의 이름 중복을 못 막는다.** Postgres의 UNIQUE는
+   NULL을 서로 다른 값으로 보므로 `(NULL, 'reviewer')` 두 행이 공존한다. 부분 유니크 인덱스
+   두 개로 나눴다 — `WHERE project_id IS NOT NULL`과 `WHERE project_id IS NULL`.
+2. **`WHERE project_id = $2`는 전역 행을 고르지 못한다.** `NULL = NULL`은 거짓이 아니라 NULL이고
+   WHERE에서 NULL은 참이 아니므로 한 건도 안 잡힌다. `IS NOT DISTINCT FROM`으로 바꿨다.
+
+전자는 "NULL이 서로 다르다"가 문제였고 후자는 "NULL이 같지 않다"가 문제였다. 같은 규칙의 두 얼굴이다.
+
+### 고정 해시는 어디서 왔는가
+
+`builtin_default_body_hash_is_pinned`가 처음에 실패했다. 내가 리터럴을 지어냈기 때문이다. 여기서
+가장 쉬운 수정은 구현이 출력한 값을 그대로 붙여넣는 것인데, **그러면 그 테스트는 아무것도 증명하지
+않는다** — 구현이 무엇을 내든 테스트는 통과한다. 대신 정규 인코딩(길이 접두 필드, `agent_template/v1`
+도메인 구분자)을 Python으로 독립 재구현해 `bf84a875…`를 얻었고, 그것이 Rust 구현의 출력과 같아서
+그 값을 고정했다. 테스트 주석에 그 출처를 적었다 — 다음 사람이 같은 고민을 할 때 "출력을 붙여넣은
+값인가"를 물어야 하기 때문이다.
+
+길이 접두를 쓴 이유도 같은 계열이다. 필드를 그냥 이어 붙이면 `["ab","c"]`와 `["a","bc"]`가 같은
+해시를 낸다. `content_hash`는 감사 대조의 근거이므로 연접 충돌이 있으면 그 근거가 아니다.
+
+### 설계 정본을 세 군데 고쳤다
+
+구현이 문서를 따르는 것이 원칙이지만, 문서가 틀린 자리는 문서를 고친다.
+
+1. `agent_template:archive` → `agent_template:lifecycle`. 전이 집합이 publish/deprecate/retire/
+   discard인데 "archive"는 그중 하나만 가리킨다.
+2. `agent_template:revision:revoke` → `agent_template:revision_revoke`. 다른 이름은 전부 2단이다.
+3. viewer의 부여를 "없음"에서 `agent_template:read`로. viewer는 이미 `agent:read`를 갖고 Agent
+   상세에 pin 두 필드가 노출되므로, template read가 없으면 viewer는 **풀 수 없는 참조**를 본다.
+   본문은 비밀이 아니고, 필드별 게이팅이 지키려는 것은 쓰기다.
+
+operator에게 `update`는 주되 `agent:manage`는 주지 않는 배치가 필드별 게이팅을 **공허하지 않게**
+만든다. 둘 다 admin만 가졌다면 `required_permissions_for_change`의 `AgentManage` 가지는 항상
+참이어서 검사가 무의미했을 것이다.
+
+### MCP 표면을 만들지 않은 것은 미구현이 아니다
+
+LLM이 직접 부르는 표면에 템플릿 편집 권한을 주면 Agent가 자기 role prompt와 도구 목록을 스스로
+고칠 수 있다. 그것이 정확히 `agent-template.md`가 존재하는 이유인 권한 상승 경로다. 문서와 코드
+양쪽에 그 부재를 규칙으로 적었다 — 적지 않으면 다음 세션이 "대칭이 안 맞네"라며 채운다.
+
+### 테스트를 두 store에 같은 함수로 건다
+
+`crates/fleet-store/tests/agent_templates.rs`는 시나리오 5개를 `async fn(&dyn Store)`로 쓰고
+매크로가 그것을 MemStore와 PgStore 두 테스트로 편다. `#78`에서 MemStore에만 있던 규칙이 실
+배포에서만 깨진 적이 있어 게이트 8이 존재하는데, 시나리오를 함수 하나로 두면 **같은 단정**이
+양쪽에 걸리는 것이 구조적으로 보장된다(한쪽만 고치는 실수를 컴파일러가 잡아 주지는 않지만,
+단정을 한 번만 쓰므로 애초에 갈라질 자리가 없다).
+
+`MemStore`가 `test-support` 피처 뒤에 있어서 통합 테스트에서 보이지 않았다. `fleet-store`를
+자기 자신의 dev-dependency로 다시 걸어 그 피처를 켰다 — dev-dependency는 릴리즈 그래프에
+들어가지 않으므로 프로덕션 빌드에는 영향이 없다.
+
+### 검증 한계
+
+- **브라우저 실검증을 하지 않았다.** 이 표면에는 화면이 없고 JSON API뿐이라 확인할 UI가 없다.
+  관리 화면은 `#92`의 남은 절반이다.
+- 게이트 4·5·6은 도달할 수 없었다. 실행 중인 Agent 프로세스(`#89`)와 `projects`의 정책
+  컬럼(`#48`)이 없기 때문이며, 없는 것을 흉내 내는 테스트를 쓰면 통과가 거짓이 된다.
+- 게이트 7은 절반만이다. 본문 해시는 고정했으나 시드 행을 넣는 주체가 없고, tool binding이
+  `ReadOnly` 등급인지 단정하려면 그 등급을 나타내는 타입이 필요한데 `ReadOnly`/`IsolationClass`/
+  `ToolGrade`/`tool_catalog` 어느 이름도 `crates/` 전체에서 0건이다. `tool-catalog.md`가
+  `authority: canonical`인데 소유 로드맵 항목이 없다는 별개 문제가 그대로 남아 있다.
+- `FOR SHARE`/`FOR UPDATE`의 직렬화는 SQL 의미론으로 논증했고, 실제 동시 실행으로 경합을
+  재현하지는 않았다. 재현하려면 두 트랜잭션의 인터리빙을 제어해야 하는데 이 하네스에 그 수단이
+  없다.

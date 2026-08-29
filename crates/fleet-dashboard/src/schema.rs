@@ -116,6 +116,15 @@ pub struct AgentSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     pub status: String,
+    /// 어느 AgentTemplate revision으로 만들어졌는지 (로드맵 #86). 둘은 항상
+    /// 함께 있거나 함께 없다 — 코어의 `AgentTemplatePin`이 절반만 채워진
+    /// 상태를 표현할 수 없게 되어 있고, 여기서는 그것을 두 필드로 편다.
+    /// 응답에서 둘을 합친 객체가 아니라 평평한 두 필드로 두는 것은 기존
+    /// 필드들과 같은 모양을 유지하기 위함이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_template_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_template_revision_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -129,6 +138,8 @@ impl From<&Agent> for AgentSummary {
             description: a.description.clone(),
             created_by: a.created_by.clone(),
             status: a.status.as_str().to_string(),
+            agent_template_id: a.template_pin.map(|p| p.template_id.to_string()),
+            agent_template_revision_id: a.template_pin.map(|p| p.revision_id.to_string()),
             created_at: a.created_at,
             updated_at: a.updated_at,
         }
@@ -142,6 +153,128 @@ pub struct CreateAgentRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// 템플릿 pin (로드맵 #86). 둘 다 주거나 둘 다 생략한다 — 한쪽만 주면
+    /// `400`이다. 핸들러가 그것을 먼저 걸러 코어의 `AgentTemplatePin`을
+    /// 만들며, 유효성(revoke·retire 여부)은 Store가 트랜잭션 안에서 본다.
+    #[serde(default)]
+    pub agent_template_id: Option<String>,
+    #[serde(default)]
+    pub agent_template_revision_id: Option<String>,
+}
+
+// ── AgentTemplate (로드맵 #86, 1단계) ──────────────────────────────────
+
+/// `/api/agent-templates` 배열 요소.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTemplateSummary {
+    pub id: String,
+    /// `None`이면 전역 템플릿.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&fleet_core::AgentTemplate> for AgentTemplateSummary {
+    fn from(t: &fleet_core::AgentTemplate) -> Self {
+        Self {
+            id: t.id.to_string(),
+            project_id: t.project_id.map(|p| p.to_string()),
+            name: t.name.clone(),
+            description: t.description.clone(),
+            created_by: t.created_by.clone(),
+            status: t.status.as_str().to_string(),
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+        }
+    }
+}
+
+/// revision 한 건. 본문 전체를 담는다 — 이것이 감사 대상이며, `content_hash`가
+/// 그 본문에서 재계산 가능해야 기록으로서 뜻이 있다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTemplateRevisionSummary {
+    pub id: String,
+    pub template_id: String,
+    pub content_revision: i32,
+    pub content_hash: String,
+    pub role_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&fleet_core::AgentTemplateRevision> for AgentTemplateRevisionSummary {
+    fn from(r: &fleet_core::AgentTemplateRevision) -> Self {
+        Self {
+            id: r.id.to_string(),
+            template_id: r.template_id.to_string(),
+            content_revision: r.content_revision,
+            content_hash: r.content_hash.clone(),
+            role_prompt: r.body.role_prompt.clone(),
+            tools: r.body.tools.clone(),
+            skills: r.body.skills.clone(),
+            revoked_at: r.revoked_at,
+            created_by: r.created_by.clone(),
+            created_at: r.created_at,
+        }
+    }
+}
+
+/// `POST /api/agent-templates` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentTemplateRequest {
+    /// 생략하면 전역 템플릿이며, 그 경우 `agent_template:manage_global`을
+    /// 추가로 요구한다.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST /api/agent-templates/{id}/revisions` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateAgentTemplateRevisionRequest {
+    pub role_prompt: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+}
+
+/// `POST /api/agent-templates/{id}/status` 요청 본문.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentTemplateStatusRequest {
+    pub status: String,
+    /// `retired`로 전이할 때 **필수**. `GET /api/agent-templates/{id}/dependents`가
+    /// 돌려준 해시를 그대로 되보낸다. 그 사이에 의존 집합이 바뀌었으면 `409`다.
+    #[serde(default)]
+    pub dependent_set_hash: Option<String>,
+}
+
+/// `GET /api/agent-templates/{id}/dependents` 응답.
+///
+/// 목록과 해시를 **함께** 준다. 해시만 주면 확인 화면이 무엇을 못 쓰게 만드는지
+/// 보여줄 수 없고, 목록만 주면 클라이언트가 해시를 직접 계산해야 해서 인코딩
+/// 규칙이 서버 밖으로 새어 나간다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTemplateDependents {
+    pub template_id: String,
+    pub agent_ids: Vec<String>,
+    pub dependent_set_hash: String,
 }
 
 // ── Issue (로드맵 #92, Issue 표면) ──────────────────────────────────────

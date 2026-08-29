@@ -24,6 +24,13 @@ tokio = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 fleet-core = { workspace = true }
+# 자기 자신을 dev-dependency로 다시 거는 것은 `test-support`를 통합
+# 테스트에서만 켜기 위해서다. `tests/agent_templates.rs`가 MemStore와
+# PgStore에 **같은 시나리오**를 걸어야 하는데(설계 게이트 8), `mem` 모듈은
+# 그 피처 뒤에 있고 통합 테스트는 lib의 피처를 자동으로 켜지 않는다.
+# 프로덕션 빌드에는 영향이 없다 — dev-dependency는 릴리즈 그래프에 들어가지
+# 않는다.
+fleet-store = { path = ".", features = ["test-support"] }
 
 [features]
 # 테스트 전용 완전 인메모리 Store 구현(`mem::MemStore`)을 노출한다. 로드맵

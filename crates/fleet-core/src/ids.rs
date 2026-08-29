@@ -42,6 +42,22 @@ pub struct AgentId(pub Uuid);
 #[repr(transparent)]
 pub struct IssueId(pub Uuid);
 
+/// AgentTemplate 정체성 식별자 (로드맵 #86). 이름·소유 Project·수명 주기
+/// 상태를 담은 **정체성** 계층을 가리키며, 본문은 여기 있지 않다 —
+/// [AgentTemplate 정본](../../../docs/architecture/agents/agent-template.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct AgentTemplateId(pub Uuid);
+
+/// AgentTemplate revision 식별자 (로드맵 #86). 불변 본문 한 판을 가리킨다.
+///
+/// [`AgentTemplateId`]와 분리된 이유는 정본의 참조 방식이 3-tuple
+/// `(template_id, content_revision, content_hash)`이기 때문이다. 정체성과
+/// 본문을 한 키로 합치면 revision immutability를 표현할 수 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct AgentTemplateRevisionId(pub Uuid);
+
 // ── TaskId ───────────────────────────────────────────────────────────────
 
 impl TaskId {
@@ -293,6 +309,104 @@ impl Serialize for AgentId {
 }
 
 impl<'de> Deserialize<'de> for AgentId {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Uuid::deserialize(de).map(Self)
+    }
+}
+
+// ── AgentTemplateId ──────────────────────────────────────────────
+
+impl AgentTemplateId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for AgentTemplateId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentTemplateId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for AgentTemplateId {
+    fn from(u: Uuid) -> Self {
+        Self(u)
+    }
+}
+
+impl FromStr for AgentTemplateId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
+impl Serialize for AgentTemplateId {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentTemplateId {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Uuid::deserialize(de).map(Self)
+    }
+}
+
+// ── AgentTemplateRevisionId ──────────────────────────────────────────────
+
+impl AgentTemplateRevisionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn as_uuid(&self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for AgentTemplateRevisionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentTemplateRevisionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<Uuid> for AgentTemplateRevisionId {
+    fn from(u: Uuid) -> Self {
+        Self(u)
+    }
+}
+
+impl FromStr for AgentTemplateRevisionId {
+    type Err = uuid::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Uuid::parse_str(s)?))
+    }
+}
+
+impl Serialize for AgentTemplateRevisionId {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentTemplateRevisionId {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         Uuid::deserialize(de).map(Self)
     }

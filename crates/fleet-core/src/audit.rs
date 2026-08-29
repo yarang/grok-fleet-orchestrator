@@ -109,6 +109,20 @@ pub mod action {
     pub const AGENT_CREATE: &str = "agent.create";
     /// Agent 회수(`Ready → Stopped`) (로드맵 #49).
     pub const AGENT_STOP: &str = "agent.stop";
+    /// AgentTemplate 정체성 생성 (로드맵 #86). `detail.project_id`가 없으면
+    /// 전역 템플릿이다.
+    pub const AGENT_TEMPLATE_CREATE: &str = "agent_template.create";
+    /// 새 revision 발행 (로드맵 #86). `detail.content_revision`과
+    /// `detail.content_hash`가 들어간다 — 이 둘이 있어야 나중에 저장된 본문에서
+    /// hash를 재계산해 감사 기록과 대조할 수 있다.
+    pub const AGENT_TEMPLATE_REVISION_CREATE: &str = "agent_template.revision_create";
+    /// revision revoke (로드맵 #86). 이미 pin한 Agent는 영향받지 않으므로
+    /// 이 기록은 "언제부터 새 pin이 막혔는가"의 유일한 근거다.
+    pub const AGENT_TEMPLATE_REVISION_REVOKE: &str = "agent_template.revision_revoke";
+    /// 수명 주기 전이 (로드맵 #86). `detail.from`/`detail.to`가 들어간다.
+    /// retire의 경우 `detail.dependent_count`와 `detail.dependent_set_hash`도
+    /// 함께 남긴다 — 무엇을 못 쓰게 만들었는지를 사후에 셀 수 있어야 한다.
+    pub const AGENT_TEMPLATE_STATUS_CHANGE: &str = "agent_template.status_change";
     /// Issue 생성 (로드맵 #92).
     pub const ISSUE_CREATE: &str = "issue.create";
     /// Issue 상태 전이 (로드맵 #92). `detail.to`에 목표 상태가 들어간다 —
