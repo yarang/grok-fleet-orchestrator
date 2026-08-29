@@ -606,12 +606,33 @@ impl WorkerTransport for AcpTransport {
                 }
                 Err(_) if !already_handled_elsewhere => {
                     warn!(%task_id, %worker_id, "acp prompt timed out");
+
+                    // 프롬프트는 워커에 갔다. 타임아웃은 우리 쪽 대기가 끝났다는
+                    // 뜻일 뿐, 저쪽 실행이 끝났다는 뜻이 아니다 — 그래서 여기서
+                    // 세션을 끊어 준다. 이 자리에서 보내야만 하는 이유가 있다:
+                    // 바로 위에서 `sessions_map`의 엔트리를 이미 제거했고,
+                    // `cancel()`은 그 맵을 `s.task_id == task_id`로 훑어 세션을
+                    // 찾는다. 즉 나중에 외부에서 `cancel(task_id)`를 불러도 찾을
+                    // 게 없어 조용히 `Ok(())`를 반환한다(그 debug 로그의
+                    // "task already terminal?"은 이 경로에 대해 거짓이다 —
+                    // 워커 쪽 실행은 살아 있고 라우팅 엔트리만 사라진 것이다).
+                    // `connection`과 `session_id`가 스코프에 남아 있는 여기가
+                    // 워커에 닿을 수 있는 마지막 지점이다.
+                    //
+                    // permit은 여전히 이 arm이 끝나면서 놓는다. `session/cancel`은
+                    // ack 없는 notification이라 워커가 실제로 멈췄는지 확인할
+                    // 방법이 없고, 확인될 때까지 슬롯을 붙들면 영영 돌아오지
+                    // 않는 permit이 된다 — 채울 방법이 없는 상태는 만들지
+                    // 않는다. 초과 점유 창은 닫히는 게 아니라 좁아진다.
+                    info!(%task_id, %worker_id, session_id = %session_id, "sending ACP cancel after prompt timeout");
+                    let _ = connection.send_notification(CancelNotification::new(session_id));
+
                     let _ = broadcaster.send(WorkerEvent::Failed {
                         task_id,
                         error: format!("session/prompt timed out after {timeout:?}"),
-                        // 프롬프트는 워커에 갔다. 타임아웃은 우리 쪽 대기가
-                        // 끝났다는 뜻일 뿐, 저쪽 실행이 끝났다는 뜻이 아니다
-                        // (cancel도 보내지 않는다 — 인접 결함 2).
+                        // cancel을 보냈다고 결과가 확정되는 것은 아니다. 워커가
+                        // 그것을 받았는지, 받고 멈췄는지, 멈추기 전에 무엇을
+                        // 했는지 우리는 모른다 — 관측은 여전히 유실이다.
                         observation: FailureObservation::ResultLost,
                     });
                 }

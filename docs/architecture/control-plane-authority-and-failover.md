@@ -250,10 +250,34 @@ AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
    확정이다(`fail_all()`이 훑는 세션 맵에는 `session/new`를 통과한 태스크만 들어간다는 것이
    그 불변식이다). 그래서 그 자리는 `ResultLost`가 아니라 `WorkerUnavailable`로 갈랐다.
    관측을 잃은 것은 연결 상실 시의 `fail_all()`과 `session/prompt` 타임아웃 **둘**이다.
-2. prompt 타임아웃 경로가 `cancel`을 보내지 않은 채 transport의 용량 permit(`_permit`)만
-   놓는다. DB의 `active_tasks`는 heartbeat로 보고될 뿐이라, 어느 쪽에도 전역으로 점유된
-   슬롯이 남지 않는다. **여전히 열려 있다** — 해소하려면 `cancel`을 보내야 하는데, 그것은
-   "답을 못 들은 실행을 끊는다"는 별도의 동작 변경이라 자체 설계 질문을 갖는다.
+2. ~~prompt 타임아웃 경로가 `cancel`을 보내지 않은 채 transport의 용량 permit(`_permit`)만
+   놓는다.~~ **2026-08-29에 해소했다.** 타임아웃 arm이 떠나기 전에
+   `CancelNotification`(`session/cancel`)을 그 세션에 보낸다. 기록해 둔 설계 질문("답을 못
+   들은 실행을 끊는 것이 옳은가")의 답은 **끊는다**이다 — 대안은 워커가 아무도 기다리지
+   않는 답을 위해 계속 토큰을 태우고, 그동안 permit은 실제로 비지 않은 용량을 비었다고
+   말하는 것이다. 반대편에 놓인 비용은 ack 없는 notification 한 건뿐이고, 워커가 그것을
+   무시해도 잃는 것이 없다.
+
+   **고칠 자리가 그 arm 안이어야 하는 이유는 구조적이다.** `cancel()`은 `sessions` 맵을
+   `s.task_id == task_id`로 훑어 세션을 찾는데, 타임아웃 경로는 그 arm에 **도달하기 전에**
+   해당 엔트리를 이미 제거한다(중복 emit 방지 목적). 그래서 나중에 외부에서
+   `cancel(task_id)`를 불러도 찾을 것이 없어 조용히 `Ok(())`를 반환하며, 그때 남기는 debug
+   로그 "task already terminal?"은 이 경로에 대해 **거짓**이다 — 워커 쪽 실행은 살아 있고
+   라우팅 엔트리만 사라진 것이다. `connection`과 `session_id`가 스코프에 남아 있는 그
+   arm이 워커에 닿을 수 있는 마지막 지점이다.
+
+   **permit은 여전히 그 자리에서 놓는다.** `session/cancel`에는 ack이 없어 워커가 실제로
+   멈췄는지 확인할 방법이 없고, 확인될 때까지 슬롯을 붙들면 영영 돌아오지 않는 permit이
+   된다 — 바로 위 표에서 `OutcomeUnknown`을 거절한 것과 같은 판단이다. 따라서 **초과 점유
+   창은 닫히는 것이 아니라 좁아진다**. 관측 분류도 `ResultLost` 그대로다: cancel을 보냈다는
+   것과 결과를 알게 됐다는 것은 다르다.
+
+   **실측이 드러낸 정정**: 예전 경로가 워커에 아무것도 보내지 않았던 것은 아니다.
+   `tokio::time::timeout`이 만료되면 요청 future가 drop되고 SDK가 `$/cancel_request`를
+   보낸다(수정 전 목이 받은 메서드: `initialize`, `session/new`, `session/prompt`,
+   `$/cancel_request`). 그러나 그것은 SDK 스스로 "hop-scoped"라고 부르는 **JSON-RPC 요청
+   단위 취소**이며, 턴을 멈추라고 ACP가 정의한 것은 `session/cancel`이다. 즉 결함은 "아무
+   것도 보내지 않았다"가 아니라 **"보낸 것이 실행을 멈추는 신호가 아니었다"**였다.
 
 **검증 한계.** 위 시나리오는 `crates/fleet-store/tests/task_cas.rs`의 5건이 **두 백엔드
 모두에서** 커버하지만, 전부 **단일 프로세스가 순차로 리스를 뺏고 되찾는 방식**의 재구성이다.

@@ -9,7 +9,7 @@
 #![cfg(feature = "acp")]
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use axum::{
     Router,
 };
 use fleet_core::{TaskId, WorkerId};
-use fleet_transport::{AcpTransport, WorkerEvent, WorkerTransport};
+use fleet_transport::{AcpTransport, FailureObservation, WorkerEvent, WorkerTransport};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -38,6 +38,13 @@ struct MockState {
     next_session_id: Arc<AtomicU64>,
     /// 세션마다 흘려보낼 텍스트 청크. 큐가 비면 빈 응답.
     scripted_chunks: Arc<Mutex<Vec<String>>>,
+    /// 켜면 `session/prompt`에 **응답하지 않는다** — 클라이언트 쪽
+    /// 타임아웃 경로를 재현하기 위한 스위치. 응답을 보내지 않을 뿐
+    /// 리더 루프는 계속 돌아야 한다: 여기서 sleep이나 await로 멈추면
+    /// 소켓을 드레인하는 주체가 사라져 뒤이어 오는 `session/cancel`을
+    /// 아예 읽지 못하고, 그러면 이 스위치를 쓰는 테스트가 검증하려는
+    /// 바로 그것이 보이지 않는다.
+    stall_prompt: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +108,9 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                 let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
             "session/prompt" => {
+                if state.stall_prompt.load(Ordering::SeqCst) {
+                    continue;
+                }
                 let session_id = req
                     .get("params")
                     .and_then(|p| p.get("sessionId"))
@@ -408,5 +418,116 @@ async fn completed_task_receives_no_further_output_after_session_ends() {
     assert_eq!(
         out2, "second",
         "second task's output must not contain the first task's text"
+    );
+}
+
+/// 인접 결함 2(#67) — `session/prompt`가 타임아웃하면 워커 쪽 실행은 그대로
+/// 돌고 있는데 우리는 permit만 놓고 떠났다. 이제 떠나기 전에 워커에
+/// `session/cancel`을 보낸다.
+///
+/// **두 가지를 한 테스트에서 함께 단정한다.** cancel이 실제로 워커에
+/// 닿았다는 것과, 그럼에도 관측은 여전히 `ResultLost`라는 것. 나누어 두면
+/// 나중에 읽는 사람이 "cancel을 보냈으니 결과가 확정됐다"로 읽을 수 있다 —
+/// `session/cancel`은 ack 없는 notification이라 워커가 받았는지도, 받고
+/// 멈췄는지도 알 수 없다. 초과 점유 창은 닫히는 게 아니라 좁아질 뿐이고,
+/// 그 사실이 두 단정 사이에 있다.
+#[tokio::test]
+async fn prompt_timeout_cancels_the_session_but_still_reports_result_lost() {
+    let (state, addr) = start_mock_server().await;
+    state.stall_prompt.store(true, Ordering::SeqCst);
+
+    let transport = Arc::new(AcpTransport::new());
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let task_id = TaskId::new();
+    let mut req = dispatch_req(task_id, worker, "hi");
+    // 기본값 30초는 테스트가 기다릴 수 있는 시간이 아니다.
+    req.timeout_secs = Some(1);
+    transport.dispatch(req).await.expect("dispatch");
+
+    let mut observed: Option<FailureObservation> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::Failed {
+                task_id: t,
+                error,
+                observation,
+            })) => {
+                assert_eq!(t, task_id);
+                assert!(
+                    error.contains("timed out"),
+                    "expected the prompt-timeout failure, got {error}"
+                );
+                observed = Some(observation);
+                break;
+            }
+            Ok(Some(WorkerEvent::Completed { .. })) => {
+                panic!("mock never answered session/prompt — Completed must not appear")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(_) => continue,
+        }
+    }
+
+    // 관측값을 따지기 전에 프롬프트가 실제로 목까지 닿았는지부터 본다. `timeout_secs`는
+    // `session/new`와 `session/prompt` 두 타이머에 같이 먹히므로, 러너가 굶주려
+    // `session/new`가 1초를 넘기면 코드는 **다른 arm**(`NotDelivered`, cancel 없음)을
+    // 탄다. 그때 먼저 깨지는 것이 아래 단정이면 실패 메시지가 "관측값이 틀렸다"를
+    // 가리켜 엉뚱한 곳을 보게 만든다. 여기서 먼저 끊으면 "프롬프트가 목에 닿지도
+    // 않았다"고 직접 말한다.
+    let methods: Vec<String> = state
+        .received
+        .lock()
+        .await
+        .iter()
+        .filter_map(|m| m.get("method").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    assert!(
+        methods.iter().any(|m| m == "session/prompt"),
+        "타임아웃이 프롬프트 경로에서 났어야 한다 — 받은 메시지: {methods:?}"
+    );
+
+    assert_eq!(
+        observed,
+        Some(FailureObservation::ResultLost),
+        "프롬프트는 전달됐고 답만 오지 않았다 — cancel을 보냈다고 이것이 Reported나 NotDelivered가 되지는 않는다"
+    );
+
+    // cancel은 fire-and-forget이라 위 `Failed` 이벤트와 순서가 정해져 있지
+    // 않다. 이벤트 직후의 스냅샷 단정은 그 자체로 flaky하므로 마감 시한을
+    // 두고 폴링한다(§3.3).
+    let mut cancelled = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let seen = state
+            .received
+            .lock()
+            .await
+            .iter()
+            .any(|m| m.get("method").and_then(|v| v.as_str()) == Some("session/cancel"));
+        if seen {
+            cancelled = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        cancelled,
+        "prompt 타임아웃 뒤 워커에 session/cancel이 도착해야 한다 — 받은 메시지: {:?}",
+        state
+            .received
+            .lock()
+            .await
+            .iter()
+            .filter_map(|m| m.get("method").and_then(|v| v.as_str()).map(str::to_string))
+            .collect::<Vec<_>>()
     );
 }
