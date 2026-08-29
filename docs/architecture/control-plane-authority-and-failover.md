@@ -230,21 +230,30 @@ AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
 
 | 미룬 것 | 만들지 않은 이유 | 귀속 |
 | --- | --- | --- |
-| `worker_execution_lease`의 CAS slot claim·`fencing_token` | Agent 엔티티가 없어 lease의 주체가 없다 | `#67` 후속 |
+| `worker_execution_lease`의 CAS slot claim·`fencing_token` | **원래 사유였던 "Agent 엔티티가 없다"는 만료됐다** — 엔티티는 `#49` 1단계(2026-08-28, 마이그레이션 027)로 생겼고, 레코드가 실어야 할 나머지 필드도 생산자를 얻었다(`worker_incarnation`은 `#67` 2단계, `control_epoch`는 `#67` 1단계). 지금 막는 것은 필드가 아니라 **lease의 주체**다: fencing할 대상인 *실행 중인 Agent process*가 아직 존재하지 않는다. `dispatch`는 Agent를 고르지 않고(`#49` 2단계), `WorkerTransport`에는 프로세스를 띄울 채널이 없다(`#89`). 지금 만들면 아래 WarmIdle 칸과 같은 "영원히 비는 상태"가 된다 | `#49` 2단계 + `#89` |
 | ~~`worker_incarnation`~~ (Agent command ACK는 유지) | **`worker_incarnation`은 `#67` 2단계(2026-08-29)가 만들었다.** 이 칸의 원래 판단은 "제어 스트림이 없으니 세대를 실어 나를 수 없다"였는데, 그 전제는 **워커가 자기 세대를 보고한다**는 설계(하트비트의 `process_incarnation`)에 묶여 있었다. register가 프로세스 기동 1회 이벤트라는 사실을 쓰면 오케스트레이터가 **관측만으로** 같은 신호를 만들 수 있고, 그쪽이 워커 시계도 워커가 고른 값도 술어에 들이지 않으므로 더 강하다. Agent command ACK는 그대로 남는다 — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널이 없다 | ACK는 `#89` |
 | Agent self-fencing | 위와 같은 이유. 워커가 자기 세대를 확인할 입력이 없다 | `#89` |
 | `agent_id`를 실은 dispatch | Agent/AgentTemplate 엔티티 미존재 | `#49` |
 | WarmIdle(=`task_id` NULL) lease 행 | 그런 행을 만드는 코드 경로가 없다 — 만들면 영원히 비는 상태 | 생산자 생김과 동시에 |
-| `OutcomeUnknown` 결과 종류 | 아래 참고 — 설계가 아직 정해지지 않았다 | `#67` 후속 |
+| `OutcomeUnknown` **상태**(비terminal) | 설계는 [실행 일관성](tasks/execution-consistency.md)에 이미 그려져 있다 — 막는 것은 설계가 아니라 **해소기**다. 그 상태의 출구는 전부 "워커 inventory 조회와 effect ledger로 증명"인데 두 판독기가 없다. 지금 만들면 나갈 수 없는 상태가 되고, `docs/log.md`가 기록한 위험(비terminal이 Project archive를 정지시킨다)이 그대로 발생한다. **관측 사실 자체는 아래 인접 결함 1 해소로 terminal `FailureKind::ResultLost`에 기록된다 — 그것은 이 상태가 아니다** | inventory·effect ledger 판독기 (`#89`) |
 
 **이번에 손대지 않은 인접 결함 2건**(발견했으나 이 단계의 범위 밖이라 기록만 남긴다).
 
-1. `WorkerEvent::Failed`가 **워커가 보고한 실패**(확정)와 **관측을 잃은 것**(`session/new`
-   타임아웃, `session/prompt` 타임아웃, 연결 상실 시의 `fail_all()`)을 한 종류로 뭉친다.
-   후자는 워커에서 작업이 아직 돌고 있을 수 있으므로 `Failed` 확정이 사실과 다를 수 있다.
+1. ~~`WorkerEvent::Failed`가 **워커가 보고한 실패**(확정)와 **관측을 잃은 것**을 한 종류로
+   뭉친다.~~ **2026-08-29에 해소했다.** `WorkerEvent::Failed`가 `FailureObservation`
+   (`Reported`/`NotDelivered`/`ResultLost`)을 함께 싣고, `dispatcher.rs`가 그것을 각각
+   `WorkerError`/`WorkerUnavailable`/`ResultLost`로 옮긴다. 예전에는 여섯 생성 지점 전부가
+   `FailureKind::WorkerError`로 확정됐는데, 그 이름의 doc은 "워커에서 **실행 중** 발생한
+   에러"라고 주장하므로 운영자가 있지도 않은 실행 실패 로그를 뒤지게 만드는 오분류였다.
+   **다만 원래 기록의 목록은 과포함이었다**: `session/new` 타임아웃은 세션이 열리지 않아
+   프롬프트가 **전달되지 않았으므로** 결과가 불확실한 것이 아니라 "실행이 시작되지 않았다"가
+   확정이다(`fail_all()`이 훑는 세션 맵에는 `session/new`를 통과한 태스크만 들어간다는 것이
+   그 불변식이다). 그래서 그 자리는 `ResultLost`가 아니라 `WorkerUnavailable`로 갈랐다.
+   관측을 잃은 것은 연결 상실 시의 `fail_all()`과 `session/prompt` 타임아웃 **둘**이다.
 2. prompt 타임아웃 경로가 `cancel`을 보내지 않은 채 transport의 용량 permit(`_permit`)만
    놓는다. DB의 `active_tasks`는 heartbeat로 보고될 뿐이라, 어느 쪽에도 전역으로 점유된
-   슬롯이 남지 않는다.
+   슬롯이 남지 않는다. **여전히 열려 있다** — 해소하려면 `cancel`을 보내야 하는데, 그것은
+   "답을 못 들은 실행을 끊는다"는 별도의 동작 변경이라 자체 설계 질문을 갖는다.
 
 **검증 한계.** 위 시나리오는 `crates/fleet-store/tests/task_cas.rs`의 5건이 **두 백엔드
 모두에서** 커버하지만, 전부 **단일 프로세스가 순차로 리스를 뺏고 되찾는 방식**의 재구성이다.

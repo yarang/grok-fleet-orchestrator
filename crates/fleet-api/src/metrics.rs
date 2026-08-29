@@ -790,6 +790,7 @@ mod tests {
                 "circuit_open",
                 "credential_missing",
                 "invalid_request",
+                "result_lost",
             ]),
             "type" => Some(&["input", "output", "cache_read", "total"]),
             _ => None,

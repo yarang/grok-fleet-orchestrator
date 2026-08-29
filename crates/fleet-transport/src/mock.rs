@@ -241,6 +241,9 @@ impl WorkerTransport for MockTransport {
                     let _ = event_tx.send(WorkerEvent::Failed {
                         task_id,
                         error: err,
+                        // 테스트 더블이 심어 둔 실패 응답 — 워커가 보고한 실패에
+                        // 해당한다.
+                        observation: crate::FailureObservation::Reported,
                     });
                 }
             }

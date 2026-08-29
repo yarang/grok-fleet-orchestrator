@@ -62,7 +62,7 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "mtls")]
 use crate::tls::ClientTlsConfig;
-use crate::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
+use crate::{DispatchRequest, FailureObservation, TransportError, WorkerEvent, WorkerTransport};
 
 /// 브로드캐스트 채널 용량.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -226,6 +226,10 @@ impl WorkerSession {
             let _ = broadcaster.send(WorkerEvent::Failed {
                 task_id,
                 error: reason.to_string(),
+                // 여기 있는 세션은 전부 프롬프트가 이미 전달된 것들이다
+                // (session/new가 실패한 태스크는 세션 맵에 들어오지 못한다).
+                // 워커는 지금도 그 작업을 돌리고 있을 수 있다.
+                observation: FailureObservation::ResultLost,
             });
         }
     }
@@ -474,6 +478,10 @@ impl WorkerTransport for AcpTransport {
                     let _ = broadcaster.send(WorkerEvent::Failed {
                         task_id,
                         error: format!("session/new: {e}"),
+                        // 워커가 답을 줬다. 프롬프트가 나가기 전 단계에서
+                        // 거부당했지만 그것은 분류를 바꾸지 않는다 —
+                        // `FailureObservation`의 질문 1이 질문 2보다 먼저다.
+                        observation: FailureObservation::Reported,
                     });
                     return;
                 }
@@ -482,6 +490,9 @@ impl WorkerTransport for AcpTransport {
                     let _ = broadcaster.send(WorkerEvent::Failed {
                         task_id,
                         error: format!("session/new timed out after {timeout:?}"),
+                        // 세션이 열리지 않았으니 프롬프트는 전달되지 않았다.
+                        // 워커가 응답하지 않는다는 사실 자체는 확정이다.
+                        observation: FailureObservation::NotDelivered,
                     });
                     return;
                 }
@@ -590,6 +601,7 @@ impl WorkerTransport for AcpTransport {
                     let _ = broadcaster.send(WorkerEvent::Failed {
                         task_id,
                         error: format!("session/prompt: {e}"),
+                        observation: FailureObservation::Reported,
                     });
                 }
                 Err(_) if !already_handled_elsewhere => {
@@ -597,6 +609,10 @@ impl WorkerTransport for AcpTransport {
                     let _ = broadcaster.send(WorkerEvent::Failed {
                         task_id,
                         error: format!("session/prompt timed out after {timeout:?}"),
+                        // 프롬프트는 워커에 갔다. 타임아웃은 우리 쪽 대기가
+                        // 끝났다는 뜻일 뿐, 저쪽 실행이 끝났다는 뜻이 아니다
+                        // (cancel도 보내지 않는다 — 인접 결함 2).
+                        observation: FailureObservation::ResultLost,
                     });
                 }
                 Ok(Err(_)) | Err(_) => {

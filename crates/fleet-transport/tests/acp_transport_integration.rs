@@ -297,7 +297,9 @@ async fn dispatch_streams_output_and_completes() {
                 duration_secs = result.duration_secs;
                 break;
             }
-            Ok(Some(WorkerEvent::Failed { task_id: t, error })) => {
+            Ok(Some(WorkerEvent::Failed {
+                task_id: t, error, ..
+            })) => {
                 panic!("unexpected Failed for {t}: {error}");
             }
             Ok(None) => break,

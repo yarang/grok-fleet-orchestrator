@@ -303,7 +303,9 @@ async fn acp_transport_with_client_tls_dispatches_task_end_to_end() {
                 completed = true;
                 break;
             }
-            Ok(Some(WorkerEvent::Failed { task_id: t, error })) if t == task_id => {
+            Ok(Some(WorkerEvent::Failed {
+                task_id: t, error, ..
+            })) if t == task_id => {
                 panic!("task failed over mTLS: {error}");
             }
             _ => continue,

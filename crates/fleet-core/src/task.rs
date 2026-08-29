@@ -773,7 +773,12 @@ pub struct TaskFailure {
 pub enum FailureKind {
     /// 워커가 응답하지 않거나 등록 해제됨.
     WorkerUnavailable,
-    /// 워커에서 실행 중 발생한 에러 (exit ≠ 0, panic 등).
+    /// 워커가 **응답으로 보고한** 실패. 실행 중 에러(exit ≠ 0, panic 등)이거나,
+    /// 실행 전 세션 생성 거부(`session/new`의 에러 응답)다. 어느 쪽이든 워커는
+    /// 살아 있고 답을 줬으므로 결과가 확정이라는 점이 같다 — 예전 doc은 "실행 중"만
+    /// 적고 있었고, 그것은 `session/new` 거부에 대해 거짓이라 운영자가 있지도 않은
+    /// 실행 로그를 뒤지게 만든다. 워커가 답을 주지 않은 경우는 `WorkerUnavailable`
+    /// (전달 전) 또는 `ResultLost`(전달 후)다.
     WorkerError,
     /// CircuitBreaker가 열려 있어 dispatch 자체가 차단됨.
     CircuitOpen,
@@ -792,18 +797,36 @@ pub enum FailureKind {
     /// 않는다는 성질도 같다. 다만 해소 방법이 다르다: 저쪽은 프로비저닝이고,
     /// 이쪽은 요청을 고쳐 다시 제출하는 것뿐이다.
     InvalidRequest,
+    /// 워커에 요청을 보낸 뒤 **결과를 관측하지 못했다**. 작업이 워커에서
+    /// 아직 돌고 있을 수도, 이미 끝났을 수도 있다 — 오케스트레이터는 모른다.
+    ///
+    /// `WorkerError`와 반드시 구분해야 한다. `InvalidRequest`가 "워커가 요청을
+    /// 본 적조차 없다"를 가르려고 생긴 것과 같은 이유이며, 이쪽은 그 거울상이다:
+    /// 요청은 분명히 갔는데 답이 오지 않았다. `WorkerError`로 뭉치면 운영자는
+    /// 워커에서 실행이 실패했다고 읽고 워커 로그를 뒤지지만, 그 로그에는 성공
+    /// 기록이 남아 있을 수 있다. 생성 지점은 `fleet-transport`의
+    /// `FailureObservation::ResultLost` 두 곳(연결 상실 시의 `fail_all()`,
+    /// `session/prompt` 타임아웃)이다.
+    ///
+    /// **이것은 `docs/architecture/tasks/execution-consistency.md`의
+    /// `OutcomeUnknown` 상태가 아니다.** 저것은 워커 inventory 조회와 effect
+    /// ledger로 해소되는 **비terminal 상태**이고, 이것은 그 판독기가 없는 지금
+    /// 관측 사실만 정직하게 남기는 **terminal 분류**다. 이 variant가 있다고
+    /// `OutcomeUnknown` 상태 기계가 구현된 것이 아니다.
+    ResultLost,
 }
 
 impl FailureKind {
     /// 모든 variant를 순서대로 나열 — metric label 등 전량 순회가 필요한
     /// 곳에서 사용(새 variant 추가를 컴파일러가 강제하도록 이 배열도 함께
     /// 갱신해야 한다).
-    pub const ALL: [FailureKind; 5] = [
+    pub const ALL: [FailureKind; 6] = [
         FailureKind::WorkerUnavailable,
         FailureKind::WorkerError,
         FailureKind::CircuitOpen,
         FailureKind::CredentialMissing,
         FailureKind::InvalidRequest,
+        FailureKind::ResultLost,
     ];
 
     /// Prometheus label 등 안정적인 텍스트 표현이 필요한 곳에서 사용.
@@ -816,6 +839,7 @@ impl FailureKind {
             Self::CircuitOpen => "circuit_open",
             Self::CredentialMissing => "credential_missing",
             Self::InvalidRequest => "invalid_request",
+            Self::ResultLost => "result_lost",
         }
     }
 }

@@ -3877,3 +3877,137 @@ URL이 들어왔을 때 뒷부분을 통째로 먹어 **위반을 감추는** �
   실현되지 않으며, 실현되더라도 표시 버그이지 보안 결함이 아니다.
 - `worker_to_summary`가 `mask_server_key`를 적용하는 것을 확인했으므로 워커 상세 화면의
   `Endpoint`에 secret이 실리지는 않는다. 이번 감사에서 확인만 하고 바꾼 것은 없다.
+
+---
+
+## 2026-08-29 — fix — `Failed`가 "워커가 실패했다"와 "우리가 결과를 못 봤다"를 한 이름으로 부르고 있었다
+
+`#67` 후속 게이트가 시작 가능한지 조사하다가, 게이트 자체가 아니라 그 옆에 기록만 되어
+있던 인접 결함이 **오늘 고칠 수 있는 상태**임이 드러나 처리했다.
+
+### 조사: `#67` 다음 게이트 세 항목은 서로 다른 이유로 막혀 있다
+
+| 항목 | 판정 | 막는 것 |
+| --- | --- | --- |
+| `worker_execution_lease` CAS slot claim·`fencing_token` | 막힘 | lease의 **주체**가 없다. 레코드가 실을 필드는 전부 생산자를 얻었지만(`agent_id`←`#49` 1단계, `worker_incarnation`←`#67` 2단계, `control_epoch`←1단계) fencing할 대상인 *실행 중인 Agent process*가 존재하지 않는다 — `dispatch`는 Agent를 고르지 않고(`#49` 2단계), `WorkerTransport`에 프로세스를 띄울 채널이 없다(`#89`) |
+| Agent self-fencing E2E | 막힘 | 같은 이유(`#89`) |
+| ACK 유실 `OutcomeUnknown` | **막힘, 그러나 사유가 정본과 다르다** | 정본은 "설계가 아직 정해지지 않았다"라고 적어 뒀는데, 설계는 `execution-consistency.md`에 상태 기계로 이미 그려져 있다. 실제로 막는 것은 **해소기**다 |
+
+`#67` 2단계가 자기 blocker를 녹인 방식(워커 자기보고 → 오케스트레이터 관측으로 재구성)을
+여기에 다시 쓸 수 없다는 것도 함께 확인했다. 그때는 **신호가 이미 있었고** 해석만 바꾸면
+됐다. lease는 신호가 아니라 fencing 대상 자체가 없으므로, 관측으로 재구성할 원본이 없다.
+
+### 그럼에도 오늘 고칠 수 있었던 것
+
+`OutcomeUnknown` 조사에서 나온 사실: `WorkerEvent::Failed`의 **여섯 생성 지점 중 셋은
+워커가 실패를 보고한 적이 없다**(연결 상실 시의 `fail_all()`, `session/new` 타임아웃,
+`session/prompt` 타임아웃). 이 "셋"과 아래의 "관측을 잃은 것은 둘"은 다른 집합이다 —
+`session/new` 타임아웃은 보고가 없었지만 결과는 불확실하지 않다. 그런데 `dispatcher.rs`가 여섯 전부를
+`FailureKind::WorkerError`로 못 박고 있었고, 그 이름의 doc은 "워커에서 **실행 중** 발생한
+에러(exit ≠ 0, panic 등)"라고 주장한다. 운영자는 그 분류를 보고 워커 로그를 뒤지지만,
+연결 상실이나 prompt 타임아웃에서는 그 로그에 오히려 **성공 기록**이 남아 있을 수 있다.
+`control-plane-authority-and-failover.md`가 "인접 결함 1"로 기록해 둔 것이다.
+
+`InvalidRequest`가 이미 같은 논증으로 존재한다 — "`WorkerError`는 워커가 실행을 시도했다가
+실패했다고 **주장**한다". `ResultLost`는 그 거울상이다: 요청은 분명히 갔는데 답이 오지 않았다.
+
+**바꾼 것.** `fleet_transport::FailureObservation{Reported, NotDelivered, ResultLost}`를
+`WorkerEvent::Failed`에 실었고, dispatcher가 각각 `WorkerError`/`WorkerUnavailable`/
+`ResultLost`로 옮긴다. 가르는 기준은 심각도가 아니라 **오케스트레이터가 아는 것의 범위**이며,
+두 질문을 **순서대로** 묻는다: (1) 답이 왔는가 — 왔으면 `Reported`. (2) 안 왔으면, 프롬프트가
+전달됐는가 — 전이면 `NotDelivered`, 후면 `ResultLost`.
+
+**처음에는 이 둘을 대등한 축으로 적었고, 그 서술은 바로 아래 표와 모순됐다.** "넷째 조합
+(요청이 안 갔는데 답이 왔다)은 존재하지 않는다"고 썼는데, 표의 둘째 행 `session/new` 에러
+응답이 정확히 그 조합이다 — 프롬프트는 나가지 않았고 워커는 답을 줬다. 대등한 두 축으로
+읽으면 그 칸이 어디로 가야 할지 정해지지 않는다. 질문 1이 먼저인 이유는 **답이 온 순간
+질문 2가 무의미해지기 때문**이다: 결과가 확정된 마당에 프롬프트가 어디까지 갔는지는
+오케스트레이터의 판단을 바꾸지 않는다. 질문 2는 답이 없을 때에만, 그 무지의 범위를
+좁히려고 묻는다. 이 결함은 커밋 직전 diff를 다시 읽다가 잡혔다 — **이 변경 자체가
+"doc이 코드에 대해 거짓말하는 것"을 고치는 작업인데, 새로 쓴 doc이 같은 결함을 갖고
+있었다.** 세 variant라는 결론은 같지만, 근거가 틀리면 다음 variant를 추가할 때 잘못된
+자리에 놓게 된다.
+
+| 생성 지점 | 관측 | 저장되는 kind |
+| --- | --- | --- |
+| `acp_transport.rs` `fail_all()` (연결 상실) | `ResultLost` | `ResultLost` |
+| `session/new` 에러 응답 | `Reported` | `WorkerError` |
+| `session/new` 타임아웃 | `NotDelivered` | `WorkerUnavailable` |
+| `session/prompt` 에러 응답 | `Reported` | `WorkerError` |
+| `session/prompt` 타임아웃 | `ResultLost` | `ResultLost` |
+| `mock.rs` (테스트 더블) | `Reported` | `WorkerError` |
+
+### 세 지점을 빼내는 것으로는 절반만 고쳐진다
+
+이 변경의 논거는 "`WorkerError`의 doc이 그 이름이 실제로 담는 것보다 좁다"였다. 그런데 셋을
+빼낸 뒤에도 남은 셋 중 `session/new` 에러 응답은 **여전히 실행 중이 아니다** — 세션이 열리지
+않았으니 실행이 시작된 적이 없다. doc을 그대로 뒀다면 이 커밋이 인용한 바로 그 문장이 커밋
+후에도 거짓으로 남고, 논증을 따라온 독자가 같은 모순을 다시 발견하게 된다. 그래서
+`FailureKind::WorkerError`의 doc을 **"워커가 응답으로 보고한 실패 — 실행 중 에러이거나 실행 전
+세션 생성 거부"**로 넓혔다.
+
+지점을 다른 variant로 옮기지 않은 이유: `InvalidRequest`는 요청이 잘못됐다는 뜻이라 맞지 않고,
+일곱째 variant를 만들 이유도 없다 — **워커가 답을 준 이상 결과는 확정이고, 오케스트레이터의
+후속 판단을 정하는 것은 그 확정성이지 세션이 열렸는지 여부가 아니다.** 이것은 위 `FailureObservation`
+질문 순서와 같은 판단이며, 그 판단이 kind 쪽에도 일관되게 적혀야 한다.
+
+### 정본의 목록이 과포함이었다
+
+인접 결함 1은 관측 상실 경로로 **셋**(`session/new` 타임아웃 포함)을 적어 뒀는데,
+코드를 읽으면 `session/new` 타임아웃은 그 자리에서 `return`하므로 **프롬프트가 전달되지
+않았다**. 결과가 불확실한 것이 아니라 "실행이 시작되지 않았다"가 확정이다. 그래서 그 자리는
+`ResultLost`가 아니라 `WorkerUnavailable`(워커 무응답)로 갈랐다.
+
+이 판단의 근거는 코드 구조에 있는 불변식이다: `fail_all()`이 훑는 `sessions` 맵에는
+`session/new`를 통과한 태스크만 들어간다. **세션 맵에 있다 = 프롬프트가 이미 전달됐다.**
+
+### `FailureKind::ResultLost`는 `OutcomeUnknown` 상태가 아니다
+
+이름을 `OutcomeUnknown`으로 짓지 않은 이유가 여기 있다. 정본의 `OutcomeUnknown`은
+**비terminal 위상**이고 출구 세 개가 전부 inventory·effect ledger 증명이다. 그 판독기가 없는
+지금 위상을 만들면 들어간 Task가 영원히 나오지 못하고, 비terminal Task는 Project archive를
+정지시킨다 — 모른다는 사실을 표시하는 대신 **일을 멈추는** 결함이 된다. `ResultLost`는
+terminal 분류이며, 해소기가 생기면 그 위상의 **입력**이 될 값이다. 코드 doc과
+`execution-consistency.md`에 이 구분을 표로 박아 뒀다.
+
+### breaker는 건드리지 않았다
+
+`ResultLost`도 `Outcome::Failure`로 남긴다. 분류가 가른 것은 **작업의 결말**이지 워커의
+건강도가 아니다 — 연결이 끊기거나 응답이 없는 것은 그 워커에 대한 진짜 나쁜 신호이고,
+여기서 빼면 고장 난 워커로 계속 디스패치하게 된다. 이것을 고정하는 테스트를 함께 넣었다.
+
+### 가드가 실제로 발화하는지 먼저 확인했다
+
+`metrics.rs`의 `failure_kind_allow_list_covers_every_variant`가 새 variant를 강제한다고
+**믿지 않고**, allow-list를 고치기 전에 돌려서 실제로 깨지는 것을 봤다:
+`FailureKind::ResultLost is missing from the metric label allow-list`. 가드에 의존하기 전에
+가드를 검증한 것이며, 이것이 없으면 "컴파일러가 강제한다"는 문장이 근거 없는 안심이 된다.
+
+### 실패한 첫 시도 — 관측 지점을 잘못 골랐다
+
+breaker 테스트를 처음에 "저장소의 워커 회로 상태가 `Open`인가"로 썼다가 `Closed`로 실패했다.
+코드 결함이 아니라 **`Store::update_worker_circuit_state`가 트레이트 기본 구현 `Ok(())`이고
+`MemStore`가 이를 재정의하지 않아** 메모리 저장소에서는 쓰기가 조용히 사라지기 때문이었다.
+`BreakerRegistry::state_of()`로 관측 지점을 옮겨 해결했다. 테스트가 깨졌을 때 대상 코드부터
+의심하면 이런 종류는 오래 걸린다 — **관측 지점이 그 사실을 담을 수 있는지**를 먼저 본다.
+
+### 검증 한계
+
+- **transport의 다섯 생성 지점이 각각 어떤 `observation`을 싣는지는 테스트가 없다.**
+  고정한 것은 `observation → FailureKind` 매핑이고, 그 앞단(어느 실패 경로가 어느
+  `observation`을 고르는가)은 코드 대조로만 확인했다. 타임아웃과 연결 상실을 실제로
+  일으키는 통합 테스트는 만들지 않았다.
+- 라이브 fleet에서 연결이 끊긴 뒤 워커에서 작업이 계속 돌아 결과가 실제로 갈리는 상황은
+  재현하지 않았다. 이 변경이 고치는 것은 **분류의 정직성**이지 그 상황의 처리 자체가
+  아니다 — 처리는 `OutcomeUnknown` 해소기가 생겨야 가능하다.
+- 인접 결함 2(prompt 타임아웃이 `cancel` 없이 permit만 놓는 것)는 그대로 두었다.
+  해소하려면 `cancel`을 보내야 하는데, "답을 못 들은 실행을 끊는다"는 별도의 동작 변경이라
+  자체 설계 질문을 갖는다.
+- `ResultLost`는 재시도 정책에 아무 영향도 주지 않는다. **처음에는 근거를 "`#62` 4단계의
+  무재시도 결정"이라고만 적었는데, 확인해 보니 `reconcile.rs:312`에 `max_dispatch_retries`
+  재시도 루프가 실재한다.** 결론은 같지만 근거가 달랐다: 그 루프는 `Pending` 작업만 돌고
+  dead-letter의 `mark_failed`도 `&[TaskPhase::Pending]`으로 좁혀져 있다. `ResultLost`는
+  `Dispatched → Failed` 경로에서만 생기므로 그 루프에 닿지 않는다 — 거기서 세는 것은
+  *디스패치* 재시도이지 실행 재시도가 아니다. `#62` 4단계는 그 위에 "실행이 실패하면
+  재시도하지 않고 새 Task를 만든다"를 얹은 별개의 결정이다. 재시도가 돌아오면 이 variant는
+  **재시도하면 안 되는** 종류로 다시 검토해야 한다(중복 실행이 된다).

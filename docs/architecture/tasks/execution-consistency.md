@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/tasks/execution-consistency.md"
-last_verified: "2026-08-27"
+last_verified: "2026-08-29"
 last_verified_commit: "working-tree"
 ---
 
@@ -232,9 +232,35 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | redrive Task의 external idempotency key 승계 | **설계 미결** | 새 Task ID가 키를 바꾼다. 새 Task 경계를 넘는 앵커 필드가 없음 |
 | policy revision 변경 후 redrive의 동일 key | 미구현 | `policy_revision` 개념이 저장소·코드 어디에도 없음 |
 | `CancelUnconfirmed` 해소와 archive 차단 | 미구현 | 해당 상태 자체가 `TaskStatus`에 없음. 해소 판정에 필요한 effect ledger도 없음 |
+| `Dispatched` 후 응답 유실 → `OutcomeUnknown` | **미구현. 단, 관측 사실은 기록된다**(2026-08-29) | 상태 자체가 `TaskStatus`에 없음. 넣더라도 출구 세 개가 전부 inventory·effect ledger 증명이라 **해소기가 없으면 나갈 수 없는 상태**가 된다. 아래 참고 |
 | 조회 불가 `Started` effect → `PartiallyApplied` | 미구현 | ledger 부재 |
 | cancel/timeout이 ledger를 우회하지 않음 | 미구현(결함 존재) | ledger 부재. 현재 `cancel`은 transport 실패를 로그만 남기고 `Cancelled`를 확정한다 |
 | Task 삭제 후 동일 key 재제출 | 구현됨 | — (로드맵 `#96`) |
+
+### `OutcomeUnknown` 상태와 `FailureKind::ResultLost`는 다른 것이다
+
+2026-08-29에 transport가 실패를 **어떻게 관측했는지**를 싣기 시작했다
+(`fleet_transport::FailureObservation`). 연결 상실 시의 `fail_all()`과 `session/prompt`
+타임아웃은 프롬프트가 워커에 전달된 뒤 응답을 듣지 못한 경우이고, 이 둘은 이제
+`FailureKind::ResultLost`로 저장된다. 위 상태 모델의 `Dispatched --> OutcomeUnknown:
+전달 후 응답 유실` 간선이 가리키는 것과 **같은 사건**이다.
+
+그렇다고 그 간선이 구현된 것은 아니다. 둘은 다른 종류의 객체다.
+
+| | `OutcomeUnknown` (이 문서) | `FailureKind::ResultLost` (오늘 코드) |
+| --- | --- | --- |
+| 무엇인가 | `TaskStatus`의 **비terminal 위상** | `TaskStatus::Failed` 안의 **terminal 분류** |
+| 다음에 일어나는 일 | Reconciler가 inventory·effect ledger로 셋 중 하나로 해소 | 없음 — 최종 상태다 |
+| 필요한 것 | 워커 inventory 조회 + effect ledger (둘 다 부재) | 없음 — transport가 이미 생산한다 |
+
+**지금 상태를 만들지 않은 이유는 설계가 없어서가 아니라 해소기가 없어서다.** 출구 세 개가
+전부 증명을 요구하는데 그 판독기가 없으면 들어간 Task는 영원히 그 위상에 남고, 비terminal
+Task는 Project archive를 정지시킨다. 즉 지금 만들면 오케스트레이터가 **모른다는 사실**을
+정직하게 표시하는 대신 **작업을 멈추는** 결함이 된다.
+
+`ResultLost`는 그 사이의 정직한 자리다 — 결말을 확정하지만, 그 확정이 *워커가 보고한 실패*가
+아니라 *우리가 결과를 못 봤다*는 것임을 이름으로 밝힌다. 해소기가 생기면 이 분류가 곧
+`OutcomeUnknown` 위상의 **입력**이 된다.
 
 ### control epoch 게이트를 절반만 닫았던 이유와, 그 절반이 닫힌 경위
 

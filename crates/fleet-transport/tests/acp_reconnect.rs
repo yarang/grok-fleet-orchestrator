@@ -427,7 +427,7 @@ async fn failed_event_emitted_for_in_flight_task_on_close() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(500), rx.recv()).await {
-            Ok(Some(WorkerEvent::Failed { task_id, error })) => {
+            Ok(Some(WorkerEvent::Failed { task_id, error, .. })) => {
                 // 2026-08-11: 어느 경로가 먼저 이 task를 정리하느냐에 따라 두
                 // 가지 메시지 중 하나가 온다 — (a) supervisor의 fail_all()
                 // ("ACP connection lost..."), 또는 (b) 연결이 끊기면서 SDK가

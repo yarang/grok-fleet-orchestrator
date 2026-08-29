@@ -14,7 +14,7 @@ use fleet_core::{
     CircuitState, FailureKind, FleetEvent, IdempotentInsert, Task, TaskFailure, TaskId, TaskPhase,
     TaskStatus, TransitionOrigin, TransitionOutcome, WorkerId,
 };
-use fleet_transport::{DispatchRequest, TransportError, WorkerEvent};
+use fleet_transport::{DispatchRequest, FailureObservation, TransportError, WorkerEvent};
 use tracing::{info, warn};
 
 use crate::breaker::{BreakerState, Outcome};
@@ -229,7 +229,11 @@ impl Dispatcher {
                 dec_running();
                 self.dispatch_ready_tasks().await;
             }
-            WorkerEvent::Failed { task_id, error } => {
+            WorkerEvent::Failed {
+                task_id,
+                error,
+                observation,
+            } => {
                 // 현재 상태에서 worker_id 추출
                 let worker_id = self.current_worker_of(task_id).await;
 
@@ -266,9 +270,23 @@ impl Dispatcher {
                     }
                 }
 
+                // 관측의 범위를 그대로 옮긴다. 예전에는 여섯 생성 지점 전부가
+                // `WorkerError`로 확정됐는데, 그 이름의 doc은 "워커에서 **실행 중**
+                // 발생한 에러"라고 주장한다 — 연결 상실과 prompt 타임아웃에서는
+                // 거짓이고, 운영자가 있지도 않은 워커 실행 실패 로그를 뒤지게
+                // 만든다(`control-plane-authority-and-failover.md`의 인접 결함 1).
+                //
+                // breaker에는 셋 다 `Outcome::Failure`로 남긴다. 관측을 잃은 것도
+                // 그 워커의 건강도에 대한 진짜 신호이기 때문이다 — 분류가 갈리는
+                // 것은 **작업의 결말**이지 워커의 상태가 아니다.
+                let kind = match observation {
+                    FailureObservation::Reported => FailureKind::WorkerError,
+                    FailureObservation::NotDelivered => FailureKind::WorkerUnavailable,
+                    FailureObservation::ResultLost => FailureKind::ResultLost,
+                };
                 let failure = TaskFailure {
                     error,
-                    kind: FailureKind::WorkerError,
+                    kind,
                     worker_id,
                     attempts: 1,
                 };
@@ -1678,6 +1696,7 @@ mod tests {
             .handle_worker_event(WorkerEvent::Failed {
                 task_id,
                 error: "should never be persisted while fenced".into(),
+                observation: fleet_transport::FailureObservation::Reported,
             })
             .await;
 
@@ -1916,6 +1935,115 @@ mod tests {
                 .expect("list_tasks")
                 .len(),
             1
+        );
+    }
+
+    // ── 인접 결함 1: 관측의 범위를 실패 분류로 옮긴다 ──────────────────
+
+    /// `WorkerEvent::Failed`의 `observation`이 저장되는 `FailureKind`를 정한다.
+    ///
+    /// 예전에는 이 자리가 `FailureKind::WorkerError` 상수였다. 그 이름의 doc은
+    /// "워커에서 **실행 중** 발생한 에러"라고 주장하는데, transport의 여섯 생성
+    /// 지점 중 둘(연결 상실 시의 `fail_all()`, `session/prompt` 타임아웃)은 워커가
+    /// 실패를 보고한 적이 없다 — 작업은 그 순간에도 워커에서 돌고 있을 수 있다.
+    /// 셋째(`session/new` 타임아웃)는 반대쪽으로 틀렸다: 프롬프트가 전달되지도
+    /// 않았으니 워커 실행 실패가 아니라 워커 무응답이다.
+    ///
+    /// 표로 고정하는 이유는 생성 지점이 아니라 **매핑**이 계약이기 때문이다.
+    /// transport에 새 실패 경로가 생겨도 셋 중 하나를 고르면 되고, 넷째가
+    /// 필요해지면 이 테스트가 먼저 깨진다.
+    #[tokio::test]
+    async fn failure_observation_decides_the_persisted_failure_kind() {
+        let cases = [
+            (FailureObservation::Reported, FailureKind::WorkerError),
+            (
+                FailureObservation::NotDelivered,
+                FailureKind::WorkerUnavailable,
+            ),
+            (FailureObservation::ResultLost, FailureKind::ResultLost),
+        ];
+
+        for (observation, expected) in cases {
+            let (state, dispatcher) = setup_no_workers(0);
+            let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+            state.store.upsert_worker(&worker).await.unwrap();
+
+            let mut task = sample_task();
+            let task_id = task.id;
+            task.status = TaskStatus::Dispatched {
+                worker_id: worker.id,
+                started_at: Utc::now(),
+            };
+            state.store.insert_task(&task).await.unwrap();
+
+            dispatcher
+                .handle_worker_event(WorkerEvent::Failed {
+                    task_id,
+                    error: "boom".into(),
+                    observation,
+                })
+                .await;
+
+            let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+            match stored.status {
+                TaskStatus::Failed(failure) => assert_eq!(
+                    failure.kind, expected,
+                    "{observation:?} should persist as {expected:?}"
+                ),
+                other => panic!("{observation:?}: expected Failed, got {other:?}"),
+            }
+        }
+    }
+
+    /// 관측을 잃은 실패도 breaker에는 실패로 남는다.
+    ///
+    /// 분류를 가른 것은 **작업의 결말**이지 워커의 건강도가 아니다. 연결이
+    /// 끊기거나 응답이 오지 않는 것은 그 워커에 대한 진짜 나쁜 신호이므로,
+    /// `ResultLost`라고 해서 breaker 카운트에서 빼면 고장 난 워커로 계속
+    /// 디스패치하게 된다. 샘플 1건에 회로가 열리도록 설정해 두고 breaker
+    /// 레지스트리에서 관측한다 — `CircuitBreaker`에 카운터 접근자가 없고,
+    /// 저장소 쪽은 관측 지점이 되지 못한다: `Store::update_worker_circuit_state`는
+    /// 트레이트 기본 구현이 `Ok(())`이고 `MemStore`가 이를 재정의하지 않아
+    /// 여기서는 쓰기가 조용히 사라진다.
+    #[tokio::test]
+    async fn result_lost_still_counts_as_a_breaker_failure() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(FleetState::new(
+            store,
+            transport,
+            CircuitBreakerConfig {
+                min_samples: 1,
+                error_rate_threshold: 1.0,
+                ..Default::default()
+            },
+        ));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::Failed {
+                task_id,
+                error: "ACP connection lost — will reconnect".into(),
+                observation: FailureObservation::ResultLost,
+            })
+            .await;
+
+        assert_eq!(
+            state.breakers.state_of(worker.id),
+            crate::breaker::BreakerState::Open,
+            "관측 상실도 워커 건강도 신호다 — breaker에서 빠지면 안 된다"
         );
     }
 }
