@@ -79,10 +79,10 @@
         row.className = 'row';
         const type = getEventType(ev);
         row.innerHTML = `
-          <div style="font-family:var(--font-mono);font-size:12px;color:var(--ink-muted-48);">${ev.seq}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--ink-muted-48);">${escapeHtml(String(ev.seq))}</div>
           <div style="font-family:var(--font-mono);font-size:12px;font-weight:600;">${escapeHtml(type)}</div>
-          <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${getTaskId(ev)}</div>
-          <div style="font-family:var(--font-mono);font-size:12px;">${getWorkerId(ev)}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escapeHtml(getTaskId(ev))}</div>
+          <div style="font-family:var(--font-mono);font-size:12px;">${escapeHtml(getWorkerId(ev))}</div>
           <div style="font-size:13px;color:var(--ink-muted-80);">${escapeHtml(getDetails(ev))}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(ev.event?.at)}</div>
         `;
@@ -90,12 +90,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      if (!s) return '';
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     document.querySelectorAll('.pill-btn').forEach(btn => {
       btn.addEventListener('click', () => {

@@ -6,11 +6,6 @@
       return m ? m.pop() : '';
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     function fmtTime(iso) {
       if (!iso) return '—';
@@ -159,7 +154,7 @@
           : '';
         row.innerHTML = `
           <div style="font-weight:600;">${escapeHtml(a.name)}</div>
-          <div><span class="badge ${cls}">${escapeHtml(a.status)}</span></div>
+          <div><span class="badge ${escapeHtml(cls)}">${escapeHtml(a.status)}</span></div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(a.created_by || '—')}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(a.created_at)}</div>
           <div>${stopBtn}</div>

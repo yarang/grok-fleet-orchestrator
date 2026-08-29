@@ -60,7 +60,7 @@
         } else {
           timeline.innerHTML = h.events.map(e => `
             <li class="timeline-item">
-              <div class="timeline-dot ${e.severity}"></div>
+              <div class="timeline-dot ${escapeHtml(e.severity)}"></div>
               <div class="timeline-content">
                 <div class="event-type">${escapeHtml(e.event_type)}</div>
                 <div class="event-time">${fmtTime(e.created_at)}</div>
@@ -74,11 +74,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     loadHost();
 

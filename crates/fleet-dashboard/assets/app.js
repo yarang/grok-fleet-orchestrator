@@ -248,9 +248,9 @@ async function refreshWorkers() {
       row.className = 'row';
       row.innerHTML = `
         <div>${escapeHtml(w.name)}</div>
-        <div><span class="status-pill ${w.status}">${w.status}</span></div>
-        <div>${w.active_tasks}/${w.max_concurrent}</div>
-        <div>${w.circuit_state}</div>
+        <div><span class="status-pill ${escapeHtml(w.status)}">${escapeHtml(w.status)}</span></div>
+        <div>${escapeHtml(String(w.active_tasks))}/${escapeHtml(String(w.max_concurrent))}</div>
+        <div>${escapeHtml(w.circuit_state)}</div>
         <div>${fmtTime(w.last_seen)}</div>
       `;
       list.appendChild(row);
@@ -274,8 +274,8 @@ async function refreshTasks() {
       const idShort = (t.id || '').slice(0, 8);
       const tokenStr = t.token_usage ? fmtTokens(t.token_usage.total_tokens) : '—';
       row.innerHTML = `
-        <div title="${escapeHtml(t.id)}">${idShort}</div>
-        <div><span class="phase ${t.phase}">${t.phase}</span></div>
+        <div title="${escapeHtml(t.id)}">${escapeHtml(idShort)}</div>
+        <div><span class="phase ${escapeHtml(t.phase)}">${escapeHtml(t.phase)}</span></div>
         <div>${escapeHtml((t.prompt || '').slice(0, 60))}</div>
         <div>${escapeHtml(t.model || '—')}</div>
         <div title="${escapeHtml(t.worker_id || '')}">${escapeHtml(workerLabel(t.worker_id, workerNames))}</div>

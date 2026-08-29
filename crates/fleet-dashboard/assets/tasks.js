@@ -230,10 +230,10 @@
       const prompt = t.prompt.length > 60 ? t.prompt.substring(0,60)+'…' : t.prompt;
       const idCellClass = indent ? 'task-id-cell indent' : 'task-id-cell';
       return `
-          <div class="${idCellClass}" style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${t.id.substring(0,8)}</div>
-          <div><span class="badge badge-${t.phase}">${t.phase}</span></div>
+          <div class="${idCellClass}" style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escapeHtml(t.id.substring(0,8))}</div>
+          <div><span class="badge badge-${escapeHtml(t.phase)}">${escapeHtml(t.phase)}</span></div>
           <div style="font-size:14px;">${escapeHtml(prompt)}</div>
-          <div style="font-size:13px;color:var(--ink-muted-48);">${t.model||'—'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(t.model||'—')}</div>
           <div style="font-family:var(--font-mono);font-size:12px;" title="${escapeHtml(t.worker_id||'')}">${escapeHtml(workerLabel(t.worker_id, workerNames))}</div>
           <div style="font-size:13px;">${fmtTokens(t.token_usage)}</div>
           <div style="font-size:13px;">${fmtDuration(t.duration_secs)}</div>
@@ -345,11 +345,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     function getCsrf() {
       const m = document.cookie.match('(^|;)\\s*fleet_csrf\\s*=\\s*([^;]+)');

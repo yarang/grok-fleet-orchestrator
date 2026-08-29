@@ -4,7 +4,7 @@ authority: historical
 implementation: partial
 verification: code-checked
 source: "docs/security/reports/security-findings.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-29"
 last_verified_commit: "working-tree"
 owners: ["security"]
 ---
@@ -15,9 +15,9 @@ owners: ["security"]
 > [control-plane-security-model.md](../control-plane-security-model.md)가 정본이다. 이 문서는
 > 발견·해결·미해결 항목의 이력을 보존하며, 현재 정책을 재정의하지 않는다.
 
-> 기록 기준일: 2026-08-17. 초기 해결 기록: 2026-08-06.
+> 기록 기준일: 2026-08-29. 초기 해결 기록: 2026-08-06.
 >
-> 기존 S1~S6은 해결됐다. 2026-08-16 전체 설계 감사에서 control-plane identity와
+> 기존 S1~S6과 S13은 해결됐다. 2026-08-16 전체 설계 감사에서 control-plane identity와
 > secret lifecycle의 신규 공백을 발견했으며 정본 설계는
 > [`control-plane-security-model.md`](../control-plane-security-model.md)다.
 
@@ -68,3 +68,45 @@ digest 저장과 immutable DB token id 마이그레이션이 남아 있다.
 ### S6. 이메일 발송 전용 rate limit 적용 (Low)
 * **수정**: 이메일 스팸 폭탄을 방어하기 위해 별도의 임계치(`MAX_EMAIL_SEND_ATTEMPTS = 3`, `MAX_IP_EMAIL_SEND_ATTEMPTS = 10`, `EMAIL_SEND_WINDOW_SECS = 3600`)를 설정하고, `check_rate_limit_custom`을 도입하여 `/forgot-password` 및 `/resend-verification` 핸들러가 1시간당 최대 3회 발송만 허용하도록 리팩토링했습니다.
 * **결과**: 대량 메일 발송 엔드포인트에 대한 Abuse 공격 장벽이 크게 높아졌습니다.
+
+### S13. Dashboard 정적 자산의 저장형 XSS — 4계층 (High)
+
+로드맵 [`#98`](../../roadmap/roadmap.md). 배경·판정 근거·미룬 항목은 그 행이 소유하며 여기서
+재서술하지 않는다.
+
+* **결함**: 한 종류의 실수가 아니라 서로 다른 네 계층이 겹쳐 있었다.
+  1. 약 20곳에서 `escapeHtml` 호출이 누락됐다.
+  2. 11개 페이지 스크립트가 `d.textContent = s; return d.innerHTML` 형태의 지역
+     `escapeHtml`로 전역(`app.js:292`)을 **가렸다**. 텍스트 노드 직렬화는 `&`·`<`·`>`만
+     바꾸고 `"`·`'`는 그대로 두므로 속성 문맥에서 무력하다. 호출부는 이스케이프하는
+     것처럼 보이므로 호출부만 읽는 리뷰로는 보이지 않는다.
+  3. 3곳이 `onclick="fn('${…}')"`를 문자열로 만들었다. **HTML 이스케이프로 원리적으로
+     막을 수 없다** — HTML 파서가 속성값의 문자 참조를 JS 파싱보다 먼저 디코드하므로
+     `&#39;`가 `'`로 되돌아간 뒤 JS에 넘어간다. 값이 `a');alert(1);//`이면 통과한다.
+  4. HTML 조각을 반환하는 헬퍼(`grokBadge`)는 호출부에서 감쌀 수 없어 이스케이프가
+     헬퍼 안에 있어야 한다.
+* **공격 방향**: `worker_version`·`os_type`·`arch`·`grok_version`·워커 라벨은 워커의 자기
+  신고 값이므로 침해된 워커가 **관리자 브라우저**에서 스크립트를 실행한다(워커 → 관리자
+  권한 상승). SSH 키 이름은 업로드 시 `trim().is_empty()`만 검증하므로
+  (`crates/fleet-dashboard/src/provisioning.rs::create_ssh_key_api`) `host:provision` 보유자
+  → 관리자 상승 경로가 된다.
+* **수정**: 지역 정의 11개를 삭제해 전역 하나로 수렴시키고, 인라인 `onclick` 3곳을 저장소가
+  이미 쓰던 관례(`data-*` + `addEventListener`)로 이전했으며, 미이스케이프 보간 13곳과
+  `provision.js` 5곳에 헬퍼를 적용하고 조각 반환 헬퍼는 내부에서 이스케이프하도록 고쳤다.
+* **감사 방법이 결론을 바꿨다**: 보간 중심(`${…}`) 스캔은 48건을 전부 안전으로 판정했으나,
+  `provision.js`가 전부 `'+ var +'` 문자열 결합이라 그물에 걸리지 않아 통째로 누락됐다.
+  **싱크 중심**(`innerHTML =`·`insertAdjacentHTML`·`outerHTML`·`.href =`) 스캔으로 다시
+  돌려서야 드러났다. 데이터가 어떤 문법으로 조립되든 결국 통과해야 하는 문이 싱크이므로,
+  이스케이프 감사의 정본 스캔은 싱크 쪽이어야 한다. 최종 81건 판정, 잔여 0.
+* **회귀 방어**: `crates/fleet-dashboard/tests/asset_xss_invariants.rs`가 계층 2와 3의
+  구조적 불변식만 잠근다. 계층 1은 값마다 출처 판단이 필요해 리뷰의 몫으로 남겼다 —
+  변수 이름 allow-list로 단정하면 시간이 지날수록 틀려지는 테스트가 된다.
+* **실검증**: 임시 DB에 페이로드가 실린 SSH 키를 넣고 대시보드를 띄워 확인했다.
+  `/admin/ssh-keys`에서 `img[src="x"]`·`[onerror]`·목록 내 `[onclick]` 전부 0건, `alert`
+  0회. 첫 행 삭제 뒤 재렌더링된 목록의 Delete가 다시 동작해 **위임 리스너 재바인딩**도
+  실측했다. `/hosts/provision`의 `<option>`은 `value`가 페이로드 원본으로 **무손실
+  복원**되는데도 주입이 0건인데, 이것이 계층 2의 정확한 반증이다 — `"`를 `&quot;`로 바꿔
+  속성 조기 종료를 막았고 파서가 디코드해 값만 돌아왔다. 삭제한 약한 헬퍼들은 `"`를
+  그대로 뒀으므로 같은 자리에서 속성이 닫혔을 것이다.
+* **결과**: 워커와 `host:provision` 보유자가 관리자 세션에서 스크립트를 실행할 수 있던
+  경로를 제거했고, 가장 잡기 어려운 계층(전역을 가리는 지역 정의)은 테스트가 잠갔다.

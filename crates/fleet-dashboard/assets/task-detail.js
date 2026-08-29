@@ -82,11 +82,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     // 이 태스크가 속한 스레드(연속 대화) 히스토리를 불러온다. 태스크 하나뿐인
     // (아직 이어간 적 없는) 스레드는 섹션 자체를 숨긴다 — 매번 "히스토리

@@ -55,10 +55,10 @@
 
         let actions = '';
         if (_canCreate) {
-          actions += `<button class="btn btn-sm" onclick="toggleUser('${u.id}','${u.enabled}')">${u.enabled ? 'Disable' : 'Enable'}</button> `;
+          actions += `<button type="button" class="btn btn-sm" data-toggle-user="${escapeHtml(u.id)}">${u.enabled ? 'Disable' : 'Enable'}</button> `;
         }
         if (_canDelete) {
-          actions += `<button class="btn btn-sm btn-danger" onclick="deleteUser('${u.id}','${escapeHtml(u.username)}')">Delete</button>`;
+          actions += `<button type="button" class="btn btn-sm btn-danger" data-delete-user="${escapeHtml(u.id)}" data-username="${escapeHtml(u.username)}">Delete</button>`;
         }
         if (!actions) actions = '<span style="font-size:12px;color:var(--ink-muted-48);">—</span>';
 
@@ -72,9 +72,23 @@
         `;
         table.appendChild(row);
       }
+
+      // 인라인 onclick 금지 — 이유는 `admin-ssh-keys.js`의 같은 배선에 적어 두었다.
+      // 여기서는 사용자명이 그 자리에 들어갔으므로 노출이 더 직접적이었다.
+      table.querySelectorAll('button[data-toggle-user]').forEach(b => {
+        b.addEventListener('click', () => toggleUser(b.getAttribute('data-toggle-user')));
+      });
+      table.querySelectorAll('button[data-delete-user]').forEach(b => {
+        b.addEventListener('click', () =>
+          deleteUser(b.getAttribute('data-delete-user'), b.getAttribute('data-username')));
+      });
     }
 
-    async function toggleUser(id, currentEnabled) {
+    // `currentEnabled`는 받기만 하고 쓰지 않던 죽은 인자였다. 서버가
+    // `POST /api/users/{id}/toggle` 하나로 현재 상태를 보고 뒤집으므로
+    // 클라이언트가 알려 줄 필요가 없다. 인라인 onclick을 걷어내면서 함께
+    // 지웠다 — 이 인자가 `'${u.enabled}'`로 속성에 박히던 자리였다.
+    async function toggleUser(id) {
       const body = new URLSearchParams({ csrf_token: getCsrf() });
       try {
         const resp = await fetch('api/users/'+id+'/toggle', { method:'POST', body, headers:{'Content-Type':'application/x-www-form-urlencoded'} });
@@ -118,11 +132,6 @@
       }
     });
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     // 권한 확인 후 사용자 목록 로드.
     document.getElementById('show-create-btn').style.display = 'none';

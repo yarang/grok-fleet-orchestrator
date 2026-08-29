@@ -17,11 +17,6 @@
       return new Date(iso).toLocaleString();
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     function render(keys) {
       const table = document.getElementById('key-table');
@@ -43,12 +38,24 @@
         row.innerHTML = `
           <div style="font-weight:600;">${escapeHtml(k.name)}</div>
           <div><span class="badge badge-provisioned">${escapeHtml(k.key_type)}</span></div>
-          <div style="font-family:monospace;font-size:12px;color:var(--ink-muted-48,#888);">${fp}</div>
+          <div style="font-family:monospace;font-size:12px;color:var(--ink-muted-48,#888);">${escapeHtml(fp)}</div>
           <div style="font-size:13px;color:var(--ink-muted-48,#888);">${fmtTime(k.created_at)}</div>
-          <div><button class="btn btn-sm btn-danger" onclick="deleteKey('${escapeHtml(k.name)}')">Delete</button></div>
+          <div><button type="button" class="btn btn-sm btn-danger" data-delete-key="${escapeHtml(k.name)}">Delete</button></div>
         `;
         table.appendChild(row);
       }
+
+      // 인라인 onclick을 쓰지 않는다. 예전에는
+      // `onclick="deleteKey('${escapeHtml(k.name)}')"` 였는데, 값이 들어가는
+      // 자리가 **속성 안의 JS 문자열 리터럴**이라 HTML 이스케이프로는 막히지
+      // 않는다 — HTML 파서가 속성값의 문자 참조를 JS 파싱보다 **먼저**
+      // 디코드하므로 `&#39;`가 `'`로 되돌아간 뒤 JS에 넘어간다. 즉 키 이름이
+      // `a');alert(1);//` 이면 강한 이스케이프를 통과해도 그대로 실행된다.
+      // 데이터는 속성에 두고 값은 코드에서 읽는다 (`tasks.js`·`project-detail.js`
+      // 가 이미 쓰는 방식).
+      table.querySelectorAll('button[data-delete-key]').forEach(b => {
+        b.addEventListener('click', () => deleteKey(b.getAttribute('data-delete-key')));
+      });
     }
 
     async function deleteKey(name) {

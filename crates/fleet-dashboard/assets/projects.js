@@ -107,11 +107,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     fetchProjects();
     setInterval(fetchProjects, 10000);

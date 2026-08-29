@@ -50,7 +50,7 @@
         grid.innerHTML = details.map(([label, value, cls]) => `
           <div class="detail-item">
             <div class="label">${label}</div>
-            <div class="value">${cls ? '<span class="'+cls+'">'+value+'</span>' : value}</div>
+            <div class="value">${cls ? '<span class="'+escapeHtml(cls)+'">'+escapeHtml(String(value))+'</span>' : escapeHtml(String(value))}</div>
           </div>
         `).join('');
 
@@ -90,10 +90,10 @@
         row.className = 'row';
         const prompt = t.prompt.length > 50 ? t.prompt.substring(0,50)+'…' : t.prompt;
         row.innerHTML = `
-          <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${t.id.substring(0,8)}</div>
-          <div><span class="badge badge-${t.phase}">${t.phase}</span></div>
+          <div style="font-family:var(--font-mono);font-size:12px;color:var(--primary);">${escapeHtml(t.id.substring(0,8))}</div>
+          <div><span class="badge badge-${escapeHtml(t.phase)}">${escapeHtml(t.phase)}</span></div>
           <div style="font-size:14px;">${escapeHtml(prompt)}</div>
-          <div style="font-size:13px;color:var(--ink-muted-48);">${t.model||'—'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(t.model||'—')}</div>
           <div style="font-size:13px;">${fmtTokens(t.token_usage)}</div>
           <div style="font-size:13px;">${fmtDuration(t.duration_secs)}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(t.created_at)}</div>
@@ -102,11 +102,6 @@
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     loadWorker();
 

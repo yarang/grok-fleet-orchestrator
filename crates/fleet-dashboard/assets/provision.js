@@ -12,8 +12,12 @@
         if (!keys || keys.length === 0) {
           select.innerHTML = '<option value="">No keys — upload one first</option>';
         } else {
+          // 키 이름은 업로드 시 `trim().is_empty()`만 검증되므로 임의 문자열이
+          // 들어온다(`provisioning.rs`의 `create_ssh_key_api`). 이스케이프는
+          // `app.js`의 전역 헬퍼를 쓴다 — `provision.html`이 app.js를 먼저 로드한다.
           select.innerHTML = keys.map(k =>
-            '<option value="' + k.name + '">' + k.name + ' (' + k.key_type + ')</option>'
+            '<option value="' + escapeHtml(k.name) + '">' + escapeHtml(k.name)
+            + ' (' + escapeHtml(k.key_type) + ')</option>'
           ).join('');
         }
       } catch(e) {
@@ -73,18 +77,20 @@
             for (const s of data.steps) {
               const icon = s.status === 'applied' ? '✓' : s.status === 'skipped' ? '○' : '✗';
               const color = s.status === 'failed' ? '#c61e00' : '#666';
-              html += '<li style="color:' + color + ';">' + icon + ' ' + s.name + '</li>';
+              html += '<li style="color:' + color + ';">' + icon + ' ' + escapeHtml(s.name) + '</li>';
             }
             html += '</ul>';
           }
           html += '</div>';
           result.innerHTML = html;
         } else {
-          result.innerHTML = '<div style="padding:12px;border-radius:6px;background:rgba(198,30,0,0.1);border:1px solid #c61e00;color:#c61e00;"><strong>✗ Failed:</strong> ' + (data.error || 'Unknown error') + '</div>';
+          // 서버 에러 본문은 `Provisioning failed: {e}` 꼴이라 사용자가 입력한
+          // host 문자열이 실려 되돌아올 수 있다. 에러 경로도 신뢰하지 않는다.
+          result.innerHTML = '<div style="padding:12px;border-radius:6px;background:rgba(198,30,0,0.1);border:1px solid #c61e00;color:#c61e00;"><strong>✗ Failed:</strong> ' + escapeHtml(data.error || 'Unknown error') + '</div>';
         }
         result.style.display = 'block';
       } catch(e) {
-        result.innerHTML = '<div style="padding:12px;color:#c61e00;">Error: ' + e.message + '</div>';
+        result.innerHTML = '<div style="padding:12px;color:#c61e00;">Error: ' + escapeHtml(e.message) + '</div>';
         result.style.display = 'block';
       } finally {
         btn.disabled = false;

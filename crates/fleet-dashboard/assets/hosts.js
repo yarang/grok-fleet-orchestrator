@@ -60,7 +60,10 @@
 
     function grokBadge(version) {
       if (!version) return '<span style="color:var(--err);font-size:13px;">not installed</span>';
-      return '<span style="color:var(--ok);font-size:13px;">'+version+'</span>';
+      // 헬퍼 **안에서** 이스케이프한다. 호출부(`${grokBadge(h.grok_version)}`)는
+      // 이미 HTML 조각을 받는 자리라 거기서 감쌀 수 없고, `grok_version`은
+      // 워커가 스스로 보고하는 검증되지 않은 문자열이다.
+      return '<span style="color:var(--ok);font-size:13px;">'+escapeHtml(version)+'</span>';
     }
 
     function render() {
@@ -87,23 +90,18 @@
         row.onclick = () => window.location.href = 'hosts/' + encodeURIComponent(h.hostname);
         row.innerHTML = `
           <div style="font-weight:600;">${escapeHtml(h.hostname)}</div>
-          <div><span class="badge badge-${h.status}">${h.status}</span></div>
-          <div style="font-size:13px;color:var(--ink-muted-48);">${h.worker_name||'—'}</div>
+          <div><span class="badge badge-${escapeHtml(h.status)}">${escapeHtml(h.status)}</span></div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(h.worker_name||'—')}</div>
           <div>${grokBadge(h.grok_version)}</div>
-          <div style="font-size:13px;color:var(--ink-muted-48);">${h.fleet_worker_version||'—'}</div>
-          <div style="font-size:13px;color:var(--ink-muted-48);">${h.os_type||'—'}</div>
-          <div style="font-size:13px;font-family:var(--font-mono);">${h.arch||'—'}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(h.fleet_worker_version||'—')}</div>
+          <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(h.os_type||'—')}</div>
+          <div style="font-size:13px;font-family:var(--font-mono);">${escapeHtml(h.arch||'—')}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(h.last_heartbeat_at)}</div>
         `;
         table.appendChild(row);
       }
     }
 
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
 
     fetchHosts();
     setInterval(fetchHosts, 10000);
