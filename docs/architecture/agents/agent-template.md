@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/agent-template.md"
-last_verified: "2026-08-29"
+last_verified: "2026-08-30"
 last_verified_commit: "working-tree"
 owners: ["agent-platform", "security", "architecture"]
 ---
@@ -196,7 +196,7 @@ FK마다 폭발 반경을 논증하지 않은 `CASCADE`는 허용하지 않는�
 | 3 dependent set 해시 | 통과 | `tests/agent_templates.rs::gate3` |
 | 6b 필드별 게이팅 | 통과(권한 판정 절반) | `required_permissions_for_change`의 단위 테스트 3건 + Dashboard revision 생성 핸들러 |
 | 8 두 store 공유 행동 | 통과 | 시나리오 5개를 MemStore/PgStore에 **같은 함수로** 건다 |
-| 4 실행 중 retire와 manifest hash | 미도달 | 실행 중인 Agent 프로세스가 없다(`#89`) |
+| 4 실행 중 retire와 manifest hash | 미도달 | 실행 중인 Agent 프로세스가 없다(`#67` 4단계) |
 | 5 `TemplateUnavailable` admission 거절 | 미도달 | 같은 이유. `FailureKind`에 그 variant를 미리 만들지 않았다 |
 | 6 Project grant 교집합 | 미도달 | `projects`에 정책 컬럼이 없다(`#48`) |
 | 7 `builtin/default@1` 시드와 `ReadOnly` 등급 | 부분 | 본문 해시는 고정했으나 시드 행이 없고, `ReadOnly` 등급을 나타내는 타입 자체가 코드에 없다(`tool-catalog.md`는 정본이나 소유 로드맵 항목이 없다) |

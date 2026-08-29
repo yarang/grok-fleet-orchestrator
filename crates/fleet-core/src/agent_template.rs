@@ -42,7 +42,7 @@ use crate::ids::{AgentId, AgentTemplateId, AgentTemplateRevisionId, ProjectId};
 /// AgentTemplate 정체성의 수명 주기 상태.
 ///
 /// 다섯 상태 전부 **관리 전이만으로 도달한다** — 실행 중인 Agent 프로세스도
-/// Worker control stream도 필요하지 않다. [`crate::agent::AgentStatus`]가
+/// Worker control stream(`#67` 4단계)도 필요하지 않다. [`crate::agent::AgentStatus`]가
 /// 목표 8-상태 중 둘만 낸 것과 대비되는 지점이며, 그래서 `#86`은 다른
 /// Agent 항목들과 달라 지금 착수할 수 있다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

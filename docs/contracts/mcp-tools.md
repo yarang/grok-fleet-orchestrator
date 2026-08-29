@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/mcp-tools.md"
-last_verified: "2026-08-28"
+last_verified: "2026-08-30"
 last_verified_commit: "working-tree"
 owners: ["fleet-mcp"]
 ---
@@ -91,7 +91,7 @@ Project·Issue 도구는 `project:*`/`issue:*` capability를 부여하지 않은
 `required_permission`은 그 도구에 `None`을 반환한다(위 "전송과 오류" 절 참고).
 Agent 도구는 `#49` 1단계 범위다 — Agent를 **정의**로 만들고 회수할 뿐이며, 뒤에 프로세스가
 없으므로 시작·attach·Task 배정이 없다. 수명주기는 `ready → stopped` 둘뿐이고, `project_id`를
-바꾸는 도구는 만들지 않았다(불변). 명령/ACK 도구는 워커 제어 스트림(`#89`)이 선행이다.
+바꾸는 도구는 만들지 않았다(불변). 명령/ACK 도구는 워커 제어 스트림(`#67` 4단계)이 선행이다.
 AgentTemplate 관리 도구는 아직 제안 계약일 뿐 구현돼 있지 않다(로드맵 `#92`, `#86` 선행).
 새 도구는 여기 표, `tools/list` schema, handler 테스트를 한 변경으로 갱신한다.
 

@@ -12,8 +12,9 @@
 //! ACK로 돌려줄 때** 비로소 도달한다. 이 저장소에는 아직:
 //!
 //! - Worker control stream(명령 봉투·ACK·`worker_incarnation`)이 없다 —
-//!   로드맵 `#89`. 따라서 `Starting`/`Running`/`Failed`로 전이시킬 주체가
-//!   없다.
+//!   로드맵 `#67` 4단계. 따라서 `Starting`/`Running`/`Failed`로 전이시킬
+//!   주체가 없다. (이 자리는 `#89`로 적혀 있었으나 오표기였다. `#89`는 그
+//!   스트림 위에서 Agent가 Issue를 여는 소비자이고 선행이 `#67`이다.)
 //! - execution lease가 없다 — 로드맵 `#67` 2단계. `WarmIdle`은 정본상
 //!   execution lease와 Worker 프로세스 슬롯을 **점유한 채** 머무는 상태라,
 //!   lease 없이 만들면 아무것도 점유하지 않는 이름뿐인 상태가 된다.
@@ -57,7 +58,7 @@ pub enum AgentStatus {
     Ready,
     /// 회수됐다. 1단계에서는 프로세스가 없으므로 정리할 대상도 없어
     /// cleanup 증거 없이 곧바로 도달한다 — 정본이 요구하는 "cleanup 증거가
-    /// 있을 때만 `Stopped`"는 프로세스를 띄우는 `#89`에서 성립한다.
+    /// 있을 때만 `Stopped`"는 프로세스를 띄우는 `#67` 4단계에서 성립한다.
     Stopped,
 }
 

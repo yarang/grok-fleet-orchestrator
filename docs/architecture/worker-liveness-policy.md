@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/worker-liveness-policy.md"
-last_verified: "2026-08-17"
+last_verified: "2026-08-30"
 ---
 
 # Worker Liveness와 선택적 Heartbeat 정책
@@ -42,10 +42,18 @@ flowchart TD
 `heartbeat_interval_secs = 0`으로 처리하지 않는다. 0은 모호하며 잘못된 타이머·나눗셈
 동작을 만들 수 있다.
 
-**Agent control 제약**: 현재 Agent start/stop/capture command는 Worker의 heartbeat
-polling으로 전달된다. 따라서 별도 control stream 또는 bounded command poll을 구현하기
-전에는 Agent를 호스팅하는 Worker에 `on_demand`를 적용할 수 없다. 이는 heartbeat를
-단순히 끄는 기능이 아니라 control plane 전달 방식을 함께 바꾸는 작업이다.
+**Agent control 제약**(2026-08-30 실측 정정): 이 절은 "현재 Agent start/stop/capture command는
+Worker의 heartbeat polling으로 전달된다"고 적고 있었으나 **코드상 사실이 아니다**. control
+plane→Worker 표면은 heartbeat 응답의 `desired_state` 하나뿐이고(`crates/fleet-api/src/schema.rs`의
+`HeartbeatResponse`, `&'static str`), 값은 `"running"`/`"drain"` 둘이며 CPU/RAM 90% 초과 또는 이미
+`Draining`인 워커에서만 `"drain"`이 된다. Agent 명령은 **한 건도 실리지 않는다**. 워커측 소비자도
+`info!` 로그 한 줄이 전부다(`crates/fleet-worker/src/registration.rs`). drain이 실제로 성립하는 것은
+워커가 거절하기 때문이 아니라 `WorkerSelector::select`가 `status: Some(WorkerStatus::Online)`으로
+후보를 거르기 때문이다(`crates/fleet-scheduler/src/selector.rs`) — 즉 집행 지점은 오케스트레이터측이다.
+
+따라서 별도 control stream 또는 bounded command poll을 구현하기 전에는 Agent를 호스팅하는
+Worker에 `on_demand`를 적용할 수 없다. 이는 heartbeat를 단순히 끄는 기능이 아니라 control plane
+전달 방식을 **처음으로 만드는** 작업이며, 그 소유자는 `#67` 4단계다.
 
 WarmIdle의 execution lease 갱신과 self-fencing은 Worker liveness heartbeat와 다른 control channel
 계약이다. `on_demand`를 허용하려면 Worker가 idle이어도 lease 만료·revoke·drain 명령을 받을 수 있는

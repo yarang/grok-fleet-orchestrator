@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/agent-management.md"
-last_verified: "2026-08-28"
+last_verified: "2026-08-30"
 last_verified_commit: "working-tree"
 owners: ["agent-platform", "api-contracts"]
 ---
@@ -69,5 +69,5 @@ Agent를 다시 회수하면 쓰기를 건너뛰고 같은 `updated_at`을 반�
 - 목록 표면이 추가되면 pagination과 version negotiation 계약
 
 1단계는 이 게이트들을 **통과한 것이 아니라 우회한다** — 노출 transport(MCP·Dashboard)와 권한
-검사 시점만 확정했고, `request_id`·`429`·결과 불명 상태·pagination 협상은 명령 계층(`#89`)이
+검사 시점만 확정했고, `request_id`·`429`·결과 불명 상태·pagination 협상은 명령 계층(`#67` 4단계)이
 생길 때 함께 정한다. 현재 목록은 limit/offset만 받으며 version negotiation이 없다.

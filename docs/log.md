@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-08-29"
+last_verified: "2026-08-30"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -4454,3 +4454,100 @@ grep -rn 'fleet_list_issues\|fleet_transition_issue' crates/fleet-mcp/src/
 적어 두지 않으면, 다음 세션은 HTTP 표면과 MCP 표면의 비대칭을 보고 "빠뜨렸구나"로 읽는다.
 **의도적 부재는 적어 두지 않으면 결함으로 읽힌다** — 채울 방법이 없는 것을 미리 만들지
 않는다는 원칙의 이면이다. 만들지 않은 것에는 만들지 않은 이유가 붙어 있어야 한다.
+
+## 2026-08-30 — `#67` 귀속 정정: 제어 스트림의 소유자는 `#89`가 아니었다
+
+### 발견: 문서가 만든 순환
+
+`#92`를 닫은 뒤 다음 항목을 고르려고 막힌 항목들의 공통 선행을 훑었다. `#49` 2단계, `#69`,
+`#70` 본체, `#86` 후속, `#87`, `#67`의 남은 게이트 셋이 전부 "Worker 제어 스트림이 없다"에서
+멈춰 있었고, 그 스트림의 소유자로 **`#89`**가 적혀 있었다 — `provisioning.md`의 유예 목록 9칸
+중 6칸, `control-plane-authority-and-failover.md`의 표 4칸, `agent-template.md`, `mcp-tools.md`,
+`agent-management.md`, `project-management.md`, `ui-design.md`, `observability-and-reconciliation.md`,
+그리고 `crates/fleet-core/src/agent.rs`의 모듈 doc까지.
+
+그런데 `#89`의 로드맵 행은 **선행 `#88`, `#67`**이다. 즉 `#67`은 스트림을 `#89`로 미루고
+`#89`는 `#67`을 기다린다. 둘 중 하나는 틀렸고, 그 상태에서는 **두 항목 모두 영원히 착수
+불가로 읽힌다.**
+
+### 판정: 오표기는 `#89` 쪽이다
+
+세 가지가 같은 방향을 가리킨다.
+
+1. **`#67`의 항목명이 "Worker execution lease·Agent command ACK"다.** 명령/ACK 계층이 이름에
+   이미 들어 있다.
+2. **9-필드 명령 봉투와 ACK를 정의하는 문서가 `#67`의 설계 정본이다.** `provisioning.md`
+   §"상태와 명령"이 `agent_id`·`request_id`·`generation`·`task_id`·`actor`·`expires_at`·
+   `control_epoch`·`worker_incarnation`·`fencing_token` 아홉 개를 규정하는데, 이 문서는
+   `#67` 행의 설계 정본 칸에 `control-plane-authority-and-failover.md`와 나란히 적혀 있다.
+3. **`#89`의 완료 게이트가 전부 Issue 전용이다.** dedup 부분 유니크 인덱스, `occurrence_count`,
+   Attempt당 상한, `AgentIssueFloodSuspected`, 감사 실패 시 거절 — 하나도 transport가 아니다.
+   `#89`는 스트림 **위에** "Agent가 Issue를 연다"를 얹는 소비자다.
+
+따라서 새 로드맵 ID를 세우지 않았다. 처음에는 "소유자가 없는 고아 범위"로 읽고 `#99`를
+만들 뻔했는데, **분기 하나를 빠뜨린 오독이었다** — 소유자가 없는 경우와 소유자가 오표기된
+경우는 증상이 같다(아무도 그 이름으로 착수하지 않는다). 구분하는 방법은 하나뿐이다:
+**범위를 정의하는 문서가 누구의 설계 정본인지 본다.** 여기서는 `provisioning.md`가 답을
+줬다. 고아였다면 그 문서를 정본으로 든 항목이 없었을 것이다.
+
+### 함께 고친 사실 오류
+
+`worker-liveness-policy.md`는 "현재 Agent start/stop/capture command는 Worker의 heartbeat
+polling으로 전달된다"고 적고 있었다. **코드상 사실이 아니다.** `desired_state`를 저장소 전체에서
+추적하면 8곳뿐이고, 타입은 `HeartbeatResponse`의 `&'static str` 하나, 값은 `"running"`/`"drain"`
+둘, 생산 조건은 CPU/RAM 90% 초과 또는 이미 `Draining`인 워커, 워커측 소비자는 `info!` 로그
+한 줄이다. Agent 명령은 한 건도 실리지 않는다.
+
+**다만 이것을 "drain이 고장났다"로 읽으면 과장이다.** `WorkerSelector::select`가
+`status: Some(WorkerStatus::Online)`으로 후보를 거르므로 `Draining` 워커는 선택 단계에서
+빠진다 — 집행은 오케스트레이터측에서 이미 성립한다. 워커측 no-op이 만드는 실제 공백은
+"워커가 스스로 거절하거나 drain 진행을 보고하지 못한다"이지 "drain이 안 걸린다"가 아니다.
+처음 읽었을 때 후자로 적었다가 `selector.rs`를 확인하고 고쳤다.
+
+부수적으로 `Draining`이 단방향 함정이라는 것도 확인했다: 하트비트의 상태 승격이
+`worker.status != WorkerStatus::Draining` 가드 뒤에 있어 하트비트로는 절대 풀리지 않고,
+운영자의 status-set 경로만 되돌린다. 의도된 설계로 보여 손대지 않았다.
+
+### 이 커밋의 범위와 하지 않은 것
+
+문서·주석의 **귀속만** 고쳤다. 동작 변경은 없다. `#67` 4단계(명령 봉투·ACK)의 구현은 이
+커밋에 없다 — 범위가 바뀌었으므로 설계 정본을 먼저 맞추고 로드맵을 동기화한다는 순서를
+따랐다.
+
+`docs/log.md`의 과거 항목(`3892`행 등)은 고치지 않았다. 이 파일은 append-only이고, 그때
+그렇게 판단했다는 것 자체가 기록이다. `docs/reviews/`의 과거 리뷰도 같은 이유로 두었다.
+`issues.md:31`은 원래부터 옳았다 — 거기서 `#89`는 Issue 기능의 소유자이고 선행으로 `#67`을
+이미 들고 있었다. **전수 치환이 아니라 칸마다 의미를 읽고 골랐다**: `tasks.agent_id`는
+transport가 아니라 스케줄러 사실이므로 `#49` 2단계로, Issue 관련 `#89`는 그대로.
+
+### 검증 한계
+
+귀속의 옳음은 **문서 간 정합**으로 판정했지 실행으로 확인할 수 없다. 로드맵 ID는 코드에
+주석으로만 나타나므로 테스트가 이 변경을 검증하지 못한다. 대신 각 자리를 고칠 때마다 그
+칸이 말하는 대상이 무엇인지 코드에 확인했다(`desired_state` 전수 추적, `Agent` 구조체에
+host 필드 부재, `AgentStatus`가 2-상태, `selector.rs`의 `Online` 필터).
+
+### 부기: 게이트 신선도 검사가 볼륨 스큐 때문에 통과를 위조한다
+
+커밋 직전 `agent.md` §4.3의 신선도 검사(소스 mtime < 게이트 로그 mtime)를 돌렸더니
+"게이트가 14 296초 나중"이라는 답이 나왔다. **그런데 그 소스 파일들은 몇 분 전에 내가 쓴
+것이다.** `date +%s`와 대조해 보니 레포(`/Volumes/Data01`)의 mtime이 약 3.97시간 과거로
+찍히고, 스크래치패드(`/private/tmp`)의 게이트 로그는 정확했다. 즉 두 값의 차이는 신선도가
+아니라 **볼륨 간 시계 오프셋**이었다.
+
+이 방향의 스큐는 검사를 무력화하는 데 그치지 않고 **뒤집는다** — 레포 mtime이 항상 4시간
+과거로 보이므로, 게이트를 돌린 뒤 소스를 고쳐도 "게이트가 나중"이라는 답이 계속 나온다.
+`#49` 때 이 검사가 잡아낸 실제 사고(초록이 고치기 *전* 트리의 판정이었던 것)를, 이 환경에서는
+그대로 놓치게 된다. 시각 비교로 순서를 **추론**하는 것 자체가 약점이었다.
+
+대응은 비교를 고치는 것이 아니라 비교를 없애는 것이다: **모든 편집을 확정한 뒤 게이트를
+다시 돌린다.** 캐시가 살아 있어 재실행 비용이 작고, 순서가 추론이 아니라 사실이 된다.
+`agent.md` §4.3의 해당 bullet에 적어 두었다 — 로그에만 적으면 다음 세션이 명령을 만들 때
+보지 않는다는 것을 이 저장소는 이미 하루에 두 번 겪었다.
+
+**남은 정직한 한계**: 이 커밋에서도 게이트 재실행 시작 뒤에 편집이 더 있었다. 전부
+Markdown(문서 frontmatter의 `last_verified`와 이 로그 항목, `agent.md`)이고, 게이트 명령 중
+Markdown을 읽는 것은 없다 — `include_str!`은 저장소 전체에서 `crates/fleet-api/src/openapi.yaml`
+한 건뿐이며 그 파일은 이 커밋에서 바뀌지 않았다. 따라서 컴파일·lint·테스트 결과는 그
+편집들과 무관하다. 이것은 "게이트를 다시 돌렸다"가 아니라 **"다시 돌릴 필요가 없음을
+근거로 보였다"**이며, 두 진술을 섞지 않기 위해 여기 적는다.

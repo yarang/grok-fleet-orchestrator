@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-08-29"
+last_verified: "2026-08-30"
 last_verified_commit: "working-tree"
 owners: ["architecture", "operations"]
 ---
@@ -228,14 +228,21 @@ AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
 **의도적으로 만들지 않은 것.** "채울 방법이 없는 것은 미리 만들지 않는다"에 따라, 생산자가
 없는 구조는 이번에 만들지 않았다.
 
+**2026-08-30 귀속 정정.** 아래 표는 명령 봉투·ACK·self-fencing을 `#89`로 귀속시켰으나 오표기였다.
+`#67`의 항목명 자체가 "Worker execution lease·**Agent command ACK**"이고 9-필드 봉투를 정의하는
+[Agent provisioning](agents/provisioning.md) §"상태와 명령"이 `#67`의 설계 정본이다. `#89`("Agent
+보고 경로와 폭주 방지")는 완료 게이트가 전부 Issue 전용이며 **선행이 `#67`**이다 — 즉 스트림의
+소비자다. 오표기 상태에서는 `#67`이 스트림을 `#89`로 미루고 `#89`가 `#67`을 기다리는 순환이
+성립해, 두 항목 모두 영원히 착수 불가로 읽혔다.
+
 | 미룬 것 | 만들지 않은 이유 | 귀속 |
 | --- | --- | --- |
-| `worker_execution_lease`의 CAS slot claim·`fencing_token` | **원래 사유였던 "Agent 엔티티가 없다"는 만료됐다** — 엔티티는 `#49` 1단계(2026-08-28, 마이그레이션 027)로 생겼고, 레코드가 실어야 할 나머지 필드도 생산자를 얻었다(`worker_incarnation`은 `#67` 2단계, `control_epoch`는 `#67` 1단계). 지금 막는 것은 필드가 아니라 **lease의 주체**다: fencing할 대상인 *실행 중인 Agent process*가 아직 존재하지 않는다. `dispatch`는 Agent를 고르지 않고(`#49` 2단계), `WorkerTransport`에는 프로세스를 띄울 채널이 없다(`#89`). 지금 만들면 아래 WarmIdle 칸과 같은 "영원히 비는 상태"가 된다 | `#49` 2단계 + `#89` |
-| ~~`worker_incarnation`~~ (Agent command ACK는 유지) | **`worker_incarnation`은 `#67` 2단계(2026-08-29)가 만들었다.** 이 칸의 원래 판단은 "제어 스트림이 없으니 세대를 실어 나를 수 없다"였는데, 그 전제는 **워커가 자기 세대를 보고한다**는 설계(하트비트의 `process_incarnation`)에 묶여 있었다. register가 프로세스 기동 1회 이벤트라는 사실을 쓰면 오케스트레이터가 **관측만으로** 같은 신호를 만들 수 있고, 그쪽이 워커 시계도 워커가 고른 값도 술어에 들이지 않으므로 더 강하다. Agent command ACK는 그대로 남는다 — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널이 없다 | ACK는 `#89` |
-| Agent self-fencing | 위와 같은 이유. 워커가 자기 세대를 확인할 입력이 없다 | `#89` |
+| `worker_execution_lease`의 CAS slot claim·`fencing_token` | **원래 사유였던 "Agent 엔티티가 없다"는 만료됐다** — 엔티티는 `#49` 1단계(2026-08-28, 마이그레이션 027)로 생겼고, 레코드가 실어야 할 나머지 필드도 생산자를 얻었다(`worker_incarnation`은 `#67` 2단계, `control_epoch`는 `#67` 1단계). 지금 막는 것은 필드가 아니라 **lease의 주체**다: fencing할 대상인 *실행 중인 Agent process*가 아직 존재하지 않는다. `dispatch`는 Agent를 고르지 않고(`#49` 2단계), `WorkerTransport`에는 프로세스를 띄울 채널이 없다(그 채널은 `#67` 4단계 자신이다). 지금 만들면 아래 WarmIdle 칸과 같은 "영원히 비는 상태"가 된다 | `#49` 2단계 + `#67` 4단계 |
+| ~~`worker_incarnation`~~ (Agent command ACK는 유지) | **`worker_incarnation`은 `#67` 2단계(2026-08-29)가 만들었다.** 이 칸의 원래 판단은 "제어 스트림이 없으니 세대를 실어 나를 수 없다"였는데, 그 전제는 **워커가 자기 세대를 보고한다**는 설계(하트비트의 `process_incarnation`)에 묶여 있었다. register가 프로세스 기동 1회 이벤트라는 사실을 쓰면 오케스트레이터가 **관측만으로** 같은 신호를 만들 수 있고, 그쪽이 워커 시계도 워커가 고른 값도 술어에 들이지 않으므로 더 강하다. Agent command ACK는 그대로 남는다 — `WorkerTransport`의 오케스트레이터→워커 표면은 `dispatch`/`cancel`이 전부라 ACK를 실어 보낼 채널이 없다 | ACK는 `#67` 4단계 |
+| Agent self-fencing | 위와 같은 이유. 워커가 자기 세대를 확인할 입력이 없다 | `#67` 4단계 |
 | `agent_id`를 실은 dispatch | Agent/AgentTemplate 엔티티 미존재 | `#49` |
 | WarmIdle(=`task_id` NULL) lease 행 | 그런 행을 만드는 코드 경로가 없다 — 만들면 영원히 비는 상태 | 생산자 생김과 동시에 |
-| `OutcomeUnknown` **상태**(비terminal) | 설계는 [실행 일관성](tasks/execution-consistency.md)에 이미 그려져 있다 — 막는 것은 설계가 아니라 **해소기**다. 그 상태의 출구는 전부 "워커 inventory 조회와 effect ledger로 증명"인데 두 판독기가 없다. 지금 만들면 나갈 수 없는 상태가 되고, `docs/log.md`가 기록한 위험(비terminal이 Project archive를 정지시킨다)이 그대로 발생한다. **관측 사실 자체는 아래 인접 결함 1 해소로 terminal `FailureKind::ResultLost`에 기록된다 — 그것은 이 상태가 아니다** | inventory·effect ledger 판독기 (`#89`) |
+| `OutcomeUnknown` **상태**(비terminal) | 설계는 [실행 일관성](tasks/execution-consistency.md)에 이미 그려져 있다 — 막는 것은 설계가 아니라 **해소기**다. 그 상태의 출구는 전부 "워커 inventory 조회와 effect ledger로 증명"인데 두 판독기가 없다. 지금 만들면 나갈 수 없는 상태가 되고, `docs/log.md`가 기록한 위험(비terminal이 Project archive를 정지시킨다)이 그대로 발생한다. **관측 사실 자체는 아래 인접 결함 1 해소로 terminal `FailureKind::ResultLost`에 기록된다 — 그것은 이 상태가 아니다** | inventory·effect ledger 판독기 (`#67` 4단계 후속) |
 
 **이번에 손대지 않은 인접 결함 2건**(발견했으나 이 단계의 범위 밖이라 기록만 남긴다).
 

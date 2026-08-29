@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/provisioning.md"
-last_verified: "2026-08-28"
+last_verified: "2026-08-30"
 last_verified_commit: "working-tree"
 ---
 
@@ -93,16 +93,23 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 
 ### 유예 목록
 
+> **2026-08-30 귀속 정정.** 아래 표는 여섯 칸을 `#89`(Agent 보고 경로와 폭주 방지)로 귀속시켰으나
+> 오표기였다. Worker 제어 스트림과 위 §"상태와 명령"의 9-필드 명령 봉투·ACK는 **이 문서를 설계
+> 정본으로 갖는 `#67`("Worker execution lease·Agent command ACK")의 범위**다. `#89`는 그 스트림
+> 위에 "Agent가 Issue를 연다"를 얹는 소비자이며, 그 근거로 `#89`의 선행이 `#67`이다. 오표기를
+> 그대로 두면 `#67`이 스트림을 `#89`로 미루고 `#89`는 `#67`을 기다리는 **순환**이 생기고, 실제로
+> [권한과 장애 전환](../control-plane-authority-and-failover.md)과 이 표가 그렇게 적혀 있었다.
+
 | 항목 | 왜 미뤘나 | 선행 |
 |---|---|---|
-| `Starting`/`Running`/`Failed` 상태 | 상태를 옮길 주체가 Worker 제어 스트림뿐이며 그 스트림이 없다 | `#89` |
+| `Starting`/`Running`/`Failed` 상태 | 상태를 옮길 주체가 Worker 제어 스트림뿐이며 그 스트림이 없다 | `#67` 4단계 |
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
-| `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다 | `#89` |
-| 9-필드 명령 봉투와 ACK | 명령을 받을 상대가 없다 | `#89` |
-| `generation`/`control_epoch`/`fencing_token` | 경합할 두 번째 writer가 없다 | `#89` |
-| 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#89`, `#67` 후속 |
-| `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다 | `#89` |
+| `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다 | `#67` 4단계 |
+| 9-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 실제로 남은 선행은 워커측 프로세스 기동·격리 경로다 | `#67` 4단계 |
+| `generation`/`control_epoch`/`fencing_token` | 경합할 두 번째 writer가 없다 | `#67` 4단계 |
+| 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4단계 후속 |
+| `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
 
 위 "구현 게이트" 6개는 전부 명령·ACK 계층의 시험이므로 1단계 범위 밖이다. 1단계가 실제로
