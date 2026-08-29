@@ -575,6 +575,16 @@ h2 {
   grid-template-columns: 2fr 0.9fr 0.7fr 0.9fr 1fr;
 }
 
+/* /agent-templates 페이지 (Name/Status/Scope/Description/Created by/Created, 6열) — #92. */
+#template-table .row {
+  grid-template-columns: 1.2fr 0.8fr 0.6fr 1.8fr 0.9fr 0.9fr;
+}
+
+/* /agent-templates/:id 상세의 Revision 테이블 (#/Prompt/Tools/Skills/Created/Actions, 6열) — #92. */
+#revision-table .row {
+  grid-template-columns: 0.3fr 2.4fr 0.9fr 0.9fr 1fr 0.7fr;
+}
+
 /* ── Status pills ────────────────────────────────────────────────── */
 
 .status-pill {

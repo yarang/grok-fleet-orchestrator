@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Host Detail — Fleet</title>
+  <title>Agent Templates — Fleet</title>
   <link rel="stylesheet" href="static/styles.css" />
 </head>
 <body>
@@ -17,9 +17,9 @@
       <div class="sidebar-group">
       <a href="./" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Overview</span></a>
       <a href="tasks" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1.5 1.5L8 5"/><path d="M4 12l1.5 1.5L8 11"/><path d="M4 18l1.5 1.5L8 17"/></svg><span>Tasks</span></a>
-      <a href="hosts" class="sidebar-link active" aria-current="page"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="7" cy="7" r="0.8" fill="currentColor" stroke="none"/><circle cx="7" cy="17" r="0.8" fill="currentColor" stroke="none"/></svg><span>Hosts</span></a>
+      <a href="hosts" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><circle cx="7" cy="7" r="0.8" fill="currentColor" stroke="none"/><circle cx="7" cy="17" r="0.8" fill="currentColor" stroke="none"/></svg><span>Hosts</span></a>
       <a href="projects" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg><span>Projects</span></a>
-      <a href="agent-templates" class="sidebar-link"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg><span>Agent Templates</span></a>
+      <a href="agent-templates" class="sidebar-link active" aria-current="page"><svg class="sidebar-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/></svg><span>Agent Templates</span></a>
       </div>
       <div class="sidebar-group">
         <p class="sidebar-group-label">Admin</p>
@@ -39,21 +39,52 @@
   </button>
   <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
   <!-- sidebar:end -->
-
   <main>
-    <a href="hosts" class="back-link">← Back to Hosts</a>
-    <h1 class="page-title" id="host-name">Loading…</h1>
-    <p class="page-subtitle" id="host-status"></p>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div>
+        <h1 class="page-title">Agent Templates</h1>
+        <p class="page-subtitle">Reusable Agent bodies — role prompt, tools and skills — versioned as revisions. An Agent pins one revision.</p>
+      </div>
+      <a href="agent-templates/new" class="btn btn-primary" id="new-template-btn">+ New Template</a>
+    </div>
 
-    <div class="detail-grid" id="host-details"></div>
+    <div class="panel" style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
+      <label style="font-size:13px;">
+        <span style="display:block;margin-bottom:4px;color:var(--ink-muted-48);">Status</span>
+        <select id="filter-status">
+          <option value="">All</option>
+          <option value="draft">Draft</option>
+          <option value="published">Published</option>
+          <option value="deprecated">Deprecated</option>
+          <option value="retired">Retired</option>
+          <option value="discarded">Discarded</option>
+        </select>
+      </label>
+      <label style="font-size:13px;">
+        <span style="display:block;margin-bottom:4px;color:var(--ink-muted-48);">Scope</span>
+        <select id="filter-scope">
+          <option value="">All scopes</option>
+          <option value="global">Global only</option>
+        </select>
+      </label>
+    </div>
 
-    <h2 style="font-size:22px;font-weight:600;letter-spacing:-0.265px;margin-top:32px;margin-bottom:12px;">Event Timeline</h2>
-    <ul class="timeline" id="event-timeline">
-      <li class="empty-state"><p>No events recorded.</p></li>
-    </ul>
+    <div id="template-table" class="table">
+      <div class="row header" id="template-table-header">
+        <div class="sortable" data-sort-key="name">Name</div>
+        <div class="sortable" data-sort-key="status">Status</div>
+        <div>Scope</div>
+        <div>Description</div>
+        <div class="sortable" data-sort-key="created_by">Created by</div>
+        <div class="sortable" data-sort-key="created_at">Created</div>
+      </div>
+    </div>
+    <div id="empty-state" class="empty-state" style="display:none;">
+      <h3>No agent templates yet</h3>
+      <p>Create one to share a role prompt, tool set and skill set across Agents.</p>
+    </div>
   </main>
-
   <script src="static/app.js"></script>
-  <script src="static/host-detail.js"></script>
+  <script src="static/agent-templates.js"></script>
 </body>
 </html>

@@ -97,15 +97,26 @@ impl AgentTemplateStatus {
     /// 넓히지 않는다 — `Deprecated`가 이미 새 pin을 허용하고 있으므로
     /// 되돌려도 도달 가능한 것이 늘지 않는다.
     pub fn can_transition_to(self, next: Self) -> bool {
-        matches!(
-            (self, next),
-            (Self::Draft, Self::Published)
-                | (Self::Draft, Self::Discarded)
-                | (Self::Published, Self::Deprecated)
-                | (Self::Published, Self::Retired)
-                | (Self::Deprecated, Self::Published)
-                | (Self::Deprecated, Self::Retired)
-        )
+        self.allowed_transitions().contains(&next)
+    }
+
+    /// 이 상태에서 갈 수 있는 상태들 — **전이표의 유일한 정의**.
+    ///
+    /// [`Self::can_transition_to`]가 이것을 조회하도록 뒤집어 둔 이유는
+    /// 관리 화면이다. 화면은 누를 수 있는 버튼만 그려야 하는데, 그러려면
+    /// 표를 **열거**할 수 있어야 한다. 판정 함수만 있으면 호출자가 후보
+    /// 상태 목록을 직접 들고 있어야 하고, 그 목록이 두 번째 표가 된다.
+    ///
+    /// `self`에 대해 exhaustive하므로 상태를 추가하면 컴파일이 깨진다 —
+    /// 새 상태가 "아무 데도 못 가는 상태"로 조용히 취급되지 않는다.
+    pub fn allowed_transitions(self) -> &'static [Self] {
+        match self {
+            Self::Draft => &[Self::Published, Self::Discarded],
+            Self::Published => &[Self::Deprecated, Self::Retired],
+            Self::Deprecated => &[Self::Published, Self::Retired],
+            // 둘 다 종료 상태다. 나가는 간선이 없다는 것이 종료의 정의다.
+            Self::Retired | Self::Discarded => &[],
+        }
     }
 
     /// 이 상태의 템플릿에 새 pin을 붙일 수 있는지.
@@ -467,6 +478,25 @@ mod tests {
         for s in [Draft, Published, Deprecated, Retired, Discarded] {
             assert!(!s.can_transition_to(s));
         }
+    }
+
+    #[test]
+    fn allowed_transitions_enumerates_without_duplicates() {
+        use AgentTemplateStatus::*;
+        // `can_transition_to`는 이제 이 목록의 `contains`이므로 위 테스트가
+        // 간선의 유무는 전부 덮는다. 덮지 못하는 것이 하나 있다 — **중복**
+        // 이다. `[Published, Published]`도 `contains`는 똑같이 통과하지만
+        // 관리 화면은 같은 버튼을 두 번 그린다. 열거를 소비하는 쪽이 생겼기
+        // 때문에 생긴 새 요구라 여기서 따로 잠근다.
+        for s in [Draft, Published, Deprecated, Retired, Discarded] {
+            let list = s.allowed_transitions();
+            let mut uniq = list.to_vec();
+            uniq.sort_by_key(|t| t.as_str());
+            uniq.dedup();
+            assert_eq!(uniq.len(), list.len(), "{s:?}의 전이 목록에 중복이 있다");
+        }
+        assert!(Retired.allowed_transitions().is_empty());
+        assert!(Discarded.allowed_transitions().is_empty());
     }
 
     #[test]

@@ -341,6 +341,44 @@ async fn html_response_gets_root_base_href_when_base_path_unset() {
     );
 }
 
+/// 위 두 테스트가 지키는 주입은 **바이트 리터럴 `<head>` 6글자**를 찾는다
+/// (`app.rs`의 `bytes.windows(6).position(|w| w == b"<head>")`). 그래서
+/// `<head lang="en">`이나 `<HEAD>`로 쓴 페이지는 base 태그를 조용히 받지
+/// 못하고, 루트 마운트에서는 아무 증상도 없다 — `<base href="/">`가 없어도
+/// 상대경로가 어차피 origin root로 풀리기 때문이다. 증상은 리버스 프록시
+/// prefix 아래에서만, 그것도 그 페이지에서만 나타난다.
+///
+/// 위 두 테스트는 각각 **한 페이지**(`/`)만 본다. 그것으로는 새로 추가되는
+/// 페이지를 덮을 수 없어서 자산 전체를 훑는 이 단정을 따로 둔다. 개수를 정확히
+/// 1로 보는 이유는 두 개일 때 주입이 첫 번째에만 들어가 어느 쪽이 실제
+/// `<head>`인지에 따라 결과가 갈리기 때문이다.
+#[test]
+fn every_html_asset_has_exactly_one_bare_head_tag() {
+    use fleet_dashboard::assets::Asset;
+
+    let pages: Vec<String> = Asset::iter()
+        .map(|p| p.to_string())
+        .filter(|p| p.ends_with(".html"))
+        .collect();
+    // 바닥 단정 — 자산이 비면 아래 루프가 조용히 통과한다.
+    assert!(
+        pages.len() >= 15,
+        "html 자산이 {}개뿐이다 — 임베드가 비었을 가능성",
+        pages.len()
+    );
+
+    for path in pages {
+        let body = Asset::get(&path).expect("자산 조회");
+        let text = String::from_utf8_lossy(body.data.as_ref());
+        let count = text.matches("<head>").count();
+        assert_eq!(
+            count, 1,
+            "{path}: `<head>`(정확히 이 6바이트)가 {count}개다 — \
+             `inject_base_href`가 base 태그를 넣지 못하거나 엉뚱한 곳에 넣는다"
+        );
+    }
+}
+
 /// `POST /logout`의 redirect Location이 base_path를 포함해야, prefix 뒤에
 /// 마운트된 배포에서도 브라우저가 nginx가 실제로 라우팅하는 경로로 이동한다.
 #[tokio::test]
@@ -3010,11 +3048,203 @@ async fn new_project_page_is_forbidden_without_project_create() {
     );
 }
 
+// ── AgentTemplate 화면과 단건 조회 (로드맵 #92) ─────────────────────────
+//
+// 이 표면의 AgentTemplate 엔드포인트는 `6d3763e`에서 들어왔지만 통합 테스트가
+// 한 건도 없었다(그 커밋이 "이 표면에는 아직 화면이 없고 JSON API뿐"이라고
+// 남긴 검증 한계가 정확히 이것이다). 화면을 붙이면서 함께 닫는다.
+
+/// 테스트용 AgentTemplate 하나. `status`를 인자로 받는 이유는 파생 필드
+/// (`allowed_transitions`/`accepts_new_revisions`)가 상태에 따라 갈리기 때문이다.
+fn sample_agent_template(
+    name: &str,
+    status: fleet_core::AgentTemplateStatus,
+) -> fleet_core::AgentTemplate {
+    let now = Utc::now();
+    fleet_core::AgentTemplate {
+        id: fleet_core::AgentTemplateId::new(),
+        project_id: None,
+        name: name.into(),
+        description: Some("seeded".into()),
+        created_by: Some("test_admin".into()),
+        status,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 #[tokio::test]
-async fn every_sidebar_page_links_to_projects() {
-    // 사이드바는 12개 HTML 파일에 손으로 복제돼 있고 동기화 자동화가 없다
+async fn agent_template_pages_are_served_with_the_right_permissions() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    for path in ["agent-templates", "agent-templates/new"] {
+        assert_eq!(
+            page_status(&client, &format!("http://{}/{path}", server.addr), &cookie).await,
+            200,
+            "/{path} must render for an admin"
+        );
+    }
+    // 상세는 존재하지 않는 id여도 껍데기 HTML을 준다 — projects/hosts와 같은
+    // 관례로, 실제 조회와 404 표시는 JS가 `/api/agent-templates/:id`로 한다.
+    assert_eq!(
+        page_status(
+            &client,
+            &format!(
+                "http://{}/agent-templates/{}",
+                server.addr,
+                fleet_core::AgentTemplateId::new()
+            ),
+            &cookie
+        )
+        .await,
+        200
+    );
+}
+
+#[tokio::test]
+async fn agent_template_pages_are_forbidden_without_their_permissions() {
+    // 목록/상세는 read로, 생성 폼은 create로 가려진다. 읽기만 가능한 사용자에게
+    // 생성 폼을 보여주면 다 채워 넣고 제출한 뒤에야 403을 받는 경험이 된다.
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::DashboardView]).await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        page_status(
+            &client,
+            &format!("http://{}/agent-templates", server.addr),
+            &cookie
+        )
+        .await,
+        403
+    );
+
+    let (store, cookie) =
+        seed_test_session_with_perms(MemStore::new(), &[PermissionKind::AgentTemplateRead]).await;
+    let server = spawn_server_inner(store).await;
+    assert_eq!(
+        page_status(
+            &client,
+            &format!("http://{}/agent-templates", server.addr),
+            &cookie
+        )
+        .await,
+        200,
+        "read-only user can still see the list"
+    );
+    assert_eq!(
+        page_status(
+            &client,
+            &format!("http://{}/agent-templates/new", server.addr),
+            &cookie
+        )
+        .await,
+        403,
+        "but not the create form"
+    );
+}
+
+#[tokio::test]
+async fn get_agent_template_api_ships_the_derived_transition_fields() {
+    // 화면이 전이표를 다시 구현하지 않게 하려고 서버가 열거를 실어 보낸다.
+    // 여기서 잠그는 것은 값 자체가 아니라 **파생이 실제로 실린다**는 것이다 —
+    // 표의 내용은 `fleet-core`의 단위 테스트가 소유한다.
+    let store = MemStore::new();
+    let draft = sample_agent_template("draft-one", fleet_core::AgentTemplateStatus::Draft);
+    let retired = sample_agent_template("retired-one", fleet_core::AgentTemplateStatus::Retired);
+    store.create_agent_template(&draft).await.unwrap();
+    store.create_agent_template(&retired).await.unwrap();
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    let body: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/agent-templates/{}", server.addr, draft.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(body["status"], "draft");
+    assert_eq!(
+        body["allowed_transitions"],
+        serde_json::json!(["published", "discarded"])
+    );
+    assert_eq!(body["accepts_new_revisions"], true);
+
+    // 종료 상태에서는 목록이 비고 revision도 못 붙는다. 이 두 값이 있어야
+    // 화면이 "버튼 없음"과 "아직 못 받아옴"을 구분할 수 있다.
+    let body: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/agent-templates/{}", server.addr, retired.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(body["allowed_transitions"], serde_json::json!([]));
+    assert_eq!(body["accepts_new_revisions"], false);
+}
+
+#[tokio::test]
+async fn get_agent_template_api_separates_missing_from_forbidden() {
+    // 목록을 받아 클라이언트에서 거르면 "없는 id"와 "볼 권한이 없는 표면"이
+    // 둘 다 빈 결과가 되어 상세 화면이 어느 쪽인지 말할 수 없다. 단건 조회를
+    // 따로 둔 이유가 이 구분이므로, 구분 자체를 테스트한다.
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let resp = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/agent-templates/{}",
+            server.addr,
+            fleet_core::AgentTemplateId::new()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let store = MemStore::new();
+    let t = sample_agent_template("hidden", fleet_core::AgentTemplateStatus::Published);
+    store.create_agent_template(&t).await.unwrap();
+    let (store, cookie) =
+        seed_test_session_with_perms(store, &[PermissionKind::DashboardView]).await;
+    let server = spawn_server_inner(store).await;
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/agent-templates/{}", server.addr, t.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "존재하는 템플릿이어도 read 없이는 403이어야 한다 — 404를 주면 존재 여부가 샌다"
+    );
+}
+
+#[tokio::test]
+async fn every_sidebar_page_links_to_projects_and_agent_templates() {
+    // 사이드바는 HTML 파일마다 손으로 복제돼 있고 동기화 자동화가 없다
     // (`<!-- sidebar:start -->` 마커만 있고 그걸 읽는 코드는 없다). 링크를
     // 하나 추가할 때 일부 파일을 빠뜨리기 쉬우므로 여기서 강제한다.
+    //
+    // 아래 경로 목록은 **손으로 유지된다** — 그 자체가 이 테스트가 막으려는
+    // 결함과 같은 모양이라, 목록에 없는 새 페이지는 라우팅되는데도 검사되지
+    // 않는다. 그래서 뒤에 자산 전체를 훑는 단정을 하나 더 둔다: 앞의 것은
+    // **서빙된 응답**을, 뒤의 것은 **빠짐없음**을 지킨다.
     let (server, cookie) = spawn_authed_server(MemStore::new()).await;
     let client = reqwest::Client::new();
 
@@ -3030,6 +3260,8 @@ async fn every_sidebar_page_links_to_projects() {
         "admin/tools",
         "projects",
         "projects/new",
+        "agent-templates",
+        "agent-templates/new",
     ] {
         let body = authed_get(&client, &format!("http://{}/{path}", server.addr), &cookie)
             .send()
@@ -3038,11 +3270,34 @@ async fn every_sidebar_page_links_to_projects() {
             .text()
             .await
             .unwrap();
-        assert!(
-            body.contains("<span>Projects</span>"),
-            "/{path} is missing the Projects sidebar link"
-        );
+        for link in ["<span>Projects</span>", "<span>Agent Templates</span>"] {
+            assert!(
+                body.contains(link),
+                "/{path} is missing the {link} sidebar link"
+            );
+        }
     }
+
+    // 사이드바를 가진 자산이면 예외 없이 두 링크를 다 갖는다. `login.html`과
+    // `bootstrap.html`은 인증 전 화면이라 사이드바 자체가 없으므로 마커로
+    // 걸러 낸다 — 파일 이름으로 거르면 세 번째 인증 전 화면이 생겼을 때
+    // 목록을 또 손으로 고쳐야 한다.
+    let mut checked = 0;
+    for path in fleet_dashboard::assets::Asset::iter().filter(|p| p.ends_with(".html")) {
+        let body = fleet_dashboard::assets::Asset::get(&path).expect("자산 조회");
+        let text = String::from_utf8_lossy(body.data.as_ref());
+        if !text.contains("<!-- sidebar:start -->") {
+            continue;
+        }
+        checked += 1;
+        for link in ["<span>Projects</span>", "<span>Agent Templates</span>"] {
+            assert!(
+                text.contains(link),
+                "{path} is missing the {link} sidebar link"
+            );
+        }
+    }
+    assert!(checked >= 15, "사이드바를 가진 자산이 {checked}개뿐이다");
 }
 
 // ── 로드맵 #62 2단계 게이트 3: 대시보드 HTTP 표면의 멱등성 ────────────────

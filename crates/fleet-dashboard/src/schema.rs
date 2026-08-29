@@ -177,6 +177,18 @@ pub struct AgentTemplateSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     pub status: String,
+    /// **파생 값** — 현재 상태에서 갈 수 있는 상태들
+    /// ([`fleet_core::AgentTemplateStatus::allowed_transitions`]).
+    ///
+    /// 저장하지 않고 조회 시점에 계산해 싣는다(`IssueSummary`의
+    /// `has_active_tasks`와 같은 원칙). 관리 화면이 전이표를 다시 구현하지
+    /// 않게 하려는 것이 목적이다 — JS가 자기 표를 들면 코어의 표와 갈라지고,
+    /// 갈라진 쪽이 화면에서는 조용히 이긴다. 서버가 준 목록만 그리면 코어를
+    /// 고쳤을 때 화면이 저절로 따라온다.
+    pub allowed_transitions: Vec<String>,
+    /// **파생 값** — 이 상태에 새 revision을 붙일 수 있는지. 위와 같은 이유로
+    /// 화면이 `retired`/`discarded`를 스스로 판별하지 않게 한다.
+    pub accepts_new_revisions: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -190,6 +202,13 @@ impl From<&fleet_core::AgentTemplate> for AgentTemplateSummary {
             description: t.description.clone(),
             created_by: t.created_by.clone(),
             status: t.status.as_str().to_string(),
+            allowed_transitions: t
+                .status
+                .allowed_transitions()
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+            accepts_new_revisions: t.status.accepts_new_revisions(),
             created_at: t.created_at,
             updated_at: t.updated_at,
         }

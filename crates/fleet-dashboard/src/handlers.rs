@@ -1207,6 +1207,45 @@ pub async fn project_detail_page(
     )
 }
 
+// ── AgentTemplate 관리 화면 (로드맵 #92) ────────────────────────────────
+//
+// Project 화면과 같은 관례다 — 페이지 자체를 권한으로 가리고(서버측),
+// 화면 안의 개별 조작은 JS가 `/api/me`로 한 번 더 숨긴다. 앞의 것이 진짜
+// 게이트이고 뒤의 것은 "눌러 본 뒤에야 403을 받는" 경험을 없애는 장치다.
+
+/// GET /agent-templates — 템플릿 목록 HTML 페이지.
+pub async fn agent_templates_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::AgentTemplateRead,
+        "agent-templates.html",
+    )
+}
+
+/// GET /agent-templates/new — 템플릿 생성 폼.
+///
+/// 여기서 만드는 것은 **정체성뿐**이며 항상 `Draft`로 시작한다. 본문은
+/// 상세 화면의 revision 폼이 담당한다(`#86`이 두 계층을 나눈 이유).
+pub async fn agent_template_new_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::AgentTemplateCreate,
+        "agent-template-new.html",
+    )
+}
+
+/// GET /agent-templates/:id — 템플릿 상세 HTML 페이지.
+pub async fn agent_template_detail_page(
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(_id): Path<String>,
+) -> Response {
+    serve_page_if_permitted(
+        &principal,
+        PermissionKind::AgentTemplateRead,
+        "agent-template-detail.html",
+    )
+}
+
 /// GET /api/hosts — 호스트 목록 JSON API.
 pub async fn list_hosts_api(
     State(state): State<Arc<DashboardState>>,
@@ -1799,6 +1838,23 @@ pub async fn create_agent_template_api(
     )
     .await;
 
+    Ok(Json(crate::schema::AgentTemplateSummary::from(&template)))
+}
+
+/// GET /api/agent-templates/:id — 템플릿 한 건.
+///
+/// 목록을 받아 클라이언트에서 거를 수도 있지만, 그러면 "없는 템플릿"과
+/// "id를 잘못 친 템플릿"이 모두 빈 결과가 되어 상세 화면이 404를 표시할
+/// 방법이 없다. `load_agent_template`이 그 구분을 이미 갖고 있으므로
+/// 표면에서 다시 만들지 않고 노출만 한다.
+pub async fn get_agent_template_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    let template_id = parse_agent_template_id(&id)?;
+    let template = load_agent_template(&state, template_id).await?;
     Ok(Json(crate::schema::AgentTemplateSummary::from(&template)))
 }
 

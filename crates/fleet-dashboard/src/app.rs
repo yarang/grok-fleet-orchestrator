@@ -233,6 +233,17 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route("/projects", get(handlers::projects_page))
         .route("/projects/new", get(handlers::project_new_page))
         .route("/projects/:id", get(handlers::project_detail_page))
+        // AgentTemplate 관리 화면 (로드맵 #92). Project 화면과 같은 3면
+        // 구성 — 목록/생성/상세. 생성 폼만 `create` 권한으로 가린다.
+        .route("/agent-templates", get(handlers::agent_templates_page))
+        .route(
+            "/agent-templates/new",
+            get(handlers::agent_template_new_page),
+        )
+        .route(
+            "/agent-templates/:id",
+            get(handlers::agent_template_detail_page),
+        )
         .route("/hosts/:hostname", get(handlers::host_detail_page))
         .route("/hosts/provision", get(crate::provisioning::provision_page))
         // ── P2: 관리 ──
@@ -282,6 +293,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         .route(
             "/api/agent-templates",
             get(handlers::list_agent_templates_api).post(handlers::create_agent_template_api),
+        )
+        .route(
+            "/api/agent-templates/:id",
+            get(handlers::get_agent_template_api),
         )
         .route(
             "/api/agent-templates/:id/revisions",
