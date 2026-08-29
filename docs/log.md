@@ -4551,3 +4551,72 @@ Markdown을 읽는 것은 없다 — `include_str!`은 저장소 전체에서 `c
 한 건뿐이며 그 파일은 이 커밋에서 바뀌지 않았다. 따라서 컴파일·lint·테스트 결과는 그
 편집들과 무관하다. 이것은 "게이트를 다시 돌렸다"가 아니라 **"다시 돌릴 필요가 없음을
 근거로 보였다"**이며, 두 진술을 섞지 않기 위해 여기 적는다.
+
+## 2026-08-30 — `#67` 4단계 분할: 봉투는 상대를 만들지만 방향을 만들지 못한다
+
+같은 날 오전에 `#67` 4단계를 "9-필드 명령 봉투 + 워커측 ACK"로 정의하면서 이렇게 적었다:
+**"선행은 '명령을 받을 상대'가 아니다 — 첫 명령이 `StartAgent`이므로 봉투가 상대를 만든다.
+남은 실제 선행은 워커측 프로세스 기동·격리 경로다."** 구현에 들어가기 전 사실 확인을 하다가
+그 문장이 절반만 맞았다는 것을 알았다.
+
+맞는 절반: `StartAgent`가 프로세스를 만들므로, "명령을 실행할 프로세스가 없다"는 미룰 사유가
+아니다. 틀린 절반: **명령이 갈 방향은 봉투가 만들지 않는다.** `migrations/027_agents.sql`을
+직접 열어 보면 `agents`에는 `worker_id`가 없다. 배정이 저장되지 않으므로 "이 Agent에게
+`StartAgent`를 보내라"를 **어느 Worker의 응답에 실을지** 결정할 수단이 없다. 정본
+(`provisioning.md` §"상태와 명령")은 이미 "Worker는 자신에게 **배정된** Agent와 현재
+incarnation만 처리한다"고 적어 배정을 전제하고 있었는데, 그 전제를 채우는 컬럼이 없었다.
+
+### 배정에는 주인이 없었다
+
+배정이 다른 항목의 것이면 4단계는 그것을 기다리면 된다. 확인해 보니 아니었다.
+`#49` 2단계의 정의는 "`#48`/`#67` **뒤** Hibernated 단일 Agent E2E; WarmIdle은 별도 flag"이고,
+같은 셀이 봉투·ACK·`generation`을 "전부 `#67` 4단계 선행"으로 귀속시켜 두었다(오늘 오전의
+귀속 정정). 즉 `#49`는 `#67` 뒤에 오며 배정을 소유하지 않는다. 배정은 **주인이 없는 채로
+4단계 안에 암묵적으로 들어 있었다**.
+
+그래서 4단계를 셋으로 나눴다. **4a** 배정(`agents.worker_id`), **4b** 수렴 프로토콜
+(desired state + generation + ACK), **4c** 워커측 1:N 프로세스 매니저. 넷 중 하나라도
+빠지면 나머지가 도달 불가가 되는 관계가 아니라, 4a → 4b → 4c 순으로 각자 관측 가능한
+결과를 내는 관계다.
+
+### 명령 큐 대신 desired-state 수렴
+
+같이 정한 것이 하나 더 있다. 봉투의 9개 필드를 늘어놓고 보면 대부분이 **명령의 속성이
+아니라 `agents` 행의 상태**다 — `agent_id`는 행 자신이고 `generation`/`control_epoch`/
+`worker_incarnation`/`actor`는 컬럼이며 `task_id`는 그 Agent가 지금 무엇을 위해 존재하는지다.
+그래서 명령 큐 테이블을 만드는 대신 행에 `desired_status`·`command_generation`·
+`last_acked_generation`을 두고, heartbeat 응답이 그 Worker에 배정된 Agent들의 desired state를
+싣고 Worker가 같은 generation으로 ACK하기로 했다.
+
+이 형태를 고른 이유는 크기가 아니라 **정본의 요구가 공짜로 성립하기 때문**이다. "control
+plane은 CAS로 ACK를 반영하므로 지연된 ACK가 새 상태를 덮어쓰지 못한다"는
+`WHERE command_generation = $ack_generation` 한 줄이 된다. 큐 모델이었다면 같은 성질을 따로
+구현해야 했다. 덤으로 `expires_at`이 대부분 해소된다 — desired state는 매 beat 재전송되므로
+"오래된 명령이 뒤늦게 실행되는" 창이 열리지 않고, 신선도 판정은 `command_generation`이 한다.
+그리고 이 선택은 새 발명이 아니라 **기존 필드의 연장**이다: `HeartbeatResponse.desired_state`가
+이미 오케스트레이터 → 워커의 유일한 명령면으로 존재한다.
+
+### 이 증분에서 만들지 않기로 한 것과 그 사유
+
+| 만들지 않는 것 | 사유 | 언제 |
+|---|---|---|
+| `fencing_token` (봉투를 9-필드가 아닌 **8-필드**로) | `worker_execution_lease` 테이블이 **존재하지 않는다**. migration 018~029에 없고 `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다 — 즉 생산자가 없다 | 구현 게이트 ① |
+| 워커가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 워커는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다 | 4c |
+| ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없고(Task를 Agent로 라우팅하는 것은 `#49` 2단계), secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
+| `Draining` | Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문이다(`fleet-api/src/handlers.rs`). 그 모양을 Agent가 물려받을 이유가 없다 | 4c 이후 |
+
+### `on_demand`는 이 단계가 풀지 못한다
+
+`WorkerLivenessMode::OnDemand`의 doc은 스스로 "`on_demand`로 설정된 워커에 실제로 task를
+배정하는 로직은 이 증분의 범위 밖(로드맵 `#67` 의존)"이라고 적어 `#67`을 해소처로 지목한다.
+그런데 4b가 명령을 heartbeat에 싣는 이상, **idle에 heartbeat을 보내지 않는 워커에는 desired
+state가 원리적으로 도달하지 않는다**. 실제로 `WorkerSelector`는 이미 같은 이유로 `on_demand`
+워커를 Task 후보에서 빼고 `SelectionError::AllUnprobed`를 낸다. 해소하는 것은 명령 전달이
+아니라 **dispatch 직전 ACP probe**(`#70`)이며, `provisioning.md`에 그렇게 적었다.
+
+### 이 커밋의 범위
+
+문서만 바꿨다. `docs/roadmap/roadmap.md`의 `#67` 셀(4단계 → 4a/4b/4c)과 `#49` 셀의 상호
+참조, `docs/architecture/agents/provisioning.md`의 §"상태와 명령"(배정 선행·수렴 형태·
+`on_demand` 한계)과 유예 목록이다. 코드는 한 줄도 바꾸지 않았으므로 이 커밋의 검증은
+문서 정합성뿐이고, 4a의 구현·테스트는 다음 커밋이다.

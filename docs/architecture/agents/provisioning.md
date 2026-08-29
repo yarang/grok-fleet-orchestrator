@@ -38,6 +38,33 @@ runtime/image·isolation·workspace·Tool/Skill·egress/privileged policy snapsh
 식별자와 관측한 process/container ID·결과·오류 분류·cleanup 증거를 반환한다. control plane은 CAS로
 ACK를 반영하므로 지연된 ACK가 새 상태를 덮어쓰지 못한다.
 
+**배정은 봉투의 일부가 아니라 봉투의 선행이다.** 위 문단의 "자신에게 배정된 Agent"는 배정이
+이미 존재함을 전제한다. 배정의 저장 자리는 `agents.worker_id`이고, 그것이 없으면 명령을 **어느
+Worker의 응답에 실을지** 결정할 수 없다 — 봉투는 명령을 받을 *프로세스*를 만들지만 명령이 갈
+*방향*은 만들지 못한다. 배정을 고르는 규칙은 Task용 `WorkerSelector`와 같은 순서(online →
+liveness → circuit → least-loaded)를 쓰되 부하의 출처는 워커 자기보고가 아니라 오케스트레이터
+원장(배정된 Agent 수)이다. Task 선택이 `#67` 3단계에서 같은 이유로 자기보고를 버린 것과 같은
+판단이다.
+
+**명령은 큐가 아니라 desired state로 구현한다.** 위 봉투의 필드는 대부분 `agents` 행의 상태다 —
+`agent_id`는 행 자신, `generation`/`control_epoch`/`worker_incarnation`/`actor`는 컬럼, `task_id`는
+그 Agent가 지금 무엇을 위해 존재하는지다. 그래서 별도 명령 큐 테이블을 두는 대신 행에
+`desired_status`·`command_generation`·`last_acked_generation`을 두고, heartbeat 응답이 그 Worker에
+배정된 Agent들의 desired state와 generation을 싣고, Worker가 관측 상태를 같은 generation으로
+ACK한다. 이때 "지연된 ACK가 새 상태를 덮어쓰지 못한다"는 `WHERE command_generation =
+$ack_generation` CAS로 **그대로** 성립한다 — 수렴 모델이 그 성질을 따로 구현하지 않고 갖는다.
+이 선택은 정본으로부터의 이탈이 아니라 구현 형태의 결정이며, 정본이 큐를 요구한 적이 없다.
+
+수렴 모델에서 `expires_at`은 대부분 해소된다. desired state는 매 heartbeat마다 재전송되므로
+"오래된 명령이 뒤늦게 실행되는" 창이 큐 모델처럼 열리지 않고, 신선도 판정은 `expires_at`이 아니라
+`command_generation`이 한다. TTL 규칙을 쓰는 대신 이 문장을 남긴다.
+
+**수렴은 `on_demand` Worker를 풀지 못한다.** `WorkerLivenessMode::OnDemand`는 idle 시 heartbeat을
+보내지 않는 모드이므로, heartbeat에 실려 가는 desired state는 그 Worker에 **원리적으로 도달하지
+않는다**. `WorkerSelector`가 이미 같은 이유로 `on_demand` 워커를 Task 후보에서 빼고 있다
+(`SelectionError::AllUnprobed`). `worker.rs`의 doc이 이 제약의 해소처로 `#67`을 지목하지만, 실제로
+해소하는 것은 명령 전달이 아니라 **dispatch 직전 ACP probe**(로드맵 `#70`)다.
+
 ## 재조정과 회수
 
 재조정은 관측된 Worker process inventory, 마지막 확정 generation, fencing token을 비교해
@@ -100,17 +127,27 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 > 그대로 두면 `#67`이 스트림을 `#89`로 미루고 `#89`는 `#67`을 기다리는 **순환**이 생기고, 실제로
 > [권한과 장애 전환](../control-plane-authority-and-failover.md)과 이 표가 그렇게 적혀 있었다.
 
+> **2026-08-30 분할.** `#67` 4단계는 배정·수렴 프로토콜·워커측 프로세스 매니저 셋을 한 덩어리로
+> 적고 있었으나, 그중 배정(`agents.worker_id`)에는 **주인이 없었다** — `#49` 2단계는 "`#48`/`#67`
+> 뒤 Hibernated E2E"라 배정을 소유하지 않고, `#67` 4단계 정의문은 "봉투가 상대를 만든다"로 *프로세스*
+> 부재만 해소했지 *방향* 부재는 해소하지 않았다. 그래서 셋으로 나눈다: **4a** 배정, **4b** 수렴
+> 프로토콜(desired state + generation + ACK), **4c** 워커측 1:N 프로세스 매니저. 아래 "선행" 칸은
+> 이 분할을 반영한다.
+
 | 항목 | 왜 미뤘나 | 선행 |
 |---|---|---|
-| `Starting`/`Running`/`Failed` 상태 | 상태를 옮길 주체가 Worker 제어 스트림뿐이며 그 스트림이 없다 | `#67` 4단계 |
+| `Starting`/`Running`/`Failed` 상태 | 상태를 옮길 주체가 Worker 제어 스트림뿐이며 그 스트림이 없다. `Starting`/`Running`은 수렴 프로토콜이, `Failed`의 cleanup 증거는 프로세스 매니저가 만든다 | `#67` 4b·4c |
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
-| `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다 | `#67` 4단계 |
-| 9-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 실제로 남은 선행은 워커측 프로세스 기동·격리 경로다 | `#67` 4단계 |
-| `generation`/`control_epoch`/`fencing_token` | 경합할 두 번째 writer가 없다 | `#67` 4단계 |
-| 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4단계 후속 |
+| `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
+| 8-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 남은 선행은 명령이 갈 **방향**(배정)이며 그것이 4a다. 봉투는 위 §"상태와 명령"대로 큐가 아니라 `agents` 행의 desired state로 구현한다 | `#67` 4a → 4b |
+| `generation`/`control_epoch` | 경합할 두 번째 writer가 없다 | `#67` 4b |
+| `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ① |
+| 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
 | `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
+| ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
+| Worker가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 Worker는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다. 4a의 배정은 하드 상한 없이 원장 기반 least-loaded만 쓴다 | `#67` 4c |
 
 위 "구현 게이트" 6개는 전부 명령·ACK 계층의 시험이므로 1단계 범위 밖이다. 1단계가 실제로
 증명한 것은 (a) FK·유일성 위반이 `StoreError::Conflict`로 번역되는지, (b) 살아 있는 Agent 하나가
