@@ -93,6 +93,67 @@ impl AgentStatus {
 /// `project_id`는 **생성 시점에 정해지고 이후 바뀌지 않는다**. 정본은 Agent를
 /// 옮기는 대신 새로 만들라고 규정한다 — 소속을 바꿀 수 있으면 Project 경계가
 /// 사후적으로 무너져 감사 추적이 불가능해지기 때문이다. 그래서 이 필드에는
+/// 오케스트레이터가 이 Agent에 **바라는** 상태 (로드맵 `#67` 4b).
+///
+/// [`AgentStatus`]와 다른 축이다. `AgentStatus`는 **관측**이고 이것은
+/// **의도**다. 그래서 값 집합도 같지 않다 — 관측에는 `Ready`처럼 "아직
+/// 아무 명령도 받지 않았다"가 있지만, 의도에는 그런 값이 없다(바라는 바가
+/// 없다는 의도는 곧 "돌지 않기를 바란다"이다).
+///
+/// 기본값이 [`Self::Stopped`]인 이유는 `AgentStatus::Ready`의 정의
+/// ("정의는 끝났고 시작 명령을 **받을 수 있다**")와 맞추기 위해서다.
+/// 생성만으로 돌기 시작하면 `Ready`가 뜻을 잃는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDesiredStatus {
+    /// 이 Agent의 프로세스가 살아 있기를 바란다.
+    Running,
+    /// 이 Agent의 프로세스가 없기를 바란다.
+    Stopped,
+}
+
+impl AgentDesiredStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(Self::Running),
+            "stopped" => Some(Self::Stopped),
+            _ => None,
+        }
+    }
+}
+
+/// heartbeat 응답에 실려 Worker로 가는 Agent 하나에 대한 명령
+/// (로드맵 `#67` 4b).
+///
+/// **여기에 포트·secret·cwd는 없다.** 그 셋이 들어오는 순간 heartbeat
+/// 응답은 통째로 로깅해도 안전한 값이 아니게 되며, 그것들을 만들 프로세스
+/// 매니저는 4c다. 지금은 세 필드가 전부다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentCommand {
+    pub agent_id: AgentId,
+    pub desired_status: AgentDesiredStatus,
+    /// 이 명령의 세대. Worker는 같은 값을 [`AgentAck`]로 돌려준다.
+    pub generation: i64,
+}
+
+/// Worker가 heartbeat 요청에 실어 보내는 명령 수신 확인 (로드맵 `#67` 4b).
+///
+/// **관측 상태를 싣지 않는다.** 4b에는 볼 프로세스가 없으므로 "받았고
+/// 받아들였다"가 Worker가 정직하게 말할 수 있는 최대치이며, 관측
+/// 결과(process/container ID·cleanup 증거)는 4c가 얹는다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentAck {
+    pub agent_id: AgentId,
+    pub generation: i64,
+}
+
 /// 갱신 경로 자체를 만들지 않는다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
@@ -136,6 +197,28 @@ pub struct Agent {
     /// 없다 — `030`의 `agents_placement_complete` CHECK가 강제한다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_at: Option<DateTime<Utc>>,
+    /// 오케스트레이터가 이 Agent에 바라는 상태 (로드맵 `#67` 4b).
+    ///
+    /// `status`(관측)와 함께 읽어야 뜻이 산다: `status == Ready &&
+    /// desired_status == Running`이 정본의 `Starting`이며, 그것을 컬럼으로
+    /// 만들지 않은 이유는 [`Agent::is_starting`]에 적었다.
+    #[serde(default = "default_desired_status")]
+    pub desired_status: AgentDesiredStatus,
+    /// `desired_status` 또는 배정이 바뀔 때마다 증가하는 세대 번호.
+    ///
+    /// **배정 변경에서도 올라간다.** 새 Worker는 이전 Worker가 받은 명령을
+    /// 본 적이 없으므로, 올리지 않으면 `last_acked_generation ==
+    /// command_generation`이 "새 Worker가 확인했다"는 거짓을 말한다.
+    #[serde(default)]
+    pub command_generation: i64,
+    /// Worker가 마지막으로 수신 확인한 세대.
+    ///
+    /// `command_generation`과 같다는 것은 **전달·수락**이지 **수렴**이
+    /// 아니다 — 4b에는 프로세스가 없고, Worker는 "이 세대의 명령을 받았다"만
+    /// 말한다. 4c가 이 등식을 "돌고 있다"로 읽으면 어떤 테스트도 잡지 못하는
+    /// 조용한 오탐이 된다.
+    #[serde(default)]
+    pub last_acked_generation: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -154,6 +237,9 @@ impl Agent {
             template_pin: None,
             worker_id: None,
             assigned_at: None,
+            desired_status: AgentDesiredStatus::Stopped,
+            command_generation: 0,
+            last_acked_generation: 0,
             created_at: now,
             updated_at: now,
         }
@@ -190,6 +276,39 @@ impl Agent {
         self.assigned_at = Some(assigned_at);
         self
     }
+
+    /// 마지막 명령이 배정된 Worker에 전달·수락됐는지 (로드맵 `#67` 4b).
+    ///
+    /// 다시 강조하면 **수렴이 아니다**. 프로세스가 떴다는 뜻이 아니라 명령이
+    /// 도달했다는 뜻이며, 운영자에게는 "이 Worker가 아직 명령을 집어가지
+    /// 않았다"와 "집어갔는데 반영이 안 됐다"를 가르는 값이다.
+    pub fn command_delivered(&self) -> bool {
+        self.last_acked_generation == self.command_generation
+    }
+
+    /// 정본의 `Starting` — 시작을 바라지만 아직 돌고 있다고 관측되지 않은 상태.
+    ///
+    /// **컬럼으로 만들지 않은 이유**: 이 값은 `(status, desired_status)`의 순수
+    /// 함수다. 컬럼으로 두면 (a) `027`의 `status IN ('ready','stopped')` CHECK를
+    /// 아무도 관측하지 않는 값 때문에 넓혀야 하고, (b) generation 컬럼들과
+    /// 어긋날 수 있는 두 번째 진실 원천이 생긴다. `#67` 3단계가 워커 자기보고
+    /// 대신 오케스트레이터 원장을 택한 것과 같은 판단이다.
+    ///
+    /// 4b에는 여기서 나가는 문이 없다 — `Running`은 프로세스를 볼 수 있는
+    /// 4c만 관측할 수 있기 때문이다. 이것은 "나갈 수 없는 위상"이 아니다:
+    /// `status`는 여전히 `Ready`라는 정상 값이고, 여기서 나가는 길(회수)도
+    /// 있다. 미충족된 의도는 수렴 프로토콜의 정상 상태다.
+    pub fn is_starting(&self) -> bool {
+        self.status == AgentStatus::Ready && self.desired_status == AgentDesiredStatus::Running
+    }
+}
+
+/// `serde(default)`용 — `AgentDesiredStatus`는 `Default`를 구현하지 않는다.
+/// 기본이 `Stopped`인 것은 이 타입의 성질이 아니라 **Agent 생성 시의 정책**
+/// 이므로(위 `AgentDesiredStatus` 문서 참고), 타입에 붙이면 다른 문맥에서도
+/// 조용히 기본값이 생긴다.
+fn default_desired_status() -> AgentDesiredStatus {
+    AgentDesiredStatus::Stopped
 }
 
 /// Agent 목록 조회 필터.

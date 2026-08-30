@@ -55,6 +55,34 @@ ACK한다. 이때 "지연된 ACK가 새 상태를 덮어쓰지 못한다"는 `WH
 $ack_generation` CAS로 **그대로** 성립한다 — 수렴 모델이 그 성질을 따로 구현하지 않고 갖는다.
 이 선택은 정본으로부터의 이탈이 아니라 구현 형태의 결정이며, 정본이 큐를 요구한 적이 없다.
 
+**heartbeat의 `desired_state`와 Agent의 desired state는 다른 축이다.** 이미 있는
+`HeartbeatResponse.desired_state`(`"running"`|`"drain"`)는 **그 Worker 자신**에게 내리는 신호이며,
+CPU/RAM 90% 초과 자가 판정이 만든다(`fleet-api/src/handlers.rs`). Agent의 desired state는 **그
+Worker에 배정된 Agent들**에 대한 것이다. 같은 이름이라고 한 필드에 합치면 두 축이 서로를 덮으므로,
+Agent 명령은 형제 필드로 따로 싣는다. `command_generation`이 Agent별 원소 안에 들어가므로 기존
+필드는 `&'static str` 그대로 두어도 된다.
+
+Worker의 `drain`은 Agent 명령을 **억제하지 않는다**. `drain`은 이미 "새 배정 후보에서 빠진다"는
+뜻이고 4a의 배정 선택기가 `Online`이 아닌 Worker를 이미 거른다 — 그래서 draining Worker에는 새
+Agent가 오지 않는다. 이미 배정된 Agent를 drain 시점에 죽이는 것은 만들지 않은 별개의 결정이며
+(위 유예 표의 Agent `Draining`), 4c가 이 문장 없이 임의로 발명하지 않도록 여기에 적어 둔다.
+
+**수렴 프로토콜은 새 관측 상태를 만들지 않는다.** `Running`은 "이 Agent의 포트·secret·cwd로 grok
+프로세스가 살아 있다"는 관측이고, 그것을 볼 수 있는 주체는 4c의 프로세스 매니저뿐이다. 프로세스
+없이 Worker가 `running`을 ACK하면 저장된 값이 거짓이 되고, 4c는 이미 기록된 컬럼의 **의미를**
+바꿔야 한다. `Starting`도 마찬가지로 들어갈 문은 있지만 나갈 문(`Running`)이 없다 — 구현 게이트
+③의 `OutcomeUnknown`을 "나갈 수 없는 비terminal 위상"이라며 물린 것과 같은 결함이다. 더구나
+`Starting`은 `(desired_status, command_generation, last_acked_generation, status)`의 **순수
+함수**라 컬럼이 필요 없다: 컬럼으로 만들면 027의 `status IN ('ready','stopped')` CHECK를 아무도
+관측하지 않는 값 때문에 넓혀야 하고, generation 컬럼과 어긋날 수 있는 두 번째 진실 원천이 생긴다
+(3단계에서 워커 자기보고 대신 원장을 택한 것과 같은 판단). 그래서 4b는 `AgentStatus`에 variant를
+추가하지 않고, `Starting`은 표시용 파생값으로만 노출한다.
+
+`last_acked_generation == command_generation`은 **전달·수락**이지 **수렴**이 아니다. 프로세스
+매니저가 없어도 Worker는 "이 generation의 명령을 받았다"를 정직하게 ACK할 수 있고, 바로 그 점이
+이 컬럼들을 030이 만들기를 거부한 항상-기본값 컬럼과 구분한다. 4c가 이 등식을 "running"으로 읽는
+순간 어떤 테스트도 잡지 못하는 조용한 오탐이 되므로, 마이그레이션 주석에도 같은 문장을 남긴다.
+
 수렴 모델에서 `expires_at`은 대부분 해소된다. desired state는 매 heartbeat마다 재전송되므로
 "오래된 명령이 뒤늦게 실행되는" 창이 큐 모델처럼 열리지 않고, 신선도 판정은 `expires_at`이 아니라
 `command_generation`이 한다. TTL 규칙을 쓰는 대신 이 문장을 남긴다.
@@ -136,17 +164,17 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 
 | 항목 | 왜 미뤘나 | 선행 |
 |---|---|---|
-| `Starting`/`Running`/`Failed` 상태 | 상태를 옮길 주체가 Worker 제어 스트림뿐이며 그 스트림이 없다. `Starting`/`Running`은 수렴 프로토콜이, `Failed`의 cleanup 증거는 프로세스 매니저가 만든다 | `#67` 4b·4c |
+| `Starting`/`Running`/`Failed` 상태 | 셋 다 **관측**이고 관측 주체가 프로세스 매니저뿐이다. 4b(수렴 프로토콜)는 명령의 전달만 만들 뿐 프로세스를 보지 못하므로 셋 중 어느 것도 4b에서 도달하지 않는다 — `Starting`은 그나마 generation 컬럼들의 순수 함수라 컬럼 없이 파생으로 표시한다 | `#67` 4c |
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
-| 8-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 남은 선행은 명령이 갈 **방향**(배정)이며 그것이 4a다(2026-08-30 완료, 아래 "구현 상태 (`#67` 4a)"). 봉투는 위 §"상태와 명령"대로 큐가 아니라 `agents` 행의 desired state로 구현한다 | `#67` 4b |
-| `generation`/`control_epoch` | 경합할 두 번째 writer가 없다 | `#67` 4b |
 | `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ① |
 | 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
 | `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
 | ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
+| 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c |
+| ACK가 관측 상태를 싣는 것 | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | `#67` 4c |
 | Worker가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 Worker는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다. 4a의 배정은 하드 상한 없이 원장 기반 least-loaded만 쓴다 | `#67` 4c |
 
 위 "구현 게이트" 6개는 전부 명령·ACK 계층의 시험이므로 1단계 범위 밖이다. 1단계가 실제로
@@ -208,3 +236,109 @@ Task 없이도 Project를 `draining`에 붙잡는지 — 두 가지이며 `crate
 - 원장을 읽고 INSERT하기까지가 **원자적이지 않다.** 동시에 두 Agent를 만들면 둘 다 같은 Worker를
   고를 수 있다. 상한이 없는 4a에서는 부하 분포가 잠시 기우는 것으로 끝나지만, 상한이 생기는 순간
   초과 배정이 된다 — 그래서 CAS slot claim이 `#67` 구현 게이트 ①이다.
+
+## 구현 상태 (`#67` 4b — 수렴 프로토콜)
+
+4a가 명령이 갈 **방향**을 만들었다면 4b는 **명령 자체**를 만든다. 그 명령을 받아 프로세스를
+띄우는 쪽은 여전히 4c이므로, 이 단계가 끝나도 Agent 프로세스는 하나도 뜨지 않는다.
+
+### 큐가 아니라 수렴을 고른 이유
+
+명령을 큐에 쌓지 않고 `agents` 행에 **desired state 한 칸**으로 둔다. heartbeat 응답이 매 beat
+목록 전체를 다시 싣고, Worker는 같은 generation을 돌려주며, `WHERE command_generation = $ack`
+CAS가 그것을 받는다. 이 모양에서는 "지연된 ACK가 새 명령을 덮어쓰지 못한다"가 **공짜로**
+성립하고, 명령의 신선도를 generation이 판정하므로 `expires_at`이 아예 필요 없어진다. 큐였다면
+중복 배달·순서 역전·만료를 각각 따로 막아야 한다.
+
+세 컬럼(`031_agent_desired_state.sql`):
+
+| 컬럼 | 뜻 |
+|---|---|
+| `desired_status` | `running` \| `stopped`. 오케스트레이터가 원하는 상태 |
+| `command_generation` | 그 명령의 세대. desired state가 바뀌거나 **재배정될 때** 오른다 |
+| `last_acked_generation` | Worker가 확인한 마지막 세대. `<= command_generation`을 `CHECK`가 강제한다 |
+
+재배정에서도 세대를 올린다. 옮겨 간 Worker에게 그 명령은 처음 보는 것이므로, 이전 Worker의
+확인이 새 Worker의 확인을 대신할 수 없다.
+
+`last_acked_generation == command_generation`은 **전달과 수락**이지 **수렴**이 아니다. 관측
+주체가 4c에 생기기 전까지 오케스트레이터가 정직하게 말할 수 있는 최대치가 전달이며, 그래서
+`Agent::command_delivered()`라는 이름을 쓴다.
+
+### `desired_status = 'running'`의 생산자: 명시적 start 표면
+
+생성도 배정도 아니고 **운영자의 명시적 start 호출**이 유일한 생산자다. Dashboard
+`POST /api/agents/{id}/start`와 MCP `fleet_start_agent`(둘 다 `agent:manage`, 감사 이벤트
+`agent.start`)가 그것이다.
+
+세 후보를 검토했고 앞의 둘은 배제했다.
+
+- **생성이 곧 running**: `AgentStatus::Ready`의 정의가 "정의는 끝났고 시작 명령을 **받을 수
+  있다**"인데, 생성이 running을 뜻하면 그 문장이 빈다. `create_agent`는 정의 조작이다.
+- **배정이 곧 running**: 4a의 `place_on_create`가 생성 시점에 **자동으로** 배정하므로
+  "배정 ⇒ running"은 곧 "생성 ⇒ running"이고, 위 항목과 같은 것이 된다. 4a를 읽지 않으면
+  독립적인 선택지처럼 보이지만 아니다.
+- **명시적 start**(채택): 표면은 운영자 호출을 요구할 뿐 실재하는 생산자다. "채울 방법이 없는
+  것은 미리 만들지 않는다"가 금지하는 것은 *아무도 채울 수 없는 컬럼*이지 *호출이 필요한
+  표면*이 아니다. 회수가 이미 `fleet_stop_agent`/`DELETE /api/agents/{id}`라는 명시적 표면인
+  것과 대칭이기도 하다.
+
+start의 두 경계:
+
+- **`Stopped`에는 start를 거부한다.** 회수는 종단이며, 4a의 `place_agent_api`가 회수된 Agent의
+  배정을 거부하는 것과 같은 기준이다. 이 판정은 **핸들러**에 둔다 —
+  `set_agent_desired_status`의 UPDATE에 `status <> 'stopped'`를 넣으면 "바뀐 것이 없음"과
+  "그런 Agent가 없음"이 같은 0-row로 뭉개진다.
+- **미배정(`worker_id IS NULL`)에는 start를 허용한다.** 명령은 갈 곳이 없을 뿐 잃어버리지
+  않는다 — 다음 배정이 세대를 올리며 그때 실려 간다. 여기서 거부하면 `NULL`에서의 회복이
+  "먼저 배정하고 그다음 start"라는 순서 제약을 갖게 되는데, 그 순서를 강제할 이유가 없다.
+
+### 회수 명령은 확인될 때까지 실린다
+
+`list_agent_commands`의 술어가 `status <> 'stopped'`뿐이면, 회수가 올린 세대는 같은 조회가
+그 행을 빼 버리는 탓에 **영원히 전달되지 않고** 모든 회수된 Agent의 `command_delivered()`가
+항상 false가 된다. 그래서 술어는
+`worker_id = $1 AND (status <> 'stopped' OR last_acked_generation < command_generation)`이다.
+확인이 오면 조건이 깨지며 행이 조용해지므로 목록은 무한히 자라지 않는다.
+
+ACK는 `updated_at`을 **밀지 않는다**. 두 회수 표면이 이미 `Stopped`인 Agent에 UPDATE를 건너뛰는
+것은 "언제 회수됐는가"를 보존하려는 것인데, 한 beat 뒤에 도착한 ACK가 그 시각을 밀면 그
+불변식이 무효가 된다. ACK는 프로토콜 부기이지 운영자의 변경이 아니다.
+
+### `agents`가 `Vec`이 아니라 `Option<Vec>`인 이유
+
+4c의 Worker는 이 목록을 **권위 있는 전체 집합**으로 읽고 "목록에 없는 것은 정리한다"를 하게
+된다. 그 전제에서 `Vec` 하나로는 두 가지가 구분되지 않는다:
+
+| 값 | 뜻 |
+|---|---|
+| `None` | 이번 beat에는 권위 있는 목록이 없다(store 조회 실패, 또는 이 필드를 모르는 구버전 오케스트레이터). **아무것도 바꾸지 마라** |
+| `Some([])` | 정말로 배정된 Agent가 없다 |
+
+이 구분이 없으면 store 오류 한 번이 그 Worker의 Agent를 전부 죽이는 신호가 되고, Worker측의
+`#[serde(default)]`는 **구버전 서버의 응답**을 "전부 죽여라"로 읽는다. 4b가 커밋되면 이 모양을
+바꾸는 것은 breaking change이므로 필드가 갓 생긴 지금 정한다.
+
+### `Starting`은 컬럼이 아니라 파생이다
+
+`Starting`은 `(status, desired_status)`의 **순수 함수**다 — `Ready`이면서 desired가 `running`인
+동안이 그것이다. 그래서 `Agent::is_starting()`으로 노출하고 `AgentStatus`에는 넣지 않는다.
+넣었다면 `027`의 `status IN ('ready','stopped')` CHECK를 고쳐야 하고, 무엇보다 관측 주체 없이
+관측 상태를 저장하게 된다(위 유예 표의 첫 줄).
+
+### 의도적으로 만들지 않은 것
+
+- **명령 payload는 `(agent_id, desired_status, generation)` 셋뿐이다.** 포트·secret·cwd가
+  들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 된다.
+- **ACK는 관측 상태를 싣지 않는다.** 볼 프로세스가 없으므로 generation만 돌려주는 것이 정직한
+  최대치다. 여기서 상태를 지어내면 오케스트레이터에 거짓이 저장되고, 4c가 이미 기록된 값의
+  의미를 바꿔야 한다.
+- **재조정기가 없다.** 비교할 process inventory가 없다.
+
+### 검증 한계
+
+- 4b는 **전달까지만** 증명한다. Worker가 명령대로 프로세스를 띄웠는지는 이 단계의 어떤
+  테스트도 말하지 않으며, 그것이 `command_delivered()`와 "수렴"을 구분해 이름 붙인 이유다.
+- Worker측 소비는 ACK 버퍼링까지만 있다. `Option`이 4c의 "정리" 동작을 실제로 막는지는 그
+  동작이 존재하지 않으므로 지금 시험할 수 없다 — 지금 확정하는 것은 **그때 필요한 구분을
+  나중에 breaking change 없이 쓸 수 있게 하는 것**뿐이다.

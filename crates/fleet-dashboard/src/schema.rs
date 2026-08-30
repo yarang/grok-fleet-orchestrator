@@ -135,6 +135,24 @@ pub struct AgentSummary {
     pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assigned_at: Option<DateTime<Utc>>,
+    /// 수렴 프로토콜의 세 값 (로드맵 #67 4b). `status`가 **관측**이라면 이
+    /// 셋은 **의도와 그 전달 상태**다 — 둘을 한 필드로 합치지 않는 이유가
+    /// 여기 있다: 관측 주체(4c의 프로세스 매니저)가 아직 없어서, 지금
+    /// 오케스트레이터가 아는 것은 "무엇을 원했고 Worker가 그것을 받았는가"
+    /// 까지뿐이다.
+    pub desired_status: String,
+    pub command_generation: i64,
+    pub last_acked_generation: i64,
+    /// 위 두 세대가 같은가 — 즉 Worker가 현재 명령을 **받고 받아들였는가**.
+    /// 파생이지만 서버가 내보낸다: 두 클라이언트가 각자 비교하다가 한쪽이
+    /// `<=`로 쓰면 조용히 다른 답을 낸다.
+    pub command_delivered: bool,
+    /// `ready`이면서 desired가 `running`인 구간. `AgentStatus`의 variant가
+    /// **아니라** 파생인 이유는 `Starting`이 관측이 아니라 두 필드의 순수
+    /// 함수이기 때문이다 — variant로 만들었다면 `027`의
+    /// `status IN ('ready','stopped')` CHECK를 고치고, 아무도 관측하지 않는
+    /// 상태를 저장하게 된다.
+    pub is_starting: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -152,6 +170,11 @@ impl From<&Agent> for AgentSummary {
             agent_template_revision_id: a.template_pin.map(|p| p.revision_id.to_string()),
             worker_id: a.worker_id.map(|w| w.to_string()),
             assigned_at: a.assigned_at,
+            desired_status: a.desired_status.as_str().to_string(),
+            command_generation: a.command_generation,
+            last_acked_generation: a.last_acked_generation,
+            command_delivered: a.command_delivered(),
+            is_starting: a.is_starting(),
             created_at: a.created_at,
             updated_at: a.updated_at,
         }

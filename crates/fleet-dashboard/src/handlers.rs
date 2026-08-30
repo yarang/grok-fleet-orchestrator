@@ -1736,6 +1736,87 @@ pub async fn place_agent_api(
     Ok(Json(crate::schema::AgentSummary::from(&placed)))
 }
 
+/// POST /api/agents/:id/start — desired state를 `running`으로 (로드맵 #67 4b).
+///
+/// **생성도 배정도 이 자리를 대신하지 않는다.** 4a가 생성 시점에 자동으로
+/// 배정하므로 "배정 ⇒ running"은 곧 "생성 ⇒ running"이고, 그러면
+/// `AgentStatus::Ready`의 정의("정의는 끝났고 시작 명령을 **받을 수 있다**")가
+/// 빈다. 회수가 이미 `DELETE /api/agents/{id}`라는 명시적 표면인 것과 대칭이다.
+///
+/// 4c 전에는 이 호출이 프로세스를 띄우지 않는다 — 의도를 기록하고 heartbeat에
+/// 실을 뿐이다.
+pub async fn start_agent_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentManage)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let agent_id = id
+        .parse::<fleet_core::AgentId>()
+        .map_err(|_| ApiError::BadRequest("invalid agent id".into()))?;
+    let mut agent = state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id}")))?;
+
+    // 회수는 종단이다 — `place_agent_api`가 같은 기준으로 거절한다. 이 판정을
+    // `set_agent_desired_status`의 UPDATE 술어(`status <> 'stopped'`)로 내리지
+    // 않는 이유는, 그러면 "바뀐 것이 없음"과 "그런 Agent가 없음"이 같은
+    // 0-row로 뭉개져 404와 400을 구분할 수 없게 되기 때문이다.
+    if agent.status == fleet_core::AgentStatus::Stopped {
+        return Err(ApiError::BadRequest(format!(
+            "agent {agent_id} is stopped and cannot be started"
+        )));
+    }
+
+    // **미배정(`worker_id` 없음)은 거부하지 않는다.** 명령은 갈 곳이 없을 뿐
+    // 잃어버리지 않으며, 다음 배정이 세대를 올릴 때 실려 간다. 여기서 거부하면
+    // `NULL`에서의 회복이 "먼저 배정하고 그다음 start"라는 순서 제약을 갖는데,
+    // 그 순서를 강제할 이유가 없다.
+    if agent.desired_status != fleet_core::AgentDesiredStatus::Running {
+        state
+            .store
+            .set_agent_desired_status(agent_id, fleet_core::AgentDesiredStatus::Running)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?;
+        // 세대는 저장소가 정하므로 로컬 필드를 고쳐 응답하면 실제 발행된
+        // 세대와 다른 값을 싣게 된다(`place_agent_api`의 `assigned_at`과 같은
+        // 이유).
+        agent = state
+            .store
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| ApiError::Store(e.to_string()))?
+            .ok_or_else(|| ApiError::Store("agent disappeared during start".into()))?;
+
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::AGENT_START,
+            )
+            .actor(principal.user.id)
+            .target("agent", agent.id.to_string())
+            .detail(serde_json::json!({
+                "project_id": agent.project_id.to_string(),
+                "generation": agent.command_generation,
+                // 미배정이면 `null`이다 — 명령이 어디로도 가지 않은 채
+                // 발행됐다는 사실 자체가 기록될 값이다.
+                "worker_id": agent.worker_id.map(|w| w.to_string()),
+            })),
+        )
+        .await;
+    }
+
+    Ok(Json(crate::schema::AgentSummary::from(&agent)))
+}
+
 /// DELETE /api/agents/:id — Agent 회수(`Ready → Stopped`).
 ///
 /// idempotent다 — 이미 `Stopped`면 아무것도 쓰지 않고 현재 상태를

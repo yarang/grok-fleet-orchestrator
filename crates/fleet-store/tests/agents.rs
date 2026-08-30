@@ -34,7 +34,9 @@
 //! 그 Project로만 조회를 좁힌다. 공유 상태를 지우는 대신 애초에 공유하지
 //! 않는 쪽이라 스레드 수와 무관하다.
 
-use fleet_core::{Agent, AgentFilter, AgentStatus, Project, ProjectStatus, Worker};
+use fleet_core::{
+    Agent, AgentDesiredStatus, AgentFilter, AgentStatus, Project, ProjectStatus, Worker,
+};
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
@@ -559,4 +561,302 @@ async fn list_agents_filters_by_worker() {
         .await
         .unwrap();
     assert_eq!(all.len(), 3);
+}
+
+// ── 수렴 프로토콜 (로드맵 #67 4b) ───────────────────────────────────
+//
+// 여기서 증명하는 것은 **전달**이지 수렴이 아니다. 프로세스를 관측하는
+// 주체가 4c에 가서야 생기므로, 4b가 말할 수 있는 최대치는 "명령이 배정된
+// Worker에 도달했고 그 Worker가 같은 세대를 되돌려줬다"까지다.
+//
+// 위 파일 머리말의 격리 규약을 그대로 따른다 — TRUNCATE 대신 테스트마다
+// 유일한 Project·Worker를 만들고 그 안에서만 조회한다.
+
+#[tokio::test]
+async fn a_new_agent_wants_nothing_and_has_nothing_pending() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-new").await;
+    let agent = Agent::new(project.id, "fresh");
+    store.create_agent(&agent).await.unwrap();
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    assert_eq!(fetched.desired_status, AgentDesiredStatus::Stopped);
+    assert_eq!(fetched.command_generation, 0);
+    assert_eq!(fetched.last_acked_generation, 0);
+    // 두 세대가 0으로 같으므로 `command_delivered()`가 true다. 이것이 그
+    // 값의 정확한 뜻을 드러낸다 — "미전달 명령이 없다"이지 "무언가
+    // 확인됐다"가 아니다. 아직 발행된 명령 자체가 없다.
+    assert!(fetched.command_delivered());
+    assert!(!fetched.is_starting());
+}
+
+#[tokio::test]
+async fn desired_status_bumps_the_generation_only_when_the_value_changes() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-bump").await;
+    let agent = Agent::new(project.id, "bumper");
+    store.create_agent(&agent).await.unwrap();
+
+    assert!(store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap());
+    let first = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(first.command_generation, 1);
+    assert!(first.is_starting(), "ready + running = starting");
+
+    // 같은 의도를 다시 눌러도 세대는 그대로다. 매 호출마다 올리면 이미
+    // 확인된 명령이 반복 클릭만으로 미확인으로 되돌아간다.
+    assert!(store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap());
+    let again = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(again.command_generation, 1);
+
+    // 존재하지 않는 id는 `false`다. 이 구분이 있으려면 UPDATE 술어에
+    // `desired_status <> $2`를 넣으면 안 된다 — 넣으면 "바뀐 것이 없음"과
+    // "그런 Agent가 없음"이 같은 0-row가 된다.
+    assert!(!store
+        .set_agent_desired_status(fleet_core::AgentId::new(), AgentDesiredStatus::Running)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn commands_go_only_to_the_assigned_worker() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-route").await;
+    let mine = seed_worker(&store, "conv-route-mine").await;
+    let other = seed_worker(&store, "conv-route-other").await;
+
+    let agent = Agent::new(project.id, "routed").with_placement(mine.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap();
+
+    let cmds = store.list_agent_commands(mine.id).await.unwrap();
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0].agent_id, agent.id);
+    assert_eq!(cmds[0].desired_status, AgentDesiredStatus::Running);
+    assert_eq!(cmds[0].generation, 1);
+
+    assert!(store
+        .list_agent_commands(other.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_late_ack_cannot_confirm_a_command_that_was_already_superseded() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-late").await;
+    let worker = seed_worker(&store, "conv-late").await;
+    let agent = Agent::new(project.id, "late").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap(); // 세대 1
+    store
+        .update_agent_status(agent.id, AgentStatus::Stopped)
+        .await
+        .unwrap(); // 회수가 desired를 내리며 세대 2
+
+    // 세대 1을 뒤늦게 확인해도 반영되지 않는다. 이것이 큐 모델에서 따로
+    // 만들어야 했던 "만료" 장치를 대신한다 — 신선도 판정을 세대가 한다.
+    let applied = store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 1,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied, 0);
+
+    let fetched = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(fetched.command_generation, 2);
+    assert_eq!(fetched.last_acked_generation, 0);
+    assert!(!fetched.command_delivered());
+}
+
+#[tokio::test]
+async fn an_ack_from_a_worker_that_no_longer_owns_the_agent_is_rejected() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-steal").await;
+    let old = seed_worker(&store, "conv-steal-old").await;
+    let new = seed_worker(&store, "conv-steal-new").await;
+    let agent = Agent::new(project.id, "moved").with_placement(old.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap(); // 세대 1
+
+    // 재배정도 세대를 올린다 — 새 Worker는 이 명령을 아직 본 적이 없으므로
+    // 세대를 올리지 않으면 `command_delivered()`가 "새 Worker가 확인했다"는
+    // 거짓을 말하게 된다.
+    assert!(store.assign_agent_worker(agent.id, new.id).await.unwrap());
+    let moved = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(moved.command_generation, 2);
+    assert_eq!(moved.last_acked_generation, 0);
+
+    // 옛 Worker가 현재 세대를 정확히 들고 와도 통과하지 못한다. 세대만
+    // 보면 맞지만 자기 것이 아니다.
+    let applied = store
+        .ack_agent_commands(
+            old.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied, 0);
+
+    let applied = store
+        .ack_agent_commands(
+            new.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied, 1);
+    assert!(store
+        .get_agent(agent.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .command_delivered());
+}
+
+#[tokio::test]
+async fn a_repeated_ack_of_the_same_generation_is_a_noop() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-dup").await;
+    let worker = seed_worker(&store, "conv-dup").await;
+    let agent = Agent::new(project.id, "dup").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap();
+
+    let ack = [fleet_core::AgentAck {
+        agent_id: agent.id,
+        generation: 1,
+    }];
+    assert_eq!(store.ack_agent_commands(worker.id, &ack).await.unwrap(), 1);
+    // 매 beat 전체 목록을 다시 싣는 프로토콜이므로 같은 ACK가 계속 온다.
+    // 반환값이 "실제로 새로 확인된 수"가 되려면 두 번째는 0이어야 한다.
+    assert_eq!(store.ack_agent_commands(worker.id, &ack).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_stop_command_stays_on_the_list_until_it_is_acked() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-stop").await;
+    let worker = seed_worker(&store, "conv-stop").await;
+    let agent = Agent::new(project.id, "stopper").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap();
+    store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 1,
+            }],
+        )
+        .await
+        .unwrap();
+
+    // 회수. `status <> 'stopped'`만으로 목록을 걸렀다면 여기서 올라간 세대
+    // 2가 **영원히 전달되지 않고**, 회수된 모든 Agent의
+    // `command_delivered()`가 항상 false로 남는다.
+    store
+        .update_agent_status(agent.id, AgentStatus::Stopped)
+        .await
+        .unwrap();
+    let cmds = store.list_agent_commands(worker.id).await.unwrap();
+    assert_eq!(cmds.len(), 1, "회수 명령도 전달되어야 한다");
+    assert_eq!(cmds[0].desired_status, AgentDesiredStatus::Stopped);
+    assert_eq!(cmds[0].generation, 2);
+
+    // 확인되면 조용해진다 — 목록이 무한히 자라지 않는다는 것이 이 술어를
+    // 넓혀도 안전한 이유다.
+    store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    assert!(store
+        .list_agent_commands(worker.id)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn acking_does_not_move_updated_at() {
+    require_db!(store);
+    let project = seed_project(&store, "conv-touch").await;
+    let worker = seed_worker(&store, "conv-touch").await;
+    let agent = Agent::new(project.id, "untouched").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    // 먼저 running으로 올려 두지 않으면 회수가 세대를 올리지 않는다
+    // (`desired_status`가 이미 `stopped`이므로 `CASE`가 0을 준다). 그러면
+    // 확인할 명령 자체가 없어 이 테스트가 아무것도 증명하지 못한다.
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap(); // 세대 1
+    store
+        .update_agent_status(agent.id, AgentStatus::Stopped)
+        .await
+        .unwrap(); // 세대 2
+    let stopped_at = store.get_agent(agent.id).await.unwrap().unwrap().updated_at;
+
+    let applied = store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent.id,
+                generation: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied, 1);
+
+    // 두 회수 표면(Dashboard·MCP)이 이미 `Stopped`인 Agent에 대해 쓰기를
+    // 건너뛰는 것은 "언제 회수됐는가"를 지키기 위해서다. ACK가
+    // `updated_at`을 밀면 한 beat 뒤에 그 불변식이 무효가 된다 — ACK는
+    // 운영자의 조작이 아니라 프로토콜 부기다.
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.updated_at.timestamp_micros(),
+        stopped_at.timestamp_micros(),
+        "ACK는 회수 시각을 밀지 않는다"
+    );
+    assert!(after.command_delivered());
 }

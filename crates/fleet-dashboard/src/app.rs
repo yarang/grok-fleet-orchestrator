@@ -295,6 +295,10 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
         // 배정은 필드 편집이 아니라 **명명된 동작**이다. 같은 이유로
         // 회수가 `DELETE`인 것과 짝을 이룬다.
         .route("/api/agents/:id/place", post(handlers::place_agent_api))
+        // start (로드맵 #67 4b). 배정과 나란히 하위 경로인 이유도 같다 —
+        // `PATCH /api/agents/:id`는 `project_id` 불변 규칙 때문에 존재하지
+        // 않으므로, 운영 상태를 바꾸는 동사는 각자 하위 경로를 갖는다.
+        .route("/api/agents/:id/start", post(handlers::start_agent_api))
         .route(
             "/api/agent-templates",
             get(handlers::list_agent_templates_api).post(handlers::create_agent_template_api),

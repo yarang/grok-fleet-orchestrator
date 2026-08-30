@@ -28,15 +28,15 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
-    AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision, AgentTemplateRevisionId,
-    AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason,
-    EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent, IdempotentInsert, Issue,
-    IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt, Permission,
-    PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId, Session,
-    SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskOutputChunk,
-    TaskPhase, TaskStatus, TaskStatusFilter, TransitionOrigin, TransitionOutcome, User, UserId,
-    Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
+    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision,
+    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken,
+    CloseReason, EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent, IdempotentInsert,
+    Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt,
+    Permission, PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
+    Session, SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOrigin, TransitionOutcome,
+    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 
 use crate::{
@@ -1762,6 +1762,12 @@ impl Store for MemStore {
         match agents.get_mut(&id) {
             Some(a) => {
                 a.status = status;
+                // PgStore의 CASE 두 개와 같은 의미다(로드맵 #67 4b).
+                if status == AgentStatus::Stopped && a.desired_status != AgentDesiredStatus::Stopped
+                {
+                    a.desired_status = AgentDesiredStatus::Stopped;
+                    a.command_generation += 1;
+                }
                 a.updated_at = Utc::now();
                 Ok(true)
             }
@@ -1803,6 +1809,9 @@ impl Store for MemStore {
                 let now = Utc::now();
                 a.worker_id = Some(worker_id);
                 a.assigned_at = Some(now);
+                // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
+                // (로드맵 #67 4b).
+                a.command_generation += 1;
                 a.updated_at = now;
                 Ok(true)
             }
@@ -1823,6 +1832,81 @@ impl Store for MemStore {
             }
         }
         Ok(out)
+    }
+
+    // ── 수렴 프로토콜 (로드맵 #67 4b) ──────────────────────────────────
+
+    async fn set_agent_desired_status(
+        &self,
+        id: AgentId,
+        desired: AgentDesiredStatus,
+    ) -> Result<bool, StoreError> {
+        let mut agents = self.agents.lock().unwrap();
+        match agents.get_mut(&id) {
+            Some(a) => {
+                if a.desired_status != desired {
+                    a.desired_status = desired;
+                    a.command_generation += 1;
+                }
+                a.updated_at = Utc::now();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn list_agent_commands(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Vec<AgentCommand>, StoreError> {
+        let agents = self.agents.lock().unwrap();
+        let mut out: Vec<_> = agents
+            .values()
+            // PgStore의 술어와 같다 — 회수된 Agent도 그 회수 명령이 확인되기
+            // 전까지는 남는다. 자세한 이유는 postgres.rs의 같은 함수 주석.
+            .filter(|a| {
+                a.worker_id == Some(worker_id)
+                    && (a.status != AgentStatus::Stopped
+                        || a.last_acked_generation < a.command_generation)
+            })
+            .collect();
+        // PgStore의 `ORDER BY created_at`과 맞춘다. HashMap 순회 순서를 그대로
+        // 내보내면 같은 입력에 다른 순서가 나와, 두 Store를 같은 단정으로
+        // 검사하는 테스트가 MemStore 위에서만 간헐 실패한다.
+        out.sort_by_key(|a| a.created_at);
+        Ok(out
+            .into_iter()
+            .map(|a| AgentCommand {
+                agent_id: a.id,
+                desired_status: a.desired_status,
+                generation: a.command_generation,
+            })
+            .collect())
+    }
+
+    async fn ack_agent_commands(
+        &self,
+        worker_id: WorkerId,
+        acks: &[AgentAck],
+    ) -> Result<u64, StoreError> {
+        let mut agents = self.agents.lock().unwrap();
+        let mut applied = 0u64;
+        for ack in acks {
+            let Some(a) = agents.get_mut(&ack.agent_id) else {
+                continue;
+            };
+            // PgStore의 세 CAS 조건과 같다.
+            if a.worker_id == Some(worker_id)
+                && a.command_generation == ack.generation
+                && a.last_acked_generation < ack.generation
+            {
+                a.last_acked_generation = ack.generation;
+                // PgStore와 같이 `updated_at`은 건드리지 않는다 — 이유는
+                // postgres.rs의 `ack_agent_commands` 주석.
+                applied += 1;
+            }
+        }
+        Ok(applied)
     }
 
     // MemStore는 Worker 삭제 시 배정을 비우지 않는다 — PgStore에서는 `030`의

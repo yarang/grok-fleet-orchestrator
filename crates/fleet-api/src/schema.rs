@@ -8,7 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use fleet_core::{BootstrapToken, PermissionKind, WorkerLivenessMode, WorkerStatus};
+use fleet_core::{
+    AgentAck, AgentCommand, BootstrapToken, PermissionKind, WorkerLivenessMode, WorkerStatus,
+};
 
 /// `POST /v1/workers/register` 요청 바디.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -76,6 +78,15 @@ pub struct HeartbeatRequest {
     /// OS 정보.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub os_info: Option<ApiOsInfo>,
+    /// 지난 heartbeat 응답으로 받은 Agent 명령들에 대한 수신 확인
+    /// (로드맵 `#67` 4b).
+    ///
+    /// `#[serde(default)]`가 필수다 — 이 필드를 모르는 구버전 Worker의
+    /// heartbeat이 422로 떨어지면 업그레이드 순서가 오케스트레이터 → Worker로
+    /// 강제된다. 빈 목록은 "확인할 것이 없다"와 "구버전이다"를 구분하지 않으며,
+    /// 4b에서는 둘의 처리가 같다(명령이 미확인으로 남고 매 beat 재전송된다).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_acks: Vec<AgentAck>,
 }
 
 /// heartbeat 요청용 OS 정보.
@@ -127,7 +138,29 @@ pub struct HeartbeatResponse {
     pub ok: bool,
     /// 오케스트레이터가 워커에게 지시하는 상태 (예: "shutdown" 시그널).
     /// Phase 3에서는 항상 "running".
+    ///
+    /// **아래 `agents`와 다른 축이다.** 이것은 **Worker 자신**에 대한
+    /// 신호(자가 드레인 판정이 만든다)이고, `agents`는 그 Worker에 **배정된
+    /// Agent들**에 대한 명령이다. 같은 이름이라고 한 필드에 합치면 두 축이
+    /// 서로를 덮는다.
     pub desired_state: &'static str,
+    /// 이 Worker에 배정된 Agent들의 desired state (로드맵 `#67` 4b).
+    ///
+    /// 매 beat 전체를 다시 싣는다 — 그래서 `expires_at`이 필요 없고, 신선도
+    /// 판정은 각 원소의 `generation`이 한다. Worker의 `desired_state`가
+    /// `"drain"`이어도 이 목록은 **비지 않는다**: drain은 "새 배정 후보에서
+    /// 빠진다"는 뜻이고 4a의 배정 선택기가 이미 그것을 집행하므로, 이미 배정된
+    /// Agent를 여기서 추가로 억제하면 아무도 결정한 적 없는 동작이 생긴다.
+    ///
+    /// **`Vec`이 아니라 `Option<Vec>`인 이유가 4c를 좌우한다.** 4c의 워커는
+    /// 이 목록을 권위 있는 전체 집합으로 읽고 "목록에 없는 것은 정리한다"를
+    /// 하게 된다. 그러면 `None`과 `Some(vec![])`의 구분이 안전 장치가 된다 —
+    /// `None`은 "이번 beat에는 권위 있는 목록이 없다(조회 실패). 아무것도
+    /// 바꾸지 마라", `Some(vec![])`은 "정말로 배정된 Agent가 없다"다. 이걸
+    /// `Vec` 하나로 두면 store 조회 실패 한 번이 fleet 전체 종료 신호가 된다.
+    /// 지금 필드가 갓 생겼을 때는 공짜지만, 4b가 커밋되면 breaking change다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<AgentCommand>>,
     pub server_time: DateTime<Utc>,
 }
 
@@ -474,4 +507,60 @@ pub struct ExportedCredential {
     pub rotated_at: DateTime<Utc>,
     /// 워커의 `~/.grok/config.toml`에 추가할 TOML 섹션 (렌더링된 문자열).
     pub grok_config_section: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `agents`의 세 상태가 wire에서 서로 구분되는지 (로드맵 #67 4b).
+    ///
+    /// 이 구분이 4c의 안전 장치 전체다. `None`(조회 실패)과
+    /// `Some(vec![])`(정말로 없음)이 같은 바이트로 나가면, 4c의 워커가
+    /// "목록에 없는 프로세스는 정리한다"를 구현하는 순간 store 오류 한 번이
+    /// 그 Worker의 Agent 전부를 죽이는 신호가 된다.
+    #[test]
+    fn heartbeat_response_distinguishes_no_list_from_an_empty_list() {
+        let base = HeartbeatResponse {
+            ok: true,
+            desired_state: "running",
+            agents: None,
+            server_time: Utc::now(),
+        };
+
+        // `None`은 키 자체를 내보내지 않는다. `null`로 내보내도 워커 쪽
+        // `Option`은 같게 읽지만, 키를 빼면 이 응답이 **4b를 모르는 워커**
+        // 에게도 그대로 유효하다.
+        let obj = serde_json::to_value(&base).unwrap();
+        let obj = obj.as_object().unwrap();
+        assert!(
+            !obj.contains_key("agents"),
+            "권위 있는 목록이 없으면 키를 싣지 않는다"
+        );
+
+        let empty = serde_json::to_value(HeartbeatResponse {
+            agents: Some(Vec::new()),
+            ..base
+        })
+        .unwrap();
+        assert_eq!(
+            empty.get("agents").expect("빈 목록은 명시적으로 실린다"),
+            &serde_json::json!([])
+        );
+    }
+
+    /// 명령 원소가 세 필드만 싣는지. 관측 상태가 여기 섞이면 4c가 그것을
+    /// "돌고 있다"로 읽는 조용한 오탐이 생긴다.
+    #[test]
+    fn an_agent_command_carries_only_intent_and_generation() {
+        let cmd = AgentCommand {
+            agent_id: fleet_core::AgentId::new(),
+            desired_status: fleet_core::AgentDesiredStatus::Running,
+            generation: 7,
+        };
+        let value = serde_json::to_value(&cmd).unwrap();
+        let keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| &**k).collect();
+        assert_eq!(keys, ["agent_id", "desired_status", "generation"]);
+        assert_eq!(value["desired_status"], "running");
+    }
 }

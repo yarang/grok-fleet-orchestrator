@@ -112,7 +112,9 @@ fn required_permission(tool: &str) -> Option<PermissionKind> {
         TOOL_CREATE_PROJECT => PermissionKind::ProjectCreate,
         TOOL_LIST_PROJECTS => PermissionKind::ProjectRead,
         TOOL_DELETE_PROJECT => PermissionKind::ProjectDelete,
-        TOOL_CREATE_AGENT | TOOL_STOP_AGENT | TOOL_PLACE_AGENT => PermissionKind::AgentManage,
+        TOOL_CREATE_AGENT | TOOL_START_AGENT | TOOL_STOP_AGENT | TOOL_PLACE_AGENT => {
+            PermissionKind::AgentManage
+        }
         TOOL_LIST_AGENTS => PermissionKind::AgentRead,
         TOOL_LIST_ISSUES => PermissionKind::IssueRead,
         TOOL_CREATE_ISSUE => PermissionKind::IssueCreate,

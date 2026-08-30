@@ -40,6 +40,8 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/projects/{id}` | GET, DELETE | `project:read`, `project:delete` | Project 상세·archive 요청 |
 | `/api/agents` | GET, POST | `agent:read`, `agent:manage` | Agent 목록(`project_id` 필터)·생성 (로드맵 #49) |
 | `/api/agents/{id}` | DELETE | `agent:manage` | Agent 회수(`ready → stopped`, idempotent) |
+| `/api/agents/{id}/start` | POST | `agent:manage` | desired state를 `running`으로 (로드맵 #67 4b, idempotent) |
+| `/api/agents/{id}/place` | POST | `agent:manage` | Worker 배정·재배정 (로드맵 #67 4a) |
 | `/api/agent-templates` | GET, POST | `agent_template:read`, `agent_template:create` | 템플릿 목록(`project_id` 또는 `global=true` 필터)·정체성 생성 (로드맵 #86) |
 | `/api/agent-templates/{id}/revisions` | GET, POST | `agent_template:read`, `agent_template:update` (+ 도구/스킬 변경 시 `agent:manage`) | revision 이력·새 revision 발행 |
 | `/api/agent-templates/{id}/revisions/{revision_id}/revoke` | POST | `agent_template:revision_revoke` | 그 revision의 신규 pin 금지 (idempotent) |

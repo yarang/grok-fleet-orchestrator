@@ -4211,6 +4211,247 @@ async fn place_agent_without_csrf_header_is_rejected() {
     assert_eq!(resp.status(), 403);
 }
 
+// ── POST /api/agents/{id}/start (로드맵 #67 4b) ─────────────────────
+//
+// 이 표면이 증명하는 것은 **의도의 기록과 발행**까지다. 프로세스가 떴는지는
+// 4c의 관측 주체가 생겨야 말할 수 있다.
+
+#[tokio::test]
+async fn start_agent_issues_a_command_and_audits_the_generation() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let worker = Worker::new("starter", "wss://starter.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "starting").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "runner"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id = created["id"].as_str().unwrap().to_string();
+    // 생성이 start를 대신하지 않는다는 것이 이 설계의 전제다 — 4a가 생성
+    // 시점에 자동 배정하므로, 생성이 running을 뜻하면 `ready`("정의는 끝났고
+    // 시작 명령을 받을 수 있다")가 표현할 수 있는 상태가 사라진다.
+    assert_eq!(created["desired_status"], "stopped");
+    assert_eq!(created["is_starting"], false);
+
+    let started: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/start", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(started["desired_status"], "running");
+    assert_eq!(started["status"], "ready", "관측은 아직 바뀌지 않는다");
+    assert_eq!(started["is_starting"], true);
+    assert_eq!(started["command_generation"], 1);
+    assert_eq!(started["command_delivered"], false);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_START.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    // 세대를 detail에 싣는 이유: 이것이 있어야 나중에 Worker의 ACK와 맞대어
+    // "그 명령이 실제로 전달됐는가"를 감사 로그만으로 답할 수 있다.
+    assert_eq!(events[0].detail["generation"], 1, "{:?}", events[0].detail);
+    assert_eq!(
+        events[0].detail["worker_id"],
+        worker.id.to_string(),
+        "{:?}",
+        events[0].detail
+    );
+}
+
+#[tokio::test]
+async fn starting_an_already_running_agent_issues_nothing() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    store
+        .upsert_worker(&Worker::new("idem", "wss://idem.invalid/ws"))
+        .await
+        .unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "idempotent").await;
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "again"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id = created["id"].as_str().unwrap().to_string();
+
+    let url = format!("http://{}/api/agents/{}/start", server.addr, agent_id);
+    for _ in 0..2 {
+        authed_json(&client, reqwest::Method::POST, &url, &cookie)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_START.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // 두 번 눌렀지만 이벤트는 하나다. 값이 바뀔 때만 세대가 오르므로, 여기서
+    // 이벤트를 내면 세대가 같은 줄이 여러 개 남아 "몇 번 시작을 명령했나"가
+    // 무의미해진다.
+    assert_eq!(events.len(), 1, "{events:?}");
+}
+
+#[tokio::test]
+async fn start_agent_rejects_a_stopped_agent_with_400() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "terminal").await;
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "gone"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id: fleet_core::AgentId = created["id"].as_str().unwrap().parse().unwrap();
+    store
+        .update_agent_status(agent_id, fleet_core::AgentStatus::Stopped)
+        .await
+        .unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/start", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+    // 404가 아니라 400이다 — 행은 존재하고, 거절 사유는 그 상태다. 이
+    // 구분이 유지되려면 판정을 store의 UPDATE 술어로 내리면 안 된다.
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn start_agent_accepts_an_agent_with_no_worker() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "unplaced-start").await;
+    // Worker를 하나도 등록하지 않았으므로 생성 시 자동 배정이 실패한다.
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "orphan-start"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(created.get("worker_id").is_none());
+    let agent_id = created["id"].as_str().unwrap().to_string();
+
+    let started: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/start", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(started["desired_status"], "running");
+    assert_eq!(started["command_generation"], 1);
+}
+
+#[tokio::test]
+async fn start_agent_requires_agent_manage_permission() {
+    let (store, cookie) = seed_test_session_with_perms(
+        MemStore::new(),
+        &[PermissionKind::ProjectRead, PermissionKind::AgentRead],
+    )
+    .await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!(
+            "http://{}/api/agents/{}/start",
+            server.addr,
+            fleet_core::AgentId::new()
+        ),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn start_agent_without_csrf_header_is_rejected() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!(
+            "http://{}/api/agents/{}/start",
+            server.addr,
+            fleet_core::AgentId::new()
+        ))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
 #[tokio::test]
 async fn list_agents_filters_by_worker() {
     let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;

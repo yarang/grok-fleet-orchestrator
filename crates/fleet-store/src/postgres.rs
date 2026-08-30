@@ -23,15 +23,16 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
-    AgentTemplateFilter, AgentTemplateId, AgentTemplatePin, AgentTemplateRevision,
-    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, AuditOutcome,
-    BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent, IdempotentInsert, Issue,
-    IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus, IssueTaskLink, Labels,
-    LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus,
-    Role, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter, TransitionOrigin,
-    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
+    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplatePin,
+    AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter,
+    AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent,
+    IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus,
+    IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter,
+    ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter,
+    TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter,
+    TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -2861,8 +2862,9 @@ impl Store for PgStore {
             INSERT INTO agents
                 (id, project_id, name, description, created_by, status,
                  agent_template_id, agent_template_revision_id,
-                 worker_id, assigned_at, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 worker_id, assigned_at, desired_status, command_generation,
+                 last_acked_generation, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             "#,
         )
         .bind(agent.id.0)
@@ -2879,6 +2881,12 @@ impl Store for PgStore {
         // 대상 Worker가 선택과 INSERT 사이에 사라진 경우다.
         .bind(agent.worker_id.map(|w| w.0))
         .bind(agent.assigned_at)
+        // 생성 시 desired state는 `Agent::new`가 정한 `stopped`다(로드맵 #67
+        // 4b). 생성만으로 명령이 나가면 `AgentStatus::Ready`("아직 시작 명령을
+        // 받지 않았다")가 뜻을 잃는다.
+        .bind(agent.desired_status.as_str())
+        .bind(agent.command_generation)
+        .bind(agent.last_acked_generation)
         .bind(agent.created_at)
         .bind(agent.updated_at)
         .execute(&mut *tx)
@@ -2908,7 +2916,8 @@ impl Store for PgStore {
         let row = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
-                worker_id, assigned_at, created_at, updated_at \
+                worker_id, assigned_at, desired_status, command_generation, \
+                last_acked_generation, created_at, updated_at \
                FROM agents WHERE id = $1",
         )
         .bind(id.0)
@@ -2925,7 +2934,8 @@ impl Store for PgStore {
         let row = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
-                worker_id, assigned_at, created_at, updated_at \
+                worker_id, assigned_at, desired_status, command_generation, \
+                last_acked_generation, created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id.0)
@@ -2945,7 +2955,8 @@ impl Store for PgStore {
         let rows = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
-                worker_id, assigned_at, created_at, updated_at \
+                worker_id, assigned_at, desired_status, command_generation, \
+                last_acked_generation, created_at, updated_at \
                FROM agents \
               WHERE ($1::uuid IS NULL OR project_id = $1) \
                 AND ($2::text IS NULL OR status = $2) \
@@ -2968,11 +2979,26 @@ impl Store for PgStore {
         id: AgentId,
         status: AgentStatus,
     ) -> Result<bool, StoreError> {
-        let result = sqlx::query("UPDATE agents SET status = $2, updated_at = NOW() WHERE id = $1")
-            .bind(id.0)
-            .bind(status.as_str())
-            .execute(&self.pool)
-            .await?;
+        // 회수(`stopped`)는 desired state도 같은 쓰기에서 내린다(로드맵 #67
+        // 4b). 두 번의 쓰기로 나누면 그 사이에 heartbeat이 끼어 이미 회수된
+        // Agent에 `running` 명령이 나간다. 세대는 실제로 값이 바뀔 때만
+        // 올린다 — 이미 `stopped`를 바라던 Agent를 회수했다는 이유로 확인된
+        // 명령을 미확인으로 되돌릴 이유가 없다.
+        let result = sqlx::query(
+            "UPDATE agents \
+                SET status = $2, \
+                    desired_status = CASE WHEN $2 = 'stopped' \
+                                          THEN 'stopped' ELSE desired_status END, \
+                    command_generation = command_generation \
+                        + CASE WHEN $2 = 'stopped' AND desired_status <> 'stopped' \
+                               THEN 1 ELSE 0 END, \
+                    updated_at = NOW() \
+              WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(status.as_str())
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -2993,7 +3019,16 @@ impl Store for PgStore {
         worker_id: WorkerId,
     ) -> Result<bool, StoreError> {
         let result = sqlx::query(
-            "UPDATE agents SET worker_id = $2, assigned_at = NOW(), updated_at = NOW() \
+            // `command_generation`을 함께 올린다(로드맵 #67 4b). 새 Worker는
+            // 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
+            // `last_acked_generation == command_generation`이 "새 Worker가
+            // 확인했다"는 거짓을 말한다. 같은 Worker로의 재배정도 올린다 —
+            // 재배정을 명시적으로 요청했다는 것 자체가 전달을 다시 확인하고
+            // 싶다는 뜻이고, 구분해서 얻는 것이 없다.
+            "UPDATE agents \
+                SET worker_id = $2, assigned_at = NOW(), \
+                    command_generation = command_generation + 1, \
+                    updated_at = NOW() \
               WHERE id = $1",
         )
         .bind(id.0)
@@ -3031,6 +3066,101 @@ impl Store for PgStore {
             out.insert(WorkerId(worker_id), n as u32);
         }
         Ok(out)
+    }
+
+    // ── 수렴 프로토콜 (로드맵 #67 4b) ──────────────────────────────────
+
+    async fn set_agent_desired_status(
+        &self,
+        id: AgentId,
+        desired: AgentDesiredStatus,
+    ) -> Result<bool, StoreError> {
+        // `WHERE desired_status <> $2`를 쓰지 않는 이유: 그러면 같은 값을 다시
+        // 넣었을 때 `rows_affected = 0`이 되어 호출부가 "그런 Agent가 없다"와
+        // 구분하지 못한다. 대신 CASE로 세대만 조건부로 올린다.
+        let result = sqlx::query(
+            "UPDATE agents \
+                SET desired_status = $2, \
+                    command_generation = command_generation \
+                        + CASE WHEN desired_status <> $2 THEN 1 ELSE 0 END, \
+                    updated_at = NOW() \
+              WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(desired.as_str())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn list_agent_commands(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Vec<AgentCommand>, StoreError> {
+        // 030의 `idx_agents_worker_status`가 이 조회를 덮는다. `stopped` Agent를
+        // 빼는 이유는 원장과 같다 — 회수된 Agent에는 새로 띄울 것이 없다.
+        //
+        // **단 회수 명령 자체는 확인될 때까지 실어야 한다.** `update_agent_status`가
+        // `stopped`로 내릴 때 세대를 올리는데, `status <> 'stopped'`만으로 거르면
+        // 그 세대가 **영원히 전달되지 않고** 모든 회수된 Agent의
+        // `command_delivered()`가 항상 false가 된다. 그래서 미확인
+        // (`last_acked_generation < command_generation`)인 동안은 남긴다. 확인이
+        // 오면 조건이 깨지며 행이 조용해지므로 목록은 무한히 자라지 않고,
+        // 영구히 오프라인인 Worker의 행은 아무도 읽지 않으니 비용이 없다.
+        let rows = sqlx::query(
+            "SELECT id, desired_status, command_generation FROM agents \
+              WHERE worker_id = $1 \
+                AND (status <> 'stopped' OR last_acked_generation < command_generation) \
+              ORDER BY created_at",
+        )
+        .bind(worker_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let desired_str: String = row.try_get("desired_status")?;
+                let desired_status =
+                    AgentDesiredStatus::parse_str(&desired_str).ok_or_else(|| {
+                        StoreError::Decode(format!(
+                            "unknown agent desired status in DB: {desired_str}"
+                        ))
+                    })?;
+                Ok(AgentCommand {
+                    agent_id: AgentId(id),
+                    desired_status,
+                    generation: row.try_get("command_generation")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn ack_agent_commands(
+        &self,
+        worker_id: WorkerId,
+        acks: &[AgentAck],
+    ) -> Result<u64, StoreError> {
+        let mut applied = 0u64;
+        for ack in acks {
+            // `updated_at`을 **밀지 않는다.** 두 회수 경로가 이미 Stopped인
+            // Agent에 대해 UPDATE를 건너뛰는 것은 "언제 회수됐는가"를 보존하기
+            // 위해서인데(fleet-mcp/src/handlers.rs의 handle_stop_agent),
+            // 한 beat 뒤에 도착한 ACK가 그 시각을 밀어 버리면 그 불변식이
+            // 무효가 된다. ACK는 프로토콜 부기이지 운영자의 변경이 아니다.
+            let result = sqlx::query(
+                "UPDATE agents SET last_acked_generation = $3 \
+                  WHERE id = $1 AND worker_id = $2 \
+                    AND command_generation = $3 AND last_acked_generation < $3",
+            )
+            .bind(ack.agent_id.0)
+            .bind(worker_id.0)
+            .bind(ack.generation)
+            .execute(&self.pool)
+            .await?;
+            applied += result.rows_affected();
+        }
+        Ok(applied)
     }
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
@@ -3749,6 +3879,10 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
             "agent {id} has a half-populated placement: worker={worker_id:?} assigned_at={assigned_at:?}"
         )));
     }
+    let desired_str: String = row.try_get("desired_status")?;
+    let desired_status = AgentDesiredStatus::parse_str(&desired_str).ok_or_else(|| {
+        StoreError::Decode(format!("unknown agent desired status in DB: {desired_str}"))
+    })?;
     Ok(Agent {
         id: AgentId(id),
         project_id: ProjectId(project_id),
@@ -3759,6 +3893,9 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         template_pin,
         worker_id: worker_id.map(WorkerId),
         assigned_at,
+        desired_status,
+        command_generation: row.try_get("command_generation")?,
+        last_acked_generation: row.try_get("last_acked_generation")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

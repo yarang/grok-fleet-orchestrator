@@ -4800,3 +4800,93 @@ Store 구현인데 둘 다 `left`가 1**이었다. 서로 무관한 로직이 �
 `#49` 1단계 이래 데스크톱에서도 세로로 쌓여 있었다. 같은 누락이 이 저장소에서 세 번째다
 (`#activity-table`/`#key-table`/`#user-table` 묶음 주석이 앞선 두 번을 적고 있다). Worker 열이
 붙어 5열 → 6열이 되는 이번이 고칠 자리라 함께 넣었다.
+
+## 2026-08-31 — `#67` 4b 수렴 프로토콜: 큐가 아니라 상태를 보내면 늦은 ACK가 공짜로 막힌다
+
+`#67` 4단계의 두 번째 조각으로 Agent 명령 전달·ACK 경로를 넣었다. 4a가 "Agent를 Worker에
+얹는다"까지였다면, 4b는 "그 Worker에게 무엇을 하라고 말하고, 말이 도착했는지 안다"이다.
+
+**큐를 만들지 않았다.** `agents` 행에 `desired_status`·`command_generation`·
+`last_acked_generation` 세 컬럼(migration `031_agent_desired_state.sql`)을 올리고, 하트비트가
+매 박동마다 **명령 목록 전체를 다시 보낸다**. 워커는 같은 세대를 되돌려 ACK하고, 서버는
+`WHERE command_generation = $ack AND worker_id = $worker AND last_acked_generation < $ack`
+CAS로만 반영한다. 이 모양을 고른 이유는 재전송 로직이 필요 없어서가 아니라 — 그건 부수
+효과다 — **"지연된 ACK가 새 상태를 덮어쓰지 못한다"가 별도 코드 없이 성립하기 때문이다.**
+큐였다면 중복 소비·순서 역전·유실을 각각 막아야 했고, 세 방어는 서로를 알지 못해 하나만
+빠져도 조용히 뚫린다. 수렴 프로토콜에서는 셋이 같은 술어 하나로 접힌다. 세대를 되돌린
+ACK는 `last_acked_generation < $ack`가 거짓이라 무시되고, 다른 워커의 ACK는 `worker_id`가
+거짓이라 무시되며, 유실된 ACK는 다음 박동이 같은 목록을 다시 실어 스스로 복구한다.
+
+**`Starting`은 컬럼이 아니라 함수다.** `(status, desired_status)`의 순수 함수로
+`Agent::is_starting()`과 `AgentSummary.is_starting`에 노출했다. 상태를 하나 더 저장하면
+그 값이 두 컬럼과 어긋나는 네 번째 상태가 생기는데, 그것을 만들 방법이 코드에 있다는
+것만으로 "절반만 채워진 상태"의 자리가 열린다(4a가 타입과 스키마로 함께 막았던 바로 그
+자리다). 마찬가지로 `command_delivered`도 클라이언트에게 두 세대 값을 빼서 비교하라고
+맡기지 않고 서버가 파생해 내보낸다 — 비교식이 클라이언트마다 갈라지면 계약이 아니다.
+
+**`command_delivered`는 전달이지 수렴이 아니다.** 이름이 약속하는 것보다 적게 말한다.
+기저 상태에서 `0 == 0`이므로 **명령을 한 번도 내린 적 없는 Agent가 `command_delivered:
+true`로 보인다.** 이것은 버그가 아니라 이름의 한계이고, 그래서 실검증에 그 단정을
+**명시적으로** 넣었다(`baseline command_delivered true (0 == 0, 명령한 적 없음)`).
+넣지 않았다면 "명령 후 false"라는 체크와 "기저에서 true"라는 사실이 서로를 조용히
+반증하는 자리로 남았을 것이다.
+
+**생성 시 배정은 세대를 올리지 않는다 — 4c가 다시 만날 비대칭.** `create_agent_api`는
+`place_on_create` → `agent.with_placement(...)` → `store.create_agent(&agent)` 경로로
+가는데, 이 INSERT는 `agent.command_generation`을 그대로 넣는다(`postgres.rs:2888`).
+세대를 올리는 것은 `assign_agent_worker`뿐이다(`postgres.rs:3030`). 즉 논리적으로 같은
+"배정"에 코드 경로가 둘이고 세대 부수효과는 한쪽에만 있다. 지금은 생성 직후 목표가
+`stopped`라 문제가 없지만, 4c가 재배정을 다루면 이 비대칭이 그대로 드러난다.
+
+### 게이트
+
+7단계 전부 `exit=0`(`rustc 1.98.0 (88d9e12ae 2026-08-18)`): fmt → clippy(acp mtls) →
+clippy(no-default) → build(acp mtls) → test(acp mtls) → build(no-default) →
+test(no-default). 테스트는 양쪽 피처 세트 모두 **74 suite / 0 실패**, 통과 건수는
+`acp mtls` 1221, `no-default` 1217 — 4a 기준선(1200 / 1196) 대비 정확히 **+21**로 4b가
+넣은 테스트 수와 일치한다.
+
+**조용한 skip은 개수가 아니라 소요 시간으로 배제했다**(§4.3 (3)). `cross_client`가
+`15 passed ... finished in 6.19s`(acp mtls) / `4.94s`(no-default)로 실제 subprocess를
+띄웠다. `finished in 0.00s`로 찍힌 항목은 전부 열거해 doc-test(0건), `fleet_worker`
+바이너리 타깃(0건), env 게이트된 `e2e_with_real_grok`(0건), 그리고 진짜로 빠른 순수 단위
+suite(`verify_examples`, `verify_env_example`, `fleet_credentials` lib, `fleet` CLI main)
+임을 확인했다 — subprocess에 의존하는 것은 하나도 없다.
+
+### 실검증 (21/21)
+
+임시 DB `fleet_verify_4b`에 `fleet serve`를 띄우고 부트스트랩 → 프로젝트·Agent 생성 →
+대시보드 API로 확인했다. 기저 5건(`desired_status=stopped`, 세대 0, ACK 0,
+`command_delivered=true`, `is_starting=false`), 미배치 Agent에 `start` → 200, `AgentSummary`
+신규 5필드 존재, `desired_status=running`·세대 1·`command_delivered=false`·
+`is_starting=true`, 두 번째 `start`도 200이고 **세대가 1 그대로**(멱등), `agent.start`
+감사 행 정확히 1건, 없는 Agent → 404, CSRF 헤더 없음 → 403, 회수된 Agent에 `start` →
+400. 서버 종료와 `dropdb`까지 정리했다.
+
+**하네스가 다섯 번 거짓 초록에 근접했다** — 전부 검증 대상이 아니라 검증 도구의 결함이다.
+(1) 피처 세트를 바꾸면 `fleet-cli` 빌드 캐시가 통째로 무효화돼 7분을 태우고 serve에
+도달하지 못했다. `fleet-dashboard`가 `fleet-cli`의 **무조건** 의존이라(`Cargo.toml:49`,
+`#[cfg(feature)]` 가드 없음) 이미 있는 `--no-default-features` 바이너리로 충분했다.
+(2) 서버 stdin에 `/dev/zero`를 물리면 stdio MCP 리더에 NUL이 무한히 들어간다 — `sleep`이
+붙잡은 FIFO로 바꿔 EOF도 입력도 없게 했다. (3) 토큰 추출이 12자를 집었다: `grep -o ... |
+head -1`이 상자보다 먼저 나오는 INFO 로그의 `token_prefix=fleet_boot_H`에 맞았다. 최장
+일치로 골라 54자를 얻었다. (4) 부트스트랩 폼 필드가 `username`이 아니라 `email`이고,
+`validate_password`가 그 이메일을 유사도 컨텍스트로 받는다. (5) 세션 쿠키가 두 번
+사라졌다 — 먼저 `Secure` 플래그 때문에 파이썬 `http.cookiejar`가 평문 HTTP로 **저장은
+하되 전송하지 않았고**(서버 로그의 `fleet_csrf cookie is missing`이 진짜 이유를 말해줬다;
+클라이언트 쪽만 보면 "쿠키 있음"이라 멀쩡해 보인다), 수동 전송으로 바꾼 뒤에는 부트스트랩
+성공 경로가 `Redirect`라 `Set-Cookie`가 **302에** 실렸는데 urllib이 그 중간 응답을 내부에서
+소비해 최종 응답만 본 내 흡수 코드가 놓쳤다. 리다이렉트 응답까지 흡수하는 핸들러를 심어
+고쳤다. **다섯 결함 모두 "실패"가 아니라 "그럴듯한 부분 성공"으로 나타났다** — (5)는
+`bootstrap status: 200`을 찍고도 세션이 없었다.
+
+### 검증 한계 (정직하게)
+
+- **4b가 증명한 것은 전달이지 수렴이 아니다.** 워커측 프로세스 매니저가 아직 없으므로
+  실제로 ACK를 보내는 것은 테스트 하네스뿐이다. `last_acked_generation == command_generation`은
+  "명령이 도착하고 수용됐다"까지만 말하고, "Agent 프로세스가 실제로 그 상태다"는 말하지
+  않는다. 그것은 4c의 몫이다.
+- 실검증은 단일 오케스트레이터·단일 워커 시나리오다. 늦은 ACK가 CAS에 걸려 무시되는
+  경로는 **단위 테스트로만** 덮었고, 실제 두 워커가 경합하는 상황은 재현하지 않았다.
+- 하트비트 재전송이 자기 복구한다는 성질도 단위 테스트 수준이다 — 실제로 ACK를
+  유실시켜 다음 박동이 복구하는 것을 관측하지는 않았다.

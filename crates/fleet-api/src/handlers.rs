@@ -347,9 +347,45 @@ pub async fn heartbeat(
         "running"
     };
 
+    // Agent 수렴 프로토콜 (로드맵 #67 4b) — ACK를 먼저 반영하고 나서 명령을
+    // 읽는다. 순서가 반대면 이번 beat에서 확인된 명령이 미확인인 채로 실려
+    // 나가고, Worker는 방금 확인해 준 것을 한 beat 더 확인하게 된다.
+    //
+    // ACK 반영 실패는 heartbeat 전체를 실패시키지 않는다 — heartbeat은 워커
+    // 생존 신호가 본업이고, 확인이 한 beat 밀리는 것은 다음 beat이 고친다
+    // (명령을 매번 다시 싣기 때문이다). 반대로 500을 내면 워커가 heartbeat을
+    // 잃고 `Offline`으로 떨어진다.
+    if !req.agent_acks.is_empty() {
+        match state
+            .store
+            .ack_agent_commands(worker_id, &req.agent_acks)
+            .await
+        {
+            Ok(applied) => {
+                debug!(%worker_id, acked = req.agent_acks.len(), applied, "agent command acks");
+            }
+            Err(e) => {
+                tracing::warn!(%worker_id, error = %e, "failed to apply agent command acks");
+            }
+        }
+    }
+    // 같은 이유로 조회 실패도 치명적이지 않다. 다만 **빈 목록으로 대신하지
+    // 않는다** — 4c의 Worker는 이 목록을 권위 있는 전체 집합으로 읽고 목록에
+    // 없는 프로세스를 정리하므로, 조회 실패를 `Some(vec![])`로 내보내면 store
+    // 오류 한 번이 그 Worker의 Agent 전부를 죽이는 신호가 된다. `None`은
+    // "이번 beat에는 말해 줄 것이 없다"이고, 다음 beat이 복구한다.
+    let agents = match state.store.list_agent_commands(worker_id).await {
+        Ok(cmds) => Some(cmds),
+        Err(e) => {
+            tracing::warn!(%worker_id, error = %e, "failed to load agent commands");
+            None
+        }
+    };
+
     Ok(Json(HeartbeatResponse {
         ok: true,
         desired_state,
+        agents,
         server_time: Utc::now(),
     }))
 }

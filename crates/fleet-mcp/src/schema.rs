@@ -60,6 +60,12 @@ pub const TOOL_CREATE_AGENT: &str = "fleet_create_agent";
 pub const TOOL_LIST_AGENTS: &str = "fleet_list_agents";
 /// Agent 회수 도구 (로드맵 #49, 1단계).
 pub const TOOL_STOP_AGENT: &str = "fleet_stop_agent";
+/// Agent의 desired state를 `running`으로 올리는 도구 (로드맵 #67 4b).
+///
+/// `fleet_create_agent`가 이것을 대신하지 않는다 — 생성은 **정의** 조작이고,
+/// 4a가 생성 시점에 자동 배정하므로 "생성 ⇒ running"으로 두면 Agent를 미리
+/// 정의해 두는 정상 사용이 사라진다. `fleet_stop_agent`와 대칭이다.
+pub const TOOL_START_AGENT: &str = "fleet_start_agent";
 /// Agent를 Worker에 (재)배정하는 운영자 도구 (로드맵 #67 4a).
 ///
 /// 생성 시점 배정은 자동이므로 이 도구는 **정상 경로가 아니다**. 필요한
@@ -611,6 +617,20 @@ pub fn all_tools() -> Vec<ToolInfo> {
         ToolInfo {
             name: TOOL_STOP_AGENT,
             description: "Reclaim an Agent, moving it to stopped. A stopped Agent no longer blocks its Project from finishing archiving. Safe to call again — it reports the current state rather than erroring. In this stage there is no process to terminate, so reclaiming is immediate; once agents run for real, this will additionally require cleanup evidence before reaching stopped.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "UUID of the agent (as returned by fleet_create_agent or fleet_list_agents)."
+                    }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_START_AGENT,
+            description: "Ask the orchestrator to run an agent: sets its desired state to running so the assigned worker picks it up on its next heartbeat. Creating an agent does not start it — creation only defines it. Idempotent: starting an already-running agent changes nothing and issues no new command. Stopped agents are rejected (stop is terminal). An agent with no worker yet is accepted; the command is delivered when it is next placed. In this stage delivery is all that is tracked — nothing reports back that a process actually came up.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

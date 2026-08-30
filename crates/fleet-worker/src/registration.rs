@@ -77,6 +77,13 @@ pub struct RegistrationClient {
     grok_version: OnceLock<Option<String>>,
     /// OS 정보 (변하지 않으므로 최초 1회만 수집).
     os_info: OnceLock<Option<WorkerOsInfo>>,
+    /// 다음 heartbeat에 실어 보낼 Agent 명령 수신 확인 (로드맵 #67 4b).
+    ///
+    /// 명령은 응답으로 오고 확인은 요청으로 가므로 한 beat만큼 상태를 들고
+    /// 있어야 한다. 전송에 실패해 유실돼도 복구가 필요 없다 — 오케스트레이터가
+    /// 매 beat 명령 전체를 다시 싣기 때문에 다음 beat이 같은 세대를 다시
+    /// 확인한다. 이것이 큐 모델 대신 수렴 모델을 고른 대가이자 이득이다.
+    pending_acks: std::sync::Mutex<Vec<fleet_core::AgentAck>>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -134,6 +141,10 @@ struct HeartbeatRequest {
     fleet_worker_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     os_info: Option<WorkerOsInfo>,
+    /// 지난 응답으로 받은 Agent 명령들의 수신 확인 (로드맵 #67 4b).
+    /// 서버가 `#[serde(default)]`로 받으므로 비면 아예 보내지 않는다.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_acks: Vec<fleet_core::AgentAck>,
 }
 
 /// heartbeat 요청용 OS 정보 (fleet-core::OsInfo와 동일 구조).
@@ -148,8 +159,21 @@ struct WorkerOsInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct HeartbeatResponse {
+    /// **이 Worker 자신**에 대한 신호(`"running"` | `"drain"`)다. 아래
+    /// `agents`와 다른 축이므로 합치지 않는다.
     pub ok: bool,
     pub desired_state: String,
+    /// 이 Worker에 배정된 Agent들의 desired state (로드맵 #67 4b).
+    ///
+    /// `#[serde(default)]`가 필수다 — 이 필드를 보내지 않는 구버전
+    /// 오케스트레이터를 상대로도 heartbeat이 성립해야 업그레이드 순서가
+    /// 강제되지 않는다. 그리고 그 기본값이 `Vec::new()`가 **아니라** `None`
+    /// 이어야 한다: 4c의 프로세스 매니저는 이 목록에 없는 Agent를 정리하므로,
+    /// 필드를 모르는 구버전 서버의 응답이 빈 목록으로 읽히면 업그레이드 도중
+    /// 워커가 자기 Agent를 전부 죽인다. `None`("권위 있는 목록 없음")과
+    /// `Some(vec![])`("정말로 없음")은 4c에서 서로 다른 동작이어야 한다.
+    #[serde(default)]
+    pub agents: Option<Vec<fleet_core::AgentCommand>>,
 }
 
 /// `DELETE /v1/workers/:id` 요청.
@@ -172,6 +196,7 @@ impl RegistrationClient {
             disk_cache: Arc::new(DiskCache::new()),
             grok_version: OnceLock::new(),
             os_info: OnceLock::new(),
+            pending_acks: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -289,6 +314,8 @@ impl RegistrationClient {
             grok_version,
             fleet_worker_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             os_info,
+            // 지난 beat에서 받은 명령들의 확인을 실어 보내고 버퍼를 비운다.
+            agent_acks: std::mem::take(&mut *self.pending_acks.lock().unwrap()),
         };
 
         let url = format!(
@@ -314,6 +341,27 @@ impl RegistrationClient {
             )));
         }
         let body: HeartbeatResponse = resp.json().await.map_err(WorkerError::Http)?;
+        // 받은 명령을 다음 beat에서 확인한다 (로드맵 #67 4b).
+        //
+        // **여기서 프로세스는 뜨지 않는다.** 확인은 "받았고 받아들였다"는
+        // transport 사실이며, 그것이 프로세스 매니저(4c) 없이 Worker가
+        // 정직하게 말할 수 있는 최대치다. 관측 상태를 여기서 지어내 보내면
+        // 오케스트레이터에 거짓이 저장되고 4c가 이미 기록된 값의 의미를
+        // 바꿔야 한다.
+        // `None`(권위 있는 목록 없음)일 때는 버퍼를 건드리지 않는다. 비우면
+        // 직전 beat의 미전송 확인이 사라지고, 그 명령은 서버가 다시 실어 줄
+        // 때까지 미확인으로 남는다.
+        if let Some(cmds) = &body.agents {
+            let mut pending = self.pending_acks.lock().unwrap();
+            // 이번 beat의 명령만 확인한다 — 이전 beat의 확인이 전송 실패로
+            // 남아 있으면 그것은 이미 낡았고, 지금 온 명령이 최신이다.
+            // `Some(vec![])`이면 확인할 것이 없으므로 버퍼도 비는 것이 맞다.
+            pending.clear();
+            pending.extend(cmds.iter().map(|c| fleet_core::AgentAck {
+                agent_id: c.agent_id,
+                generation: c.generation,
+            }));
+        }
         Ok(body)
     }
 
@@ -967,6 +1015,7 @@ mod tests {
             grok_version: None,
             fleet_worker_version: None,
             os_info: None,
+            agent_acks: Vec::new(),
         };
         let json = serde_json::to_value(&req).unwrap();
         let obj = json.as_object().unwrap();
@@ -981,6 +1030,13 @@ mod tests {
         assert!(
             !obj.contains_key("disk_free_mb"),
             "disk_free_mb must be omitted when None, not serialized as null"
+        );
+        // 같은 이유가 `agent_acks`에도 걸린다 (로드맵 #67 4b) — 서버는 이
+        // 필드를 non-Option `#[serde(default)]`로 받으므로, 빈 벡터를 명시적
+        // `[]`로 보내도 되지만 확인할 것이 없는 beat마다 빈 배열을 싣게 된다.
+        assert!(
+            !obj.contains_key("agent_acks"),
+            "agent_acks must be omitted when empty"
         );
     }
 
@@ -1123,6 +1179,29 @@ mod tests {
         assert!(
             headers.get("traceparent").is_none(),
             "no traceparent should be injected without an active OTel span"
+        );
+    }
+
+    /// 구버전 오케스트레이터의 응답이 "빈 목록"이 아니라 "목록 없음"으로
+    /// 읽히는지 (로드맵 #67 4b).
+    ///
+    /// 업그레이드는 서버가 먼저일 수도 워커가 먼저일 수도 있다. 워커가 먼저
+    /// 올라간 창에서 서버는 `agents`를 아예 보내지 않는데, 그것이
+    /// `Some(vec![])`으로 읽히면 4c의 정리 로직이 도는 순간 그 워커가 자기
+    /// Agent를 전부 죽인다. `#[serde(default)]`가 `Option`에 붙어야 하는
+    /// 이유가 이것이고, 이 테스트가 그 한 글자를 지킨다.
+    #[test]
+    fn an_old_server_response_means_no_list_not_an_empty_one() {
+        let old: HeartbeatResponse =
+            serde_json::from_str(r#"{"ok":true,"desired_state":"running"}"#).unwrap();
+        assert!(old.agents.is_none(), "필드 부재는 '목록 없음'이다");
+
+        let empty: HeartbeatResponse =
+            serde_json::from_str(r#"{"ok":true,"desired_state":"running","agents":[]}"#).unwrap();
+        assert_eq!(
+            empty.agents,
+            Some(Vec::new()),
+            "명시적 빈 배열은 '정말로 없음'이다"
         );
     }
 }

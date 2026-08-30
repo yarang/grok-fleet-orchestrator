@@ -40,14 +40,14 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    Agent, AgentFilter, AgentId, AgentStatus, AgentTemplate, AgentTemplateBody,
-    AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision, AgentTemplateRevisionId,
-    AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken, CloseReason, EventEntry,
-    FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
-    LoginAttempt, Permission, PermissionId, PermissionKind, Project, ProjectFilter, ProjectId,
-    ProjectStatus, Role, RoleId, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId,
-    TaskOutput, TaskPhase, TaskStatus, TransitionOrigin, TransitionOutcome, User, UserId, Worker,
-    WorkerFilter, WorkerHeartbeat, WorkerId,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
+    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision,
+    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken,
+    CloseReason, EventEntry, FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus,
+    IssueTaskLink, LoginAttempt, Permission, PermissionId, PermissionKind, Project, ProjectFilter,
+    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, Task, TaskDeleteOutcome,
+    TaskFilter, TaskId, TaskOutput, TaskPhase, TaskStatus, TransitionOrigin, TransitionOutcome,
+    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -1130,6 +1130,10 @@ pub trait Store: Send + Sync {
     /// 상태를 전이하고 `updated_at`을 갱신한다. Project와 같이 Store는 CAS
     /// 없는 단순 쓰기이며 전이 유효성은 호출부가 검사한다. 존재하지 않는
     /// id면 `false`.
+    ///
+    /// `Stopped`로 갈 때는 `desired_status`도 같은 쓰기에서 `stopped`로
+    /// 내린다(로드맵 `#67` 4b). 회수를 두 번의 쓰기로 나누면 그 사이에
+    /// heartbeat이 끼어 이미 회수된 Agent에 `running` 명령이 나간다.
     async fn update_agent_status(
         &self,
         _id: AgentId,
@@ -1147,6 +1151,11 @@ pub trait Store: Send + Sync {
 
     /// Agent를 Worker에 (재)배정하고 `assigned_at`/`updated_at`을 갱신한다
     /// (로드맵 `#67` 4a). 존재하지 않는 id면 `false`.
+    ///
+    /// **`command_generation`도 함께 올린다**(로드맵 `#67` 4b). 새 Worker는
+    /// 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
+    /// `last_acked_generation == command_generation`이 "새 Worker가
+    /// 확인했다"는 거짓을 말한다.
     ///
     /// 생성 시점의 배정은 이 메서드를 쓰지 않는다 — `create_agent`의 INSERT가
     /// 두 컬럼을 함께 넣는다. 이 메서드의 호출자는 운영자의 명시적 재배정
@@ -1176,6 +1185,60 @@ pub trait Store: Send + Sync {
         &self,
     ) -> Result<std::collections::HashMap<WorkerId, u32>, StoreError> {
         Err(StoreError::Unsupported("count_agents_by_worker"))
+    }
+
+    // ── 수렴 프로토콜 (로드맵 #67 4b) ──────────────────────────────────
+    //
+    // 명령 큐 테이블이 아니라 `agents` 행의 desired state로 구현한다. 아래
+    // 세 메서드가 각각 명령 발행·전달·수신 확인이며, "지연된 ACK가 새 상태를
+    // 덮어쓰지 못한다"는 세 번째 메서드의 CAS가 그대로 만든다.
+
+    /// 이 Agent에 바라는 상태를 정한다 (로드맵 `#67` 4b).
+    ///
+    /// 값이 실제로 바뀔 때만 `command_generation`을 올린다 — 매 호출마다
+    /// 올리면 같은 의도를 반복해 눌렀다는 이유로 이미 확인된 명령이
+    /// 미확인으로 되돌아간다. 존재하지 않는 id면 `false`.
+    async fn set_agent_desired_status(
+        &self,
+        _id: AgentId,
+        _desired: AgentDesiredStatus,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("set_agent_desired_status"))
+    }
+
+    /// 이 Worker에 배정된, 회수되지 않은 Agent들의 현재 명령
+    /// (로드맵 `#67` 4b). heartbeat 응답이 매 beat 이것을 통째로 싣는다.
+    ///
+    /// 매번 전부 다시 보내기 때문에 `expires_at`이 필요 없다 — 큐 모델에서
+    /// "오래된 명령이 뒤늦게 실행되는" 창이 여기서는 열리지 않고, 신선도
+    /// 판정은 generation이 한다.
+    ///
+    /// **`AgentFilter`를 쓰지 않는 이유**: 그 구조체의 `limit`은 파생
+    /// `Default`가 0을 주고 두 Store가 조용히 1로 올린다(`mem.rs`의
+    /// `max(1)`, `postgres.rs`의 `clamp(1, 1000)`). 그 함정에 걸리면 모든
+    /// Worker가 정확히 한 개의 명령만 받고, 증상은 어느 크레이트에서든
+    /// 똑같은 `left: 1`이라 원인을 가리키지 않는다.
+    async fn list_agent_commands(
+        &self,
+        _worker_id: WorkerId,
+    ) -> Result<Vec<AgentCommand>, StoreError> {
+        Err(StoreError::Unsupported("list_agent_commands"))
+    }
+
+    /// Worker의 명령 수신 확인을 반영하고 반영된 건수를 돌려준다
+    /// (로드맵 `#67` 4b).
+    ///
+    /// CAS 조건이 셋이다: `command_generation = $ack`(지연된 ACK가 새 상태를
+    /// 덮어쓰지 못한다), `worker_id = $worker`(4a로 재배정이 가능해졌으므로,
+    /// 더는 자기 것이 아닌 Agent를 확인해 주지 못하게 한다),
+    /// `last_acked_generation < $ack`(같은 세대의 중복 ACK를 no-op으로 만들어
+    /// 반환 건수가 "실제로 새로 확인된 수"가 되게 한다).
+    async fn ack_agent_commands(
+        &self,
+        _worker_id: WorkerId,
+        _acks: &[AgentAck],
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("ack_agent_commands"))
     }
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────

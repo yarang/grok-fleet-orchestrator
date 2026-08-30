@@ -27,8 +27,8 @@ use crate::schema::{
     TOOL_CREATE_AGENT, TOOL_CREATE_ISSUE, TOOL_CREATE_PROJECT, TOOL_DELETE_PROJECT,
     TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_AGENTS, TOOL_LIST_BOOTSTRAP_TOKENS,
     TOOL_LIST_HOSTS, TOOL_LIST_ISSUES, TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS,
-    TOOL_PLACE_AGENT, TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STOP_AGENT,
-    TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE, TOOL_WAIT_FOR_TASK,
+    TOOL_PLACE_AGENT, TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_START_AGENT,
+    TOOL_STOP_AGENT, TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE, TOOL_WAIT_FOR_TASK,
 };
 
 /// 도구 호출 컨텍스트. 핸들러가 필요로 하는 모든 의존성을 캡슐화.
@@ -95,6 +95,7 @@ pub async fn dispatch_tool(
         TOOL_LIST_PROJECTS => handle_list_projects(ctx, arguments).await,
         TOOL_DELETE_PROJECT => handle_delete_project(ctx, arguments).await,
         TOOL_CREATE_AGENT => handle_create_agent(ctx, arguments).await,
+        TOOL_START_AGENT => handle_start_agent(ctx, arguments).await,
         TOOL_PLACE_AGENT => handle_place_agent(ctx, arguments).await,
         TOOL_LIST_AGENTS => handle_list_agents(ctx, arguments).await,
         TOOL_STOP_AGENT => handle_stop_agent(ctx, arguments).await,
@@ -1105,6 +1106,15 @@ fn agent_json(a: &fleet_core::Agent) -> Value {
         // 된다: 운영자가 배정이 실제로 어디로 갔는지 확인할 방법이 없다.
         "worker_id": a.worker_id.map(|w| w.to_string()),
         "assigned_at": a.assigned_at.map(|t| t.to_rfc3339()),
+        // 로드맵 #67 4b. `status`가 관측이라면 이 셋은 의도와 그 전달
+        // 상태다. `command_delivered`는 두 세대의 비교를 서버가 한 번만
+        // 정의하기 위해 함께 싣는다 — 도구 호출자가 각자 비교하면 한쪽이
+        // `<=`로 쓰는 순간 조용히 다른 답이 나온다.
+        "desired_status": a.desired_status.as_str(),
+        "command_generation": a.command_generation,
+        "last_acked_generation": a.last_acked_generation,
+        "command_delivered": a.command_delivered(),
+        "is_starting": a.is_starting(),
         "created_at": a.created_at.to_rfc3339(),
         "updated_at": a.updated_at.to_rfc3339(),
     })
@@ -1286,6 +1296,71 @@ async fn handle_list_agents(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         "agents": summary,
         "count": summary.len(),
     })))
+}
+
+/// `fleet_start_agent` — desired state를 `running`으로 (로드맵 #67 4b).
+///
+/// Dashboard `POST /api/agents/{id}/start`와 **같은 규칙**을 쓴다: `stopped`는
+/// 거절하고, 미배정은 허용하며, 이미 `running`이면 쓰지 않는다.
+///
+/// **오류를 `Ok(tool_error)`로 돌려주는 것은 `handle_stop_agent`를 따른 것이다.**
+/// 이 도메인에는 관행이 둘 있다 — `handle_place_agent`(4a)는 같은 상황에
+/// `Err(JsonRpcError::invalid_params)`를 쓴다. MCP의 구분("프로토콜 오류"는
+/// 요청이 잘못된 것, "도구 오류"는 도구가 돌았는데 적용되지 않은 것)에서는
+/// 존재하지 않는 Agent가 후자이므로 `stop` 쪽이 맞고, start는 stop의 거울이라
+/// 더욱 그렇다. `place`를 여기 맞추는 것은 4b의 범위가 아니라 손대지 않았고,
+/// 그 불일치는 docs/contracts/mcp-tools.md에 적어 둔다.
+async fn handle_start_agent(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let agent_id: fleet_core::AgentId = args
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: agent_id"))?
+        .parse()
+        .map_err(|_| JsonRpcError::invalid_params("agent_id must be a UUID"))?;
+
+    let Some(mut agent) = ctx
+        .state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+    else {
+        return Ok(schema::tool_error("agent not found"));
+    };
+
+    // 회수는 종단이다 — `handle_place_agent`가 같은 기준으로 거절한다.
+    if agent.status == fleet_core::AgentStatus::Stopped {
+        return Ok(schema::tool_error(format!(
+            "agent {agent_id} is stopped and cannot be started"
+        )));
+    }
+
+    // 이미 `running`이면 쓰지 않는다 — 저장소가 값이 바뀔 때만 세대를 올리므로
+    // 쓰기 자체는 무해하지만, `updated_at`이 재호출마다 밀린다
+    // (`handle_stop_agent`가 같은 이유로 쓰기를 건너뛴다).
+    //
+    // 미배정(`worker_id` 없음)은 거부하지 않는다: 명령은 갈 곳이 없을 뿐
+    // 잃어버리지 않으며 다음 배정이 세대를 올릴 때 실려 간다.
+    if agent.desired_status != fleet_core::AgentDesiredStatus::Running {
+        ctx.state
+            .store
+            .set_agent_desired_status(agent_id, fleet_core::AgentDesiredStatus::Running)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+        agent = ctx
+            .state
+            .store
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+            .ok_or_else(|| JsonRpcError::internal("agent disappeared during start"))?;
+    }
+
+    Ok(schema::tool_json(&agent_json(&agent)))
 }
 
 async fn handle_stop_agent(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
@@ -1659,8 +1734,9 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        // `#67` 4a가 `fleet_place_agent`를 더해 22 → 23.
-        assert_eq!(tools.len(), 23);
+        // `#67` 4a가 `fleet_place_agent`를 더해 22 → 23,
+        // 4b가 `fleet_start_agent`를 더해 23 → 24.
+        assert_eq!(tools.len(), 24);
     }
 
     #[test]
@@ -1953,6 +2029,124 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.message.contains("online"), "{}", err.message);
+    }
+
+    // ── fleet_start_agent (로드맵 #67 4b) ─────────────────────────────
+    //
+    // 이 도구가 증명할 수 있는 것은 **의도의 기록과 발행**까지다. 프로세스를
+    // 관측하는 주체는 4c에 가서야 생긴다.
+
+    #[tokio::test]
+    async fn start_agent_records_the_intent_and_issues_a_generation() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, worker) = seed_placeable(&ctx).await;
+        let agent = fleet_core::Agent::new(project_id, "startable")
+            .with_placement(worker.id, chrono::Utc::now());
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_START_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&out);
+
+        assert_eq!(body["desired_status"], "running");
+        assert_eq!(body["command_generation"], 1);
+        assert_eq!(body["last_acked_generation"], 0);
+        // `status`는 여전히 `ready`다 — 시작을 **바라는** 것과 돌고 있다고
+        // **관측된** 것은 다른 축이고, 후자를 볼 수 있는 것은 4c뿐이다.
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["is_starting"], true);
+        assert_eq!(
+            body["command_delivered"], false,
+            "발행했을 뿐 Worker가 아직 가져가지 않았다"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_agent_does_not_reissue_the_same_intent() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, worker) = seed_placeable(&ctx).await;
+        let agent = fleet_core::Agent::new(project_id, "twice")
+            .with_placement(worker.id, chrono::Utc::now());
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        let args = json!({"agent_id": agent.id.to_string()});
+        dispatch_tool(&ctx, TOOL_START_AGENT, &args).await.unwrap();
+        // Worker가 1세대를 가져갔다고 하자.
+        ctx.state
+            .store
+            .ack_agent_commands(
+                worker.id,
+                &[fleet_core::AgentAck {
+                    agent_id: agent.id,
+                    generation: 1,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let out = dispatch_tool(&ctx, TOOL_START_AGENT, &args).await.unwrap();
+        let body = parse_tool_json(&out);
+        // 같은 의도를 다시 눌렀다고 세대가 오르면, 이미 확인된 명령이 반복
+        // 클릭만으로 미확인으로 되돌아간다.
+        assert_eq!(body["command_generation"], 1);
+        assert_eq!(body["command_delivered"], true);
+    }
+
+    #[tokio::test]
+    async fn start_agent_accepts_an_agent_that_has_no_worker_yet() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, _w) = seed_placeable(&ctx).await;
+        let agent = fleet_core::Agent::new(project_id, "homeless");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        // 거부하면 회복에 "먼저 배정하고 그다음 start"라는 순서 제약이
+        // 생기는데, 그 순서를 강제할 이유가 없다. 명령은 갈 곳이 없을 뿐
+        // 잃어버리지 않으며, 다음 배정이 세대를 올릴 때 실려 간다.
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_START_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap();
+        let body = parse_tool_json(&out);
+        assert_eq!(body["desired_status"], "running");
+        assert!(body["worker_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn start_agent_rejects_a_stopped_agent() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, _w) = seed_placeable(&ctx).await;
+        let agent = fleet_core::Agent::new(project_id, "retired-start");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+        ctx.state
+            .store
+            .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
+            .await
+            .unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_START_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["isError"], true);
+        assert!(
+            out["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("stopped"),
+            "{:?}",
+            out
+        );
     }
 
     #[tokio::test]

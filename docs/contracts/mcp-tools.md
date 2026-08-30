@@ -32,6 +32,16 @@ handler 테스트를 기준으로 한다.
 집합을 열거한다는 것이다. 따라서 `-32600`이 추가로 흘리는 정보는 "받지 못한 capability에 속한
 도구가 카탈로그에 있다"뿐이며, 이를 감추려면 `tools/list`부터 바꿔야 한다.
 
+**대상이 없을 때의 코드는 도구마다 갈려 있으며, 이것은 아직 정리되지 않은 상태다.**
+`fleet_stop_agent`와 `fleet_start_agent`(`#67` 4b)는 없는 Agent를 `isError: true`인 정상
+응답(tool-level)으로 돌려주고, `fleet_place_agent`(`#67` 4a)는 `-32602 invalid_params`
+(protocol-level)로 돌려준다. `start`가 `stop`을 따른 것은 그것이 `stop`의 거울 표면이고,
+"그런 Agent가 없다"는 프로토콜 위반이 아니라 도구가 관측한 결과이기 때문이다 —
+인자의 **형태**는 멀쩡하고 지시한 **대상**만 없으므로 `invalid_params`의 뜻과 맞지 않는다.
+`place`를 이번에 함께 바꾸지 않은 것은 그것이 `#67` 4b의 범위 밖이고, 그 계약에 의존하는
+테스트가 이미 있기 때문이다. 정리 방향은 tool-level로 통일하는 쪽이며, 그때 이 문단과
+`place`의 테스트를 함께 고친다.
+
 존재 판정의 정본은 `all_tools()` 카탈로그이지 `required_permission()`이 아니다. 후자는
 `fleet_transition_issue`처럼 **존재하지만** 요구 capability가 인자에 따라 달라지는 도구에도
 `None`을 반환하므로, `None`을 "없는 도구"로 읽으면 오판한다.
@@ -76,7 +86,9 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_delete_project` | `project_id` | archive 진행 결과 — Project 상태와, `draining`에 머물렀다면 `archive_blocked_by`(`tasks`/`agents`) |
 | `fleet_create_agent` | `project_id`, `name`, 선택 `description` | 생성된 Agent |
 | `fleet_list_agents` | 선택 `project_id`, limit, offset | Agent 목록 |
+| `fleet_start_agent` | `agent_id` | start 결과(`desired_status: running`과 그 `generation`) |
 | `fleet_stop_agent` | `agent_id` | 회수 결과(`stopped`) |
+| `fleet_place_agent` | `agent_id`, 선택 `worker_id` | 배정 결과(선택된 Worker) |
 | `fleet_list_issues` | 선택 `project_id`, `status`, `open_only` | Issue 목록 |
 | `fleet_create_issue` | `project_id`, `title`, 선택 `body`, `severity`, labels | 생성된 Issue |
 | `fleet_transition_issue` | `issue_id`, `status`, 선택 `close_reason` | 전이 결과 |

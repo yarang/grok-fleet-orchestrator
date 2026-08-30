@@ -109,6 +109,15 @@ pub mod action {
     pub const AGENT_CREATE: &str = "agent.create";
     /// Agent 회수(`Ready → Stopped`) (로드맵 #49).
     pub const AGENT_STOP: &str = "agent.stop";
+    /// Agent의 desired state를 `running`으로 (로드맵 #67 4b).
+    /// `detail.generation`에 이 start가 발행한 명령 세대가 들어간다 — 그것이
+    /// 있어야 나중에 Worker의 ACK(`last_acked_generation`)와 이 이벤트를
+    /// 맞대어 "그 명령이 실제로 전달됐는가"를 감사 로그만으로 답할 수 있다.
+    ///
+    /// 이미 `running`인 Agent를 다시 start하면 **이벤트를 내지 않는다**.
+    /// 저장소가 값이 바뀔 때만 세대를 올리므로, 여기서 이벤트를 내면 세대가
+    /// 같은 이벤트가 여러 줄 남아 "몇 번 시작을 명령했나"가 무의미해진다.
+    pub const AGENT_START: &str = "agent.start";
     /// Agent를 Worker에 (재)배정 (로드맵 #67 4a). `detail.worker_id`와
     /// `detail.previous_worker_id`가 들어간다 — 후자가 있으면 옮긴 것이고
     /// 없으면 처음 배정한 것이다.

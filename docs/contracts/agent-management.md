@@ -49,6 +49,20 @@ capture와 attach는 이 계약의 부속 기능이 아니며 [터미널 접근]
 | 목록 | `fleet_list_agents` | `GET /api/agents?project_id=` | `agent:read` |
 | 회수 | `fleet_stop_agent` | `DELETE /api/agents/{id}` | `agent:manage` |
 
+`#67` 4a·4b가 여기에 두 줄을 더했다.
+
+| 작업 | MCP | Dashboard | capability |
+|---|---|---|---|
+| 배정 | `fleet_place_agent` | `POST /api/agents/{id}/place` | `agent:manage` |
+| start | `fleet_start_agent` | `POST /api/agents/{id}/start` | `agent:manage` |
+
+start가 별도 표면인 이유와, 생성·배정이 그 생산자가 **아닌** 이유는
+[Agent provisioning](../architecture/agents/provisioning.md)의 `#67` 4b 절이 정본이다. 요약하면
+4a가 생성 시점에 자동 배정하므로 "배정 ⇒ running"이 곧 "생성 ⇒ running"이 되고, 그러면
+`ready`("정의는 끝났고 시작 명령을 받을 수 있다")가 뜻을 잃는다. 회수가 이미 명시적 표면인
+것과 대칭이기도 하다. start는 `stopped` Agent에는 거부되지만 **미배정 Agent에는 허용된다** —
+명령은 다음 배정이 세대를 올릴 때 실려 간다.
+
 입력은 `project_id`, `name`, 선택 `description`이며 template/runtime 참조는 없다 — AgentTemplate
 (`#86`)이 아직 없기 때문이다. 상태는 `ready`/`stopped` 둘뿐이라 응답에 `generation`도 마지막 ACK도
 없다. 이름은 `(project_id, name)` 범위에서 유일하고, 중복은 `409`(MCP는 `invalid_params`)다.
