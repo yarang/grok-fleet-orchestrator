@@ -25,7 +25,24 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Mutex as TokioMutex};
 
-use fleet_worker::{RegistrationClient, WorkerConfig};
+use fleet_worker::{AgentProcessManager, RegistrationClient, WorkerConfig};
+
+/// heartbeat 루프에 넘길 Agent 프로세스 매니저 (로드맵 `#67` 4c-A).
+///
+/// 이 mock orchestrator는 heartbeat 응답에 `agents`를 싣지 않으므로 매니저는
+/// "권위 있는 목록 없음" 경로만 밟고 프로세스를 하나도 띄우지 않는다.
+fn test_agent_manager() -> Arc<AgentProcessManager> {
+    let config = WorkerConfig::for_test()
+        .agent_port_range("39900-39999")
+        .agent_workspace_root(
+            std::env::temp_dir()
+                .join("fleet-worker-lifecycle-test")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .build();
+    Arc::new(AgentProcessManager::new(Arc::new(config)).unwrap())
+}
 
 /// mock orchestrator가 수신한 요청을 추적하는 공유 상태.
 #[derive(Clone, Default)]
@@ -154,7 +171,7 @@ async fn full_lifecycle_register_heartbeat_deregister() {
     let hb_client = client.clone();
     let hb_handle = tokio::spawn(async move {
         hb_client
-            .run_heartbeat_loop(1, grok_addr, shutdown_rx)
+            .run_heartbeat_loop(1, grok_addr, test_agent_manager(), shutdown_rx)
             .await;
     });
 
@@ -225,7 +242,7 @@ async fn heartbeat_reports_unhealthy_when_grok_down() {
     let hb_client = client.clone();
     let hb_handle = tokio::spawn(async move {
         hb_client
-            .run_heartbeat_loop(1, "127.0.0.1:9".into(), shutdown_rx)
+            .run_heartbeat_loop(1, "127.0.0.1:9".into(), test_agent_manager(), shutdown_rx)
             .await;
     });
 

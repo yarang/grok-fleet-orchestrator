@@ -16,17 +16,24 @@
 //!   ├── GrokRunner (백그라운드 태스크)
 //!   │     └── grok agent serve --bind 127.0.0.1:2419 --secret ...
 //!   │           (비정상 종료 시 5초 후 재시작)
+//!   │           = 이 Worker의 ACP 종단. Task dispatch는 전부 여기로 온다.
+//!   │
+//!   ├── AgentProcessManager (heartbeat 루프가 beat마다 호출)
+//!   │     └── Agent마다 grok agent serve --bind <host>:<2420..> --secret <개별>
+//!   │           (singleton을 대체하지 않고 **옆에** 선다 — 로드맵 `#67` 4c-A)
 //!   │
 //!   ├── RegistrationClient (백그라운드 태스크)
 //!   │     ├── register (1회, 재시도 포함)
 //!   │     └── heartbeat 루프 (15초 간격)
+//!   │           └── 응답의 agents 목록으로 위 매니저를 수렴시킨다
 //!   │
 //!   └── 신호 핸들러 (SIGTERM/SIGINT)
-//!         └── grok 종료 + 등록 해제 (best-effort)
+//!         └── grok 종료 + Agent 프로세스 종료 + 등록 해제 (best-effort)
 //! ```
 
 #![forbid(unsafe_code)]
 
+pub mod agent_process;
 pub mod config;
 pub mod error;
 pub mod grok_process;
@@ -35,6 +42,7 @@ pub mod registration;
 pub mod runner;
 pub mod skill_loader;
 
+pub use agent_process::AgentProcessManager;
 pub use config::WorkerConfig;
 pub use error::WorkerError;
 pub use join::JoinArgs;

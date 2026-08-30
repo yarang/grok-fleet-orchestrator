@@ -164,7 +164,7 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 
 | 항목 | 왜 미뤘나 | 선행 |
 |---|---|---|
-| `Starting`/`Running`/`Failed` 상태 | 셋 다 **관측**이고 관측 주체가 프로세스 매니저뿐이다. 4b(수렴 프로토콜)는 명령의 전달만 만들 뿐 프로세스를 보지 못하므로 셋 중 어느 것도 4b에서 도달하지 않는다 — `Starting`은 그나마 generation 컬럼들의 순수 함수라 컬럼 없이 파생으로 표시한다 | `#67` 4c |
+| `Starting`/`Running`/`Failed` 상태 | 셋 다 **관측**이고 관측 주체가 프로세스 매니저뿐이다. 4b(수렴 프로토콜)는 명령의 전달만 만들 뿐 프로세스를 보지 못하므로 셋 중 어느 것도 4b에서 도달하지 않는다 — `Starting`은 그나마 generation 컬럼들의 순수 함수라 컬럼 없이 파생으로 표시한다 | `#67` 4c-B |
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
@@ -173,9 +173,13 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
 | ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
-| 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c |
-| ACK가 관측 상태를 싣는 것 | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | `#67` 4c |
-| Worker가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 Worker는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다. 4a의 배정은 하드 상한 없이 원장 기반 least-loaded만 쓴다 | `#67` 4c |
+| 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c-A(해소: 워커 로컬 파생) |
+| ACK가 관측 상태를 싣는 것 | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | `#67` 4c-B |
+| Worker가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 Worker는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다. 4a의 배정은 하드 상한 없이 원장 기반 least-loaded만 쓴다 | 집행 `#67` 4c-A · 신고 `#67` 4c-B |
+| 포트 소진·상한 거절과 4a 원장의 불일치 | Worker가 거절해도 `agents.worker_id`는 그대로 남는다 — 원장은 "배정됐다"고 세고 Worker는 "못 띄운다"고 본다. 이 창을 닫으려면 배정 시점에 자리를 예약하는 CAS slot claim이 필요하며, 그것은 4a가 이미 게이트 ①로 미뤄 둔 것과 **같은 창**이다 | `#67` 구현 게이트 ① |
+| per-Agent secret의 회전 | 회전은 살아 있는 프로세스를 재시작시키는 결정이고, 재시작을 관측·보고할 채널이 4c-A에는 없다. 워커 재기동 시 전부 새로 생성되는 것이 지금의 유일한 회전이다 | 미정 |
+| `agent_workspace_root`와 Project Git workspace의 관계 | 4c-A의 작업 디렉터리는 **프로세스의 cwd**일 뿐 checkout이 아니다. Git workspace·checkpoint는 `#69`가 소유하며, 지금 둘을 합치면 `#69`가 자기 설계를 4c-A의 디렉터리 규약에 맞춰야 한다 | `#69` |
+| Agent 프로세스의 우아한 종료 | 지금은 SIGTERM을 **보내지 않는다** — `fleet-worker`는 `#![forbid(unsafe_code)]`이고 `libc::kill`은 unsafe, `nix`는 의존성에 없다. singleton이 이미 같은 제약 아래 있으므로 4c-A가 새로 만든 문제가 아니다 | 미정 |
 
 위 "구현 게이트" 6개는 전부 명령·ACK 계층의 시험이므로 1단계 범위 밖이다. 1단계가 실제로
 증명한 것은 (a) FK·유일성 위반이 `StoreError::Conflict`로 번역되는지, (b) 살아 있는 Agent 하나가
@@ -342,3 +346,129 @@ ACK는 `updated_at`을 **밀지 않는다**. 두 회수 표면이 이미 `Stoppe
 - Worker측 소비는 ACK 버퍼링까지만 있다. `Option`이 4c의 "정리" 동작을 실제로 막는지는 그
   동작이 존재하지 않으므로 지금 시험할 수 없다 — 지금 확정하는 것은 **그때 필요한 구분을
   나중에 breaking change 없이 쓸 수 있게 하는 것**뿐이다.
+
+## 설계 결정 (`#67` 4c — 워커측 프로세스 매니저)
+
+> **2026-08-31 재분할.** 4c를 **4c-A**(워커측 프로세스 매니저)와 **4c-B**(관측 상태의 왕복)로
+> 나눈다. 아래 첫 절이 근거다. 이 절은 **두 단계 모두의** 결정을 지금 확정한다 — 그중 하나
+> (`is_starting`의 이름)는 4c-B가 표면에 노출한 뒤에는 고치는 비용이 달라지기 때문이다.
+
+### 왜 다시 나누는가 — 분할선은 마이그레이션 경계다
+
+`Starting`/`Running`/`Failed`를 `agents.status`에 넣으려면 `027`의
+`status IN ('ready','stopped')` CHECK를 넓혀야 하고, 그 세 값에는 **생산자가 있어야 한다**.
+생산자는 프로세스를 보는 매니저인데, 매니저는 4c-A가 만든다. 그런데 매니저가 본 것이
+`agents` 행까지 **도달**하려면 ACK가 관측 상태를 싣고 store가 그것을 적용해야 한다 — 즉
+CHECK를 넓히는 커밋은 매니저·ACK 확장·store 경로·세 표면 스키마를 전부 포함해야 죽은 값을
+만들지 않는다.
+
+`#70`에서 생산자 없는 `FailureKind` variant 셋을 걷어낸 비용을 이 프로젝트는 이미 치렀다.
+그래서 경계를 마이그레이션에 맞춘다:
+
+| | 만드는 것 | 만들지 않는 것 |
+|---|---|---|
+| **4c-A** | 매니저·설정·포트/secret/workspace 파생·수렴과 정리 | 마이그레이션, `AgentStatus` variant, ACK 확장 |
+| **4c-B** | CHECK 확장, variant 셋, 관측 상태를 실은 ACK, store 적용 경로, 세 표면 | — |
+
+4c-A가 끝난 시점에 오케스트레이터가 아는 것은 여전히 **전달**까지다. 프로세스는 실제로 뜨지만
+그 사실은 워커 로그에만 남는다. 이것은 구멍이 아니라 **명시된 한계**이며, 4b가
+`command_delivered`를 수렴이라 부르지 않은 것과 같은 종류의 정직함이다.
+
+### 매니저는 `GrokRunner`를 대체하지 않고 옆에 선다
+
+1:1 singleton을 Agent별 1:N으로 "바꾼다"는 4단계 최초 정의문은 그대로 실행하면 안 된다.
+singleton `grok agent serve`는 **Worker 자신의 ACP 종단**이고 그 주소가
+`workers.endpoint`로 등록되어 있으며, 모든 Task dispatch가 그리로 간다. Agent별로 쪼개는
+순간 dispatch는 `tasks.agent_id` 라우팅(`#49` 2단계)이 생기기 전까지 **갈 곳을 잃는다**.
+
+따라서 4c-A의 `AgentProcessManager`는 `GrokRunner`와 **공존**한다. singleton은 Task 종단으로
+남고, 매니저는 Agent별 프로세스를 따로 띄운다. 둘을 합치는 것은 dispatch가 Agent를 고르게 된
+뒤의 결정이다.
+
+### 포트·secret·cwd는 워커 로컬에서 파생한다
+
+명령 payload는 `(agent_id, desired_status, generation)` 셋으로 **고정**이다(위 유예 표와
+§"의도적으로 만들지 않은 것"). 그러면 프로세스마다 달라야 하는 셋은 Worker가 스스로 만들어야
+한다. 규칙은 셋 다 워커 설정(`[grok]`)에서 나온다:
+
+| 값 | 파생 규칙 | 기본값 |
+|---|---|---|
+| bind 주소 | `bind_addr`의 host + `agent_port_range`에서 비어 있는 포트 하나 | `2420-2519` |
+| secret | Agent마다 **새로 생성**(`hex(rand 32B)`). `grok.secret` 재사용 금지 | — |
+| cwd | `agent_workspace_root/<agent_id>` | `<grok.cwd 또는 워커 cwd>/fleet-agents` |
+
+**`grok.secret`을 재사용하지 않는 이유**: 그 값은 이미 Worker의 ACP 종단을 여는 열쇠이고,
+Agent 프로세스에 같은 값을 주면 Agent 하나가 샜을 때 Worker 종단까지 열린다 —
+"secret 하나 = 노출 범위 하나"가 깨진다. 포트 범위가 `2420`에서 시작하는 것은 singleton의
+`2419` 바로 다음이라는 뜻이며, 겹치지 않음이 눈으로 읽힌다.
+
+**4c-A에서 per-Agent secret은 워커 밖에 소비자가 없다.** 소비자는 자식 프로세스 자신뿐이다
+(`grok agent serve --secret`이 값을 요구한다). 이 격리가 실제로 무언가를 막는지는 Agent
+프로세스에 **닿는 경로**가 생기는 `#49` 2단계에서야 관측 가능하다.
+
+### 거절 경로는 하나다
+
+포트 소진과 `max_agent_processes` 초과는 원인이 다르지만 **결과가 같다** — 그 Agent는 이번
+beat에 뜨지 않는다. 두 개의 서로 다른 오류로 보고하면, 관측 상태가 생기는 4c-B에서 둘 다
+`Failed`로 접히면서 운영자는 두 이름을 보고 같은 처방을 찾게 된다. 하나의 거절 경로로 모으고
+**원인은 로그 필드로** 구분한다.
+
+**4c-A에서 이 거절은 워커 로그 한 줄과 "뜨지 않음"이 전부다.** 오케스트레이터에 도달하는
+채널이 없기 때문이다. 4c-B가 이 자리를 관측 상태로 잇기 전까지는 **조용한 실패 모드**이며,
+적어 두지 않으면 4c-B가 그것을 물려받고도 모른다.
+
+### `is_starting`은 4c-B에서 `start_pending`으로 바꾼다
+
+지금 `Agent::is_starting()`은 `(Ready, desired=running)`의 파생값이고 "명령은 냈는데 아직
+개시되지 않았다"를 뜻한다. 4c-B가 관측 `Starting`을 저장하면 이름이 하나 더 생기는데, 두
+값은 뜻이 다르다:
+
+| | 뜻 | 주체 |
+|---|---|---|
+| 파생 `is_starting` | 시작을 지시했고 Worker가 아직 아무것도 보고하지 않았다 | 오케스트레이터 |
+| 관측 `Starting` | Worker가 자식을 띄웠고 아직 health check 전이다 | Worker |
+
+둘은 **상호배타**다. 그래서 4c-B 이후 `{"status":"starting","is_starting":false}`가 정상
+응답이 되는데, 이것은 읽는 쪽에서 자기모순으로 보인다. 관측 쪽 이름은 상태 기계표가 이미
+`Starting`으로 고정했으므로, **파생 쪽을 `start_pending`으로 바꾼다**.
+
+바꾸는 시점은 4c-B다 — 충돌이 실제로 생기는 커밋에서 상태 어휘 변경 하나로 처리하는 편이,
+워커 코드만 건드리는 4c-A에 세 표면의 이름 변경을 섞는 것보다 읽기 쉽다. 결정을 여기 적어
+두는 것은 4c-B가 그 자리에 도착했을 때 **다시 판단하지 않게** 하기 위해서다.
+
+### 4c-A가 발명하지 않는 것
+
+- **Agent `Draining`.** 위 유예 표가 `#67` 4c 이후로 못박았다.
+- **Worker `drain`이 Agent 명령을 억제하는 것.** §"재조정과 회수"가 금지한다. 이미 배정된
+  Agent를 drain 시점에 죽이는 것은 별개의 결정이다.
+- **배경 재조정기.** 비교할 process inventory는 4c-A가 만들지만, 그것을 오케스트레이터와
+  맞대는 것은 관측이 왕복한 뒤의 일이다.
+- **`on_demand` Worker에서의 수렴.** 그 워커는 heartbeat 루프를 아예 시작하지 않으므로
+  (`runner.rs`) 매니저의 `reconcile`이 한 번도 호출되지 않는다. 4a의 배정 선택기가
+  `on_demand`를 후보에서 이미 빼므로 지금은 도달 불가능한 조합이며, 그것이 옳다.
+
+### 종료는 프로세스당 5초이므로 배치로 묶는다
+
+`grok_process::terminate_child`는 자식이 스스로 끝나기를 5초 기다린 뒤 SIGKILL한다.
+이름과 달리 **SIGTERM을 보내지 않으며**, `grok agent serve`는 끝날 이유를 통보받지
+못하므로 그 5초를 **항상 다 쓴다**. singleton 하나일 때는 종료 경로에 한 번 붙는
+고정 비용이라 눈에 띄지 않았지만, Agent가 여럿이면 곱해진다.
+
+직렬로 정리하면 상한 4개 기준 20초이고, 그 20초 동안 `reconcile`은 프로세스 맵의
+lock을 쥔 채 반환하지 않는다 — heartbeat 간격이 15초이므로 beat을 통째로 건너뛴다.
+그래서 정리는 `terminate_all`로 묶어 **동시에** 돌린다. 배치 전체가 약 5초가 되고,
+Agent 수와 무관해진다.
+
+이것은 성능 조정이 아니라 **정확성 쪽에 가깝다**: 지연이 heartbeat 주기를 넘기면
+Worker가 살아 있는데도 명령을 받지 못하는 구간이 생긴다.
+
+### `Option<Vec>`이 여기서 비로소 하중을 받는다
+
+4b가 `HeartbeatResponse.agents`를 `Option<Vec>`으로 둔 이유가 4c-A에서 처음으로 시험 가능해진다.
+매니저는 목록을 **권위 있는 전체 집합**으로 읽고 "목록에 없는 것은 정리한다"를 하므로:
+
+- `None` → 아무것도 하지 않는다. store 조회가 실패한 beat이 그 Worker의 Agent를 전부 죽이면 안 된다.
+- `Some([])` → 전부 정리한다. 정말로 배정된 Agent가 없다는 뜻이다.
+
+4c-A의 테스트는 이 두 값을 **반드시 구분해서** 확인한다 — 구분이 무너지는 순간의 대가가
+"함대 전체 종료"이기 때문이다.

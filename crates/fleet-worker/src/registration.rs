@@ -366,10 +366,16 @@ impl RegistrationClient {
     }
 
     /// 하트비트 루프. shutdown_rx가 true가 될 때까지.
+    ///
+    /// `agent_manager`는 매 beat의 응답에 실려 온 Agent 명령 목록으로 수렴한다
+    /// (로드맵 `#67` 4c-A). 매니저를 **선택적으로** 받지 않는 이유: 프로덕션
+    /// 경로에는 항상 하나가 있고, `Option`으로 두면 테스트만 도달하는 상태가
+    /// 하나 생긴다.
     pub async fn run_heartbeat_loop(
         &self,
         interval_secs: u32,
         grok_bind_addr: String,
+        agent_manager: Arc<crate::agent_process::AgentProcessManager>,
         mut shutdown_rx: watch::Receiver<bool>,
     ) {
         let interval = Duration::from_secs(interval_secs.max(1) as u64);
@@ -393,8 +399,15 @@ impl RegistrationClient {
                     if resp.desired_state == "drain" {
                         info!("Worker is in Draining state by Orchestrator direction");
                     }
+                    // `None`(구 오케스트레이터·조회 실패)과 `Some([])`(정말로
+                    // 없음)의 구분은 여기서 그대로 넘긴다 — 이 자리에서
+                    // `unwrap_or_default()`를 쓰면 조회 실패 한 번이 이 Worker의
+                    // Agent를 전부 죽인다.
+                    agent_manager.reconcile(resp.agents.as_deref()).await;
                 }
                 Err(e) => {
+                    // heartbeat 자체가 실패하면 권위 있는 목록이 없다 — 명령을
+                    // 추측해서 프로세스를 건드리지 않는다.
                     warn!(error = %e, "heartbeat failed — will retry next interval");
                 }
             }
@@ -696,6 +709,25 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::Mutex as TokioMutex;
 
+    /// heartbeat 루프 테스트용 Agent 매니저.
+    ///
+    /// mock orchestrator는 `agents`를 싣지 않으므로 `reconcile`은 `None` 경로만
+    /// 밟는다 — 프로세스는 하나도 뜨지 않는다. 그래도 workspace 루트를 임시
+    /// 디렉터리로 못박아 두는 이유는, 나중에 누가 이 mock에 목록을 실었을 때
+    /// 레포 안에 디렉터리가 생기지 않게 하기 위해서다.
+    fn test_agent_manager() -> Arc<crate::agent_process::AgentProcessManager> {
+        let config = WorkerConfig::for_test()
+            .agent_port_range("39900-39999")
+            .agent_workspace_root(
+                std::env::temp_dir()
+                    .join("fleet-worker-hb-test")
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .build();
+        Arc::new(crate::agent_process::AgentProcessManager::new(Arc::new(config)).unwrap())
+    }
+
     /// mock orchestrator의 공유 상태.
     #[derive(Clone)]
     struct MockState {
@@ -943,7 +975,7 @@ mod tests {
         let hb_client = client.clone();
         let hb_handle = tokio::spawn(async move {
             hb_client
-                .run_heartbeat_loop(1, "127.0.0.1:1".into(), shutdown_rx)
+                .run_heartbeat_loop(1, "127.0.0.1:1".into(), test_agent_manager(), shutdown_rx)
                 .await;
         });
 

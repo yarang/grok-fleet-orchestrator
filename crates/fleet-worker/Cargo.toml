@@ -44,6 +44,9 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+# Agent별 프로세스의 per-Agent secret 생성 (로드맵 `#67` 4c-A).
+rand = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -60,6 +60,30 @@ restart_delay_secs = 5
 # 미지정 시 fleet-worker 의 cwd 를 상속.
 # cwd = "/var/lib/fleet-worker"
 
+# ─── Agent 별 프로세스 (로드맵 #67 4c-A; 전부 옵션) ────────────────────
+# 위 bin/bind_addr/secret 은 이 Worker 자신의 ACP 종단(singleton)을 정의한다.
+# 아래 세 값은 오케스트레이터가 이 Worker 에 배정한 Agent 마다 **따로** 띄우는
+# 프로세스에만 적용된다 — singleton 을 대체하지 않고 옆에 선다.
+#
+# Agent 프로세스의 secret 은 설정하지 않는다 — Worker 가 Agent 마다 새로
+# 생성한다. 위 secret 은 Worker 자신의 ACP 종단을 여는 열쇠이므로 재사용하면
+# Agent 하나가 새는 순간 Worker 종단까지 열린다.
+
+# Agent 프로세스에 나눠 줄 포트 범위 ("시작-끝"). 기본 "2420-2519".
+# 기본값이 bind_addr 의 기본 포트(2419) 바로 다음이라 겹치지 않음이 값만 보고
+# 확인된다. bind_addr 를 옮겼다면 이 범위도 함께 옮길 것.
+# agent_port_range = "2420-2519"
+
+# Agent 별 작업 디렉토리의 부모. 각 Agent 는 <root>/<agent_id> 를 쓴다.
+# 미지정 시 위 cwd(없으면 워커 프로세스의 cwd) 아래 fleet-agents 로 파생.
+# 이것은 프로세스의 cwd 일 뿐 Git checkout 이 아니다 (Project workspace 는 #69).
+# agent_workspace_root = "/var/lib/fleet-worker/agents"
+
+# 이 Worker 가 동시에 띄우는 Agent 프로세스 상한. 기본 4.
+# max_concurrent_tasks 와 다른 축이다 — 저쪽은 singleton 하나가 동시에
+# 처리하는 Task 수이고, 이쪽은 프로세스의 개수다.
+# max_agent_processes = 4
+
 # ─── mTLS proxy (Phase 8.5; 옵션) ──────────────────────────────────────
 # 활성화 시 grok agent serve 앞에 mTLS 종단 TCP proxy 가 배치된다.
 # orchestrator는 사설 CA 로 서명된 클라이언트 인증서로 자신을 증명해야 함.

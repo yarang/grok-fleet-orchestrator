@@ -122,6 +122,25 @@ pub struct GrokSection {
     /// grok 서브프로세스의 작업 디렉토리 (옵션).
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Agent별 프로세스에 나눠 줄 포트 범위. `"시작-끝"` (로드맵 `#67` 4c-A).
+    ///
+    /// 기본 `2420-2519`는 singleton `bind_addr`의 기본 포트(`2419`) **바로
+    /// 다음**이다 — 겹치지 않음이 값을 읽는 것만으로 확인된다.
+    #[serde(default = "default_agent_port_range")]
+    pub agent_port_range: String,
+    /// Agent별 작업 디렉터리의 부모. 각 Agent는 `<root>/<agent_id>`를 쓴다.
+    ///
+    /// `None`이면 `cwd`(없으면 워커 프로세스의 cwd) 아래 `fleet-agents`로
+    /// 파생한다. **이것은 프로세스의 cwd일 뿐 Git checkout이 아니다** —
+    /// Project workspace·checkpoint는 `#69`가 소유한다.
+    #[serde(default)]
+    pub agent_workspace_root: Option<String>,
+    /// 이 Worker가 동시에 띄우는 Agent 프로세스 상한.
+    ///
+    /// `max_concurrent_tasks`와 **다른 축**이다 — 저쪽은 singleton 하나가
+    /// 동시에 처리하는 Task 수이고, 이쪽은 프로세스의 개수다.
+    #[serde(default = "default_max_agent_processes")]
+    pub max_agent_processes: u32,
 }
 
 fn default_heartbeat_interval() -> u32 {
@@ -135,6 +154,12 @@ fn default_max_concurrent() -> u32 {
 }
 fn default_restart_delay() -> u32 {
     5
+}
+fn default_agent_port_range() -> String {
+    "2420-2519".to_string()
+}
+fn default_max_agent_processes() -> u32 {
+    4
 }
 
 /// `[mtls]` 섹션 (Phase 8.5).
@@ -441,6 +466,9 @@ pub struct WorkerConfigBuilder {
     mtls: Option<MtlsSection>,
     llm_proxy: Option<LlmProxySection>,
     liveness_mode: WorkerLivenessMode,
+    agent_port_range: Option<String>,
+    agent_workspace_root: Option<String>,
+    max_agent_processes: Option<u32>,
 }
 
 impl WorkerConfigBuilder {
@@ -489,6 +517,18 @@ impl WorkerConfigBuilder {
         self
     }
     /// liveness 보고 방식 오버라이드 (테스트용). 기본값 `periodic`.
+    pub fn agent_port_range(mut self, r: impl Into<String>) -> Self {
+        self.agent_port_range = Some(r.into());
+        self
+    }
+    pub fn agent_workspace_root(mut self, p: impl Into<String>) -> Self {
+        self.agent_workspace_root = Some(p.into());
+        self
+    }
+    pub fn max_agent_processes(mut self, n: u32) -> Self {
+        self.max_agent_processes = Some(n);
+        self
+    }
     pub fn liveness_mode(mut self, mode: WorkerLivenessMode) -> Self {
         self.liveness_mode = mode;
         self
@@ -513,6 +553,13 @@ impl WorkerConfigBuilder {
                 max_concurrent_tasks: self.max_concurrent.unwrap_or(2),
                 restart_delay_secs: 1,
                 cwd: None,
+                agent_port_range: self
+                    .agent_port_range
+                    .unwrap_or_else(default_agent_port_range),
+                agent_workspace_root: self.agent_workspace_root,
+                max_agent_processes: self
+                    .max_agent_processes
+                    .unwrap_or_else(default_max_agent_processes),
             },
             mtls: self.mtls,
             llm_proxy: self.llm_proxy,

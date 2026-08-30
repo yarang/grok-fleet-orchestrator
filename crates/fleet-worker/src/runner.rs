@@ -9,6 +9,9 @@
 //!   ├── GrokRunner (백그라운드)
 //!   │     └── grok agent serve (재시작 루프)
 //!   │
+//!   ├── AgentProcessManager (상태만 보유 — 태스크를 따로 띄우지 않는다)
+//!   │     └── heartbeat 루프가 beat마다 reconcile()을 호출한다 (`#67` 4c-A)
+//!   │
 //!   ├── register_with_retry (1회)
 //!   │     ↓
 //!   ├── run_heartbeat_loop (백그라운드)
@@ -18,6 +21,7 @@
 //!         shutdown_tx.send(true)
 //!         → grok 종료
 //!         → heartbeat 루프 종료
+//!         → Agent 프로세스 종료
 //!         → mtls proxy 종료
 //!         (deregister 하지 않음 — 로드맵 #78. control plane의 heartbeat
 //!          timeout이 Offline 전이를 담당하고, 영구 제거는 관리자 명령만.)
@@ -29,6 +33,7 @@ use tokio::signal;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
+use crate::agent_process::AgentProcessManager;
 use crate::config::WorkerConfig;
 use crate::error::WorkerError;
 use crate::grok_process::GrokRunner;
@@ -59,6 +64,11 @@ impl WorkerRunner {
             mtls_enabled = config.mtls.as_ref().map(|m| m.enabled).unwrap_or(false),
             "fleet-worker starting"
         );
+
+        // 0. Agent 프로세스 매니저 생성 (로드맵 `#67` 4c-A).
+        //    grok을 띄우기 **전에** 만든다 — 포트 범위 파싱이 여기서 실패할 수
+        //    있고, 그 시점에는 아직 정리할 자식 프로세스가 없다.
+        let agent_manager = Arc::new(AgentProcessManager::new(config.clone())?);
 
         // 1. GrokRunner 백그라운드 시작.
         let (grok_runner, grok_shutdown_tx) = GrokRunner::new(config.clone());
@@ -99,12 +109,16 @@ impl WorkerRunner {
                 .heartbeat_interval_secs
                 .max(config.worker.heartbeat_interval_secs);
             let hb_shutdown_rx = shutdown_rx.clone();
+            let hb_agent_manager = agent_manager.clone();
             Some(tokio::spawn(async move {
                 hb_client
-                    .run_heartbeat_loop(hb_interval, hb_grok_bind, hb_shutdown_rx)
+                    .run_heartbeat_loop(hb_interval, hb_grok_bind, hb_agent_manager, hb_shutdown_rx)
                     .await;
             }))
         } else {
+            // Agent 명령의 유일한 전달 경로가 heartbeat 응답이므로, on_demand
+            // Worker에는 Agent가 배정되지 않는다 — 4a의 배치 선택기가 이미
+            // 그런 Worker를 후보에서 제외한다.
             info!("liveness_mode=on_demand — periodic heartbeat loop not started");
             None
         };
@@ -137,6 +151,10 @@ impl WorkerRunner {
                 _ => warn!("heartbeat loop did not exit cleanly"),
             }
         }
+
+        // Agent 프로세스 정리. heartbeat 루프를 join한 **뒤에** 부른다 — 그
+        // 전에 부르면 진행 중이던 beat이 방금 종료한 프로세스를 다시 띄운다.
+        agent_manager.shutdown_all().await;
 
         // mTLS proxy 정리 (최대 5초). shutdown 신호는 shutdown_rx 채널을 통해
         // 전달되므로, mtls_handle 은 shutdown_tx drop 후 자연 종료.

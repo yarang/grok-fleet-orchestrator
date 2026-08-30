@@ -103,7 +103,7 @@ impl GrokRunner {
                 _ = shutdown_watcher.changed() => {
                     if *shutdown_watcher.borrow() {
                         info!("shutdown signal received — terminating grok");
-                        terminate_child(&mut child).await;
+                        terminate_child(&mut child, "grok").await;
                         return Ok(());
                     }
                 }
@@ -163,8 +163,17 @@ async fn spawn_grok(config: &WorkerConfig) -> Result<Child, std::io::Error> {
     cmd.spawn()
 }
 
-/// 자식 프로세스 정상 종료 — SIGTERM → 5초 대기 → SIGKILL.
-async fn terminate_child(child: &mut Child) {
+/// 자식 프로세스를 종료한다 — 5초 대기 후 SIGKILL. `label`은 로그 식별자다.
+///
+/// **SIGTERM을 보내지 않는다.** 아래 주석대로 `nix` 없이는 보낼 수단이 없고,
+/// `start_kill()`은 Unix에서 곧바로 SIGKILL이다. 즉 자식이 스스로 끝나기를
+/// 5초 기다린 뒤 죽이는 것이 실제 규약이다 — 예전 한 줄 요약은 보내지 않는
+/// 신호를 보낸다고 적고 있었다.
+///
+/// singleton과 Agent별 프로세스가 **같은 종료 규약**(5초 대기 후 kill)을 쓰도록
+/// 한 곳에 둔다. 라벨을 인자로 받는 이유는 로그가 "grok"으로 고정되어 있으면
+/// Agent 프로세스의 종료가 singleton의 종료로 읽히기 때문이다.
+pub(crate) async fn terminate_child(child: &mut Child, label: &str) {
     use std::future::Future;
 
     // 1. SIGTERM 시도 (Unix에서는 start_kill이 SIGKILL이므로 별도 처리).
@@ -177,14 +186,14 @@ async fn terminate_child(child: &mut Child) {
 
     match tokio::time::timeout(Duration::from_secs(5), wait_fut).await {
         Ok(Ok(status)) => {
-            info!(?status, "grok exited cleanly on shutdown");
+            info!(label, ?status, "child exited cleanly on shutdown");
         }
         Ok(Err(e)) => {
-            warn!(error = %e, "error waiting for grok shutdown — killing");
+            warn!(label, error = %e, "error waiting for shutdown — killing");
             let _ = child.start_kill();
         }
         Err(_) => {
-            warn!("grok did not exit within 5s — force killing");
+            warn!(label, "child did not exit within 5s — force killing");
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
@@ -214,7 +223,7 @@ pub async fn health_check(bind_addr: &str, timeout_ms: u64) -> Result<(), Worker
     }
 }
 
-fn host_of(bind_addr: &str) -> &str {
+pub(crate) fn host_of(bind_addr: &str) -> &str {
     // `host:port`에서 host 추출.
     match bind_addr.rfind(':') {
         Some(i) => &bind_addr[..i],
