@@ -46,7 +46,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_template::AgentTemplatePin;
-use crate::ids::{AgentId, ProjectId};
+use crate::ids::{AgentId, ProjectId, WorkerId};
 
 /// Agent 운영 상태 (목표 8-상태의 1단계 부분집합 — 위 모듈 문서 참고).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +118,24 @@ pub struct Agent {
     /// 시간에 따라 달라져 감사 기록이 무의미해진다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_pin: Option<AgentTemplatePin>,
+    /// 이 Agent를 실행할 Worker (로드맵 `#67` 4a).
+    ///
+    /// **`project_id`/`template_pin`과 달리 불변이 아니다.** 저 둘은 정체성이라
+    /// 바뀌면 감사 기록이 무의미해지지만, 배정은 운영 상태다 — Worker가
+    /// 등록 해제되면 배정은 더는 참이 아니고(`030`의 `ON DELETE SET NULL`),
+    /// 운영자가 다른 Worker로 옮길 수 있어야 한다. 그래서 이 필드에는
+    /// 갱신 경로([`crate::audit::action::AGENT_ASSIGN`])를 만든다.
+    ///
+    /// `None`은 배정되지 않았다는 뜻이며 오늘 정상적으로 도달한다 — 생성
+    /// 시점에 배정 가능한 Worker가 하나도 없으면 배정 없이 생성된다. 생성을
+    /// 실패시키지 않는 이유는 Agent 정의가 Worker 가용성에 인질로 잡히면
+    /// 안 되기 때문이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<WorkerId>,
+    /// 언제 현재 Worker에 배정됐는지. `worker_id`와 항상 함께 있거나 함께
+    /// 없다 — `030`의 `agents_placement_complete` CHECK가 강제한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -134,6 +152,8 @@ impl Agent {
             created_by: None,
             status: AgentStatus::Ready,
             template_pin: None,
+            worker_id: None,
+            assigned_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -157,6 +177,19 @@ impl Agent {
         self.template_pin = Some(pin);
         self
     }
+
+    /// 생성 시점에 Worker를 배정한다 (로드맵 `#67` 4a).
+    ///
+    /// 배정을 INSERT **전에** 정해서 한 번의 쓰기로 끝내는 이유는, 생성 후
+    /// UPDATE로 나누면 INSERT는 성공하고 UPDATE가 실패했을 때 배정되지 않은
+    /// 행이 남는데 그것을 되돌릴 주체가 없기 때문이다. 배정 선택 자체는
+    /// `fleet_scheduler::placement::choose_worker`가 한다 — 코어에 두면
+    /// 도메인 모델이 Worker 목록 조회에 의존하게 된다.
+    pub fn with_placement(mut self, worker_id: WorkerId, assigned_at: DateTime<Utc>) -> Self {
+        self.worker_id = Some(worker_id);
+        self.assigned_at = Some(assigned_at);
+        self
+    }
 }
 
 /// Agent 목록 조회 필터.
@@ -164,12 +197,41 @@ impl Agent {
 /// `project_id`가 `None`이면 모든 Project의 Agent를 본다. principal 단위
 /// Project scope가 아직 없으므로 오늘은 이것이 관리자 조회이며, scope가
 /// 들어오면 이 필터가 그 강제 지점이 된다.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AgentFilter {
     pub project_id: Option<ProjectId>,
     pub status: Option<AgentStatus>,
+    /// 이 Worker에 배정된 Agent만 (로드맵 `#67` 4a). 4b의 heartbeat 응답이
+    /// "이 Worker에 배정된 Agent들의 desired state"를 실으려면 이 조회가
+    /// 필요하다. 오늘의 판독자는 운영자 조회(Dashboard `GET /api/agents`,
+    /// MCP `fleet_list_agents`)다 — 배정이 실제로 어디로 갔는지 확인할 수
+    /// 없으면 컬럼이 죽은 데이터가 된다.
+    ///
+    /// 배정되지 **않은** Agent만 보는 조회는 만들지 않았다. 그 값을 쓰는
+    /// 곳이 없다 — 재배정은 운영자가 특정 Agent를 지목해 호출한다.
+    pub worker_id: Option<WorkerId>,
     pub limit: usize,
     pub offset: usize,
+}
+
+/// `limit`이 0인 기본값을 만들지 않는다. 두 Store 모두 0을 **조용히 1로**
+/// 올리므로(`MemStore`는 `filter.limit.max(1)`, `PgStore`는
+/// `filter.limit.clamp(1, 1000)`), 파생 `Default`를 쓰면
+/// `..Default::default()`가 "필터 없음"이 아니라 "첫 한 행만"을 뜻하게 된다.
+/// 오류도 빈 목록도 아니어서 호출자가 알아차릴 방법이 없다 — `#67` 4a에서
+/// 실제로 세 개의 테스트가 이 방식으로 잘못된 개수를 세다 깨졌다.
+/// `TaskFilter`·`WorkerFilter`·`AuditFilter`가 같은 이유로 손으로 쓴
+/// `Default`를 갖고 있으며, 그쪽과 같은 100을 쓴다.
+impl Default for AgentFilter {
+    fn default() -> Self {
+        Self {
+            project_id: None,
+            status: None,
+            worker_id: None,
+            limit: 100,
+            offset: 0,
+        }
+    }
 }
 
 #[cfg(test)]

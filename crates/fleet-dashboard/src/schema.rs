@@ -125,6 +125,16 @@ pub struct AgentSummary {
     pub agent_template_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_template_revision_id: Option<String>,
+    /// 어느 Worker에 배정됐는지 (로드맵 #67 4a). `template_pin`과 마찬가지로
+    /// 둘은 항상 함께 있거나 함께 없지만, 이유는 정반대다 — pin은 **불변
+    /// 정체성**이라 절반이 불가능하고, 배정은 **가변 운영 상태**라 절반이
+    /// 되지 않도록 DB의 CHECK와 트리거가 막는다. `None`은 오류가 아니라
+    /// "지금 어느 Worker에도 배정되어 있지 않음"이며, 생성 시 배정에
+    /// 실패했거나 배정됐던 Worker가 등록 해제된 경우에 나타난다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -140,10 +150,24 @@ impl From<&Agent> for AgentSummary {
             status: a.status.as_str().to_string(),
             agent_template_id: a.template_pin.map(|p| p.template_id.to_string()),
             agent_template_revision_id: a.template_pin.map(|p| p.revision_id.to_string()),
+            worker_id: a.worker_id.map(|w| w.to_string()),
+            assigned_at: a.assigned_at,
             created_at: a.created_at,
             updated_at: a.updated_at,
         }
     }
+}
+
+/// `POST /api/agents/{id}/place` 요청 본문 (로드맵 #67 4a).
+///
+/// 본문 전체가 선택적이다 — `worker_id`를 생략하면 오케스트레이터가
+/// least-loaded로 고른다. `CreateAgentRequest`와 달리 필수 필드가 하나도
+/// 없는 이유는, 이 경로의 주 용도가 "생성 때 배정에 실패한 Agent를 지금
+/// 배정하라"이고 그때 운영자는 **어느 Worker인지 모르기 때문**이다.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PlaceAgentRequest {
+    #[serde(default)]
+    pub worker_id: Option<String>,
 }
 
 /// `POST /api/agents` 요청 본문.

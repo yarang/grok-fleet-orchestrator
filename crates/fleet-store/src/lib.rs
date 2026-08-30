@@ -1145,6 +1145,39 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("project_has_live_agents"))
     }
 
+    /// Agent를 Worker에 (재)배정하고 `assigned_at`/`updated_at`을 갱신한다
+    /// (로드맵 `#67` 4a). 존재하지 않는 id면 `false`.
+    ///
+    /// 생성 시점의 배정은 이 메서드를 쓰지 않는다 — `create_agent`의 INSERT가
+    /// 두 컬럼을 함께 넣는다. 이 메서드의 호출자는 운영자의 명시적 재배정
+    /// 하나뿐이며, 그래서 배정 **해제** 메서드는 만들지 않았다: 해제할 이유
+    /// 두 가지가 모두 다른 곳에서 처리된다. Worker 등록 해제는 `030`의
+    /// `ON DELETE SET NULL`이, Agent 회수는 아래 원장이 `stopped`를 세지
+    /// 않는 것이 처리한다.
+    async fn assign_agent_worker(
+        &self,
+        _id: AgentId,
+        _worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("assign_agent_worker"))
+    }
+
+    /// 배정 원장 — Worker별로 배정된 채 아직 회수되지 않은 Agent 수
+    /// (로드맵 `#67` 4a).
+    ///
+    /// `count_dispatched_tasks_by_worker`와 같은 역할을 Agent에 대해 한다:
+    /// least-loaded 배정의 부하 출처이며, 출처는 오케스트레이터 자신의 원장
+    /// 이지 Worker 자기보고가 아니다(그 판단의 근거는
+    /// `fleet-scheduler/src/selector.rs`의 `#67` 3단계 논거와 같다).
+    ///
+    /// `stopped` Agent는 세지 않는다 — 회수된 Agent는 실행될 일이 없으므로
+    /// 슬롯을 잡지 않는다. 이것이 별도의 배정 해제 경로를 불필요하게 만든다.
+    async fn count_agents_by_worker(
+        &self,
+    ) -> Result<std::collections::HashMap<WorkerId, u32>, StoreError> {
+        Err(StoreError::Unsupported("count_agents_by_worker"))
+    }
+
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
     //
     // 기본 구현은 `Unsupported` — 다른 신규 도메인과 같은 관례.

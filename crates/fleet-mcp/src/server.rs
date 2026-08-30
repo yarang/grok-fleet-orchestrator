@@ -112,7 +112,7 @@ fn required_permission(tool: &str) -> Option<PermissionKind> {
         TOOL_CREATE_PROJECT => PermissionKind::ProjectCreate,
         TOOL_LIST_PROJECTS => PermissionKind::ProjectRead,
         TOOL_DELETE_PROJECT => PermissionKind::ProjectDelete,
-        TOOL_CREATE_AGENT | TOOL_STOP_AGENT => PermissionKind::AgentManage,
+        TOOL_CREATE_AGENT | TOOL_STOP_AGENT | TOOL_PLACE_AGENT => PermissionKind::AgentManage,
         TOOL_LIST_AGENTS => PermissionKind::AgentRead,
         TOOL_LIST_ISSUES => PermissionKind::IssueRead,
         TOOL_CREATE_ISSUE => PermissionKind::IssueCreate,
@@ -328,6 +328,26 @@ mod tests {
         assert!(authorization.permits_tool(crate::schema::TOOL_LIST_TASKS));
         assert!(!authorization.permits_tool(crate::schema::TOOL_DISPATCH_TASK));
         assert!(!authorization.permits_tool(crate::schema::TOOL_REVOKE_BOOTSTRAP_TOKEN));
+    }
+
+    /// 로드맵 #67 4a — 배정은 Agent의 실행 위치를 바꾸는 쓰기이므로
+    /// 읽기 권한만 가진 launcher에게는 보이지 않아야 한다. 생성·중지와 같은
+    /// `AgentManage`에 둔 이유는 셋 다 "이 Agent가 어디서 도는가"를 바꾸기
+    /// 때문이다 — 배정만 더 낮은 권한으로 두면 읽기 권한자가 남의 Agent를
+    /// 다른 Worker로 옮길 수 있다.
+    #[test]
+    fn place_agent_tool_needs_agent_manage() {
+        let read_only = McpAuthorization {
+            capabilities: vec![PermissionKind::AgentRead, PermissionKind::TaskRead],
+        };
+        assert!(!read_only.permits_tool(crate::schema::TOOL_PLACE_AGENT));
+
+        let manager = McpAuthorization {
+            capabilities: vec![PermissionKind::AgentManage],
+        };
+        assert!(manager.permits_tool(crate::schema::TOOL_PLACE_AGENT));
+        assert!(manager.permits_tool(crate::schema::TOOL_CREATE_AGENT));
+        assert!(manager.permits_tool(crate::schema::TOOL_STOP_AGENT));
     }
 
     /// 인자 의존 도구(`fleet_transition_issue`)의 **노출** 판정 — 정확한

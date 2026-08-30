@@ -60,6 +60,12 @@ pub const TOOL_CREATE_AGENT: &str = "fleet_create_agent";
 pub const TOOL_LIST_AGENTS: &str = "fleet_list_agents";
 /// Agent 회수 도구 (로드맵 #49, 1단계).
 pub const TOOL_STOP_AGENT: &str = "fleet_stop_agent";
+/// Agent를 Worker에 (재)배정하는 운영자 도구 (로드맵 #67 4a).
+///
+/// 생성 시점 배정은 자동이므로 이 도구는 **정상 경로가 아니다**. 필요한
+/// 이유는 배정이 실패해도 생성은 성공하기 때문이다 — 그때 `worker_id`가
+/// `NULL`인 채로 남는데, 이 도구가 없으면 그 상태가 **회복 불가능**해진다.
+pub const TOOL_PLACE_AGENT: &str = "fleet_place_agent";
 /// Issue 목록 조회 도구 (로드맵 #92).
 pub const TOOL_LIST_ISSUES: &str = "fleet_list_issues";
 /// Issue 생성 도구 (로드맵 #92).
@@ -557,7 +563,7 @@ pub fn all_tools() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: TOOL_CREATE_AGENT,
-            description: "Create an Agent inside a Project — a named role with its own policy and context. The project_id is fixed at creation and can never be changed; to move work to another Project, create a new Agent there. This is stage-1 support: the Agent is a definition only. There is no process behind it yet, so it cannot be started, attached to, or assigned a task — its lifecycle here is ready -> stopped. Runtime/image, isolation, workspace, and tool bindings are not settable yet.",
+            description: "Create an Agent inside a Project — a named role with its own policy and context. The project_id is fixed at creation and can never be changed; to move work to another Project, create a new Agent there. The Agent is also placed on a worker at creation (least-loaded among online, probed workers with a closed circuit); if no worker qualifies, creation still succeeds with worker_id null and you can place it later with fleet_place_agent. There is no process behind the Agent yet, so it cannot be started, attached to, or assigned a task — its lifecycle here is ready -> stopped. Runtime/image, isolation, workspace, and tool bindings are not settable yet.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -579,13 +585,17 @@ pub fn all_tools() -> Vec<ToolInfo> {
         },
         ToolInfo {
             name: TOOL_LIST_AGENTS,
-            description: "List Agents, newest first. Omit project_id to list agents across all projects.",
+            description: "List Agents, newest first. Omit project_id to list agents across all projects. Each entry carries worker_id/assigned_at: null means the agent is not currently placed on any worker — either no worker qualified at creation, or the worker it was placed on was deregistered.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "project_id": {
                         "type": "string",
                         "description": "Only agents in this project (UUID). Omit for all projects."
+                    },
+                    "worker_id": {
+                        "type": "string",
+                        "description": "Only agents placed on this worker (UUID). Omit for all workers. Note this cannot select unplaced agents; read worker_id from the results for that."
                     },
                     "limit": {
                         "type": "integer",
@@ -607,6 +617,24 @@ pub fn all_tools() -> Vec<ToolInfo> {
                     "agent_id": {
                         "type": "string",
                         "description": "UUID of the agent (as returned by fleet_create_agent or fleet_list_agents)."
+                    }
+                },
+                "required": ["agent_id"]
+            }),
+        },
+        ToolInfo {
+            name: TOOL_PLACE_AGENT,
+            description: "Place an Agent on a worker, or move it to a different one. Only needed when creation could not place it (worker_id is null) or when you want to override the automatic choice. Omit worker_id to let the orchestrator pick the least-loaded online worker; pass it to target a specific one. Stopped agents are rejected. This records the intended location only — in this stage nothing is started or migrated as a result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "UUID of the agent (as returned by fleet_create_agent or fleet_list_agents)."
+                    },
+                    "worker_id": {
+                        "type": "string",
+                        "description": "UUID of the target worker (as returned by fleet_list_workers). Omit to choose automatically."
                     }
                 },
                 "required": ["agent_id"]

@@ -575,6 +575,14 @@ h2 {
   grid-template-columns: 2fr 0.9fr 0.7fr 0.9fr 1fr;
 }
 
+/* /projects/:id 상세의 Agent 테이블 (Name/Status/Worker/Created by/Created/Actions,
+   6열) — #49 1단계에 신설됐으나 전용 규칙이 없어 데스크톱에서도 세로로 쌓여
+   있었다(위 #activity-table 묶음과 같은 누락). #67 4a가 Worker 열을 더하며
+   5열 → 6열이 되는 김에 함께 넣는다. */
+#agent-table .row {
+  grid-template-columns: 1.2fr 0.7fr 0.8fr 0.9fr 0.9fr 0.7fr;
+}
+
 /* /agent-templates 페이지 (Name/Status/Scope/Description/Created by/Created, 6열) — #92. */
 #template-table .row {
   grid-template-columns: 1.2fr 0.8fr 0.6fr 1.8fr 0.9fr 0.9fr;

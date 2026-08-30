@@ -290,6 +290,11 @@ pub fn build_dashboard_app(state: Arc<DashboardState>) -> Router {
             get(handlers::list_agents_api).post(handlers::create_agent_api),
         )
         .route("/api/agents/:id", delete(handlers::stop_agent_api))
+        // 배정 (로드맵 #67 4a). `PATCH /api/agents/:id`가 아니라 하위
+        // 경로인 것은 규칙을 지키기 위해서다 — Agent에는 갱신 경로가 없고,
+        // 배정은 필드 편집이 아니라 **명명된 동작**이다. 같은 이유로
+        // 회수가 `DELETE`인 것과 짝을 이룬다.
+        .route("/api/agents/:id/place", post(handlers::place_agent_api))
         .route(
             "/api/agent-templates",
             get(handlers::list_agent_templates_api).post(handlers::create_agent_template_api),

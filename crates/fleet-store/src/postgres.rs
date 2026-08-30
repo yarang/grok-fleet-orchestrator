@@ -2860,8 +2860,9 @@ impl Store for PgStore {
             r#"
             INSERT INTO agents
                 (id, project_id, name, description, created_by, status,
-                 agent_template_id, agent_template_revision_id, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 agent_template_id, agent_template_revision_id,
+                 worker_id, assigned_at, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(agent.id.0)
@@ -2872,6 +2873,12 @@ impl Store for PgStore {
         .bind(agent.status.as_str())
         .bind(agent.template_pin.map(|p| p.template_id.0))
         .bind(agent.template_pin.map(|p| p.revision_id.0))
+        // 배정을 생성과 같은 INSERT에 넣는다(로드맵 #67 4a). 생성 후 UPDATE로
+        // 나누면 INSERT만 성공했을 때 배정 없는 행이 남고, 그것을 되돌릴
+        // 주체가 없다. FK 위반은 아래 매핑이 `Conflict`로 옮긴다 — 배정
+        // 대상 Worker가 선택과 INSERT 사이에 사라진 경우다.
+        .bind(agent.worker_id.map(|w| w.0))
+        .bind(agent.assigned_at)
         .bind(agent.created_at)
         .bind(agent.updated_at)
         .execute(&mut *tx)
@@ -2900,7 +2907,8 @@ impl Store for PgStore {
     async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
         let row = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
-                agent_template_id, agent_template_revision_id, created_at, updated_at \
+                agent_template_id, agent_template_revision_id, \
+                worker_id, assigned_at, created_at, updated_at \
                FROM agents WHERE id = $1",
         )
         .bind(id.0)
@@ -2916,7 +2924,8 @@ impl Store for PgStore {
     ) -> Result<Option<Agent>, StoreError> {
         let row = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
-                agent_template_id, agent_template_revision_id, created_at, updated_at \
+                agent_template_id, agent_template_revision_id, \
+                worker_id, assigned_at, created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id.0)
@@ -2931,17 +2940,21 @@ impl Store for PgStore {
         let offset = filter.offset as i64;
         let status_str = filter.status.map(|s| s.as_str());
         let project_id = filter.project_id.map(|p| p.0);
+        let worker_id = filter.worker_id.map(|w| w.0);
 
         let rows = sqlx::query(
             "SELECT id, project_id, name, description, created_by, status, \
-                agent_template_id, agent_template_revision_id, created_at, updated_at \
+                agent_template_id, agent_template_revision_id, \
+                worker_id, assigned_at, created_at, updated_at \
                FROM agents \
               WHERE ($1::uuid IS NULL OR project_id = $1) \
                 AND ($2::text IS NULL OR status = $2) \
-              ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+                AND ($3::uuid IS NULL OR worker_id = $3) \
+              ORDER BY created_at DESC LIMIT $4 OFFSET $5",
         )
         .bind(project_id)
         .bind(status_str)
+        .bind(worker_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -2972,6 +2985,52 @@ impl Store for PgStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(exists)
+    }
+
+    async fn assign_agent_worker(
+        &self,
+        id: AgentId,
+        worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE agents SET worker_id = $2, assigned_at = NOW(), updated_at = NOW() \
+              WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(worker_id.0)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            // 선택과 UPDATE 사이에 Worker가 등록 해제된 경우. 서버 결함이
+            // 아니라 호출자가 지목한 대상이 더는 유효하지 않다는 뜻이므로
+            // `create_agent`의 project FK와 같은 취급을 한다.
+            sqlx::Error::Database(ref db) if db.is_foreign_key_violation() => StoreError::Conflict(
+                format!("no such worker for agent placement: {}", db.message()),
+            ),
+            other => StoreError::Sqlx(other),
+        })?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn count_agents_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
+        // `idx_agents_worker_status`(030)가 이 조회를 덮는다. `worker_id IS
+        // NOT NULL`을 명시하는 이유는 `count_dispatched_tasks_by_worker`와
+        // 같다 — NULL 그룹이 만들어질 여지를 없앤다.
+        let rows = sqlx::query(
+            "SELECT worker_id, COUNT(*) AS n FROM agents \
+              WHERE worker_id IS NOT NULL AND status <> 'stopped' \
+              GROUP BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let worker_id: Uuid = row.try_get("worker_id")?;
+            let n: i64 = row.try_get("n")?;
+            out.insert(WorkerId(worker_id), n as u32);
+        }
+        Ok(out)
     }
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
@@ -3678,6 +3737,18 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
             )))
         }
     };
+    // 030의 `agents_placement_complete` CHECK가 절반만 채워진 배정을 막으므로
+    // 여기서도 template pin과 같은 규율을 쓴다 — 한쪽만 있는 행은 그 CHECK를
+    // 우회해 들어온 것이므로 조용히 넘기지 않는다. 조용히 `None`으로 넘기면
+    // 배정된 Agent가 배정되지 않은 것처럼 보이고, 4b의 수렴 프로토콜이
+    // 그 Agent에게 영원히 명령을 보내지 않게 된다.
+    let worker_id: Option<Uuid> = row.try_get("worker_id")?;
+    let assigned_at: Option<DateTime<Utc>> = row.try_get("assigned_at")?;
+    if worker_id.is_some() != assigned_at.is_some() {
+        return Err(StoreError::Decode(format!(
+            "agent {id} has a half-populated placement: worker={worker_id:?} assigned_at={assigned_at:?}"
+        )));
+    }
     Ok(Agent {
         id: AgentId(id),
         project_id: ProjectId(project_id),
@@ -3686,6 +3757,8 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         created_by: row.try_get("created_by")?,
         status,
         template_pin,
+        worker_id: worker_id.map(WorkerId),
+        assigned_at,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

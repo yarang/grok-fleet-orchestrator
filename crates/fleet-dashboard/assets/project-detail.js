@@ -152,9 +152,17 @@
         const stopBtn = (agentManageAllowed && a.status === 'ready')
           ? '<button type="button" class="btn" data-stop="' + escapeHtml(a.id) + '">Stop</button>'
           : '';
+        // 배정된 Worker (로드맵 #67 4a). UUID 전체는 열 폭을 잡아먹고
+        // 눈으로 구분되지도 않으므로 앞 8자만 보이고 전체는 title에 둔다.
+        // `—`는 오류가 아니라 "지금 배정 없음"이다 — 생성 때 후보가
+        // 없었거나 배정됐던 Worker가 등록 해제된 경우다.
+        const worker = a.worker_id
+          ? '<span title="' + escapeHtml(a.worker_id) + '">' + escapeHtml(a.worker_id.slice(0, 8)) + '</span>'
+          : '—';
         row.innerHTML = `
           <div style="font-weight:600;">${escapeHtml(a.name)}</div>
           <div><span class="badge ${escapeHtml(cls)}">${escapeHtml(a.status)}</span></div>
+          <div style="font-size:13px;color:var(--ink-muted-48);font-family:var(--font-mono,monospace);">${worker}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${escapeHtml(a.created_by || '—')}</div>
           <div style="font-size:13px;color:var(--ink-muted-48);">${fmtTime(a.created_at)}</div>
           <div>${stopBtn}</div>

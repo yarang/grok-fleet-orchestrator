@@ -1458,6 +1458,11 @@ pub async fn delete_project_api(
     }))
 }
 
+fn parse_worker_id(raw: &str) -> Result<fleet_core::WorkerId, ApiError> {
+    raw.parse::<fleet_core::WorkerId>()
+        .map_err(|_| ApiError::BadRequest("invalid worker id".into()))
+}
+
 fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
     raw.parse::<fleet_core::ProjectId>()
         .map_err(|_| ApiError::BadRequest("invalid project id".into()))
@@ -1475,6 +1480,11 @@ fn parse_project_id(raw: &str) -> Result<fleet_core::ProjectId, ApiError> {
 pub struct ListAgentsQuery {
     #[serde(default)]
     pub project_id: Option<String>,
+    /// 배정된 Worker로 거른다 (로드맵 #67 4a). "어느 Worker도 배정되지
+    /// 않은 것만"을 뽑는 값은 없다 — 그 질문의 소비자가 아직 없고, 없는
+    /// 소비자를 위한 필터는 항상 비어 있는 컬럼과 같은 종류의 부채다.
+    #[serde(default)]
+    pub worker_id: Option<String>,
 }
 
 /// GET /api/agents — Agent 목록 JSON API.
@@ -1493,11 +1503,16 @@ pub async fn list_agents_api(
         Some(raw) => Some(parse_project_id(raw)?),
         None => None,
     };
+    let worker_id = match query.worker_id.as_deref() {
+        Some(raw) => Some(parse_worker_id(raw)?),
+        None => None,
+    };
     let agents = state
         .store
         .list_agents(&fleet_core::AgentFilter {
             project_id,
             status: None,
+            worker_id,
             limit: 1000,
             offset: 0,
         })
@@ -1577,6 +1592,17 @@ pub async fn create_agent_api(
         }
     }
 
+    // Worker 배정 (로드맵 #67 4a). 후보가 없어도 생성은 계속된다 —
+    // Agent 정의가 Worker 가용성에 인질로 잡히면 안 되기 때문이며, 그때
+    // 남는 `worker_id = NULL`은 `POST /api/agents/{id}/place`로 회복
+    // 가능하다. 별도 UPDATE가 아니라 **같은 INSERT**에 실어 보내므로,
+    // 중간에 실패해서 "아무도 고치지 않을 미배정 행"이 남는 경우가 없다.
+    if let Some((worker_id, assigned_at)) =
+        fleet_scheduler::placement::place_on_create(state.store.as_ref()).await
+    {
+        agent = agent.with_placement(worker_id, assigned_at);
+    }
+
     // pin이 지금도 유효한지(revoke·retire 여부)는 Store가 트랜잭션 안에서
     // 본다. 여기서 미리 읽어 검사하면 그 사이에 revoke가 끼어들 수 있다.
     state.store.create_agent(&agent).await.map_err(|e| {
@@ -1598,11 +1624,116 @@ pub async fn create_agent_api(
         .detail(serde_json::json!({
             "name": agent.name,
             "project_id": agent.project_id.to_string(),
+            // 생성 시점 배정은 `agent.assign`을 따로 내지 않는다. 여기에
+            // 실어 두면 "이 Agent가 몇 번 옮겨졌는가"가 `agent.assign`
+            // 건수로 그대로 세어진다 — 생성이 그 수를 1 부풀리지 않는다.
+            "worker_id": agent.worker_id.map(|w| w.to_string()),
         })),
     )
     .await;
 
     Ok(Json(crate::schema::AgentSummary::from(&agent)))
+}
+
+/// POST /api/agents/:id/place — Agent를 Worker에 (재)배정한다 (로드맵 #67 4a).
+///
+/// 생성 시점 배정이 자동이므로 이 경로는 **예외 처리용**이다. 존재해야
+/// 하는 이유는 하나뿐이다: 생성은 배정 실패로 막히지 않으므로 `worker_id`가
+/// `NULL`인 Agent가 정상적으로 생길 수 있고, 이 경로가 없으면 그 상태가
+/// 영구히 고착된다. Worker 등록 해제로 배정이 풀린 Agent도 같은 자리로
+/// 돌아온다.
+///
+/// `DELETE`(회수)와 달리 idempotent하지 않다 — 같은 Worker로 두 번 불러도
+/// `assigned_at`이 갱신된다. 회수는 "언제 회수됐는가"가 기록이라 밀리면
+/// 안 되지만, 배정은 "언제 이 자리를 다시 확인했는가"가 기록이기 때문이다.
+pub async fn place_agent_api(
+    State(state): State<Arc<DashboardState>>,
+    Extension(principal): Extension<AuthPrincipal>,
+    jar: CookieJar,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<crate::schema::PlaceAgentRequest>,
+) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
+    require_permission(&principal, PermissionKind::AgentManage)?;
+    verify_csrf_header(&jar, &headers)?;
+
+    let agent_id = id
+        .parse::<fleet_core::AgentId>()
+        .map_err(|_| ApiError::BadRequest("invalid agent id".into()))?;
+    let agent = state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound(format!("agent {id}")))?;
+
+    // 회수된 Agent는 배정하지 않는다. 원장(`count_agents_by_worker`)이
+    // `stopped`를 세지 않으므로 배정해도 부하에 잡히지 않고, 4b의 desired
+    // state도 실릴 일이 없다 — 아무도 읽지 않는 값을 쓰는 것이 된다.
+    if agent.status == fleet_core::AgentStatus::Stopped {
+        return Err(ApiError::BadRequest(format!(
+            "agent {agent_id} is stopped and cannot be placed"
+        )));
+    }
+
+    let worker_id = match body.worker_id.as_deref() {
+        Some(raw) => parse_worker_id(raw)?,
+        None => fleet_scheduler::placement::choose_worker(state.store.as_ref())
+            .await
+            .map_err(|e| match e {
+                fleet_scheduler::placement::PlacementError::Store(inner) => {
+                    ApiError::Store(inner.to_string())
+                }
+                // 후보 없음은 서버 오류가 아니라 지금의 fleet 상태다 —
+                // 409로 돌려 운영자가 Worker를 올린 뒤 재시도하게 한다.
+                other => ApiError::Conflict(other.to_string()),
+            })?,
+    };
+
+    let previous_worker_id = agent.worker_id;
+    let updated = state
+        .store
+        .assign_agent_worker(agent_id, worker_id)
+        .await
+        .map_err(|e| match e {
+            // 존재하지 않는 Worker를 지목한 경우 — FK가 잡는다. 미리 읽어
+            // 검사하지 않는 이유는 그 사이에 등록 해제가 끼어들 수 있어
+            // 검사가 보장을 주지 못하기 때문이다(pin 검증과 같은 논리).
+            fleet_store::StoreError::Conflict(msg) => ApiError::BadRequest(msg),
+            other => ApiError::Store(other.to_string()),
+        })?;
+    if !updated {
+        return Err(ApiError::NotFound(format!("agent {id}")));
+    }
+
+    // `assigned_at`은 DB의 `NOW()`가 정하므로 로컬 구조체를 고쳐 응답하면
+    // 저장된 값과 다른 시각을 싣게 된다.
+    let placed = state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| ApiError::Store(e.to_string()))?
+        .ok_or_else(|| ApiError::Store("agent disappeared during placement".into()))?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::AGENT_ASSIGN,
+        )
+        .actor(principal.user.id)
+        .target("agent", agent_id.to_string())
+        .detail(serde_json::json!({
+            "worker_id": worker_id.to_string(),
+            // 이전 배정을 함께 남긴다 — 이것이 없으면 감사 로그가 "어디로
+            // 갔는가"만 말하고 "어디에서 왔는가"는 앞 이벤트를 거슬러
+            // 올라가야 알 수 있다. 최초 배정이면 `null`이다.
+            "previous_worker_id": previous_worker_id.map(|w| w.to_string()),
+        })),
+    )
+    .await;
+
+    Ok(Json(crate::schema::AgentSummary::from(&placed)))
 }
 
 /// DELETE /api/agents/:id — Agent 회수(`Ready → Stopped`).

@@ -34,7 +34,7 @@
 //! 그 Project로만 조회를 좁힌다. 공유 상태를 지우는 대신 애초에 공유하지
 //! 않는 쪽이라 스레드 수와 무관하다.
 
-use fleet_core::{Agent, AgentFilter, AgentStatus, Project, ProjectStatus};
+use fleet_core::{Agent, AgentFilter, AgentStatus, Project, ProjectStatus, Worker};
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
@@ -191,6 +191,7 @@ async fn list_agents_filters_by_project_and_status() {
         .list_agents(&AgentFilter {
             project_id: Some(a.id),
             status: None,
+            worker_id: None,
             limit: 100,
             offset: 0,
         })
@@ -206,6 +207,7 @@ async fn list_agents_filters_by_project_and_status() {
         .list_agents(&AgentFilter {
             project_id: Some(a.id),
             status: Some(AgentStatus::Ready),
+            worker_id: None,
             limit: 100,
             offset: 0,
         })
@@ -223,6 +225,7 @@ async fn list_agents_filters_by_project_and_status() {
         .list_agents(&AgentFilter {
             project_id: None,
             status: None,
+            worker_id: None,
             limit: 1000,
             offset: 0,
         })
@@ -347,4 +350,213 @@ async fn archived_project_survives_agent_rows() {
 
     let still_there = store.get_agent(agent.id).await.unwrap();
     assert!(still_there.is_some(), "archive는 Agent 행을 지우지 않는다");
+}
+
+// ── 로드맵 #67 4a: Agent → Worker 배정 ────────────────────────────────────
+//
+// 이 절이 실 DB를 요구하는 이유는 파일 상단이 적은 것과 같다 — 검증 대상이
+// **SQL 계층에만 존재**한다. `agents_placement_complete` CHECK, `worker_id`의
+// `ON DELETE SET NULL`, 그리고 그 SET NULL이 CHECK를 깨지 않도록 짝을 맞추는
+// `BEFORE UPDATE OF worker_id` 트리거 셋 다 MemStore에는 없다(`src/mem.rs`
+// 말미의 주석이 그 부재를 명시한다).
+
+/// 테스트마다 유일한 Worker를 만든다. `seed_project`와 같은 이유다.
+async fn seed_worker(store: &PgStore, label: &str) -> Worker {
+    let name = format!("agents-w-{label}-{}", uuid::Uuid::new_v4());
+    let worker = Worker::new(name.clone(), format!("http://{name}.invalid"));
+    store.upsert_worker(&worker).await.unwrap();
+    worker
+}
+
+#[tokio::test]
+async fn placement_roundtrips_through_the_row() {
+    require_db!(store);
+    let project = seed_project(&store, "placed").await;
+    let worker = seed_worker(&store, "placed").await;
+
+    // 나노초 잔여를 **일부러** 심는다. `Utc::now()`는 Linux에서 나노초를
+    // 주지만 macOS의 `CLOCK_REALTIME`은 잔여가 항상 0이라, 이 줄이 없으면
+    // "Linux CI에서만 깨지는 테스트"가 된다(agent.md §3.4).
+    let assigned_at = chrono::Utc::now() + chrono::Duration::nanoseconds(416);
+    let agent = Agent::new(project.id, "placed").with_placement(worker.id, assigned_at);
+    store.create_agent(&agent).await.unwrap();
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    assert_eq!(fetched.worker_id, Some(worker.id));
+    // `timestamptz`는 마이크로초 해상도다. 메모리 값과 왕복 값을 직접 맞대지
+    // 않고 양변을 내려서 비교한다.
+    assert_eq!(
+        fetched.assigned_at.unwrap().timestamp_micros(),
+        assigned_at.timestamp_micros(),
+    );
+}
+
+#[tokio::test]
+async fn an_unplaced_agent_has_neither_half() {
+    require_db!(store);
+    let project = seed_project(&store, "unplaced").await;
+    let agent = Agent::new(project.id, "floating");
+    store.create_agent(&agent).await.unwrap();
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    assert!(fetched.worker_id.is_none());
+    assert!(fetched.assigned_at.is_none());
+}
+
+#[tokio::test]
+async fn assign_stamps_assigned_at_from_the_database() {
+    require_db!(store);
+    let project = seed_project(&store, "assign").await;
+    let worker = seed_worker(&store, "assign").await;
+    let agent = Agent::new(project.id, "late");
+    store.create_agent(&agent).await.unwrap();
+
+    let before = chrono::Utc::now();
+    assert!(store
+        .assign_agent_worker(agent.id, worker.id)
+        .await
+        .unwrap());
+
+    // 호출자가 손에 든 `agent`는 여전히 미배정이다. 저장된 행을 **다시
+    // 읽어야** `assigned_at`을 알 수 있다 — `NOW()`를 찍는 것이 DB이기
+    // 때문이며, #49 1단계의 멱등 stop이 정확히 이 지점에서 깨졌었다.
+    assert!(agent.assigned_at.is_none());
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    assert_eq!(fetched.worker_id, Some(worker.id));
+    assert!(
+        fetched.assigned_at.unwrap().timestamp_micros() >= before.timestamp_micros(),
+        "assigned_at은 DB의 NOW()에서 온다"
+    );
+}
+
+#[tokio::test]
+async fn assign_returns_false_for_an_unknown_agent() {
+    require_db!(store);
+    let worker = seed_worker(&store, "noagent").await;
+    let missing = fleet_core::AgentId::new();
+    assert!(
+        !store.assign_agent_worker(missing, worker.id).await.unwrap(),
+        "없는 Agent는 오류가 아니라 `false`다 — 호출자가 404로 번역한다"
+    );
+}
+
+#[tokio::test]
+async fn assign_to_an_unknown_worker_is_a_conflict() {
+    require_db!(store);
+    let project = seed_project(&store, "badworker").await;
+    let agent = Agent::new(project.id, "target");
+    store.create_agent(&agent).await.unwrap();
+
+    // 미리 조회해서 막지 않는 이유: 조회와 UPDATE 사이에 등록 해제가 끼어들
+    // 수 있어 어차피 FK가 최종 판정자다(template pin 검증과 같은 논리).
+    let err = store
+        .assign_agent_worker(agent.id, fleet_core::WorkerId::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Conflict(_)),
+        "FK 위반은 서버 결함이 아니라 지목한 대상이 없다는 뜻이다: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn deleting_the_worker_clears_both_halves() {
+    require_db!(store);
+    let project = seed_project(&store, "vanish").await;
+    let worker = seed_worker(&store, "vanish").await;
+    let agent = Agent::new(project.id, "orphan").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+
+    store.delete_worker(worker.id).await.unwrap();
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    // FK는 `worker_id`만 NULL로 만들 수 있고, 그것만으로는 both-or-neither
+    // CHECK가 깨진다. `assigned_at`까지 비어 있다는 것이 트리거가 실제로
+    // 발화했다는 증거다 — FK가 유발한 UPDATE에도 `BEFORE UPDATE OF`가 걸린다.
+    assert!(fetched.worker_id.is_none(), "ON DELETE SET NULL");
+    assert!(fetched.assigned_at.is_none(), "trigger가 짝을 맞춘다");
+    // 그리고 Agent 행 자체는 살아 있다 — Worker가 사라졌다고 Agent 정의가
+    // 사라지면 안 된다.
+    assert_eq!(fetched.status, AgentStatus::Ready);
+}
+
+#[tokio::test]
+async fn the_ledger_counts_only_live_assigned_agents() {
+    require_db!(store);
+    let project = seed_project(&store, "ledger").await;
+    let worker = seed_worker(&store, "ledger").await;
+
+    for name in ["l1", "l2"] {
+        let a = Agent::new(project.id, name).with_placement(worker.id, chrono::Utc::now());
+        store.create_agent(&a).await.unwrap();
+    }
+    // 미배정 Agent는 어느 Worker의 부하도 아니다.
+    store
+        .create_agent(&Agent::new(project.id, "floating"))
+        .await
+        .unwrap();
+
+    let load = store.count_agents_by_worker().await.unwrap();
+    assert_eq!(load.get(&worker.id).copied(), Some(2));
+
+    // 중지하면 슬롯이 풀린다 — 배정 회수 경로(`unassign_agent_worker`)를
+    // 따로 만들지 않은 근거가 이것이다.
+    let live = store
+        .list_agents(&AgentFilter {
+            worker_id: Some(worker.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    store
+        .update_agent_status(live[0].id, AgentStatus::Stopped)
+        .await
+        .unwrap();
+
+    let load = store.count_agents_by_worker().await.unwrap();
+    assert_eq!(load.get(&worker.id).copied(), Some(1));
+
+    // 다만 **배정 자체는 남는다** — 어디서 돌았는지가 기록이기 때문이다.
+    let stopped = store.get_agent(live[0].id).await.unwrap().unwrap();
+    assert_eq!(stopped.worker_id, Some(worker.id));
+}
+
+#[tokio::test]
+async fn list_agents_filters_by_worker() {
+    require_db!(store);
+    let project = seed_project(&store, "byworker").await;
+    let a_worker = seed_worker(&store, "byworker-a").await;
+    let b_worker = seed_worker(&store, "byworker-b").await;
+
+    let on_a = Agent::new(project.id, "on-a").with_placement(a_worker.id, chrono::Utc::now());
+    let on_b = Agent::new(project.id, "on-b").with_placement(b_worker.id, chrono::Utc::now());
+    store.create_agent(&on_a).await.unwrap();
+    store.create_agent(&on_b).await.unwrap();
+    store
+        .create_agent(&Agent::new(project.id, "on-none"))
+        .await
+        .unwrap();
+
+    let listed = store
+        .list_agents(&AgentFilter {
+            project_id: Some(project.id),
+            worker_id: Some(a_worker.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, on_a.id);
+
+    // 필터를 생략하면 미배정 Agent까지 전부 나온다. 반대로 "미배정만"을
+    // 뜻하는 값은 없다 — 그 질문을 하는 호출자가 아직 없다.
+    let all = store
+        .list_agents(&AgentFilter {
+            project_id: Some(project.id),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
 }

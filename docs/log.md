@@ -4620,3 +4620,183 @@ state가 원리적으로 도달하지 않는다**. 실제로 `WorkerSelector`는
 참조, `docs/architecture/agents/provisioning.md`의 §"상태와 명령"(배정 선행·수렴 형태·
 `on_demand` 한계)과 유예 목록이다. 코드는 한 줄도 바꾸지 않았으므로 이 커밋의 검증은
 문서 정합성뿐이고, 4a의 구현·테스트는 다음 커밋이다.
+
+## 2026-08-30 — `#67` 4a 배정: 절반만 채워진 상태를 타입과 스키마가 함께 막았다
+
+4a는 "명령이 갈 방향"만 만드는 단계다. 명령 자체는 4b, 그 명령을 받아 프로세스를 띄우는
+쪽은 4c이므로, 이 단계가 끝나도 Agent 프로세스는 여전히 하나도 뜨지 않는다. 그래서 이 증분의
+설계 판단은 대부분 **"지금 채울 수 없는 것을 만들지 않는다"의 적용**이었다.
+
+### `worker_id`와 `assigned_at`은 both-or-neither이며, 그것을 세 겹이 지킨다
+
+한쪽만 채워진 행은 "배정됐는데 언제인지 모른다" 또는 "언제인지는 아는데 어디인지 모른다"이고,
+둘 다 읽는 쪽이 해석할 방법이 없다. 그래서 `030_agent_placement.sql`에 `CHECK`를 걸었다.
+
+그런데 `ON DELETE SET NULL`은 `worker_id`만 비운다 — **FK가 스스로 `CHECK`를 깨뜨린다.**
+`BEFORE UPDATE OF worker_id` 트리거가 `assigned_at`도 함께 비워 그 자리를 막는다. 이 트리거가
+FK가 유발한 UPDATE에서도 발동하는지는 추론하지 않고 확인했다: `createdb -T`로 `fleet_test`를
+복제하고 030을 적용한 뒤 롤백되는 트랜잭션 안에서 다섯 가지(한쪽만 → CHECK 위반, 양쪽 NULL/
+양쪽 채움 → 허용, `worker_id = NULL` UPDATE → `assigned_at`도 비워짐, `DELETE FROM workers` →
+양쪽 비워짐)를 밟고 `dropdb`했다.
+
+**`fleet_test`에 적용해서 확인하지 않은 이유가 중요하다.** `sqlx::migrate!`는 파일 전체를
+체크섬하므로, 한 번 적용된 마이그레이션은 그 시점부터 **주석 한 줄도** 고칠 수 없다. 검증하려고
+적용하면 검증 결과로 고칠 자유를 잃는다.
+
+세 번째 겹은 Rust 쪽이다. `place_on_create`는 처음에 `Option<WorkerId>`를 돌려주게 썼는데,
+`fleet-mcp`에 `chrono` 의존이 없어 호출부에서 `chrono::Utc::now()`를 부를 수 없었다(E0433).
+의존을 추가하는 대신 **반환형을 `Option<(WorkerId, DateTime<Utc>)>`로 바꿨다** — 시각이
+`fleet-scheduler` 안에서 만들어지고, 호출자가 쌍을 쪼갤 방법이 사라진다. 빠진 의존이 API를
+개선한 경우다.
+
+### `AllUnprobed`가 죽은 분기가 아님을 먼저 증명했다
+
+에러 variant도 "채울 방법이 없는 것은 만들지 않는다"의 대상이다. 세 호출 지점을 읽어 확인했다:
+`fleet-api`의 `build_worker`가 `liveness_mode`와 무관하게 `WorkerStatus::Online`을 쓰고,
+`HealthChecker`(`health.rs:152`)는 on_demand 워커를 **명시적으로 건너뛴다**("Online도 Offline도
+아니라 '판단하지 않음'"). 따라서 on_demand 워커는 등록 후 영원히 `Online`으로 남고, 배정
+필터의 on_demand 가지에 실제로 도달한다.
+
+메시지 문구는 `SelectionError::AllUnprobed`와 **일부러 같게** 뒀다. 같은 조건에 두 이름을 주면
+두 표면의 로그를 함께 보는 운영자가 서로 다른 원인이라고 읽는다.
+
+### 생성은 배정 실패로 막히지 않고, 그 대신 `NULL`이 비종단이다
+
+Agent 정의가 Worker 가용성에 인질로 잡히면 "Worker를 붙이기 전에 Project를 설계한다"는 정상
+사용이 막힌다. 그래서 후보가 없어도 생성은 200이다. 대신 회복 경로 둘을 뒀다 —
+Dashboard `POST /api/agents/{id}/place`와 MCP `fleet_place_agent`. 여기서 "후보 없음"은
+**409**이지 500이 아니다: 서버 결함이 아니라 지금 fleet의 상태이며, 500으로 답하면 운영자가
+오케스트레이터를 의심하게 된다.
+
+배정은 별도 UPDATE가 아니라 **생성과 같은 INSERT**에 실린다. 별도였다면 중간 실패가 "아무도
+고치지 않을 미배정 행"을 남긴다.
+
+### 감사 이벤트는 생성 이후의 배정 변경만 센다 — 실검증이 문구를 고쳤다
+
+`agent.assign`에 `previous_worker_id`를 함께 남겨 "어디로 갔는가"와 "어디에서 왔는가"를 한
+이벤트가 답하게 했다 — 없으면 앞 이벤트를 거슬러 올라가야 출발지를 안다. 그리고 **생성 시
+배정은 `agent.assign`을 내지 않는다.** `agent.create`의 detail에 실어 두면 생성이 그 수를
+부풀리지 않는다.
+
+설계 문서에는 이것을 "`agent.assign` 건수가 정확히 **이동 횟수**"라고 적어 뒀는데, **실검증이
+그 문장을 반증했다.** `NULL`에서 회복하는 명시 배정도 같은 이벤트를 내므로(그때
+`previous_worker_id`가 `null`이다) 정확한 이름은 "생성 이후의 배정 변경 횟수"다. 실측(임시 DB
+`fleet_verify_4a`): Agent 3개 · 명시 배정 1회에 대해 `agent.create` 3건 · `agent.assign` 1건,
+그리고 생성 시 배정된 Agent의 `agent.create` detail에만 `worker_id`가 실려 있었다.
+`provisioning.md`의 그 줄을 실측과 함께 고쳤다.
+
+**이 오류는 테스트가 잡을 수 없는 종류다.** 테스트는 "`agent.assign`이 1건 나온다"를 확인하지,
+그 1건을 **뭐라고 부를지**는 확인하지 않는다. 코드는 처음부터 옳았고 틀린 것은 설명이었다.
+
+### 만들지 않은 것
+
+| 만들지 않은 것 | 사유 | 언제 |
+|---|---|---|
+| 하드 상한 | `workers.max_concurrent`는 Task 동시성 상한이지 Agent 프로세스 상한이 아니다. 후자를 집행할 프로세스 매니저가 없다 | 4c |
+| 배경 재조정기 | 배정은 관측이 아니라 **결정**이고, 4a에는 옮길 프로세스가 없어 재조정 대상이 없다. 인라인이라 감사 actor가 실재하는 사람이고, 두 오케스트레이터가 같은 Agent 행을 두고 경합할 경로가 없어 `lease_allows_control()` 게이트도 불필요하다 | — |
+| `unassign_agent_worker` | 원장이 `worker_id IS NOT NULL AND status <> 'stopped'`만 세므로 회수가 자리를 자동으로 비운다 — 생산자가 없다 | — |
+| `HalfOpen` 배제 | dispatch의 `is_open()`과 같은 술어를 쓴다. 여기서만 보수적이면 같은 Worker가 Task는 받고 Agent는 못 받는 설명 불가능한 상태가 된다 | — |
+
+### 검증 한계
+
+1. **회로 상태가 한 쓰기만큼 뒤진다.** 출처가 인메모리 `BreakerRegistry`가 아니라
+   `workers.circuit_state` 컬럼이다 — Dashboard의 `DashboardState`에는 `FleetState`가 없어
+   강제된 선택이다. `Store::update_worker_circuit_state`가 no-op 기본 구현이라 MemStore 기반
+   테스트는 `Worker::circuit_state`를 직접 세팅한다.
+2. **원장을 읽고 INSERT하기까지가 원자적이지 않다.** 동시에 두 Agent를 만들면 같은 Worker를
+   고를 수 있다. 상한이 없는 지금은 부하 분포가 잠시 기우는 것으로 끝나지만, 상한이 생기는
+   순간 초과 배정이 된다 — CAS slot claim을 구현 게이트 ①로 남긴다.
+3. Worker 삭제 시 배정이 풀리는 것은 `MemStore`가 흉내 내지 않는다(`ON DELETE SET NULL`은
+   애플리케이션 코드가 아니다). 그래서 그 동작은 **실제 Postgres 통합 테스트로만** 증명된다.
+
+### `MemStore`가 FK를 흉내 내야 했던 이유
+
+`MemStore::assign_agent_worker`는 존재하지 않는 Worker를 그대로 받아들이고 있었다. PgStore에서는
+FK가 `Conflict`로 잡는 자리다. 흉내 내지 않으면 "없는 Worker 지목 → 400"을 검증하려던 대시보드
+테스트가 **성공 경로를 밟고도 초록**이 된다 — 검증하려던 분기를 한 번도 실행하지 않은 채다.
+`agent.md` §4.3이 반복 기록해 온 "게이트가 CI보다 약하면"의 저장소 판이다.
+
+흉내는 **판정 순서까지** 맞춰야 했다. 처음 쓴 코드는 Worker 존재 검사를 Agent 조회보다 앞에
+뒀는데, PgStore의 UPDATE는 Agent가 없으면 0행을 갱신하고 FK 검사에 **닿지도 않는다** — 둘 다
+없을 때의 답은 `Ok(false)`(→ 404)이지 FK 위반(→ 400)이 아니다. 두 표면 모두 Agent를 먼저
+조회하므로 API로는 도달하지 않는 차이지만, 그 자리의 주석이 "FK를 미러링한다"고 말하는 이상
+말과 코드가 어긋난 채로 둘 수 없었다. 잠금을 중첩하지 않으려고 존재 여부는 미리 계산하고
+판정만 `Some(a)` 가지 안으로 옮겼다.
+
+다만 흉내에는 선을 그었다: 트리거·FK 액션까지 재현하기 시작하면 MemStore가 두 번째 DB
+구현이 된다(위 한계 3).
+
+### 파생 `Default`가 `limit: 0`을 만들어 세 테스트를 조용히 틀리게 했다
+
+게이트의 test 단계에서 세 타깃이 깨졌는데, 그중 둘의 모양이 원인을 가리켰다:
+`fleet-scheduler`의 `stopped_agents_do_not_hold_a_slot`이 `left: 1, right: 2`,
+`fleet-store`의 `list_agents_filters_by_worker`가 `left: 1, right: 3` — **다른 크레이트, 다른
+Store 구현인데 둘 다 `left`가 1**이었다. 서로 무관한 로직이 같은 답을 틀리게 낼 리는 없고,
+공유하는 상한이 있다는 뜻이다.
+
+`AgentFilter`가 파생 `Default`를 쓰고 있었고, 그래서 `..Default::default()`는 `limit: 0`을
+만든다. 그리고 두 Store 모두 0을 **조용히 1로 올린다** — `MemStore`는 `filter.limit.max(1)`
+(`mem.rs:1752`), `PgStore`는 `filter.limit.clamp(1, 1000)`(`postgres.rs:2939`). 오류도 아니고
+빈 목록도 아니라서, `..Default::default()`가 "필터 없음"이 아니라 **"첫 한 행만"**을 뜻하게
+된다. 호출자가 알아차릴 방법이 없다.
+
+고칠 자리는 테스트가 아니라 원천이었다. 테스트만 고치면 다음 호출자가 같은 함정을 다시 밟는다.
+`AgentFilter`에서 파생 `Default`를 떼고 손으로 쓴 `impl Default`(limit 100)를 넣었다 —
+`TaskFilter`·`WorkerFilter`·`AuditFilter`가 같은 이유로 이미 그렇게 돼 있고 값도 100이다.
+프로덕션 호출자 중에 `..Default::default()`를 쓰는 곳이 없음을 확인했으므로(대시보드는
+`limit: 1000`, MCP는 명시 `limit`/`offset`), 이 수정의 영향은 테스트 범위에 머문다.
+
+같은 함정이 `AgentTemplateFilter`·`IssueFilter`·`ProjectFilter`에 남아 있다.
+`crates/fleet-store/tests/issues.rs`의 세 곳(145·166·177)이 이미 `..Default::default()`를
+쓰고 있어 **결과가 한 행으로 잘린 채 초록일 수 있다** — 별도 작업으로 남긴다.
+
+셋째 실패는 단순했다: `fleet-mcp`의 `all_tools_includes_list_tasks`가 도구 개수 22를 단정하는데
+4a가 `fleet_place_agent`를 더해 23이 됐다. 단정을 23으로 올리고 사유를 주석에 적었다.
+
+### 게이트 두 개를 동시에 돌려서 판정을 잃을 뻔했다
+
+게이트 도중 `gate67a.sh` 프로세스가 **둘**(PID 80912·41892) 떠 있는 것을 발견했다. 두 가지가
+동시에 깨진다. (1) 두 실행이 같은 `fleet_test` DB를 쓰는데, `fleet-store` 통합 테스트의 격리는
+각 테스트 시작 시 `TRUNCATE ... CASCADE`다 — `-- --test-threads=1`은 **한 바이너리 안에서만**
+직렬화하므로 다른 실행의 TRUNCATE를 막지 못한다. (2) 둘 다 같은 로그에 append하므로, 먼저 시작한
+쪽이 뒤에 시작한 쪽의 로그에 `test(no-default) exit=`과 `DONE`을 써 넣는다 — **섞인 판정이
+완료 표식을 쓰고 있는** 로그가 된다.
+
+`agent.md` §4.3이 "게이트와 CI가 다르면 어느 쪽이 엄격하든 로컬 판정은 CI 판정이 아니다"로
+적어 온 것의 또 다른 얼굴이다. 여기서는 게이트가 **자기 자신과도** 달랐다.
+
+둘 다 죽이고 `gate67a.sh`에 `mkdir` 기반 배타 락(`trap`으로 해제)과 단계별 타임스탬프를 넣은
+뒤 한 번만 돌렸다. 산문이 아니라 **스크립트에** 넣은 것은, 다음 세션이 읽는 것이 로그가 아니라
+실행 목록이기 때문이다(`agent.md` §3.2가 같은 이유로 하루에 두 번 재발한 사례를 적고 있다).
+
+진행 중이던 `test(acp mtls)` 관측은 오염 가능성 때문에 버렸다. 다만 위 세 건의 코드 수정은
+유지했다 — 오염이면 `left`가 실행마다 다른 값으로 나오는데(§3.2), 이 셋은 결정적이었다.
+
+### 게이트와 실검증
+
+배타 락 아래에서 최종 트리로 한 번 완주했다. `rustc 1.98.0`, `RUSTFLAGS="-D warnings"`,
+`fmt` → `clippy(acp mtls)` → `clippy(no-default)` → `build(acp mtls)` → `test(acp mtls)` →
+`build(no-default)` → `test(no-default)` 일곱 단계 전부 `exit=0`.
+
+**조용한 skip이 없음은 개수가 아니라 소요 시간으로 확인했다**(§4.3 (3)). 두 피처 세트 모두
+74 suite 전부 ok(1200건 / 1196건)였고, `cross_client`가 `0.00s`가 아니라 각각 6.11s · 5.73s로
+15건을 돌았다 — subprocess로 `target/debug/fleet`를 실제로 띄웠다는 뜻이다. `running 0 tests`
+8건은 전부 doc-test 7개와 테스트가 없는 `fleet-worker` 바이너리 타깃이다.
+
+브라우저 실검증은 임시 DB(`fleet_verify_4a`)에 서버를 띄워서 했다. 로그인은 폼에 타이핑하지
+않고 로컬 API 호출로 세션 쿠키를 받아 브라우저에 주입했다. Project 상세의 Agent 표가 헤더와
+두 행 모두 동일한 6열 그리드 트랙을 쓰는 것, 배정된 Agent가 UUID 앞 8자(`e791a1bb`)를 보여주고
+`title`에 전체 UUID를 담는 것, 미배정 Agent가 `—`인 것을 확인했다. `POST /api/agents/{id}/place`는
+200(미배정 → 배정) · 409(후보 없음) · 404(없는 Agent)를 냈다. 검증 후 서버를 내리고 임시 DB를
+`dropdb`했다.
+
+여기서 실검증만 드러낸 사실이 하나 있다: DB에 직접 꽂은 Worker는 하트비트가 없어
+`HealthChecker`가 곧 `offline`으로 강등시키므로, 배정 후보로 남기려면 `status`와 함께
+`last_seen`도 갱신해야 한다. 처음 두 번의 `place` 시도가 그래서 409였다.
+
+### 곁가지: `#agent-table`은 처음부터 컬럼 정렬이 없었다
+
+`styles.css`는 테이블별 `grid-template-columns`를 ID로만 정의하는데 `#agent-table` 규칙이 없어,
+`#49` 1단계 이래 데스크톱에서도 세로로 쌓여 있었다. 같은 누락이 이 저장소에서 세 번째다
+(`#activity-table`/`#key-table`/`#user-table` 묶음 주석이 앞선 두 번을 적고 있다). Worker 열이
+붙어 5열 → 6열이 되는 이번이 고칠 자리라 함께 넣었다.

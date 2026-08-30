@@ -1742,6 +1742,10 @@ impl Store for MemStore {
                 Some(status) => a.status == status,
                 None => true,
             })
+            .filter(|a| match filter.worker_id {
+                Some(worker_id) => a.worker_id == Some(worker_id),
+                None => true,
+            })
             .cloned()
             .collect();
         out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
@@ -1771,6 +1775,60 @@ impl Store for MemStore {
             .values()
             .any(|a| a.project_id == project_id && a.status.blocks_project_archive()))
     }
+
+    async fn assign_agent_worker(
+        &self,
+        id: AgentId,
+        worker_id: WorkerId,
+    ) -> Result<bool, StoreError> {
+        // PgStore에서는 `agents.worker_id` FK가 하는 일이다. 여기서 흉내
+        // 내지 않으면 "존재하지 않는 Worker 지목"을 다루는 상위 계층
+        // 테스트가 MemStore 위에서는 성공 경로를 밟아 버려, 검증하려던
+        // 400 경로를 **한 번도 실행하지 않은 채** 통과한다.
+        //
+        // 판정 순서까지 맞춘다. PgStore의 UPDATE는 Agent가 없으면 0행을
+        // 갱신하고 FK 검사에 **닿지도 않으므로** 둘 다 없을 때의 답은
+        // `Ok(false)`(→ 404)이지 FK 위반이 아니다. 존재 여부는 미리
+        // 계산해 두고 판정만 Agent를 찾은 뒤로 미루면, 잠금을 중첩하지
+        // 않고도 그 순서가 된다.
+        let worker_exists = self.workers.lock().unwrap().contains_key(&worker_id);
+        let mut agents = self.agents.lock().unwrap();
+        match agents.get_mut(&id) {
+            Some(a) => {
+                if !worker_exists {
+                    return Err(StoreError::Conflict(format!(
+                        "worker {worker_id} does not exist"
+                    )));
+                }
+                let now = Utc::now();
+                a.worker_id = Some(worker_id);
+                a.assigned_at = Some(now);
+                a.updated_at = now;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn count_agents_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
+        let agents = self.agents.lock().unwrap();
+        let mut out: HashMap<WorkerId, u32> = HashMap::new();
+        for a in agents.values() {
+            // PgStore의 `status <> 'stopped'` 술어와 같은 의미다.
+            if a.status == AgentStatus::Stopped {
+                continue;
+            }
+            if let Some(worker_id) = a.worker_id {
+                *out.entry(worker_id).or_insert(0) += 1;
+            }
+        }
+        Ok(out)
+    }
+
+    // MemStore는 Worker 삭제 시 배정을 비우지 않는다 — PgStore에서는 `030`의
+    // `ON DELETE SET NULL`이 하는 일이라 애플리케이션 코드가 없다. 두 Store의
+    // 동작이 여기서 갈리며, 그래서 Worker 삭제 후의 배정 회수는 실제
+    // Postgres 통합 테스트로만 증명된다.
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
 

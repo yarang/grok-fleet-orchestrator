@@ -109,6 +109,14 @@ pub mod action {
     pub const AGENT_CREATE: &str = "agent.create";
     /// Agent 회수(`Ready → Stopped`) (로드맵 #49).
     pub const AGENT_STOP: &str = "agent.stop";
+    /// Agent를 Worker에 (재)배정 (로드맵 #67 4a). `detail.worker_id`와
+    /// `detail.previous_worker_id`가 들어간다 — 후자가 있으면 옮긴 것이고
+    /// 없으면 처음 배정한 것이다.
+    ///
+    /// 생성 시점의 자동 배정은 이 이벤트를 내지 않는다. 그 배정은
+    /// `agent.create`의 `detail.worker_id`에 이미 기록되며, 한 번의 조작을
+    /// 두 줄로 남기면 "이 Agent는 몇 번 옮겨졌나"를 세는 것이 어려워진다.
+    pub const AGENT_ASSIGN: &str = "agent.assign";
     /// AgentTemplate 정체성 생성 (로드맵 #86). `detail.project_id`가 없으면
     /// 전역 템플릿이다.
     pub const AGENT_TEMPLATE_CREATE: &str = "agent_template.create";

@@ -27,7 +27,7 @@ use crate::schema::{
     TOOL_CREATE_AGENT, TOOL_CREATE_ISSUE, TOOL_CREATE_PROJECT, TOOL_DELETE_PROJECT,
     TOOL_DISPATCH_TASK, TOOL_GET_TASK_STATUS, TOOL_LIST_AGENTS, TOOL_LIST_BOOTSTRAP_TOKENS,
     TOOL_LIST_HOSTS, TOOL_LIST_ISSUES, TOOL_LIST_PROJECTS, TOOL_LIST_TASKS, TOOL_LIST_WORKERS,
-    TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STOP_AGENT,
+    TOOL_PLACE_AGENT, TOOL_RESET_WORKER_BREAKER, TOOL_REVOKE_BOOTSTRAP_TOKEN, TOOL_STOP_AGENT,
     TOOL_STREAM_TASK_OUTPUT, TOOL_TRANSITION_ISSUE, TOOL_WAIT_FOR_TASK,
 };
 
@@ -95,6 +95,7 @@ pub async fn dispatch_tool(
         TOOL_LIST_PROJECTS => handle_list_projects(ctx, arguments).await,
         TOOL_DELETE_PROJECT => handle_delete_project(ctx, arguments).await,
         TOOL_CREATE_AGENT => handle_create_agent(ctx, arguments).await,
+        TOOL_PLACE_AGENT => handle_place_agent(ctx, arguments).await,
         TOOL_LIST_AGENTS => handle_list_agents(ctx, arguments).await,
         TOOL_STOP_AGENT => handle_stop_agent(ctx, arguments).await,
         TOOL_LIST_ISSUES => handle_list_issues(ctx, arguments).await,
@@ -1098,6 +1099,12 @@ fn agent_json(a: &fleet_core::Agent) -> Value {
         "description": a.description,
         "created_by": a.created_by,
         "status": a.status.as_str(),
+        // 로드맵 #67 4a. `null`이면 배정된 Worker가 없다는 뜻이며 정상 상태다
+        // — 생성 시점에 배정 가능한 Worker가 없었거나, 배정됐던 Worker가
+        // 등록 해제됐다. 이 필드를 응답에 싣지 않으면 컬럼이 죽은 데이터가
+        // 된다: 운영자가 배정이 실제로 어디로 갔는지 확인할 방법이 없다.
+        "worker_id": a.worker_id.map(|w| w.to_string()),
+        "assigned_at": a.assigned_at.map(|t| t.to_rfc3339()),
         "created_at": a.created_at.to_rfc3339(),
         "updated_at": a.updated_at.to_rfc3339(),
     })
@@ -1146,6 +1153,17 @@ async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, J
         }
     }
 
+    // Worker 배정 (로드맵 #67 4a). 실패해도 생성은 계속된다 —
+    // `fleet_scheduler::placement` 모듈 문서 참고. Dashboard `POST /api/agents`
+    // 와 **같은 함수**를 쓴다: 두 표면이 각자 후보를 고르면 한쪽만 고쳐지는
+    // 순간 배정 규칙이 갈린다(Project admission을 단일 구현으로 둔 것과 같은
+    // 이유).
+    if let Some((worker_id, assigned_at)) =
+        fleet_scheduler::placement::place_on_create(ctx.state.store.as_ref()).await
+    {
+        agent = agent.with_placement(worker_id, assigned_at);
+    }
+
     ctx.state
         .store
         .create_agent(&agent)
@@ -1156,6 +1174,71 @@ async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, J
         })?;
 
     Ok(schema::tool_json(&agent_json(&agent)))
+}
+
+async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| JsonRpcError::invalid_params("arguments must be a JSON object"))?;
+
+    let agent_id: fleet_core::AgentId = args
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| JsonRpcError::invalid_params("missing required field: agent_id"))?
+        .parse()
+        .map_err(|_| JsonRpcError::invalid_params("agent_id must be a UUID"))?;
+
+    let agent = ctx
+        .state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        .ok_or_else(|| JsonRpcError::invalid_params(format!("no such agent: {agent_id}")))?;
+
+    // 회수된 Agent는 배정하지 않는다. 원장이 `stopped`를 세지 않으므로 배정해
+    // 봐야 부하에도 잡히지 않고, 4b의 desired state도 실릴 일이 없다 —
+    // 아무도 읽지 않는 값을 쓰는 것이 된다.
+    if agent.status == fleet_core::AgentStatus::Stopped {
+        return Err(JsonRpcError::invalid_params(format!(
+            "agent {agent_id} is stopped and cannot be placed"
+        )));
+    }
+
+    // `worker_id`를 명시하면 그 Worker로, 없으면 자동 선택. 명시 경로가 있는
+    // 이유는 자동 선택이 least-loaded뿐이라 운영자가 특정 Worker를 지목할
+    // 방법이 달리 없기 때문이다. 다만 지목한 Worker가 실재하는지는 검사하지
+    // 않는다 — Store의 FK가 `Conflict`로 돌려준다.
+    let worker_id = match args.get("worker_id").and_then(|v| v.as_str()) {
+        Some(raw) => raw
+            .parse::<fleet_core::WorkerId>()
+            .map_err(|_| JsonRpcError::invalid_params("worker_id must be a UUID"))?,
+        None => fleet_scheduler::placement::choose_worker(ctx.state.store.as_ref())
+            .await
+            .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?,
+    };
+
+    ctx.state
+        .store
+        .assign_agent_worker(agent_id, worker_id)
+        .await
+        .map_err(|e| match e {
+            fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
+            other => JsonRpcError::internal(format!("store error: {other}")),
+        })?;
+
+    // 저장된 행을 다시 읽어 돌려준다 — `assigned_at`은 DB의 `NOW()`가 정하므로
+    // 로컬 구조체를 고쳐 응답하면 저장된 값과 다른 시각을 싣게 된다. `#49`
+    // 1단계의 멱등 회수가 정확히 이 결함으로 실패했었다.
+    let placed = ctx
+        .state
+        .store
+        .get_agent(agent_id)
+        .await
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        .ok_or_else(|| JsonRpcError::internal("agent vanished during placement".to_string()))?;
+
+    Ok(schema::tool_json(&agent_json(&placed)))
 }
 
 async fn handle_list_agents(ctx: &ToolContext, args: &Value) -> Result<Value, JsonRpcError> {
@@ -1177,12 +1260,21 @@ async fn handle_list_agents(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         .map(|n| n as usize)
         .unwrap_or(0);
 
+    let worker_id = match args.get("worker_id").and_then(|v| v.as_str()) {
+        Some(raw) => Some(
+            raw.parse::<fleet_core::WorkerId>()
+                .map_err(|_| JsonRpcError::invalid_params("worker_id must be a UUID"))?,
+        ),
+        None => None,
+    };
+
     let agents = ctx
         .state
         .store
         .list_agents(&fleet_core::AgentFilter {
             project_id,
             status: None,
+            worker_id,
             limit,
             offset,
         })
@@ -1567,7 +1659,8 @@ mod tests {
         let tools = schema::all_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
         assert!(names.contains(&"fleet_list_tasks"));
-        assert_eq!(tools.len(), 22);
+        // `#67` 4a가 `fleet_place_agent`를 더해 22 → 23.
+        assert_eq!(tools.len(), 23);
     }
 
     #[test]
@@ -1690,6 +1783,204 @@ mod tests {
     // dispatch_tool을 그대로 호출한다 — 이 파일의 기존 handle_* 함수들은
     // (cross_client.rs의 subprocess+DB 통합 테스트를 빼면) 단위 수준에서
     // 검증된 적이 없었다.
+
+    // ── 로드맵 #67 4a: Agent 배정 ─────────────────────────────────────────
+
+    /// 생성 가능한 Project와 배정 가능한 Worker를 함께 심는다.
+    async fn seed_placeable(ctx: &ToolContext) -> (fleet_core::ProjectId, fleet_core::Worker) {
+        let project = fleet_core::Project::new("placement-proj");
+        ctx.state.store.create_project(&project).await.unwrap();
+        let worker = fleet_core::Worker::new("w1", "wss://w1.invalid/ws");
+        ctx.state.store.upsert_worker(&worker).await.unwrap();
+        (project.id, worker)
+    }
+
+    #[tokio::test]
+    async fn create_agent_places_on_an_online_worker() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, worker) = seed_placeable(&ctx).await;
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id.to_string(), "name": "builder"}),
+        )
+        .await
+        .unwrap();
+
+        // 응답에 실린 값과 **저장된 행**을 둘 다 본다. 응답만 보면 in-memory
+        // Agent를 그대로 직렬화한 것과 구분되지 않는다.
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["worker_id"], worker.id.to_string());
+        assert!(body["assigned_at"].is_string());
+
+        let agent_id: fleet_core::AgentId = body["id"].as_str().unwrap().parse().unwrap();
+        let stored = ctx.state.store.get_agent(agent_id).await.unwrap().unwrap();
+        assert_eq!(stored.worker_id, Some(worker.id));
+        assert!(stored.assigned_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn create_agent_succeeds_with_no_placeable_worker() {
+        // Worker가 한 대도 없는 저장소 — 생성은 성공하고 `worker_id`는 null이다.
+        // 여기서 실패시키면 Agent 정의가 Worker 가용성에 인질로 잡힌다.
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project = fleet_core::Project::new("no-workers");
+        ctx.state.store.create_project(&project).await.unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project.id.to_string(), "name": "lonely"}),
+        )
+        .await
+        .unwrap();
+
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(body["worker_id"].is_null());
+        assert!(body["assigned_at"].is_null());
+    }
+
+    #[tokio::test]
+    async fn place_agent_recovers_an_unplaced_agent() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project = fleet_core::Project::new("recover");
+        ctx.state.store.create_project(&project).await.unwrap();
+        let agent = fleet_core::Agent::new(project.id, "stray");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        // Worker는 Agent 생성 **이후에** 등록된다 — `worker_id = NULL`이
+        // 영구 상태가 아니라는 것이 이 도구의 존재 이유다.
+        let worker = fleet_core::Worker::new("late", "wss://late.invalid/ws");
+        ctx.state.store.upsert_worker(&worker).await.unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_PLACE_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap();
+
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["worker_id"], worker.id.to_string());
+        // `assigned_at`은 저장 계층이 찍는다. 호출자가 손에 든 `agent`를
+        // 그대로 돌려주면 여기가 null이 된다 — 그래서 핸들러가 다시 읽는다.
+        assert!(body["assigned_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn place_agent_honours_an_explicit_worker() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, _auto) = seed_placeable(&ctx).await;
+        let pinned = fleet_core::Worker::new("pinned", "wss://pinned.invalid/ws");
+        ctx.state.store.upsert_worker(&pinned).await.unwrap();
+        let agent = fleet_core::Agent::new(project_id, "targeted");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_PLACE_AGENT,
+            &json!({"agent_id": agent.id.to_string(), "worker_id": pinned.id.to_string()}),
+        )
+        .await
+        .unwrap();
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            body["worker_id"],
+            pinned.id.to_string(),
+            "운영자가 지목한 Worker는 least-loaded 계산을 이긴다"
+        );
+    }
+
+    #[tokio::test]
+    async fn place_agent_rejects_a_stopped_agent() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, _w) = seed_placeable(&ctx).await;
+        let agent = fleet_core::Agent::new(project_id, "retired");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+        ctx.state
+            .store
+            .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
+            .await
+            .unwrap();
+
+        let err = dispatch_tool(
+            &ctx,
+            TOOL_PLACE_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap_err();
+        // 원장이 `stopped`를 세지 않으므로 배정해도 부하에 잡히지 않고
+        // 4b의 desired state에도 실리지 않는다 — 아무도 읽지 않을 값을 쓰는 셈이다.
+        assert!(err.message.contains("stopped"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn place_agent_rejects_an_unknown_agent() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let err = dispatch_tool(
+            &ctx,
+            TOOL_PLACE_AGENT,
+            &json!({"agent_id": fleet_core::AgentId::new().to_string()}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("no such agent"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn place_agent_reports_why_no_worker_qualifies() {
+        // Worker가 없을 때 `place_agent`는 조용히 넘어가지 않는다 — 생성
+        // 경로와 정반대다. 운영자가 **명시적으로 배정을 요청**했으므로
+        // "안 됐다"를 사유와 함께 돌려주는 것이 정직한 답이다.
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let project = fleet_core::Project::new("empty-fleet");
+        ctx.state.store.create_project(&project).await.unwrap();
+        let agent = fleet_core::Agent::new(project.id, "waiting");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+
+        let err = dispatch_tool(
+            &ctx,
+            TOOL_PLACE_AGENT,
+            &json!({"agent_id": agent.id.to_string()}),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message.contains("online"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn list_agents_filters_by_worker() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project_id, worker) = seed_placeable(&ctx).await;
+        let placed = fleet_core::Agent::new(project_id, "placed")
+            .with_placement(worker.id, chrono::Utc::now());
+        ctx.state.store.create_agent(&placed).await.unwrap();
+        ctx.state
+            .store
+            .create_agent(&fleet_core::Agent::new(project_id, "unplaced"))
+            .await
+            .unwrap();
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_LIST_AGENTS,
+            &json!({"worker_id": worker.id.to_string()}),
+        )
+        .await
+        .unwrap();
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        let agents = body["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["name"], "placed");
+    }
 
     fn test_ctx(store: fleet_store::mem::MemStore) -> ToolContext {
         test_ctx_with_caps(store, fleet_core::PermissionKind::all().to_vec())

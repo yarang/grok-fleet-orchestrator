@@ -140,7 +140,7 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
-| 8-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 남은 선행은 명령이 갈 **방향**(배정)이며 그것이 4a다. 봉투는 위 §"상태와 명령"대로 큐가 아니라 `agents` 행의 desired state로 구현한다 | `#67` 4a → 4b |
+| 8-필드 명령 봉투와 ACK | **"받을 상대가 없다"는 미룰 사유가 아니다** — 첫 명령이 곧 `StartAgent`이므로 봉투가 상대를 만든다. 남은 선행은 명령이 갈 **방향**(배정)이며 그것이 4a다(2026-08-30 완료, 아래 "구현 상태 (`#67` 4a)"). 봉투는 위 §"상태와 명령"대로 큐가 아니라 `agents` 행의 desired state로 구현한다 | `#67` 4b |
 | `generation`/`control_epoch` | 경합할 두 번째 writer가 없다 | `#67` 4b |
 | `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ① |
 | 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
@@ -153,3 +153,58 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 증명한 것은 (a) FK·유일성 위반이 `StoreError::Conflict`로 번역되는지, (b) 살아 있는 Agent 하나가
 Task 없이도 Project를 `draining`에 붙잡는지 — 두 가지이며 `crates/fleet-store/tests/agents.rs`,
 `fleet-mcp`/`fleet-dashboard` 테스트가 근거다.
+
+## 구현 상태 (`#67` 4a — 배정)
+
+4a는 **명령이 갈 방향**만 만들었다. 명령 자체(desired state·generation·ACK)는 4b, 그 명령을
+받아 프로세스를 띄우는 쪽은 4c다. 즉 이 단계가 끝나도 Agent 프로세스는 여전히 하나도 뜨지 않는다.
+
+구현된 것:
+
+- `agents.worker_id`(`workers(id)` FK, `ON DELETE SET NULL`)와 `agents.assigned_at`
+  (`030_agent_placement.sql`). 둘은 **both-or-neither**이며 `CHECK`가 그것을 강제한다 —
+  한쪽만 채워진 행은 "배정됐는데 언제인지 모른다" 또는 그 반대라서, 어느 쪽도 읽는 쪽이
+  해석할 방법이 없다.
+- `ON DELETE SET NULL`이 `worker_id`만 비우면 `CHECK`를 깨뜨리므로, `BEFORE UPDATE OF worker_id`
+  트리거가 `assigned_at`도 함께 비운다. 이 트리거가 **FK가 유발한 UPDATE에서도 발동한다**는 것은
+  버려질 클론 DB(`createdb -T`)에서 직접 확인했다 — 마이그레이션은 `sqlx::migrate!`가 파일 전체를
+  체크섬하므로 `fleet_test`에 적용하면 그 시점부터 수정이 불가능해진다.
+- 배정 선택기 `fleet_scheduler::placement`: `Offline`·`on_demand`·회로 개방 Worker를 후보에서
+  빼고 **원장(`count_agents_by_worker`) 기준 least-loaded**를 고른다. 동률은 먼저 등록된 쪽이
+  이긴다(결정적 순서). 원장은 `worker_id IS NOT NULL AND status <> 'stopped'`만 세므로 회수가
+  자리를 자동으로 비운다 — 그래서 `unassign_agent_worker`는 **만들지 않았다**(생산자가 없다).
+- 배정은 생성과 **같은 INSERT**에 실린다. 별도 UPDATE였다면 중간 실패가 "아무도 고치지 않을
+  미배정 행"을 남긴다. 반대로 후보가 없어도 **생성은 실패하지 않는다** — Agent 정의가 Worker
+  가용성에 인질로 잡히면 Worker를 붙이기 전에 Project를 설계하는 정상 사용이 막힌다.
+- 그 대신 `NULL`을 비종단으로 만드는 회복 경로: Dashboard `POST /api/agents/{id}/place`,
+  MCP `fleet_place_agent`(둘 다 `agent:manage`). 자동 선택이 기본이고 `worker_id`를 명시하면
+  그 Worker로 간다 — 자동 선택이 least-loaded뿐이라 특정 Worker를 지목할 다른 방법이 없다.
+- 조회: `AgentFilter.worker_id`, Dashboard `GET /api/agents?worker_id=`, MCP `fleet_list_agents`의
+  같은 필드, Project 상세 화면의 Worker 열.
+- 감사 이벤트 `agent.assign`(`previous_worker_id` 포함). 생성 시 배정은 이 이벤트를 내지 않고
+  `agent.create`의 detail에 실린다 — 그래야 `agent.assign` 건수가 정확히 **생성 이후의 배정
+  변경 횟수**가 된다. 여기에는 Worker 간 이동뿐 아니라 `NULL`에서의 회복도 들어간다
+  (`previous_worker_id: null`로 구분된다). 2026-08-30 실측: Agent 3개(생성 시 배정 1개 포함)와
+  명시 배정 1회에 대해 `agent.create` 3건 · `agent.assign` 1건이었고, 생성 시 배정된 Agent의
+  `agent.create` detail에만 `worker_id`가 실려 있었다.
+
+의도적으로 만들지 않은 것:
+
+- **하드 상한이 없다.** `workers.max_concurrent`는 Task 동시성 상한이지 Agent 프로세스 상한이
+  아니며, 후자를 강제할 프로세스 매니저가 4c 전에는 없다(위 유예 표의 `max_agent_processes`와
+  같은 논리).
+- **배경 재조정기가 없다.** 배정은 관측이 아니라 **결정**이고, 4a에는 옮길 프로세스가 없으므로
+  재조정할 대상도 없다. 인라인 배정이라 감사 이벤트의 actor가 실재하는 사람이며, 두 오케스트레이터
+  인스턴스가 같은 Agent 행을 두고 경합할 경로가 없어 `lease_allows_control()` 게이트도 필요 없다.
+- **`HalfOpen`은 배제하지 않는다** — dispatch의 `is_open()`과 같은 술어를 쓴다. 여기서만 더 보수적으로
+  굴면 같은 Worker가 Task는 받고 Agent는 못 받는 설명 불가능한 상태가 된다.
+
+검증 한계:
+
+- 회로 상태의 출처는 `workers.circuit_state` 컬럼이지 인메모리 `BreakerRegistry`가 아니다
+  (Dashboard의 `DashboardState`에는 `FleetState`가 없다). 따라서 **레지스트리보다 한 번의 쓰기만큼
+  뒤진다**. `Store::update_worker_circuit_state`는 기본 구현이 no-op이므로 MemStore 기반 테스트는
+  `Worker::circuit_state`를 직접 세팅한다.
+- 원장을 읽고 INSERT하기까지가 **원자적이지 않다.** 동시에 두 Agent를 만들면 둘 다 같은 Worker를
+  고를 수 있다. 상한이 없는 4a에서는 부하 분포가 잠시 기우는 것으로 끝나지만, 상한이 생기는 순간
+  초과 배정이 된다 — 그래서 CAS slot claim이 `#67` 구현 게이트 ①이다.

@@ -3920,3 +3920,345 @@ async fn delete_task_records_a_task_delete_audit_event_on_success_and_rejection(
         .expect("삭제 거부에 대한 감사 이벤트가 있어야 한다");
     assert_eq!(rejected_event.outcome, fleet_core::AuditOutcome::Failure);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  로드맵 #67 4a — Agent → Worker 배정
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn create_agent_places_it_on_an_online_worker() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let worker = Worker::new("placer", "wss://placer.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "placed-home").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "builder"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    assert_eq!(created["worker_id"], worker.id.to_string());
+    assert!(created["assigned_at"].is_string());
+
+    // 생성 시 배정은 별도의 `agent.assign` 이벤트를 내지 않는다 —
+    // `agent.assign`이 정확히 **이동 횟수**를 세도록 하기 위해서다.
+    // 대신 배정 대상은 `agent.create`의 detail에 실린다.
+    let created_events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_CREATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(created_events.len(), 1);
+    assert_eq!(created_events[0].detail["worker_id"], worker.id.to_string());
+
+    let assign_events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_ASSIGN.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        assign_events.is_empty(),
+        "생성 시 배정은 이동이 아니다: {assign_events:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_agent_succeeds_when_no_worker_qualifies() {
+    // Worker가 한 대도 없어도 생성은 200이다. 여기서 실패시키면 Worker를
+    // 붙이기 전에 Project와 Agent를 정의하는 정상 사용이 막힌다.
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "no-fleet").await;
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "lonely"}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let created: serde_json::Value = resp.json().await.unwrap();
+    // `AgentSummary`는 두 필드를 `skip_serializing_if = "Option::is_none"`으로
+    // 두므로, 미배정 Agent에서는 키 자체가 **없다**. null과 부재를 구분하지
+    // 않는 단정을 쓰면 이 계약이 조용히 바뀌어도 통과한다.
+    assert!(created.get("worker_id").is_none(), "{created}");
+    assert!(created.get("assigned_at").is_none(), "{created}");
+}
+
+#[tokio::test]
+async fn place_agent_recovers_an_unplaced_agent_and_audits_the_move() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "recovery").await;
+
+    // Worker 없이 만든다 → 미배정.
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "stray"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(created.get("worker_id").is_none());
+    let agent_id = created["id"].as_str().unwrap().to_string();
+
+    // 나중에 Worker가 붙는다.
+    let first = Worker::new("first", "wss://first.invalid/ws");
+    store.upsert_worker(&first).await.unwrap();
+
+    let placed: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/place", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(placed["worker_id"], first.id.to_string());
+    assert!(placed["assigned_at"].is_string());
+
+    // 두 번째 Worker로 옮긴다 — `previous_worker_id`가 기록되어야 한다.
+    let second = Worker::new("second", "wss://second.invalid/ws");
+    store.upsert_worker(&second).await.unwrap();
+    let moved: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/place", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({"worker_id": second.id.to_string()}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(moved["worker_id"], second.id.to_string());
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_ASSIGN.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2, "배정 두 번 = 이벤트 둘: {events:?}");
+    // 감사 이벤트만으로 이동 궤적을 재구성할 수 있어야 한다 — 그러려면
+    // 도착지뿐 아니라 출발지가 있어야 하고, 첫 배정의 출발지는 null이다.
+    let details: Vec<_> = events.iter().map(|e| e.detail.clone()).collect();
+    assert!(
+        details
+            .iter()
+            .any(|d| d["worker_id"] == first.id.to_string() && d["previous_worker_id"].is_null()),
+        "{details:?}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d["worker_id"] == second.id.to_string()
+                && d["previous_worker_id"] == first.id.to_string()),
+        "{details:?}"
+    );
+}
+
+#[tokio::test]
+async fn place_agent_returns_409_when_no_worker_qualifies() {
+    // "배정할 Worker가 없다"는 서버 결함이 아니라 지금 fleet의 상태다.
+    // 500으로 답하면 운영자가 오케스트레이터를 의심하게 된다.
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "conflict").await;
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "waiting"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!(
+            "http://{}/api/agents/{}/place",
+            server.addr,
+            created["id"].as_str().unwrap()
+        ),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 409);
+}
+
+#[tokio::test]
+async fn place_agent_rejects_an_unknown_worker_with_400() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "badworker").await;
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "target"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!(
+            "http://{}/api/agents/{}/place",
+            server.addr,
+            created["id"].as_str().unwrap()
+        ),
+        &cookie,
+    )
+    .json(&serde_json::json!({"worker_id": WorkerId::new().to_string()}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn place_agent_requires_agent_manage_permission() {
+    let (store, cookie) = seed_test_session_with_perms(
+        MemStore::new(),
+        &[PermissionKind::ProjectRead, PermissionKind::AgentRead],
+    )
+    .await;
+    let server = spawn_server_inner(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!(
+            "http://{}/api/agents/{}/place",
+            server.addr,
+            fleet_core::AgentId::new()
+        ),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn place_agent_without_csrf_header_is_rejected() {
+    let (server, cookie) = spawn_authed_server(MemStore::new()).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!(
+            "http://{}/api/agents/{}/place",
+            server.addr,
+            fleet_core::AgentId::new()
+        ))
+        .header("cookie", format!("fleet_session={cookie}"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn list_agents_filters_by_worker() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let worker = Worker::new("holder", "wss://holder.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "byworker").await;
+
+    for name in ["a", "b"] {
+        authed_json(
+            &client,
+            reqwest::Method::POST,
+            &format!("http://{}/api/agents", server.addr),
+            &cookie,
+        )
+        .json(&serde_json::json!({"project_id": project_id, "name": name}))
+        .send()
+        .await
+        .unwrap();
+    }
+
+    let listed: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("http://{}/api/agents?worker_id={}", server.addr, worker.id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(listed.len(), 2);
+
+    let none: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!(
+            "http://{}/api/agents?worker_id={}",
+            server.addr,
+            WorkerId::new()
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(none.is_empty());
+}
