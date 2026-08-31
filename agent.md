@@ -128,6 +128,37 @@
         **판정은 소요 시간이 아니라 통과 여부입니다.** 반대로 §4.3의 조용한 skip 탐지에서는 소요
         시간이 판정이었습니다 — 같은 숫자가 무엇을 말하는지는 무엇을 의심하고 있느냐에 달립니다.
 
+    *   **기록 2 — `fleet-worker`의 `disk_cache_get_or_schedule_refresh_populates_background`
+        (2026-08-31, 환경적 영향)**: `--no-default-features` 세트에서만 간헐 실패했고, 격리
+        재실행도 148.87초 실패 / 122.02초 통과 / 130.51초 실패로 갈렸습니다. 주석에는 원인이
+        "`Disks::new_with_refreshed_list()`의 첫 호출이 macOS에서 수십 초"라고 적혀 있었고
+        예산이 10 → 30 → 120초로 세 번 올라가 있었습니다. **그 기전은 반증됐습니다** — 같은
+        `sysinfo` 0.32.1을 부르는 독립 프로그램은 43ms였고, 테스트와 동일한 런타임 모양
+        (`new_current_thread` + `spawn_blocking` + 1200×100ms 폴링)으로 감싸도 103ms였습니다.
+        `sample`로 뜬 스택이 답을 줬습니다: 3219개 중 3181개가
+        `sysinfo::get_disk_properties → CFURLCopyResourcePropertiesForKeys → FSMountGetVolumeUUID
+        → dispatch_once → CFBundleGetMainBundle → _CFIterateDirectory → readdir` 아래에
+        있었습니다. CoreFoundation은 첫 호출에서 메인 번들을 찾으려고 **실행 파일이 놓인
+        디렉터리를 완주**하는데, 테스트 바이너리의 디렉터리는 `target/debug/deps`이고 이
+        저장소에서 항목이 **111만 8582개**였습니다. A/B로 확정했습니다 — 같은 바이너리를 같은
+        cwd에서, 위치만 바꿔: deps에서 97.78초, 빈 디렉터리로 복사하면 0.10초(**978배**).
+        `user 9.21 / sys 25.14 / real 97.80`이라는 비율도 CPU가 아니라 외장 볼륨의
+        `__getdirentries64`에서 막혀 있었다는 그림과 맞습니다.
+
+        대응은 기록 1과 같은 처방입니다 — 비용을 **판정 밖으로** 옮기고(테스트 첫 줄에서
+        `spawn_blocking(collect_disk_free_mb).await`), 예산을 120초에서 30초로 **내렸습니다**.
+        예산이 내려간 것은 비용이 줄어서가 아니라 예산이 덮어야 할 대상이 바뀌었기
+        때문입니다. **여기서 배울 것은 예산 상향이 세 번 다 실패한 이유입니다**: 예산은 잘못
+        지목한 비용의 분산을 따라잡을 수 없습니다. 측정 최대치의 배수로 잡는 것도 기전을
+        모르는 한 다음 회차의 최대치를 예측하지 못합니다 — 기전을 규명하기 전의 상향은
+        전부 같은 실수의 반복입니다.
+
+        **검증 한계**: 이 테스트는 deps 디렉터리가 큰 트리에서 여전히 100초 가까이 걸립니다.
+        워밍업은 그 시간을 없애지 않고 단정과 무관하게 만들 뿐이며, 시간을 실제로 줄이는
+        것은 `cargo clean` 계열의 target 정리입니다. Linux CI에는 CFBundle 자체가 없으므로
+        이 경로가 존재하지 않고, 워밍업은 그쪽에서 무해합니다 — 즉 이 수정은 **CI에서는
+        검증되지 않는 종류의 수정**이고, 근거는 로컬 A/B 실측입니다.
+
 4.  **플랫폼 의존 단정 금지 — 메모리 값과 왕복 값을 직접 맞대지 않습니다**:
     Postgres `timestamptz`는 **마이크로초 해상도**입니다. 반면 `Utc::now()`는 나노초를 줍니다.
     따라서 `assert_eq!(stored.some_time, in_memory.some_time)`은 나노초 잔여가 있는 플랫폼에서만

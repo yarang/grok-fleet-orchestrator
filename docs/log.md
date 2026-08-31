@@ -4970,3 +4970,54 @@ heartbeat 간격이 15초이므로 beat을 통째로 건너뛴다. 그래서 정
   본다)는 4a가 이미 게이트 ①로 미뤄 둔 CAS slot claim과 **같은 창**이다. 새 창이 아니다.
 - `on_demand` Worker에서의 수렴은 시험하지 않았다 — 그 Worker는 heartbeat 루프를 시작하지
   않고, 4a의 배치 선택기가 이미 후보에서 제외한다. 현재 도달 불가능한 조합이다.
+
+## 2026-08-31 — 예산은 잘못 지목한 비용을 따라잡지 못한다
+
+`fleet-worker`의 `disk_cache_get_or_schedule_refresh_populates_background`가
+`--no-default-features` 세트에서만 간헐 실패했다. 격리 재실행은 148.87초 실패 / 122.02초 통과 /
+130.51초 실패로 갈렸다. 테스트에 붙은 주석은 원인을 "이 프로세스에서
+`Disks::new_with_refreshed_list()`의 첫 호출이 macOS에서 수십 초"라고 적고 있었고, 예산은 그
+전제 위에서 10 → 30 → 120초로 세 번 올라가 있었다.
+
+그 기전은 틀렸다. 같은 `sysinfo` 0.32.1을 부르는 독립 프로그램은 43ms에 끝나고, 테스트와 똑같은
+런타임 모양(`new_current_thread` + `spawn_blocking` + 1200×100ms 폴링)으로 감싸도 103ms다. 즉
+주석이 지목한 자리에는 비용이 없었다.
+
+`sample`이 답을 줬다. 3219개 표본 중 3181개가 아래에 있었다.
+
+```
+sysinfo::…::get_disk_properties
+  → CFURLCopyResourcePropertiesForKeys → FSMountGetVolumeUUID
+    → dispatch_once → CFBundleGetMainBundle → _CFBundleCreate
+      → _CFIterateDirectory → readdir → __getdirentries64
+```
+
+CoreFoundation은 프로세스마다 한 번 "메인 번들"을 찾는데, 번들 안에 있지 않은 실행 파일을
+만나면 **그 실행 파일이 놓인 디렉터리를 통째로 훑는다**. 테스트 바이너리의 디렉터리는
+`target/debug/deps`이고, 이 체크아웃에서 그 항목 수는 111만 8582개였다.
+
+A/B로 확정했다. 같은 바이너리, 같은 cwd, 실행 파일의 위치만 바꿨다 — `target/debug/deps`에서
+97.78초, 빈 디렉터리로 복사해 실행하면 0.10초. **978배**다. `user 9.21 / sys 25.14 /
+real 97.80`이라는 비율도 같은 그림을 가리킨다. CPU를 태운 것이 아니라 외장 볼륨의
+`__getdirentries64`에 막혀 있었다.
+
+대응은 `cross_client`에 이미 적용해 둔 것과 같다 — 비용을 판정 밖에서 치른다. 테스트가 폴링을
+시작하기 전에 `spawn_blocking(collect_disk_free_mb)`를 한 번 await하면 CoreFoundation의
+`dispatch_once`가 거기서 끝나고, 예산은 120초에서 30초로 **내려간다**. 내려간 이유가 중요하다.
+비용이 줄어서가 아니라 예산이 덮어야 할 대상이 "잘못 지목된 수십 초"에서 "실측된 40ms"로
+바뀌었기 때문이다.
+
+**세 번의 예산 상향이 왜 전부 실패했는가**가 이 건에서 남길 것이다. 예산은 잘못 지목한 비용의
+분산을 따라잡을 수 없다. "측정 최대치의 배수"라는 산정 방식도 기전을 모르는 한 다음 회차의
+최대치를 예측하지 못한다 — 120초는 33.07초의 3.6배로 잡은 값이었는데, 진짜 비용은 디렉터리
+항목 수에 비례하는 양이라 그 배수와 아무 관계가 없었다. 기전을 규명하기 전의 상향은 전부 같은
+실수의 반복이다.
+
+### 검증 한계 (정직하게)
+
+- 이 테스트는 deps 디렉터리가 큰 트리에서 여전히 100초 가까이 걸린다. 워밍업은 그 시간을
+  없애지 않고 단정과 무관하게 만들 뿐이다. 시간을 실제로 줄이는 것은 `target/` 정리다.
+- Linux에는 이 경로가 아예 없다. 그래서 CI에서는 원래 느리지 않았고, **CI가 이 수정을 확인해
+  주지 않는다.** 근거는 전적으로 위의 로컬 A/B다.
+- A/B는 양쪽 각 1회다. 반복 재현이 아니라 기전 실측으로 정당화한다 — `cross_client` 때와 같은
+  기준이다.
