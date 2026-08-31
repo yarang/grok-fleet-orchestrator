@@ -147,12 +147,35 @@ pub struct AgentSummary {
     /// 파생이지만 서버가 내보낸다: 두 클라이언트가 각자 비교하다가 한쪽이
     /// `<=`로 쓰면 조용히 다른 답을 낸다.
     pub command_delivered: bool,
-    /// `ready`이면서 desired가 `running`인 구간. `AgentStatus`의 variant가
-    /// **아니라** 파생인 이유는 `Starting`이 관측이 아니라 두 필드의 순수
-    /// 함수이기 때문이다 — variant로 만들었다면 `027`의
-    /// `status IN ('ready','stopped')` CHECK를 고치고, 아무도 관측하지 않는
-    /// 상태를 저장하게 된다.
-    pub is_starting: bool,
+    /// 명령은 냈는데 Worker가 아직 아무 말도 하지 않은 구간 (로드맵 `#67`
+    /// 4c-B에서 `is_starting`에서 개명).
+    ///
+    /// `AgentStatus`의 variant가 **아니라** 파생인 이유는 이것이 관측이
+    /// 아니라 세 필드의 순수 함수이기 때문이다 — variant로 만들었다면
+    /// `027`의 `status IN ('ready','stopped')` CHECK를 고치고, 아무도
+    /// 관측하지 않는 상태를 저장하게 된다.
+    ///
+    /// 이 값이 `false`로 떨어지는 경로는 둘이다: Worker가 떴다고 보고했거나
+    /// (`observed_status = "running"`), **못 띄웠다고** 보고했거나
+    /// (`"failed"`). 둘을 구분하려면 아래 세 필드를 봐야 한다.
+    pub start_pending: bool,
+    /// Worker가 마지막 heartbeat에서 보고한 프로세스 관측 (`running` |
+    /// `failed`). `null`이면 아직 아무 보고도 없다 — 명령을 못 받았을 수도,
+    /// 애초에 아무 명령도 없었을 수도 있다.
+    ///
+    /// `status`(오케스트레이터가 쓰는 생명주기)와 **다른 축**이다. 같은
+    /// 컬럼에 얹었다면 회수 직후 도착한 heartbeat이 `stopped`를 `running`으로
+    /// 되돌려 회수가 조용히 취소됐을 것이다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_status: Option<String>,
+    /// 위 관측이 기록된 시각. 신선도 판단은 이 값과 Worker의
+    /// `last_heartbeat`를 함께 봐야 한다 — 관측은 heartbeat을 타고 온다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// `observed_status = "failed"`일 때만 채워지는 이유
+    /// (`cap_reached` | `no_free_port` | `spawn_failed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -174,7 +197,10 @@ impl From<&Agent> for AgentSummary {
             command_generation: a.command_generation,
             last_acked_generation: a.last_acked_generation,
             command_delivered: a.command_delivered(),
-            is_starting: a.is_starting(),
+            start_pending: a.start_pending(),
+            observed_status: a.observed_status.map(|s| s.as_str().to_string()),
+            observed_at: a.observed_at,
+            observed_reason: a.observed_reason.map(|r| r.as_str().to_string()),
             created_at: a.created_at,
             updated_at: a.updated_at,
         }

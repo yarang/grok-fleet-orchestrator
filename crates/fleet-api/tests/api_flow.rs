@@ -26,7 +26,15 @@ struct Server {
 }
 
 async fn spawn_server() -> Server {
-    let store = Arc::new(MemStore::new()) as Arc<dyn Store>;
+    spawn_server_with_store(Arc::new(MemStore::new())).await
+}
+
+/// store 핸들을 테스트가 계속 들고 있는 변형.
+///
+/// HTTP로 도달할 수 없는 사실을 단정해야 할 때 쓴다 — 예컨대 heartbeat이
+/// 실은 Agent 행을 고쳤는지는 워커 API에 조회 경로가 없다.
+async fn spawn_server_with_store(store: Arc<MemStore>) -> Server {
+    let store = store as Arc<dyn Store>;
     let state = Arc::new(AppState::new(store));
     // ephemeral port
     let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -445,4 +453,118 @@ async fn list_workers_label_filtering_and_pagination() {
     assert_eq!(resp.status(), 200);
     let workers_paginated: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(workers_paginated.len(), 1);
+}
+
+/// 로드맵 `#67` 4c-B — Worker의 프로세스 관측이 heartbeat을 타고 저장된다.
+///
+/// store 계층 단정(`fleet-store/tests/agents.rs`)과 겹치지 않는 것만 여기서
+/// 본다: **선(wire) 위에서의 `None`과 `Some([])` 구분**이다. 요청 스키마가
+/// `Vec` + `skip_serializing_if = "Vec::is_empty"`였다면 빈 목록이 필드 부재와
+/// 구별되지 않아 마지막 Agent를 회수한 뒤 관측을 지울 방법이 사라진다. 그
+/// 결함은 타입이 잡아 주지 않고 이 테스트에서만 드러난다.
+#[tokio::test]
+async fn heartbeat_carries_agent_process_observations() {
+    let store = Arc::new(MemStore::new());
+    let srv = spawn_server_with_store(store.clone()).await;
+
+    let reg: serde_json::Value = client()
+        .post(format!("http://{}/v1/workers/register", srv.addr))
+        .json(&json!({
+            "name": "observer-01",
+            "agent_endpoint": "wss://10.0.1.7:2419/ws",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let worker_id: fleet_core::WorkerId = reg["worker_id"].as_str().unwrap().parse().unwrap();
+
+    let project = fleet_core::Project::new("obs-proj");
+    store.create_project(&project).await.unwrap();
+    let agent =
+        fleet_core::Agent::new(project.id, "watched").with_placement(worker_id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+
+    let beat = |body: serde_json::Value| {
+        let url = format!("http://{}/v1/workers/heartbeat", srv.addr);
+        async move {
+            client()
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    // 1. 필드를 아예 모르는 구버전 Worker도 422로 떨어지지 않는다.
+    assert_eq!(
+        beat(json!({"worker_id": worker_id.to_string(), "agent_healthy": true})).await,
+        200
+    );
+
+    assert_eq!(
+        beat(json!({
+            "worker_id": worker_id.to_string(),
+            "agent_healthy": true,
+            "agent_observations": [{"status": "running", "agent_id": agent.id.to_string()}],
+        }))
+        .await,
+        200
+    );
+    let stored = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.observed_status,
+        Some(fleet_core::AgentObservedStatus::Running)
+    );
+
+    // 2. 빈 목록은 선 위에서 살아남아 관측을 지운다. `[]`가 필드 부재로
+    //    접히면 이 단정이 깨진다.
+    assert_eq!(
+        beat(json!({
+            "worker_id": worker_id.to_string(),
+            "agent_healthy": true,
+            "agent_observations": [],
+        }))
+        .await,
+        200
+    );
+    assert_eq!(
+        store
+            .get_agent(agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed_status,
+        None,
+        "빈 목록은 '하나도 안 돈다'는 주장이며 남은 관측을 지운다"
+    );
+
+    // 3. 실패 관측은 이유를 함께 싣는다. `failed`인데 이유가 없는 조합은
+    //    타입이 만들 수 없으므로 여기서 볼 것은 왕복뿐이다.
+    assert_eq!(
+        beat(json!({
+            "worker_id": worker_id.to_string(),
+            "agent_healthy": true,
+            "agent_observations": [{
+                "status": "failed",
+                "agent_id": agent.id.to_string(),
+                "reason": "no_free_port",
+            }],
+        }))
+        .await,
+        200
+    );
+    let stored = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.observed_status,
+        Some(fleet_core::AgentObservedStatus::Failed)
+    );
+    assert_eq!(
+        stored.observed_reason,
+        Some(fleet_core::AgentObservationReason::NoFreePort)
+    );
 }

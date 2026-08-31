@@ -4242,7 +4242,7 @@ async fn start_agent_issues_a_command_and_audits_the_generation() {
     // 시점에 자동 배정하므로, 생성이 running을 뜻하면 `ready`("정의는 끝났고
     // 시작 명령을 받을 수 있다")가 표현할 수 있는 상태가 사라진다.
     assert_eq!(created["desired_status"], "stopped");
-    assert_eq!(created["is_starting"], false);
+    assert_eq!(created["start_pending"], false);
 
     let started: serde_json::Value = authed_json(
         &client,
@@ -4259,7 +4259,7 @@ async fn start_agent_issues_a_command_and_audits_the_generation() {
     .unwrap();
     assert_eq!(started["desired_status"], "running");
     assert_eq!(started["status"], "ready", "관측은 아직 바뀌지 않는다");
-    assert_eq!(started["is_starting"], true);
+    assert_eq!(started["start_pending"], true);
     assert_eq!(started["command_generation"], 1);
     assert_eq!(started["command_delivered"], false);
 

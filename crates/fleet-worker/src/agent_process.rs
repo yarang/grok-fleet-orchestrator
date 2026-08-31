@@ -20,10 +20,21 @@
 //! 매 beat마다 전체 목록이 다시 오므로 이 함수는 **멱등**이며, 명령을 놓쳤는지
 //! 추적할 필요가 없다.
 //!
-//! ## 이 단계가 만들지 않는 것
+//! ## 관측 (4c-B)
 //!
-//! 관측 상태(`Starting`/`Running`/`Failed`)를 오케스트레이터로 보내는 채널은
-//! 4c-B다. 여기서 프로세스가 실제로 뜬 사실은 **워커 로그에만** 남는다.
+//! [`reconcile`](AgentProcessManager::reconcile)이 이번 beat에 본 것을
+//! [`AgentObservation`] 목록으로 돌려주고, `registration.rs`가 그것을 다음
+//! heartbeat 요청에 싣는다. 4c-A에서 워커 로그 한 줄이 전부였던 거절이 여기서
+//! 오케스트레이터에 도달한다.
+//!
+//! **`Starting`은 만들지 않는다.** 정본의 이름표는 그것을 "자식을 띄웠고 아직
+//! health check 전"으로 정의했는데 이 매니저에는 health check가 없다 —
+//! `try_wait()`는 "죽지 않았다"만 말한다. 어휘는 `Running`과 `Failed` 둘이다.
+//!
+//! **크래시 루프는 보이지 않는다.** 0단계가 죽은 자식을 걷어내고 3단계가 같은
+//! beat에 재기동하므로, 매 beat 죽었다 살아나는 Agent도 관측은 `Running`이다.
+//! 그것을 드러내려면 상태가 아니라 **사건**을 실어야 하는데(재기동 횟수 또는
+//! 전이 이벤트), 그 채널은 지금 없고 소비자도 없다. 4c-B는 상태만 다룬다.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -33,7 +44,9 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use fleet_core::{AgentCommand, AgentDesiredStatus, AgentId};
+use fleet_core::{
+    AgentCommand, AgentDesiredStatus, AgentId, AgentObservation, AgentObservationReason,
+};
 
 use crate::config::WorkerConfig;
 use crate::error::WorkerError;
@@ -64,6 +77,21 @@ impl RejectReason {
         match self {
             RejectReason::CapReached => "process cap reached",
             RejectReason::NoFreePort => "no free port in range",
+        }
+    }
+}
+
+/// 워커 안의 거절 이유를 오케스트레이터가 아는 어휘로 옮긴다 (로드맵 `#67` 4c-B).
+///
+/// 변환을 두고 두 번째 문자열 어휘를 만들지 않는 이유: `as_str`의 값
+/// (`"process cap reached"`)은 **사람이 읽는 로그 문구**이고 코어의
+/// `as_str`(`"cap_reached"`)은 **DB CHECK에 적힌 값**이다. 같은 문자열로
+/// 합치면 로그 문구를 다듬는 순간 스키마가 깨진다.
+impl From<RejectReason> for AgentObservationReason {
+    fn from(r: RejectReason) -> Self {
+        match r {
+            RejectReason::CapReached => AgentObservationReason::CapReached,
+            RejectReason::NoFreePort => AgentObservationReason::NoFreePort,
         }
     }
 }
@@ -135,14 +163,28 @@ impl AgentProcessManager {
         self.procs.lock().await.keys().copied().collect()
     }
 
-    /// heartbeat 응답의 명령 목록에 프로세스 집합을 수렴시킨다.
+    /// heartbeat 응답의 명령 목록에 프로세스 집합을 수렴시키고, **본 것**을
+    /// 돌려준다 (관측은 로드맵 `#67` 4c-B).
     ///
     /// 실패는 **전파하지 않는다** — 한 Agent를 못 띄운 것이 heartbeat 루프를
-    /// 멈추면 나머지 Agent의 명령도 함께 끊긴다.
-    pub async fn reconcile(&self, commands: Option<&[AgentCommand]>) {
+    /// 멈추면 나머지 Agent의 명령도 함께 끊긴다. 대신 그 실패가 반환값에
+    /// [`AgentObservation::Failed`]로 실려 오케스트레이터에 도달한다. 4c-A에서
+    /// 이 자리는 워커 로그 한 줄이 전부인 **조용한 실패 모드**였다.
+    ///
+    /// 반환값의 `None`은 명령 목록이 `None`이었다는 뜻, 즉 "이번 beat에는 할 말이
+    /// 없다"다. `Some(vec![])`은 "이 Worker에 관측할 것이 하나도 없다"이며 그
+    /// 구분은 명령 목록의 그것과 정확히 대칭이다.
+    ///
+    /// 목록은 **desired가 `running`인 Agent만** 담는다. 정리한 Agent를 담지 않는
+    /// 이유는 관측 어휘에 "없음"에 해당하는 값이 없어서이고, 그것으로 충분하다 —
+    /// 오케스트레이터는 목록에 없는 것의 관측을 지운다.
+    pub async fn reconcile(
+        &self,
+        commands: Option<&[AgentCommand]>,
+    ) -> Option<Vec<AgentObservation>> {
         let Some(commands) = commands else {
             debug!("no authoritative agent list this beat — leaving processes untouched");
-            return;
+            return None;
         };
 
         let mut procs = self.procs.lock().await;
@@ -191,12 +233,19 @@ impl AgentProcessManager {
             .collect();
         terminate_all(doomed).await;
 
-        // 3. 있어야 하는데 없는 것을 띄운다.
+        // 3. 있어야 하는데 없는 것을 띄우고, 그 결과를 그대로 관측으로 적는다.
+        //    관측을 여기서 만드는 이유는 이 루프가 desired=running인 Agent를
+        //    **정확히 한 번씩** 지나가기 때문이다 — 뒤에서 다시 훑으면 0단계가
+        //    걷어낸 자식과 방금 띄운 자식을 구분할 근거가 사라진다.
+        let mut observations = Vec::with_capacity(commands.len());
         for cmd in commands
             .iter()
             .filter(|c| c.desired_status == AgentDesiredStatus::Running)
         {
             if procs.contains_key(&cmd.agent_id) {
+                observations.push(AgentObservation::Running {
+                    agent_id: cmd.agent_id,
+                });
                 continue;
             }
 
@@ -220,6 +269,10 @@ impl AgentProcessManager {
                         port_range = %self.config.grok.agent_port_range,
                         "agent process not started this beat"
                     );
+                    observations.push(AgentObservation::Failed {
+                        agent_id: cmd.agent_id,
+                        reason: reason.into(),
+                    });
                     continue;
                 }
             };
@@ -233,6 +286,9 @@ impl AgentProcessManager {
                         "agent process started"
                     );
                     procs.insert(cmd.agent_id, AgentProc { child, port });
+                    observations.push(AgentObservation::Running {
+                        agent_id: cmd.agent_id,
+                    });
                 }
                 Err(e) => {
                     warn!(
@@ -242,9 +298,15 @@ impl AgentProcessManager {
                         error = %e,
                         "failed to spawn agent process"
                     );
+                    observations.push(AgentObservation::Failed {
+                        agent_id: cmd.agent_id,
+                        reason: AgentObservationReason::SpawnFailed,
+                    });
                 }
             }
         }
+
+        Some(observations)
     }
 
     /// 모든 Agent 프로세스를 종료한다. Worker 종료 경로에서 호출한다.
@@ -327,6 +389,9 @@ async fn terminate_all(procs: Vec<(AgentId, AgentProc)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 구현부는 `AgentObservation`만 만들고 그 안을 들여다보지 않는다.
+    // 상태를 **읽는** 쪽은 테스트뿐이라 여기서만 가져온다.
+    use fleet_core::AgentObservedStatus;
     use std::io::Write;
 
     /// 인자를 무시하고 오래 자는 가짜 grok. 실제 바이너리 없이 프로세스
@@ -383,7 +448,8 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39140-39159", 4);
         let a = AgentId::new();
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
             .await;
 
         assert_eq!(m.running_agents().await, vec![a]);
@@ -397,9 +463,9 @@ mod tests {
         let a = AgentId::new();
         let list = [cmd(a, AgentDesiredStatus::Running)];
 
-        m.reconcile(Some(&list)).await;
-        m.reconcile(Some(&list)).await;
-        m.reconcile(Some(&list)).await;
+        let _ = m.reconcile(Some(&list)).await;
+        let _ = m.reconcile(Some(&list)).await;
+        let _ = m.reconcile(Some(&list)).await;
 
         // 매 beat마다 전체 목록이 다시 오지만 프로세스는 하나뿐이어야 한다.
         assert_eq!(m.running_agents().await.len(), 1);
@@ -412,11 +478,13 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39180-39199", 4);
         let a = AgentId::new();
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
             .await;
         assert_eq!(m.running_agents().await.len(), 1);
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Stopped)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Stopped)]))
             .await;
         assert!(m.running_agents().await.is_empty());
     }
@@ -429,14 +497,16 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39200-39219", 4);
         let (a, b) = (AgentId::new(), AgentId::new());
 
-        m.reconcile(Some(&[
-            cmd(a, AgentDesiredStatus::Running),
-            cmd(b, AgentDesiredStatus::Running),
-        ]))
-        .await;
+        let _ = m
+            .reconcile(Some(&[
+                cmd(a, AgentDesiredStatus::Running),
+                cmd(b, AgentDesiredStatus::Running),
+            ]))
+            .await;
         assert_eq!(m.running_agents().await.len(), 2);
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
             .await;
         assert_eq!(m.running_agents().await, vec![a]);
         m.shutdown_all().await;
@@ -451,11 +521,12 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39220-39239", 4);
         let a = AgentId::new();
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
             .await;
         assert_eq!(m.running_agents().await.len(), 1);
 
-        m.reconcile(None).await;
+        let _ = m.reconcile(None).await;
 
         assert_eq!(
             m.running_agents().await,
@@ -471,11 +542,12 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39240-39259", 4);
         let a = AgentId::new();
 
-        m.reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
             .await;
         assert_eq!(m.running_agents().await.len(), 1);
 
-        m.reconcile(Some(&[])).await;
+        let _ = m.reconcile(Some(&[])).await;
 
         assert!(
             m.running_agents().await.is_empty(),
@@ -489,17 +561,34 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39260-39279", 1);
         let (a, b) = (AgentId::new(), AgentId::new());
 
-        m.reconcile(Some(&[
-            cmd(a, AgentDesiredStatus::Running),
-            cmd(b, AgentDesiredStatus::Running),
-        ]))
-        .await;
+        let obs = m
+            .reconcile(Some(&[
+                cmd(a, AgentDesiredStatus::Running),
+                cmd(b, AgentDesiredStatus::Running),
+            ]))
+            .await
+            .expect("권위 있는 목록을 줬으므로 관측도 온다");
 
         assert_eq!(
             m.running_agents().await.len(),
             1,
             "상한이 1이면 하나만 뜬다"
         );
+        // 4c-A에서 거절은 워커 로그 한 줄이 전부였다. 4c-B의 핵심은 그것이
+        // 오케스트레이터에 **이유와 함께** 도달한다는 것이므로, 뜬 개수만
+        // 세면 이 단계가 실제로 무엇을 더했는지 증명하지 못한다.
+        assert_eq!(obs.len(), 2, "desired=running인 둘 다에 대해 말한다");
+        assert_eq!(
+            obs.iter()
+                .filter(|o| o.status() == AgentObservedStatus::Running)
+                .count(),
+            1
+        );
+        let failed = obs
+            .iter()
+            .find(|o| o.status() == AgentObservedStatus::Failed)
+            .expect("거절된 하나가 실패로 보고된다");
+        assert_eq!(failed.reason(), Some(AgentObservationReason::CapReached));
         m.shutdown_all().await;
     }
 
@@ -510,16 +599,48 @@ mod tests {
         let m = manager(&dir, fake_grok(dir.path()), "39280-39280", 4);
         let (a, b) = (AgentId::new(), AgentId::new());
 
-        m.reconcile(Some(&[
-            cmd(a, AgentDesiredStatus::Running),
-            cmd(b, AgentDesiredStatus::Running),
-        ]))
-        .await;
+        let obs = m
+            .reconcile(Some(&[
+                cmd(a, AgentDesiredStatus::Running),
+                cmd(b, AgentDesiredStatus::Running),
+            ]))
+            .await
+            .expect("권위 있는 목록을 줬으므로 관측도 온다");
 
         assert_eq!(
             m.running_agents().await.len(),
             1,
             "포트가 하나뿐이면 하나만 뜬다"
+        );
+        // 거절 **경로**는 하나지만 관측의 이유는 갈린다 — 그 구분이 실제로
+        // 살아 있는지 여기서 본다.
+        let failed = obs
+            .iter()
+            .find(|o| o.status() == AgentObservedStatus::Failed)
+            .expect("거절된 하나가 실패로 보고된다");
+        assert_eq!(failed.reason(), Some(AgentObservationReason::NoFreePort));
+        m.shutdown_all().await;
+    }
+
+    /// 관측의 `None`/`Some([])` 구분은 명령 목록의 그것과 대칭이다.
+    ///
+    /// 이 단정이 없으면 `reconcile`이 언제나 `Some`을 돌려주도록 바뀌어도
+    /// 아무 테스트도 깨지지 않는데, 그 변경은 store 조회가 실패한 beat에
+    /// "관측할 것이 하나도 없다"를 보내 살아 있는 Agent들의 관측을 전부
+    /// 지우게 만든다.
+    #[tokio::test]
+    async fn no_authoritative_list_means_nothing_observed() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39320-39339", 4);
+
+        assert!(
+            m.reconcile(None).await.is_none(),
+            "말해 줄 것이 없는 beat은 관측도 없다"
+        );
+        assert_eq!(
+            m.reconcile(Some(&[])).await,
+            Some(Vec::new()),
+            "정말로 없는 것은 빈 목록으로 말한다"
         );
         m.shutdown_all().await;
     }
@@ -533,12 +654,12 @@ mod tests {
         let a = AgentId::new();
         let list = [cmd(a, AgentDesiredStatus::Running)];
 
-        m.reconcile(Some(&list)).await;
+        let _ = m.reconcile(Some(&list)).await;
         // 자식이 종료할 시간을 준다.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         // 죽은 것을 걷어내고 다시 띄운다 — 목록에 여전히 running이 있으므로.
-        m.reconcile(Some(&list)).await;
+        let _ = m.reconcile(Some(&list)).await;
         assert_eq!(m.running_agents().await.len(), 1);
         m.shutdown_all().await;
     }

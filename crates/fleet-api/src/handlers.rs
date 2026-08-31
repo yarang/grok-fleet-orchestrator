@@ -369,6 +369,32 @@ pub async fn heartbeat(
             }
         }
     }
+    // 관측 반영 (로드맵 #67 4c-B). ACK와 같은 이유로 실패가 치명적이지
+    // 않지만, 복구 논리는 다르다 — 확인은 서버가 명령을 다시 실어 줘야
+    // 복구되고, 관측은 Worker가 다음 beat에 **새로** 만들어 보낸다.
+    //
+    // `None`과 `Some(vec![])`을 여기서 구분하는 것이 이 필드의 존재 이유다.
+    // `unwrap_or_default()`로 접으면 필드를 모르는 구버전 Worker의 heartbeat
+    // 하나가 그 Worker의 관측을 전부 지운다.
+    if let Some(observations) = &req.agent_observations {
+        match state
+            .store
+            .apply_agent_observations(worker_id, observations)
+            .await
+        {
+            Ok(changed) => {
+                debug!(
+                    %worker_id,
+                    observed = observations.len(),
+                    changed,
+                    "agent process observations"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(%worker_id, error = %e, "failed to apply agent observations");
+            }
+        }
+    }
     // 같은 이유로 조회 실패도 치명적이지 않다. 다만 **빈 목록으로 대신하지
     // 않는다** — 4c의 Worker는 이 목록을 권위 있는 전체 집합으로 읽고 목록에
     // 없는 프로세스를 정리하므로, 조회 실패를 `Some(vec![])`로 내보내면 store

@@ -23,16 +23,16 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
-    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplatePin,
-    AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter,
-    AuditOutcome, BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent,
-    IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus,
-    IssueTaskLink, Labels, LoginAttempt, Permission, PermissionKind, Project, ProjectFilter,
-    ProjectId, ProjectStatus, Role, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter,
-    TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter,
-    TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
-    WorkerId, WorkerStatus,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentObservation,
+    AgentObservationReason, AgentObservedStatus, AgentStatus, AgentTemplate, AgentTemplateBody,
+    AgentTemplateFilter, AgentTemplateId, AgentTemplatePin, AgentTemplateRevision,
+    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, AuditOutcome,
+    BootstrapToken, CircuitState, CloseReason, EventEntry, FleetEvent, IdempotentInsert, Issue,
+    IssueComment, IssueFilter, IssueId, IssueSeverity, IssueStatus, IssueTaskLink, Labels,
+    LoginAttempt, Permission, PermissionKind, Project, ProjectFilter, ProjectId, ProjectStatus,
+    Role, Session, SessionId, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
+    TaskOutputChunk, TaskPhase, TaskPriority, TaskStatus, TaskStatusFilter, TransitionOrigin,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId, WorkerStatus,
 };
 
 use crate::error::StoreError;
@@ -2917,7 +2917,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, created_at, updated_at \
+                last_acked_generation, observed_status, observed_at, observed_reason, \
+                created_at, updated_at \
                FROM agents WHERE id = $1",
         )
         .bind(id.0)
@@ -2935,7 +2936,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, created_at, updated_at \
+                last_acked_generation, observed_status, observed_at, observed_reason, \
+                created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
         )
         .bind(project_id.0)
@@ -2956,7 +2958,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, created_at, updated_at \
+                last_acked_generation, observed_status, observed_at, observed_reason, \
+                created_at, updated_at \
                FROM agents \
               WHERE ($1::uuid IS NULL OR project_id = $1) \
                 AND ($2::text IS NULL OR status = $2) \
@@ -3161,6 +3164,51 @@ impl Store for PgStore {
             applied += result.rows_affected();
         }
         Ok(applied)
+    }
+
+    async fn apply_agent_observations(
+        &self,
+        worker_id: WorkerId,
+        observations: &[AgentObservation],
+    ) -> Result<u64, StoreError> {
+        let mut changed = 0u64;
+
+        // 1. 이번에 말하지 않은 것은 지운다. 목록이 권위 있는 전체 집합이므로
+        //    침묵은 "그런 프로세스는 없다"이며, 지우지 않으면 회수된 Agent에
+        //    `running`이 영원히 남는다. `observed_status IS NOT NULL`을 붙여
+        //    이미 비어 있는 행에 쓰기가 가지 않게 한다 — 한 Worker에 배정된
+        //    Agent 대부분은 돌지 않으므로 그 없는 쓰기가 대다수다.
+        let spoken: Vec<Uuid> = observations.iter().map(|o| o.agent_id().0).collect();
+        let cleared = sqlx::query(
+            "UPDATE agents \
+                SET observed_status = NULL, observed_at = NULL, observed_reason = NULL \
+              WHERE worker_id = $1 AND observed_status IS NOT NULL AND id <> ALL($2)",
+        )
+        .bind(worker_id.0)
+        .bind(&spoken)
+        .execute(&self.pool)
+        .await?;
+        changed += cleared.rows_affected();
+
+        // 2. 말한 것을 적는다. `worker_id = $2`가 재배정된 Agent에 이전 Worker의
+        //    지연된 beat이 쓰지 못하게 막는다.
+        let now = Utc::now();
+        for obs in observations {
+            let result = sqlx::query(
+                "UPDATE agents \
+                    SET observed_status = $3, observed_at = $4, observed_reason = $5 \
+                  WHERE id = $1 AND worker_id = $2",
+            )
+            .bind(obs.agent_id().0)
+            .bind(worker_id.0)
+            .bind(obs.status().as_str())
+            .bind(now)
+            .bind(obs.reason().map(|r| r.as_str()))
+            .execute(&self.pool)
+            .await?;
+            changed += result.rows_affected();
+        }
+        Ok(changed)
     }
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
@@ -3883,6 +3931,39 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
     let desired_status = AgentDesiredStatus::parse_str(&desired_str).ok_or_else(|| {
         StoreError::Decode(format!("unknown agent desired status in DB: {desired_str}"))
     })?;
+    // 032의 `agents_observation_complete`가 절반만 채워진 관측을 막으므로 위
+    // 배정과 같은 규율을 쓴다. 다만 여기서 검사할 짝은 셋이고, `reason`은
+    // `failed`일 때만 있어야 한다 — 조용히 넘기면 "실패했는데 이유를 모른다"가
+    // 정상 응답으로 나가고, 운영자는 없는 원인을 찾게 된다.
+    let observed_str: Option<String> = row.try_get("observed_status")?;
+    let observed_status = match observed_str.as_deref() {
+        None => None,
+        Some(v) => Some(AgentObservedStatus::parse_str(v).ok_or_else(|| {
+            StoreError::Decode(format!("unknown agent observed status in DB: {v}"))
+        })?),
+    };
+    let observed_at: Option<DateTime<Utc>> = row.try_get("observed_at")?;
+    let reason_str: Option<String> = row.try_get("observed_reason")?;
+    let observed_reason = match reason_str.as_deref() {
+        None => None,
+        Some(v) => Some(AgentObservationReason::parse_str(v).ok_or_else(|| {
+            StoreError::Decode(format!("unknown agent observation reason in DB: {v}"))
+        })?),
+    };
+    // 032의 `agents_observation_complete`와 같은 세 가지 조합만 허용한다. 여기서
+    // 다시 검사하는 이유는 DB CHECK가 우회될 수 있어서가 아니라, 우회됐을 때
+    // 불완전한 관측이 조용히 `Agent`로 올라오지 않게 하기 위해서다.
+    let observation_ok = matches!(
+        (observed_status, observed_at.is_some(), observed_reason),
+        (None, false, None)
+            | (Some(AgentObservedStatus::Running), true, None)
+            | (Some(AgentObservedStatus::Failed), true, Some(_))
+    );
+    if !observation_ok {
+        return Err(StoreError::Decode(format!(
+            "agent {id} has an inconsistent observation: status={observed_status:?} at={observed_at:?} reason={observed_reason:?}"
+        )));
+    }
     Ok(Agent {
         id: AgentId(id),
         project_id: ProjectId(project_id),
@@ -3896,6 +3977,9 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         desired_status,
         command_generation: row.try_get("command_generation")?,
         last_acked_generation: row.try_get("last_acked_generation")?,
+        observed_status,
+        observed_at,
+        observed_reason,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })

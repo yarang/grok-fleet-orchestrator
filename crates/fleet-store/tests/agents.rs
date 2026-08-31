@@ -35,7 +35,8 @@
 //! 않는 쪽이라 스레드 수와 무관하다.
 
 use fleet_core::{
-    Agent, AgentDesiredStatus, AgentFilter, AgentStatus, Project, ProjectStatus, Worker,
+    Agent, AgentDesiredStatus, AgentFilter, AgentObservation, AgentObservationReason,
+    AgentObservedStatus, AgentStatus, Project, ProjectStatus, Worker,
 };
 use fleet_store::{PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
@@ -587,7 +588,7 @@ async fn a_new_agent_wants_nothing_and_has_nothing_pending() {
     // 값의 정확한 뜻을 드러낸다 — "미전달 명령이 없다"이지 "무언가
     // 확인됐다"가 아니다. 아직 발행된 명령 자체가 없다.
     assert!(fetched.command_delivered());
-    assert!(!fetched.is_starting());
+    assert!(!fetched.start_pending());
 }
 
 #[tokio::test]
@@ -603,7 +604,10 @@ async fn desired_status_bumps_the_generation_only_when_the_value_changes() {
         .unwrap());
     let first = store.get_agent(agent.id).await.unwrap().unwrap();
     assert_eq!(first.command_generation, 1);
-    assert!(first.is_starting(), "ready + running = starting");
+    assert!(
+        first.start_pending(),
+        "ready + running + 관측 없음 = 시작 대기"
+    );
 
     // 같은 의도를 다시 눌러도 세대는 그대로다. 매 호출마다 올리면 이미
     // 확인된 명령이 반복 클릭만으로 미확인으로 되돌아간다.
@@ -859,4 +863,220 @@ async fn acking_does_not_move_updated_at() {
         "ACK는 회수 시각을 밀지 않는다"
     );
     assert!(after.command_delivered());
+}
+
+// ---------------------------------------------------------------------------
+// 관측 (로드맵 #67 4c-B)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_observation_roundtrips_and_ends_start_pending() {
+    require_db!(store);
+    let project = seed_project(&store, "obs-rt").await;
+    let worker = seed_worker(&store, "obs-rt").await;
+    let agent = Agent::new(project.id, "watched").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .await
+        .unwrap();
+
+    let before = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert!(
+        before.start_pending(),
+        "명령만 냈고 관측이 없으면 시작 대기다"
+    );
+    assert!(before.observed_status.is_none());
+
+    let changed = store
+        .apply_agent_observations(
+            worker.id,
+            &[AgentObservation::Running { agent_id: agent.id }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_status, Some(AgentObservedStatus::Running));
+    assert!(after.observed_at.is_some());
+    assert_eq!(after.observed_reason, None);
+    // 관측은 생명주기를 건드리지 않는다 — 두 축이 한 컬럼을 나눠 쓰면
+    // 회수 직후 도착한 beat이 `stopped`를 되돌린다.
+    assert_eq!(after.status, AgentStatus::Ready);
+    assert_eq!(after.desired_status, AgentDesiredStatus::Running);
+    assert!(
+        !after.start_pending(),
+        "Worker가 돌고 있다고 보고했으면 더는 시작 대기가 아니다"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_observation_carries_its_reason() {
+    require_db!(store);
+    let project = seed_project(&store, "obs-fail").await;
+    let worker = seed_worker(&store, "obs-fail").await;
+    let agent = Agent::new(project.id, "rejected").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+
+    store
+        .apply_agent_observations(
+            worker.id,
+            &[AgentObservation::Failed {
+                agent_id: agent.id,
+                reason: AgentObservationReason::CapReached,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_status, Some(AgentObservedStatus::Failed));
+    assert_eq!(
+        after.observed_reason,
+        Some(AgentObservationReason::CapReached)
+    );
+    // 4c-A에서 이 사실은 워커 로그 한 줄이 전부였다. 그것이 여기 도달하는
+    // 것이 4c-B의 전부이므로, 이유가 유실되면 이 단계는 아무것도 하지 않은
+    // 것과 같다.
+    assert!(
+        !after.start_pending(),
+        "못 띄웠다는 보고도 보고다 — 무한히 시작 대기로 남지 않는다"
+    );
+}
+
+#[tokio::test]
+async fn an_unspoken_agent_loses_its_observation() {
+    require_db!(store);
+    let project = seed_project(&store, "obs-clear").await;
+    let worker = seed_worker(&store, "obs-clear").await;
+    let kept = Agent::new(project.id, "kept").with_placement(worker.id, chrono::Utc::now());
+    let recalled = Agent::new(project.id, "recalled").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&kept).await.unwrap();
+    store.create_agent(&recalled).await.unwrap();
+
+    store
+        .apply_agent_observations(
+            worker.id,
+            &[
+                AgentObservation::Running { agent_id: kept.id },
+                AgentObservation::Running {
+                    agent_id: recalled.id,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    // 회수 뒤 Worker는 그 Agent를 더는 언급하지 않는다. 목록이 권위 있는
+    // 전체 집합이 아니라면 이 관측을 지울 사람이 아무도 없어서 회수된
+    // Agent가 영원히 `running`으로 남는다.
+    let changed = store
+        .apply_agent_observations(
+            worker.id,
+            &[AgentObservation::Running { agent_id: kept.id }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 2, "지운 하나 + 다시 쓴 하나");
+
+    assert_eq!(
+        store
+            .get_agent(recalled.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed_status,
+        None
+    );
+    assert_eq!(
+        store
+            .get_agent(kept.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed_status,
+        Some(AgentObservedStatus::Running)
+    );
+
+    // 빈 목록은 "하나도 안 돈다"는 적극적인 주장이다. `None`(필드 부재)과
+    // 달리 여기까지 도달하며, 남은 관측을 전부 지운다.
+    let changed = store
+        .apply_agent_observations(worker.id, &[])
+        .await
+        .unwrap();
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store
+            .get_agent(kept.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed_status,
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_observation_from_a_worker_that_does_not_own_the_agent_is_ignored() {
+    require_db!(store);
+    let project = seed_project(&store, "obs-steal").await;
+    let owner = seed_worker(&store, "obs-steal-owner").await;
+    let other = seed_worker(&store, "obs-steal-other").await;
+    let agent = Agent::new(project.id, "owned").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+
+    // `ack_agent_commands`의 세 CAS 조건 중 `worker_id`만 여기로 넘어온다.
+    // 나머지 둘은 세대에 관한 것이고 관측에는 세대가 없다 — 프로세스는
+    // 아무 명령 없이도 죽을 수 있기 때문이다.
+    let obs = [AgentObservation::Running { agent_id: agent.id }];
+
+    let changed = store
+        .apply_agent_observations(other.id, &obs)
+        .await
+        .unwrap();
+    assert_eq!(changed, 0, "남의 Agent에 대한 관측은 반영되지 않는다");
+    assert_eq!(
+        store
+            .get_agent(agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .observed_status,
+        None
+    );
+
+    let changed = store
+        .apply_agent_observations(owner.id, &obs)
+        .await
+        .unwrap();
+    assert_eq!(changed, 1, "소유자의 관측은 반영된다");
+}
+
+/// 관측은 프로토콜 부기이지 운영자의 조작이 아니다 — ACK와 같은 이유로
+/// `updated_at`을 밀지 않는다. 밀면 "언제 회수됐는가"가 한 beat 뒤에
+/// 무효가 된다.
+#[tokio::test]
+async fn observing_does_not_move_updated_at() {
+    require_db!(store);
+    let project = seed_project(&store, "obs-utime").await;
+    let worker = seed_worker(&store, "obs-utime").await;
+    let agent = Agent::new(project.id, "quiet").with_placement(worker.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    let before = store.get_agent(agent.id).await.unwrap().unwrap().updated_at;
+
+    store
+        .apply_agent_observations(
+            worker.id,
+            &[AgentObservation::Running { agent_id: agent.id }],
+        )
+        .await
+        .unwrap();
+
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(
+        after.updated_at.timestamp_micros(),
+        before.timestamp_micros(),
+        "관측은 Agent의 갱신 시각을 밀지 않는다"
+    );
 }

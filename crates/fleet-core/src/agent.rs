@@ -129,6 +129,131 @@ impl AgentDesiredStatus {
     }
 }
 
+/// Worker가 실제로 **본** Agent 프로세스의 상태 (로드맵 `#67` 4c-B).
+///
+/// [`AgentStatus`]와 다른 축이고, 그래서 다른 컬럼이다. `AgentStatus`는
+/// 오케스트레이터가 쓰는 운영 상태(정의됨/회수됨)이고 이것은 Worker가 쓰는
+/// 관측이다. 한 컬럼에 둘을 담으면 회수(`status = stopped`)를 그 회수를 보기
+/// 전에 만들어진 beat이 `running`으로 덮어 조용히 되돌린다 —
+/// `032_agent_observed_state.sql`에 그 경합을 적었다.
+///
+/// **`Starting`이 없다.** 정본의 이름표는 그것을 "자식을 띄웠고 아직 health
+/// check 전"으로 정의했는데 4c-A의 매니저에는 health check가 없다
+/// ([`try_wait`](std::process::Child::try_wait)만 있다). 계산할 방법이 없는
+/// 값을 저장하면 `#70`이 제거해야 했던 죽은 variant가 된다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentObservedStatus {
+    /// 이 Agent의 프로세스가 이번 beat에 살아 있는 것으로 확인됐다.
+    Running,
+    /// 이번 beat에 띄우지 못했다. 원인은 [`AgentObservationReason`]에 있다.
+    Failed,
+}
+
+impl AgentObservedStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "running" => Some(Self::Running),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// [`AgentObservedStatus::Failed`]의 원인 (로드맵 `#67` 4c-B).
+///
+/// **상태가 아니라 필드다.** 4c-A가 거절 경로를 하나로 모으고 원인을 로그
+/// 필드로 구분한 것과 같은 판단이다 — 원인마다 상태를 나누면 운영자가 서로
+/// 다른 두 이름을 보고 같은 처방을 찾게 된다.
+///
+/// 세 값 전부 워커에 실제 생산자가 있다. 생산자 없는 네 번째(예: 죽었다가
+/// 되살아난 자식의 `Exited`)를 두지 않는 이유는, 매니저가 죽은 자식을 걷어낸
+/// 직후 같은 beat에 재기동하므로 그 beat의 정직한 관측이 `Running`이거나
+/// 재기동이 실패한 이유이기 때문이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentObservationReason {
+    /// `grok.max_agent_processes`에 도달했다.
+    CapReached,
+    /// `grok.agent_port_range`에 쓸 수 있는 포트가 없다.
+    NoFreePort,
+    /// 프로세스 기동 자체가 실패했다(바이너리 부재, workspace 생성 실패 등).
+    SpawnFailed,
+}
+
+impl AgentObservationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CapReached => "cap_reached",
+            Self::NoFreePort => "no_free_port",
+            Self::SpawnFailed => "spawn_failed",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "cap_reached" => Some(Self::CapReached),
+            "no_free_port" => Some(Self::NoFreePort),
+            "spawn_failed" => Some(Self::SpawnFailed),
+            _ => None,
+        }
+    }
+}
+
+/// Worker가 heartbeat 요청에 실어 보내는 Agent 하나에 대한 관측
+/// (로드맵 `#67` 4c-B).
+///
+/// [`AgentAck`]와 **형제 필드로 따로 싣는다.** ACK는 "이 세대의 명령을
+/// 받았다"는 프로토콜 부기이고 이것은 "그래서 무엇이 됐다"는 관측이라, 한
+/// 구조체로 합치면 명령을 받지 않은 Agent(이미 확인이 끝난 세대)에 대해
+/// 관측을 말할 수 없게 된다.
+///
+/// **구조체가 아니라 enum인 이유**: `{status, reason}` 두 필드로 두면
+/// `failed`인데 이유가 없는 조합을 타입이 허용하고, 그 조합은 `032`의
+/// `agents_observation_complete`에 걸려 **DB CHECK 위반**으로만 드러난다 —
+/// 원인(워커가 보낸 메시지)에서 아주 먼 자리다. 여기서는 그 조합을 만들
+/// 방법 자체가 없다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AgentObservation {
+    /// 프로세스가 이번 beat에 살아 있는 것으로 확인됐다.
+    Running { agent_id: AgentId },
+    /// 이번 beat에 띄우지 못했다.
+    Failed {
+        agent_id: AgentId,
+        reason: AgentObservationReason,
+    },
+}
+
+impl AgentObservation {
+    pub fn agent_id(&self) -> AgentId {
+        match self {
+            Self::Running { agent_id } | Self::Failed { agent_id, .. } => *agent_id,
+        }
+    }
+
+    pub fn status(&self) -> AgentObservedStatus {
+        match self {
+            Self::Running { .. } => AgentObservedStatus::Running,
+            Self::Failed { .. } => AgentObservedStatus::Failed,
+        }
+    }
+
+    pub fn reason(&self) -> Option<AgentObservationReason> {
+        match self {
+            Self::Running { .. } => None,
+            Self::Failed { reason, .. } => Some(*reason),
+        }
+    }
+}
+
 /// heartbeat 응답에 실려 Worker로 가는 Agent 하나에 대한 명령
 /// (로드맵 `#67` 4b).
 ///
@@ -199,9 +324,9 @@ pub struct Agent {
     pub assigned_at: Option<DateTime<Utc>>,
     /// 오케스트레이터가 이 Agent에 바라는 상태 (로드맵 `#67` 4b).
     ///
-    /// `status`(관측)와 함께 읽어야 뜻이 산다: `status == Ready &&
-    /// desired_status == Running`이 정본의 `Starting`이며, 그것을 컬럼으로
-    /// 만들지 않은 이유는 [`Agent::is_starting`]에 적었다.
+    /// `status`(운영)·`observed_status`(관측)와 함께 읽어야 뜻이 산다. 셋의
+    /// 조합 중 운영자가 가장 자주 묻는 것을 [`Agent::start_pending`]이 파생으로
+    /// 내보내며, 그것을 컬럼으로 만들지 않은 이유도 거기 적었다.
     #[serde(default = "default_desired_status")]
     pub desired_status: AgentDesiredStatus,
     /// `desired_status` 또는 배정이 바뀔 때마다 증가하는 세대 번호.
@@ -219,6 +344,29 @@ pub struct Agent {
     /// 조용한 오탐이 된다.
     #[serde(default)]
     pub last_acked_generation: i64,
+    /// Worker가 마지막으로 본 이 Agent 프로세스의 상태 (로드맵 `#67` 4c-B).
+    ///
+    /// `None`은 "아직 아무도 보지 않았다"다. 배정이 없거나, 배정된 Worker가
+    /// 관측을 보내지 않는 구버전이거나, 이 Worker가 이번 beat에 이 Agent에
+    /// 대해 할 말이 없었던 경우다. `status`와 달리 **없을 수 있다는 것이
+    /// 정상**이며, 그래서 관측을 요구하는 판단은 전부 `None`을 먼저 다뤄야
+    /// 한다.
+    ///
+    /// [`observed_at`](Self::observed_at)과 항상 함께 있거나 함께 없다 —
+    /// `032`의 `agents_observation_complete` CHECK가 강제한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_status: Option<AgentObservedStatus>,
+    /// 그 관측이 언제 도착했는지. 신선도 판정의 유일한 근거다.
+    ///
+    /// **오래된 관측을 만료시키는 주체는 없다.** 값이 오래됐다는 것은 Worker가
+    /// heartbeat을 잃었다는 뜻이고, 그 사실은 `workers.last_heartbeat`가 이미
+    /// 말한다. 여기에 두 번째 만료 판정을 두면 둘이 어긋날 때 어느 쪽이 참인지
+    /// 답할 수 없다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// `observed_status == Failed`일 때의 원인. 그 외에는 항상 `None`이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_reason: Option<AgentObservationReason>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -240,6 +388,9 @@ impl Agent {
             desired_status: AgentDesiredStatus::Stopped,
             command_generation: 0,
             last_acked_generation: 0,
+            observed_status: None,
+            observed_at: None,
+            observed_reason: None,
             created_at: now,
             updated_at: now,
         }
@@ -286,20 +437,31 @@ impl Agent {
         self.last_acked_generation == self.command_generation
     }
 
-    /// 정본의 `Starting` — 시작을 바라지만 아직 돌고 있다고 관측되지 않은 상태.
+    /// 시작을 지시했는데 Worker가 아직 아무것도 보고하지 않은 상태
+    /// (로드맵 `#67` 4c-B에서 `is_starting`에서 개명).
     ///
-    /// **컬럼으로 만들지 않은 이유**: 이 값은 `(status, desired_status)`의 순수
-    /// 함수다. 컬럼으로 두면 (a) `027`의 `status IN ('ready','stopped')` CHECK를
-    /// 아무도 관측하지 않는 값 때문에 넓혀야 하고, (b) generation 컬럼들과
-    /// 어긋날 수 있는 두 번째 진실 원천이 생긴다. `#67` 3단계가 워커 자기보고
-    /// 대신 오케스트레이터 원장을 택한 것과 같은 판단이다.
+    /// **세 번째 입력이 생겼기 때문에 술어가 바뀌었다.** 4b의 정의는
+    /// `(status, desired_status)`뿐이었고, 그 둘은 프로세스가 실제로 뜬 뒤에도
+    /// 그대로 `(Ready, Running)`이다 — 4c-B가 관측을 들여오면서
+    /// [`observed_status`](Self::observed_status)를 함께 보지 않으면 **돌고 있는
+    /// Agent가 영원히 "시작 중"으로 보인다**. 컴파일러가 잡아 주지 않고 기존
+    /// 테스트도 새 컬럼을 모르므로 전부 초록인 채로 지나가는 종류의 결함이라,
+    /// 관측이 도착하면 거짓이 되는 단정을 테스트에 명시로 남겼다.
     ///
-    /// 4b에는 여기서 나가는 문이 없다 — `Running`은 프로세스를 볼 수 있는
-    /// 4c만 관측할 수 있기 때문이다. 이것은 "나갈 수 없는 위상"이 아니다:
-    /// `status`는 여전히 `Ready`라는 정상 값이고, 여기서 나가는 길(회수)도
-    /// 있다. 미충족된 의도는 수렴 프로토콜의 정상 상태다.
-    pub fn is_starting(&self) -> bool {
-        self.status == AgentStatus::Ready && self.desired_status == AgentDesiredStatus::Running
+    /// **개명한 이유는 정본에 적힌 것과 다르다.** 정본은 저장된 관측
+    /// `Starting`과 이름이 충돌한다는 이유로 개명을 예고했는데, 4c-B는 그
+    /// 관측 상태를 만들지 않으므로 그 충돌은 일어나지 않는다. 그런데도 개명하는
+    /// 것은 술어가 위와 같이 바뀌어 `is_starting`이 **더는 그 뜻이 아니기**
+    /// 때문이다: 이것은 "시작 중"이 아니라 "명령은 냈고 답이 없다"이며, 그
+    /// 구분이 운영자에게는 "Worker가 아직 집어가지 않았다"와 "집어갔는데 못
+    /// 띄웠다"를 가른다(후자는 `observed_status == Failed`다).
+    ///
+    /// 여전히 컬럼이 아닌 이유는 4b와 같다: 세 컬럼의 순수 함수이므로 저장하면
+    /// 그 셋과 어긋날 수 있는 두 번째 진실 원천이 생긴다.
+    pub fn start_pending(&self) -> bool {
+        self.status == AgentStatus::Ready
+            && self.desired_status == AgentDesiredStatus::Running
+            && self.observed_status.is_none()
     }
 }
 
@@ -380,6 +542,54 @@ mod tests {
         assert_eq!(a.name, "reviewer");
         assert!(a.description.is_none());
         assert_eq!(a.created_at, a.updated_at);
+    }
+
+    #[test]
+    fn observed_status_str_roundtrip() {
+        for status in [AgentObservedStatus::Running, AgentObservedStatus::Failed] {
+            assert_eq!(
+                AgentObservedStatus::parse_str(status.as_str()),
+                Some(status)
+            );
+        }
+        assert_eq!(AgentObservedStatus::parse_str("starting"), None);
+
+        for reason in [
+            AgentObservationReason::CapReached,
+            AgentObservationReason::NoFreePort,
+            AgentObservationReason::SpawnFailed,
+        ] {
+            assert_eq!(
+                AgentObservationReason::parse_str(reason.as_str()),
+                Some(reason)
+            );
+        }
+        assert_eq!(AgentObservationReason::parse_str("exited"), None);
+    }
+
+    /// 관측이 도착하면 `start_pending`이 꺼진다.
+    ///
+    /// 이 단정이 4c-B에서 `observed_status`를 **읽는 쪽에서** 필수로 만든다.
+    /// 술어에 세 번째 항을 넣지 않아도 `(Ready, Running)` 두 항은 그대로라
+    /// 컴파일은 통과하고, 4b가 남긴 테스트도 전부 초록이다 — 돌고 있는 Agent가
+    /// 영원히 "시작 중"으로 보이는 것을 잡는 것은 이 테스트뿐이다.
+    #[test]
+    fn observation_clears_start_pending() {
+        let mut a = Agent::new(ProjectId::new(), "reviewer");
+        a.desired_status = AgentDesiredStatus::Running;
+        assert!(a.start_pending(), "명령만 냈고 관측이 없으면 시작 대기다");
+
+        a.observed_status = Some(AgentObservedStatus::Running);
+        a.observed_at = Some(Utc::now());
+        assert!(
+            !a.start_pending(),
+            "Worker가 돌고 있다고 보고했으면 더는 시작 대기가 아니다"
+        );
+
+        // 실패 관측도 "답이 없다"가 아니다 — 답이 왔고 그 답이 실패다.
+        a.observed_status = Some(AgentObservedStatus::Failed);
+        a.observed_reason = Some(AgentObservationReason::CapReached);
+        assert!(!a.start_pending(), "실패 보고도 보고다");
     }
 
     #[test]

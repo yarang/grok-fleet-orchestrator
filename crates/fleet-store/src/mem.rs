@@ -28,13 +28,13 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use fleet_core::{
-    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
-    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision,
-    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken,
-    CloseReason, EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent, IdempotentInsert,
-    Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink, LoginAttempt,
-    Permission, PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role, RoleId,
-    Session, SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentObservation,
+    AgentStatus, AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId,
+    AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter,
+    BootstrapToken, CloseReason, EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent,
+    IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
+    LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role,
+    RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
     TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOrigin, TransitionOutcome,
     User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
@@ -1907,6 +1907,47 @@ impl Store for MemStore {
             }
         }
         Ok(applied)
+    }
+
+    async fn apply_agent_observations(
+        &self,
+        worker_id: WorkerId,
+        observations: &[AgentObservation],
+    ) -> Result<u64, StoreError> {
+        let spoken: std::collections::HashSet<AgentId> =
+            observations.iter().map(|o| o.agent_id()).collect();
+        let mut agents = self.agents.lock().unwrap();
+        let mut changed = 0u64;
+
+        // PgStore의 1단계 — 이번에 말하지 않은 것은 지운다.
+        for a in agents.values_mut() {
+            if a.worker_id == Some(worker_id)
+                && a.observed_status.is_some()
+                && !spoken.contains(&a.id)
+            {
+                a.observed_status = None;
+                a.observed_at = None;
+                a.observed_reason = None;
+                changed += 1;
+            }
+        }
+
+        // PgStore의 2단계 — 말한 것을 적는다. `worker_id` 조건도 같다.
+        let now = Utc::now();
+        for obs in observations {
+            let Some(a) = agents.get_mut(&obs.agent_id()) else {
+                continue;
+            };
+            if a.worker_id != Some(worker_id) {
+                continue;
+            }
+            a.observed_status = Some(obs.status());
+            a.observed_at = Some(now);
+            a.observed_reason = obs.reason();
+            // PgStore와 같이 `updated_at`은 건드리지 않는다.
+            changed += 1;
+        }
+        Ok(changed)
     }
 
     // MemStore는 Worker 삭제 시 배정을 비우지 않는다 — PgStore에서는 `030`의

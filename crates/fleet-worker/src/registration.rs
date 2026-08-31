@@ -84,6 +84,19 @@ pub struct RegistrationClient {
     /// 매 beat 명령 전체를 다시 싣기 때문에 다음 beat이 같은 세대를 다시
     /// 확인한다. 이것이 큐 모델 대신 수렴 모델을 고른 대가이자 이득이다.
     pending_acks: std::sync::Mutex<Vec<fleet_core::AgentAck>>,
+    /// 다음 heartbeat에 실어 보낼 Agent 프로세스 관측 (로드맵 #67 4c-B).
+    ///
+    /// `pending_acks`와 같은 한 beat의 지연을 갖는다 — `reconcile`은 응답을
+    /// 받은 **뒤에** 돌므로 그 결과는 다음 요청에나 실린다. 유실돼도 복구가
+    /// 필요 없다는 점도 같지만 이유는 다르다: 확인은 서버가 명령을 다시
+    /// 실어 주기 때문에 복구되고, 관측은 다음 beat의 `reconcile`이 **새로**
+    /// 만들기 때문에 복구된다. 후자가 더 신선하다.
+    ///
+    /// 바깥 `Option`은 `Vec`으로 접을 수 없다. `Some(vec![])`은 "이 Worker에
+    /// 돌아야 할 Agent가 하나도 없다"이고 서버는 그것을 받아 남아 있는 관측을
+    /// **지운다**. 빈 `Vec`을 `None`과 같이 취급해 필드를 빼면 마지막 Agent를
+    /// 회수한 순간부터 그 관측을 지울 사람이 영영 없어진다.
+    pending_observations: std::sync::Mutex<Option<Vec<fleet_core::AgentObservation>>>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -145,6 +158,14 @@ struct HeartbeatRequest {
     /// 서버가 `#[serde(default)]`로 받으므로 비면 아예 보내지 않는다.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     agent_acks: Vec<fleet_core::AgentAck>,
+    /// 지난 beat의 `reconcile`이 관측한 Agent 프로세스 상태 (로드맵 #67 4c-B).
+    ///
+    /// `agent_acks`와 달리 빈 목록도 **보낸다**. 여기서 목록은 권위 있는
+    /// 전체 집합이라 "비었다"가 곧 "전부 지워라"라는 뜻이기 때문이다.
+    /// 필드 자체가 빠지는 것(= 서버에서 `None`)은 "말해 줄 것이 없다"이며,
+    /// 그때 서버는 저장된 관측을 건드리지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_observations: Option<Vec<fleet_core::AgentObservation>>,
 }
 
 /// heartbeat 요청용 OS 정보 (fleet-core::OsInfo와 동일 구조).
@@ -197,6 +218,7 @@ impl RegistrationClient {
             grok_version: OnceLock::new(),
             os_info: OnceLock::new(),
             pending_acks: std::sync::Mutex::new(Vec::new()),
+            pending_observations: std::sync::Mutex::new(None),
         })
     }
 
@@ -316,6 +338,7 @@ impl RegistrationClient {
             os_info,
             // 지난 beat에서 받은 명령들의 확인을 실어 보내고 버퍼를 비운다.
             agent_acks: std::mem::take(&mut *self.pending_acks.lock().unwrap()),
+            agent_observations: self.pending_observations.lock().unwrap().take(),
         };
 
         let url = format!(
@@ -403,7 +426,13 @@ impl RegistrationClient {
                     // 없음)의 구분은 여기서 그대로 넘긴다 — 이 자리에서
                     // `unwrap_or_default()`를 쓰면 조회 실패 한 번이 이 Worker의
                     // Agent를 전부 죽인다.
-                    agent_manager.reconcile(resp.agents.as_deref()).await;
+                    let observed = agent_manager.reconcile(resp.agents.as_deref()).await;
+                    // 관측이 `None`이면(= 권위 있는 목록이 없었으면) 버퍼를
+                    // 덮어쓰지 않는다. `*slot = observed`로 쓰면 조회 실패
+                    // 한 번이 직전 beat의 유효한 관측을 지운다.
+                    if let Some(observed) = observed {
+                        *self.pending_observations.lock().unwrap() = Some(observed);
+                    }
                 }
                 Err(e) => {
                     // heartbeat 자체가 실패하면 권위 있는 목록이 없다 — 명령을
@@ -1051,6 +1080,7 @@ mod tests {
             fleet_worker_version: None,
             os_info: None,
             agent_acks: Vec::new(),
+            agent_observations: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         let obj = json.as_object().unwrap();
@@ -1072,6 +1102,15 @@ mod tests {
         assert!(
             !obj.contains_key("agent_acks"),
             "agent_acks must be omitted when empty"
+        );
+        // `agent_observations`(로드맵 #67 4c-B)에서는 생략이 대역폭이 아니라
+        // **의미**다. 서버는 필드 부재를 "이 beat에는 말해 줄 것이 없다"로
+        // 읽고 저장된 관측을 건드리지 않는다. 빈 배열 `[]`은 정반대로 "여기서
+        // 도는 것이 하나도 없다"는 권위 있는 선언이라 저장된 관측을 지운다.
+        // 따라서 None을 `[]`로 직렬화하면 조회 실패 한 번이 관측을 전부 지운다.
+        assert!(
+            !obj.contains_key("agent_observations"),
+            "agent_observations must be omitted when None — `[]` means something else"
         );
     }
 

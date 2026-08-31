@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use fleet_core::{
-    AgentAck, AgentCommand, BootstrapToken, PermissionKind, WorkerLivenessMode, WorkerStatus,
+    AgentAck, AgentCommand, AgentObservation, BootstrapToken, PermissionKind, WorkerLivenessMode,
+    WorkerStatus,
 };
 
 /// `POST /v1/workers/register` 요청 바디.
@@ -87,6 +88,20 @@ pub struct HeartbeatRequest {
     /// 4b에서는 둘의 처리가 같다(명령이 미확인으로 남고 매 beat 재전송된다).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_acks: Vec<AgentAck>,
+    /// Worker가 관측한 Agent 프로세스 상태 (로드맵 `#67` 4c-B).
+    ///
+    /// `agent_acks`와 같은 이유로 `#[serde(default)]`가 필수지만, 그쪽과 달리
+    /// `Vec`이 아니라 `Option<Vec>`이다. 이 목록은 **권위 있는 전체 집합**이라
+    /// 빈 목록이 "이 Worker에 돌고 있는 Agent가 하나도 없다"라는 적극적인
+    /// 주장이고, 오케스트레이터는 그것을 받아 남은 관측을 지운다. 필드가 아예
+    /// 없는 것(구버전 Worker, 또는 이번 beat에 말할 것이 없는 Worker)은
+    /// "모른다"이며 저장된 관측을 건드리지 않는다. 둘을 `Vec` 하나로 접으면
+    /// 마지막 Agent를 회수한 뒤 그 관측이 영영 남는다.
+    ///
+    /// 응답의 명령 목록이 Worker에게 권위 있는 전체 집합인 것과 방향만 뒤집힌
+    /// 대칭이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_observations: Option<Vec<AgentObservation>>,
 }
 
 /// heartbeat 요청용 OS 정보.

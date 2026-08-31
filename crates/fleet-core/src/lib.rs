@@ -41,7 +41,10 @@ pub mod task;
 pub mod worker;
 
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
-pub use agent::{Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentStatus};
+pub use agent::{
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentObservation,
+    AgentObservationReason, AgentObservedStatus, AgentStatus,
+};
 pub use agent_template::{
     dependent_set_hash, AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplatePin,
     AgentTemplateRef, AgentTemplateRevision, AgentTemplateStatus,

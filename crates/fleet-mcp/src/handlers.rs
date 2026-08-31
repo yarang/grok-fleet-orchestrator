@@ -1106,15 +1106,23 @@ fn agent_json(a: &fleet_core::Agent) -> Value {
         // 된다: 운영자가 배정이 실제로 어디로 갔는지 확인할 방법이 없다.
         "worker_id": a.worker_id.map(|w| w.to_string()),
         "assigned_at": a.assigned_at.map(|t| t.to_rfc3339()),
-        // 로드맵 #67 4b. `status`가 관측이라면 이 셋은 의도와 그 전달
-        // 상태다. `command_delivered`는 두 세대의 비교를 서버가 한 번만
-        // 정의하기 위해 함께 싣는다 — 도구 호출자가 각자 비교하면 한쪽이
-        // `<=`로 쓰는 순간 조용히 다른 답이 나온다.
+        // 로드맵 #67 4b. 이 넷은 **의도와 그 전달 상태**다.
+        // `command_delivered`는 두 세대의 비교를 서버가 한 번만 정의하기
+        // 위해 함께 싣는다 — 도구 호출자가 각자 비교하면 한쪽이 `<=`로
+        // 쓰는 순간 조용히 다른 답이 나온다.
         "desired_status": a.desired_status.as_str(),
         "command_generation": a.command_generation,
         "last_acked_generation": a.last_acked_generation,
         "command_delivered": a.command_delivered(),
-        "is_starting": a.is_starting(),
+        "start_pending": a.start_pending(),
+        // 로드맵 #67 4c-B. 이 셋은 **관측**이며 위 넷과 축이 다르다:
+        // 위는 오케스트레이터가 쓰고 Worker가 읽고, 아래는 Worker가 쓰고
+        // 오케스트레이터가 읽는다. `null`은 "아직 아무 말도 없다"이며
+        // "정상"이 아니다 — 명령을 못 받았을 수도, 애초에 아무 명령도
+        // 없었을 수도 있다. 이유는 `failed`일 때만 채워진다.
+        "observed_status": a.observed_status.map(|s| s.as_str()),
+        "observed_at": a.observed_at.map(|t| t.to_rfc3339()),
+        "observed_reason": a.observed_reason.map(|r| r.as_str()),
         "created_at": a.created_at.to_rfc3339(),
         "updated_at": a.updated_at.to_rfc3339(),
     })
@@ -2059,7 +2067,7 @@ mod tests {
         // `status`는 여전히 `ready`다 — 시작을 **바라는** 것과 돌고 있다고
         // **관측된** 것은 다른 축이고, 후자를 볼 수 있는 것은 4c뿐이다.
         assert_eq!(body["status"], "ready");
-        assert_eq!(body["is_starting"], true);
+        assert_eq!(body["start_pending"], true);
         assert_eq!(
             body["command_delivered"], false,
             "발행했을 뿐 Worker가 아직 가져가지 않았다"

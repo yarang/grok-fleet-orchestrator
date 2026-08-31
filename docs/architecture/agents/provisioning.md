@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/provisioning.md"
-last_verified: "2026-08-30"
+last_verified: "2026-08-31"
 last_verified_commit: "working-tree"
 ---
 
@@ -164,7 +164,7 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 
 | 항목 | 왜 미뤘나 | 선행 |
 |---|---|---|
-| `Starting`/`Running`/`Failed` 상태 | 셋 다 **관측**이고 관측 주체가 프로세스 매니저뿐이다. 4b(수렴 프로토콜)는 명령의 전달만 만들 뿐 프로세스를 보지 못하므로 셋 중 어느 것도 4b에서 도달하지 않는다 — `Starting`은 그나마 generation 컬럼들의 순수 함수라 컬럼 없이 파생으로 표시한다 | `#67` 4c-B |
+| ~~`Starting`/`Running`/`Failed` 상태~~ | 셋 다 **관측**이고 관측 주체가 프로세스 매니저뿐이다. 4b(수렴 프로토콜)는 명령의 전달만 만들 뿐 프로세스를 보지 못하므로 셋 중 어느 것도 4b에서 도달하지 않는다 — `Starting`은 그나마 generation 컬럼들의 순수 함수라 컬럼 없이 파생으로 표시한다 | **4c-B에서 셋 중 둘만 해소**: `running`/`failed`가 `agents.observed_status`로 왔다. `Starting`은 **만들지 않았다** — 4c-A에 health check가 없어 생산자가 없다(아래 §관측) |
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
@@ -174,8 +174,8 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
 | ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
 | 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c-A(해소: 워커 로컬 파생) |
-| ACK가 관측 상태를 싣는 것 | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | `#67` 4c-B |
-| Worker가 신고하는 `max_agent_processes` | 프로세스 매니저가 없는 동안 Worker는 자기 상한을 **집행할 수 없다**. 집행되지 않는 숫자를 신고받는 것은 "항상 NULL인 컬럼"의 뒤집힌 형태다. 4a의 배정은 하드 상한 없이 원장 기반 least-loaded만 쓴다 | 집행 `#67` 4c-A · 신고 `#67` 4c-B |
+| ~~ACK가 관측 상태를 싣는 것~~ | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | **4c-B 해소**. 단 ACK에 얹지 **않았다** — heartbeat 요청의 형제 필드 `agent_observations`로 분리했다. ACK는 명령당 부기이고 관측은 명령 없이도 생기기 때문이다(프로세스는 아무 명령 없이 죽는다) |
+| Worker가 신고하는 `max_agent_processes` | 4c-A가 집행을 만들어 원래의 유예 사유(집행되지 않는 숫자)는 사라졌다. 그런데도 **4c-B에서 만들지 않는다** — 이 숫자를 읽을 소비자가 여전히 없기 때문이다. 유일한 소비자는 배정 시점의 하드 상한인데, 그것은 4a가 이미 CAS slot claim과 함께 게이트 ①로 미뤄 뒀다. 대신 4c-B의 관측이 `observed_reason = 'cap_reached'`로 **사후에** 같은 사실을 말한다: 정적인 숫자의 신고보다 약하지만 관측이라 거짓일 수 없고, 무엇보다 읽는 사람이 있다 | `#67` 구현 게이트 ① |
 | 포트 소진·상한 거절과 4a 원장의 불일치 | Worker가 거절해도 `agents.worker_id`는 그대로 남는다 — 원장은 "배정됐다"고 세고 Worker는 "못 띄운다"고 본다. 이 창을 닫으려면 배정 시점에 자리를 예약하는 CAS slot claim이 필요하며, 그것은 4a가 이미 게이트 ①로 미뤄 둔 것과 **같은 창**이다 | `#67` 구현 게이트 ① |
 | per-Agent secret의 회전 | 회전은 살아 있는 프로세스를 재시작시키는 결정이고, 재시작을 관측·보고할 채널이 4c-A에는 없다. 워커 재기동 시 전부 새로 생성되는 것이 지금의 유일한 회전이다 | 미정 |
 | `agent_workspace_root`와 Project Git workspace의 관계 | 4c-A의 작업 디렉터리는 **프로세스의 cwd**일 뿐 checkout이 아니다. Git workspace·checkpoint는 `#69`가 소유하며, 지금 둘을 합치면 `#69`가 자기 설계를 4c-A의 디렉터리 규약에 맞춰야 한다 | `#69` |
@@ -330,6 +330,13 @@ ACK는 `updated_at`을 **밀지 않는다**. 두 회수 표면이 이미 `Stoppe
 넣었다면 `027`의 `status IN ('ready','stopped')` CHECK를 고쳐야 하고, 무엇보다 관측 주체 없이
 관측 상태를 저장하게 된다(위 유예 표의 첫 줄).
 
+> **4c-B 후기.** 이 절의 결론은 유지되지만 술어는 항이 하나 늘었고 이름이 바뀌었다
+> (`Agent::start_pending()`, 아래 §"`start_pending`으로 개명한 진짜 이유"). 여기서 남길 것은
+> **관측을 얹는 변경이 파생 술어를 조용히 낡게 만든다**는 사실이다: `(Ready, running)` 두 항은
+> 프로세스가 실제로 뜬 뒤에도 그대로라, 항을 늘리지 않으면 돌고 있는 Agent가 영원히
+> "시작 중"으로 보고된다. 컴파일러는 이것을 잡지 못하고 4b의 어떤 테스트도 깨지지 않는다 —
+> 그 테스트들은 새 컬럼을 모르기 때문이다. 파생값에 입력을 추가할 때의 일반형이다.
+
 ### 의도적으로 만들지 않은 것
 
 - **명령 payload는 `(agent_id, desired_status, generation)` 셋뿐이다.** 포트·secret·cwd가
@@ -368,11 +375,17 @@ CHECK를 넓히는 커밋은 매니저·ACK 확장·store 경로·세 표면 스
 | | 만드는 것 | 만들지 않는 것 |
 |---|---|---|
 | **4c-A** | 매니저·설정·포트/secret/workspace 파생·수렴과 정리 | 마이그레이션, `AgentStatus` variant, ACK 확장 |
-| **4c-B** | CHECK 확장, variant 셋, 관측 상태를 실은 ACK, store 적용 경로, 세 표면 | — |
+| **4c-B** | 새 마이그레이션(`032`)의 관측 컬럼 셋과 CHECK, heartbeat 요청의 관측 필드, store 적용 경로, 세 표면 | `AgentStatus` variant 추가(관측은 **다른 축**이라 같은 컬럼에 얹지 않는다), `Starting`(생산자 없음), `max_agent_processes` 신고(소비자 없음) |
 
 4c-A가 끝난 시점에 오케스트레이터가 아는 것은 여전히 **전달**까지다. 프로세스는 실제로 뜨지만
 그 사실은 워커 로그에만 남는다. 이것은 구멍이 아니라 **명시된 한계**이며, 4b가
-`command_delivered`를 수렴이라 부르지 않은 것과 같은 종류의 정직함이다.
+`command_delivered`를 수렴이라 부르지 않은 것과 같은 종류의 정직함이다. 4c-B가 이 한계를 닫는다.
+
+> **4c-B에서 이 표의 왼쪽 칸이 틀렸음이 드러났다.** "CHECK 확장"은 `027`의
+> `status IN ('ready','stopped')`를 넓힌다는 뜻이었는데, 실제로는 넓히면 **안 된다**(아래
+> §관측은 `status`와 다른 축이다). 경계를 마이그레이션에 맞춘다는 원칙 자체는 옳았고 —
+> 실제로 4c-B는 마이그레이션 하나(`032`)와 함께 그 값을 읽는 경로 전부를 같은 커밋에
+> 담았다 — 틀린 것은 **어느 마이그레이션인가**였다.
 
 ### 매니저는 `GrokRunner`를 대체하지 않고 옆에 선다
 
@@ -417,6 +430,11 @@ beat에 뜨지 않는다. 두 개의 서로 다른 오류로 보고하면, 관�
 채널이 없기 때문이다. 4c-B가 이 자리를 관측 상태로 잇기 전까지는 **조용한 실패 모드**이며,
 적어 두지 않으면 4c-B가 그것을 물려받고도 모른다.
 
+> **4c-B에서 닫혔다.** 두 거절은 각각 `observed_reason = 'cap_reached'`/`'no_free_port'`로
+> 오케스트레이터에 도달한다. 여기 적어 둔 것이 실제로 값을 했다 — 4c-B가 어휘를 정할 때
+> 후보를 이 절에서 그대로 읽었고, 그 과정에서 **어휘에 없던 세 번째 생산자**를 찾았다:
+> `cmd.spawn()`의 `Err` 경로(`spawn_failed`)다. 그것 역시 4c-A에서는 로그 한 줄이었다.
+
 ### `is_starting`은 4c-B에서 `start_pending`으로 바꾼다
 
 지금 `Agent::is_starting()`은 `(Ready, desired=running)`의 파생값이고 "명령은 냈는데 아직
@@ -435,6 +453,106 @@ beat에 뜨지 않는다. 두 개의 서로 다른 오류로 보고하면, 관�
 바꾸는 시점은 4c-B다 — 충돌이 실제로 생기는 커밋에서 상태 어휘 변경 하나로 처리하는 편이,
 워커 코드만 건드리는 4c-A에 세 표면의 이름 변경을 섞는 것보다 읽기 쉽다. 결정을 여기 적어
 두는 것은 4c-B가 그 자리에 도착했을 때 **다시 판단하지 않게** 하기 위해서다.
+
+### `start_pending`으로 개명한 진짜 이유
+
+개명은 예정대로 4c-B에서 했지만 **위 절이 든 사유로는 아니다.** 위 절은 관측 `Starting`이
+저장되어 이름이 충돌한다고 봤는데, 4c-B는 그 variant를 만들지 않았다(§관측의 어휘). 충돌은
+일어나지 않았다.
+
+바꾼 이유는 **술어의 뜻 자체가 달라졌기 때문**이다. 관측이 생긴 뒤 이 값은 "시작 중"이
+아니라 **"명령은 냈고 아직 아무 답도 없다"**이며, 답이 오면 그 답이 성공이든 실패든
+`false`가 된다:
+
+```rust
+self.status == Ready && self.desired_status == Running && self.observed_status.is_none()
+```
+
+운영상 이 술어가 구분하는 것은 **"Worker가 아직 집어가지 않았다"와 "집어갔는데 못
+띄웠다"**이다. 후자는 `observed_status = 'failed'`이고 `start_pending`은 `false`다 — 예전
+이름이었다면 못 띄운 Agent가 영원히 "시작 중"으로 보였을 자리다.
+
+> 결정을 미리 적어 둔 것 자체는 값을 했다(개명 여부를 다시 판단하지 않았다). 값을 하지 못한
+> 것은 **사유**다. 사유를 미리 적으면 그 사유가 사라졌을 때 결론만 남아 근거 없이 굳는다.
+
+### 관측은 `status`와 다른 축이다
+
+4c-A의 범위 표는 4c-B가 `027`의 `status IN ('ready','stopped')` CHECK를 넓힐 것으로 적었다.
+넓히면 안 된다. `agents.status`에 관측을 얹으면 **한 컬럼에 두 명이 쓴다**:
+
+1. 운영자가 회수한다 → `status = 'stopped'`.
+2. 그 회수를 보기 **전에** 만들어진 heartbeat이 도착한다 → `status = 'running'`.
+
+회수가 조용히 취소된다. 게다가 `AgentStatus::blocks_project_archive()`가 `status`를 읽으므로
+회수된 Agent가 다시 Project archive를 막기 시작한다. 반대로 컬럼을 나누면 이 함수는 **손대지
+않고도 계속 옳다** — 돌고 있는 Agent도 `status='ready'`라 막고, 회수된 Agent는
+`status='stopped'`라 막지 않는다. 축이 실제로 다르다는 방증이다.
+
+`031`의 마이그레이션 주석이 이미 같은 결론을 적어 뒀다: "관측은 4c가 **별도 필드로** 얹어야
+한다."
+
+정본이 관측 컬럼에 반대해 온 논거("두 번째 진실 원천")는 여기에 닿지 않는다. 그 논거는 다른
+컬럼에서 **파생되는** 값을 저장하는 것을 겨눴다(예: generation 컬럼들에서 나오는 `Starting`).
+`observed_status`는 파생되지 않는다 — Worker만 아는 정보다.
+
+### 관측의 어휘 — 생산자가 있는 것만 만든다
+
+| 값 | 생산자 (4c-A `reconcile`) |
+|---|---|
+| `running` | 이미 살아 있는 자식 / 방금 spawn 성공 |
+| `failed` + `cap_reached` | 상한 거절 |
+| `failed` + `no_free_port` | 포트 소진 거절 |
+| `failed` + `spawn_failed` | `cmd.spawn()`의 `Err` |
+
+만들지 않은 둘:
+
+- **`starting`.** 상태 기계표는 "자식을 띄웠고 아직 health check 전"으로 정의했는데 4c-A에
+  health check가 **없다**. `try_wait()`는 "죽지 않았다"만 말한다. 계산할 방법이 없는 variant는
+  `#70`이 걷어낸 것과 같은 죽은 값이다.
+- **`exited`.** `reconcile`은 0단계에서 죽은 자식을 거두고 3단계에서 **같은 beat에** 다시
+  띄운다. 그러므로 한 beat의 정직한 관측은 `running`(또는 재기동 실패의 이유)이지 `exited`가
+  아니다.
+
+이유는 상태가 아니라 **필드**다(`observed_reason`). 상태로 만들면 "왜"가 상태 공간을 곱하고,
+`failed`가 아닌 값에 이유가 붙는 불가능한 조합이 표현 가능해진다. `AgentObservation`을 구조체가
+아니라 tagged enum으로 둔 것도 같은 이유다 — 구조체였다면 이유 없는 `failed`를 만들 수 있고,
+그 결함은 원인(워커의 메시지)에서 아주 먼 곳(**DB CHECK 위반**)에서 드러난다.
+
+`RejectReason::as_str()`(사람이 읽는 로그 문구)과 `AgentObservationReason::as_str()`(DB CHECK
+값)은 **합치지 않는다.** 합치면 로그 문구를 다듬는 순간 스키마가 깨진다. 둘 사이는 명시적인
+`From`이 잇는다.
+
+### 관측 목록도 권위 있는 전체 집합이다 — 방향만 반대다
+
+heartbeat **응답**의 명령 목록이 Worker에게 권위 있는 전체 집합인 것과 대칭으로, heartbeat
+**요청**의 관측 목록은 오케스트레이터에게 권위 있는 전체 집합이다. 목록에 없는 Agent의 관측은
+**지운다**. 이 단계가 없으면 회수된 Agent가 `observed_status='running'`인 채로 영원히 남는다 —
+지워 줄 사람이 아무도 없다.
+
+따라서 요청 필드도 `Option<Vec>`이며 4b가 응답에서 세운 것과 같은 구분을 갖는다:
+
+| 값 | 뜻 |
+|---|---|
+| 필드 부재(`None`) | 말해 줄 것이 없다(구버전 Worker, 또는 권위 있는 명령 목록을 못 받은 beat). **아무것도 바꾸지 마라** |
+| `[]` | 이 Worker에 돌고 있는 Agent가 하나도 없다. **남은 관측을 전부 지워라** |
+
+`Vec` + `skip_serializing_if = "Vec::is_empty"`로 두면 둘이 구별되지 않고, 마지막 Agent를
+회수한 순간부터 관측을 지울 방법이 사라진다. 타입이 잡아 주지 않는 결함이라
+`fleet-api/tests/api_flow.rs`가 **선 위에서** 단정한다.
+
+store 적용의 CAS 조건은 `worker_id` 하나뿐이다. 4b의 `ack_agent_commands`가 가진 세 조건 중
+나머지 둘은 generation에 관한 것인데 **관측에는 generation이 없다** — 프로세스는 아무 명령
+없이도 죽는다. `updated_at`은 밀지 않는다(ACK와 같은 이유: 프로토콜 부기이지 운영자의 조작이
+아니며, 밀면 "언제 회수됐는가"가 한 beat 뒤에 무효가 된다).
+
+### 4c-B의 검증 한계 — crash loop은 보이지 않는다
+
+`reconcile`이 0단계에서 거두고 3단계에서 같은 beat에 다시 띄우므로, **매 beat 죽는 Agent도
+`running`으로 관측된다.** 상태만 나르는 채널로는 원리적으로 드러나지 않는다 — 드러내려면
+재기동 **횟수**나 전이 같은 **사건**이 필요하고, 그 채널도 그것을 읽을 소비자도 아직 없다.
+
+이것은 4c-A의 "조용한 실패 모드"와 다른 종류다. 그때는 채널이 없어서 아무것도 몰랐고, 지금은
+채널이 있고 그 채널이 나를 수 있는 것의 모양이 상태라서 사건이 빠진다.
 
 ### 4c-A가 발명하지 않는 것
 

@@ -40,14 +40,14 @@ pub use rbac::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use fleet_core::{
-    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentStatus,
-    AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId, AgentTemplateRevision,
-    AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter, BootstrapToken,
-    CloseReason, EventEntry, FleetEvent, Issue, IssueComment, IssueFilter, IssueId, IssueStatus,
-    IssueTaskLink, LoginAttempt, Permission, PermissionId, PermissionKind, Project, ProjectFilter,
-    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, Task, TaskDeleteOutcome,
-    TaskFilter, TaskId, TaskOutput, TaskPhase, TaskStatus, TransitionOrigin, TransitionOutcome,
-    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentObservation,
+    AgentStatus, AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId,
+    AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter,
+    BootstrapToken, CloseReason, EventEntry, FleetEvent, Issue, IssueComment, IssueFilter, IssueId,
+    IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, PermissionKind, Project,
+    ProjectFilter, ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, Task,
+    TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput, TaskPhase, TaskStatus, TransitionOrigin,
+    TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
 };
 use uuid::Uuid;
 
@@ -1239,6 +1239,37 @@ pub trait Store: Send + Sync {
         _acks: &[AgentAck],
     ) -> Result<u64, StoreError> {
         Err(StoreError::Unsupported("ack_agent_commands"))
+    }
+
+    /// Worker가 이번 beat에 **본 것**을 반영하고 실제로 바뀐 행 수를 돌려준다
+    /// (로드맵 `#67` 4c-B).
+    ///
+    /// **목록은 그 Worker에 대한 권위 있는 전체 집합이다.** heartbeat 응답의
+    /// 명령 목록을 워커가 그렇게 읽는 것과 대칭이며, 그래서 목록에 없는 Agent의
+    /// 관측은 **지운다**. 지우지 않으면 회수돼 프로세스가 사라진 Agent에
+    /// `observed_status = running`이 영원히 남고, 그것을 지울 주체가 어디에도
+    /// 없다. 그래서 `Some(&[])`은 "이 Worker에는 관측할 것이 하나도 없다"라는
+    /// 뜻이 되며, "말해 줄 것이 없다"는 애초에 이 함수를 부르지 않는 것으로
+    /// 표현한다(호출부의 `Option`).
+    ///
+    /// `worker_id`로 잠근다 — 재배정된 Agent에 대해 이전 Worker의 지연된 beat이
+    /// 관측을 적지 못하게 한다. `ack_agent_commands`의 세 CAS 조건 중 이것 하나만
+    /// 가져오는 이유는 나머지 둘이 세대에 대한 것이고 관측에는 세대가 없기
+    /// 때문이다: 관측은 명령 없이도 바뀐다(프로세스가 스스로 죽는다).
+    ///
+    /// **`status`는 건드리지 않는다.** 그 컬럼은 운영자의 회수가 쓰는 자리이고,
+    /// 여기서 함께 쓰면 회수 직후 도착한 beat이 회수를 덮는다
+    /// (`032_agent_observed_state.sql`).
+    ///
+    /// `updated_at`도 밀지 않는다 — `ack_agent_commands`와 같은 이유다. 관측은
+    /// 프로토콜 부기이지 운영자의 변경이 아니며, 매 beat 밀면 "언제 회수됐는가"가
+    /// heartbeat 주기로 덧칠된다.
+    async fn apply_agent_observations(
+        &self,
+        _worker_id: WorkerId,
+        _observations: &[AgentObservation],
+    ) -> Result<u64, StoreError> {
+        Err(StoreError::Unsupported("apply_agent_observations"))
     }
 
     // ── AgentTemplate (로드맵 #86, 1단계) ─────────────────────────────
