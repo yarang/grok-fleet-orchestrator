@@ -45,17 +45,29 @@
 //! 필터를 통과하는 데 그치지 않고 정렬에서 **가장 먼저 선택**된다.
 //!
 //! **남아 있는 한계**: 카운트를 읽고 INSERT하기까지가 원자적이지 않다.
-//! 동시에 들어온 두 생성 요청이 같은 Worker를 고를 수 있다. 4a에는 하드
-//! 상한이 없으므로(아래 참고) 이것이 위반하는 불변식은 없고 분포만 고르지
-//! 않아진다. 슬롯을 CAS로 선점하는 것은 `#67` 구현 게이트 ①이다.
+//! 동시에 들어온 두 생성 요청이 같은 Worker를 고를 수 있고, 아래의 상한
+//! 필터는 **읽은 시점의** 카운트로 판정하므로 둘 다 통과할 수 있다. 슬롯을
+//! `workers` 행 잠금 아래에서 선점하는 것은 `#67` 구현 게이트 ①-A-2이며,
+//! 그때까지 상한은 정렬을 편향시키는 필터이지 집행되는 불변식이 아니다.
 //!
-//! # 하드 상한을 두지 않는다
+//! # 하드 상한은 Worker가 보고한 값으로만 건다
 //!
-//! [`crate::selector`]는 `w.max_concurrent`로 용량 필터를 걸지만 여기서는
-//! 걸지 않는다. `max_concurrent`는 **Task** 동시 실행 상한이고 Agent 프로세스
-//! 상한이 아니다. 후자를 뜻하는 값(`max_agent_processes`)은 만들지 않았다 —
-//! 프로세스 매니저(4c)가 없는 동안 Worker는 자기 상한을 집행할 수 없으므로,
-//! 집행되지 않는 수를 저장하는 것은 항상-NULL 컬럼의 뒤집힌 형태다.
+//! [`crate::selector`]는 `w.max_concurrent`로 용량 필터를 걸지만 그 값은
+//! 여기서 쓰지 않는다. `max_concurrent`는 **Task** 동시 실행 상한이고 Agent
+//! 프로세스 상한이 아니다. 후자는 `max_agent_processes`이고, Worker가 등록
+//! 시점에 자기 설정(`grok.max_agent_processes`)에서 실어 보낸다.
+//!
+//! 이 값은 **nullable이고 기본값이 없다**. `None`은 "상한이 없다"가 아니라
+//! "이 Worker의 상한을 **모른다**"이며, 모르는 상한은 필터하지 않는다. 기본값을
+//! 두면 이 필드를 보내지 않는 구버전 Worker에 대해 아는 값을 날조하게 되고,
+//! 그 날조는 실제 상한이 더 작은 Worker를 과배정하는 방향으로 틀린다.
+//!
+//! 모르는 Worker를 배제하지 **않는** 쪽을 고른 근거는 방어선의 순서다. 여기의
+//! 상한은 유일한 방어선이 아니라 두 번째다 — Worker의 프로세스 매니저(4c)가
+//! 자기 상한을 직접 집행하고 초과분을 `observed_reason='cap_reached'`로
+//! 되돌려 보낸다. 따라서 여기서 수를 모르거나 틀리게 알면 결과는 거절된 관측
+//! 하나이지 상한 초과가 아니다. 반대로 모르는 Worker를 배제하면 구버전 Worker
+//! 하나만 남은 플릿에서 배정이 통째로 멈춘다 — 훨씬 나쁜 실패다.
 
 use chrono::{DateTime, Utc};
 use fleet_core::worker::{CircuitState, WorkerLivenessMode, WorkerStatus};
@@ -90,6 +102,12 @@ pub enum PlacementError {
 
     #[error("no placeable worker: every online worker has an open circuit")]
     AllCircuitOpen,
+
+    /// 상한을 **보고한** Worker가 모두 가득 찼다. 상한을 보고하지 않은
+    /// (`max_agent_processes IS NULL`) Worker는 필터를 통과하므로, 이 오류는
+    /// 그런 Worker가 하나도 없을 때만 나온다.
+    #[error("no placeable worker: every online worker is at its agent-process cap")]
+    AllAtCapacity,
 
     #[error("store error: {0}")]
     Store(#[from] StoreError),
@@ -138,13 +156,28 @@ pub async fn choose_worker(store: &dyn Store) -> Result<WorkerId, PlacementError
 
     let load = store.count_agents_by_worker().await?;
 
+    // 프로세스 상한 필터 (`#67` 게이트 ①-A). `None`은 통과시킨다 — 모듈 문서의
+    // "모르는 상한은 필터하지 않는다"를 집행하는 자리다.
+    //
+    // 세는 것이 Worker의 실제 프로세스 수가 아니라 **배정된 `agents` 행 수**라는
+    // 점이 중요하다. 두 수는 갈린다 — 배정만 되고 아직 뜨지 않은 Agent, 종료
+    // 중이지만 아직 사라지지 않은 프로세스가 각각 한쪽에만 잡힌다. 그래서 이
+    // 필터가 있어도 Worker 쪽 `cap_reached`는 죽은 코드가 되지 않는다.
+    candidates.retain(|w| match w.max_agent_processes {
+        Some(cap) => load.get(&w.id).copied().unwrap_or(0) < cap,
+        None => true,
+    });
+    if candidates.is_empty() {
+        return Err(PlacementError::AllAtCapacity);
+    }
+
     // 동점은 `registered_at`이 이른 쪽 — `WorkerSelector`와 같은 tiebreak이다.
     // 이 필드가 재시작 시각이 아니라 최초 등록 시각이어야 하는 이유가 여기에도
     // 걸린다: 재시작마다 갱신되면 방금 재시작한 Worker가 동점에서 항상 지거나
     // 항상 이겨 배정이 한쪽으로 쏠린다.
     candidates.sort_by_key(|w| (load.get(&w.id).copied().unwrap_or(0), w.registered_at));
 
-    // `retain` 세 번을 통과했으므로 비어 있지 않다.
+    // `retain` 네 번을 통과했으므로 비어 있지 않다.
     Ok(candidates[0].id)
 }
 
@@ -347,5 +380,88 @@ mod tests {
         store.upsert_worker(&w).await.unwrap();
         let (id, _at) = place_on_create(&store).await.expect("placed");
         assert_eq!(id, w.id);
+    }
+
+    // ── 프로세스 상한 (`#67` 게이트 ①-A) ───────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_cap_never_filters() {
+        // `max_agent_processes`가 `None`인 Worker는 부하가 아무리 높아도
+        // 후보에 남는다. `None`이 "상한 0"이나 "상한 미보고이므로 배제"로
+        // 읽히면 구버전 Worker만 남은 플릿에서 배정이 통째로 멈춘다.
+        let store = MemStore::new();
+        let w = placeable("legacy");
+        assert!(
+            w.max_agent_processes.is_none(),
+            "생성자의 기본은 '모른다'다"
+        );
+        store.upsert_worker(&w).await.unwrap();
+        seed_agents(&store, &w, 50).await;
+
+        assert_eq!(choose_worker(&store).await.unwrap(), w.id);
+    }
+
+    #[tokio::test]
+    async fn a_full_worker_is_excluded_even_when_it_is_least_loaded() {
+        // 상한 필터가 실제로 발동했는지를 정렬과 분리해서 본다. 가득 찬 쪽이
+        // **부하는 더 낮게** 되도록 만들었으므로, 필터가 없으면 least-loaded
+        // 정렬이 가득 찬 쪽을 고른다. 즉 이 단정은 정렬로는 통과할 수 없다.
+        let store = MemStore::new();
+        let mut full = placeable("full");
+        full.max_agent_processes = Some(1);
+        let roomy = placeable("roomy");
+        store.upsert_worker(&full).await.unwrap();
+        store.upsert_worker(&roomy).await.unwrap();
+        seed_agents(&store, &full, 1).await;
+        seed_agents(&store, &roomy, 5).await;
+
+        assert_eq!(choose_worker(&store).await.unwrap(), roomy.id);
+    }
+
+    #[tokio::test]
+    async fn all_reported_caps_full_is_all_at_capacity() {
+        let store = MemStore::new();
+        let mut w = placeable("solo");
+        w.max_agent_processes = Some(2);
+        store.upsert_worker(&w).await.unwrap();
+        seed_agents(&store, &w, 2).await;
+
+        let err = choose_worker(&store).await.unwrap_err();
+        assert!(
+            matches!(err, PlacementError::AllAtCapacity),
+            "상한을 보고한 Worker가 전부 가득 차면 `AllAtCapacity`다: {err}"
+        );
+
+        // 한 자리가 비면 즉시 다시 배정 가능해진다 — 상한이 영구 배제가
+        // 아니라 카운트 비교임을 고정한다.
+        let mut idle = placeable("idle");
+        idle.max_agent_processes = Some(1);
+        store.upsert_worker(&idle).await.unwrap();
+        assert_eq!(choose_worker(&store).await.unwrap(), idle.id);
+    }
+
+    #[tokio::test]
+    async fn stopped_agents_free_a_capped_slot() {
+        // `count_agents_by_worker`가 `stopped`를 세지 않는다는 사실이 상한
+        // 필터에도 그대로 걸린다는 것. 이 둘이 어긋나면 회수된 Agent가 슬롯을
+        // 영구히 점유해 Worker가 서서히 배정 불가가 된다.
+        let store = MemStore::new();
+        let mut w = placeable("recycler");
+        w.max_agent_processes = Some(1);
+        store.upsert_worker(&w).await.unwrap();
+
+        let project = ProjectId::new();
+        let a = Agent::new(project, "spent").with_placement(w.id, chrono::Utc::now());
+        store.create_agent(&a).await.unwrap();
+        assert!(matches!(
+            choose_worker(&store).await.unwrap_err(),
+            PlacementError::AllAtCapacity
+        ));
+
+        store
+            .update_agent_status(a.id, fleet_core::AgentStatus::Stopped)
+            .await
+            .unwrap();
+        assert_eq!(choose_worker(&store).await.unwrap(), w.id);
     }
 }

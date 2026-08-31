@@ -657,6 +657,16 @@ components:
         max_concurrent_tasks:
           type: integer
           default: 4
+        max_agent_processes:
+          type: integer
+          nullable: true
+          description: >-
+            Cap on concurrently running Agent *processes* (roadmap #67 gate 1-A).
+            A different axis from max_concurrent_tasks, which caps Tasks handled
+            by one singleton. Deliberately has no default: omitting it records
+            NULL, meaning "this worker's cap is unknown", and an unknown cap does
+            not filter placement. Any default would fabricate a cap for older
+            workers that do not report one.
         worker_version:
           type: string
           nullable: true
@@ -814,6 +824,13 @@ components:
           type: integer
         max_concurrent:
           type: integer
+        max_agent_processes:
+          type: integer
+          nullable: true
+          description: >-
+            Agent process cap reported by the worker (roadmap #67 gate 1-A).
+            Absent means the worker does not report one, not that it is
+            unlimited; placement does not filter on an unknown cap.
         circuit_state:
           type: string
           enum: [closed, open, half_open]

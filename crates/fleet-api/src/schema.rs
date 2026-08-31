@@ -26,6 +26,15 @@ pub struct RegisterRequest {
     pub capabilities: Vec<String>,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_tasks: u32,
+    /// 이 워커가 동시에 띄우는 Agent **프로세스** 상한 (로드맵 `#67` 게이트 ①-A).
+    ///
+    /// `max_concurrent_tasks`와 다른 축이다 — 저쪽은 singleton 하나가 동시에
+    /// 처리하는 Task 수이고, 이쪽은 프로세스의 개수다. 기본값을 두지 않는
+    /// 이유는 이 필드를 보내지 않는 구버전 워커에 대해 어떤 수를 적어도
+    /// **날조**이기 때문이다. `None`은 "이 워커의 상한을 모른다"로 저장되고,
+    /// 모르는 상한은 배정을 필터하지 않는다(`fleet_scheduler::placement`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_processes: Option<u32>,
     /// 사이드카 버전 (예: `0.1.0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_version: Option<String>,
@@ -189,6 +198,12 @@ pub struct WorkerSummary {
     pub labels: HashMap<String, String>,
     pub active_tasks: u32,
     pub max_concurrent: u32,
+    /// Agent **프로세스** 상한 (로드맵 `#67` 게이트 ①-A). `max_concurrent`와
+    /// 다른 축이며, `None`은 "상한 없음"이 아니라 **이 워커가 보고하지 않았다**는
+    /// 뜻이다. 배정은 모르는 상한을 필터하지 않으므로, 운영자가 배정 편향을
+    /// 해석하려면 두 상태를 구분해서 볼 수 있어야 한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_processes: Option<u32>,
     pub circuit_state: String,
     pub last_seen: Option<DateTime<Utc>>,
     /// liveness 보고 방식 (로드맵 #61) — `"periodic"` | `"on_demand"`.

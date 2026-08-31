@@ -39,6 +39,21 @@ pub struct Worker {
     /// 최대 동시 실행 작업 수.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
+    /// 이 Worker가 동시에 띄우는 Agent **프로세스** 상한 (로드맵 `#67` 게이트 ①-A).
+    ///
+    /// `max_concurrent`와 **다른 축**이다 — 저쪽은 singleton 하나가 동시에
+    /// 처리하는 Task 수이고, 이쪽은 프로세스의 개수다. 출처는 Worker config의
+    /// `grok.max_agent_processes`이며 등록(register/join)으로 전달된다.
+    ///
+    /// `None`은 "이 Worker의 상한을 **모른다**"이지 "상한이 없다"가 아니다.
+    /// 보고하지 않는 구버전 Worker가 그렇게 되며, 배정은 모르는 상한에
+    /// 필터를 걸지 않는다 — 최종 집행자가 Worker 자신이라 오케스트레이터의
+    /// 상한은 두 번째 방어선이기 때문이다(정본:
+    /// `docs/architecture/agents/provisioning.md` §"배정 슬롯 상한").
+    /// `max_concurrent`처럼 기본값을 두지 않는 이유도 같다: 기본값은 모르는
+    /// 값을 아는 값으로 **날조**한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_processes: Option<u32>,
     /// CircuitBreaker 상태.
     #[serde(default)]
     pub circuit_state: CircuitState,
@@ -100,6 +115,9 @@ impl Worker {
             last_seen: Some(Utc::now()),
             active_tasks: 0,
             max_concurrent: 4,
+            // 생성자는 "모른다"로 둔다. 이 값을 아는 유일한 주체가 Worker
+            // 자신이고, 그것이 도착하는 자리는 register/join 핸들러다.
+            max_agent_processes: None,
             circuit_state: CircuitState::Closed,
             worker_version: None,
             liveness_mode: WorkerLivenessMode::default(),

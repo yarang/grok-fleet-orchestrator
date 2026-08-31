@@ -168,15 +168,15 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
-| `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ① |
+| `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ①-B |
 | 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
 | `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
 | ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
 | 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c-A(해소: 워커 로컬 파생) |
 | ~~ACK가 관측 상태를 싣는 것~~ | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | **4c-B 해소**. 단 ACK에 얹지 **않았다** — heartbeat 요청의 형제 필드 `agent_observations`로 분리했다. ACK는 명령당 부기이고 관측은 명령 없이도 생기기 때문이다(프로세스는 아무 명령 없이 죽는다) |
-| Worker가 신고하는 `max_agent_processes` | 4c-A가 집행을 만들어 원래의 유예 사유(집행되지 않는 숫자)는 사라졌다. 그런데도 **4c-B에서 만들지 않는다** — 이 숫자를 읽을 소비자가 여전히 없기 때문이다. 유일한 소비자는 배정 시점의 하드 상한인데, 그것은 4a가 이미 CAS slot claim과 함께 게이트 ①로 미뤄 뒀다. 대신 4c-B의 관측이 `observed_reason = 'cap_reached'`로 **사후에** 같은 사실을 말한다: 정적인 숫자의 신고보다 약하지만 관측이라 거짓일 수 없고, 무엇보다 읽는 사람이 있다 | `#67` 구현 게이트 ① |
-| 포트 소진·상한 거절과 4a 원장의 불일치 | Worker가 거절해도 `agents.worker_id`는 그대로 남는다 — 원장은 "배정됐다"고 세고 Worker는 "못 띄운다"고 본다. 이 창을 닫으려면 배정 시점에 자리를 예약하는 CAS slot claim이 필요하며, 그것은 4a가 이미 게이트 ①로 미뤄 둔 것과 **같은 창**이다 | `#67` 구현 게이트 ① |
+| ~~Worker가 신고하는 `max_agent_processes`~~ | 4c-B 시점의 유예 사유는 "읽을 소비자가 없다"였고, 그 소비자(배정 시점의 하드 상한)는 게이트 ①에 묶여 있었다. **게이트 ①-A-1이 그 소비자를 만들면서 사유가 만료됐다** — 아래 §"배정 슬롯 상한"이 정본이다. 4c-B의 `observed_reason = 'cap_reached'`는 대체되지 않고 남는다: 두 수가 세는 것이 다르기 때문이다(오케스트레이터는 배정된 `agents` 행, Worker는 살아 있는 프로세스) | **①-A-1 해소** |
+| 포트 소진·상한 거절과 4a 원장의 불일치 | Worker가 거절해도 `agents.worker_id`는 그대로 남는다 — 원장은 "배정됐다"고 세고 Worker는 "못 띄운다"고 본다. 이 창을 닫으려면 배정 시점에 자리를 예약하는 CAS slot claim이 필요하다. ①-A-1의 상한 필터는 이 창을 **좁히지만 닫지 않는다** — 필터는 읽은 시점의 카운트로 판정하므로 동시 요청 둘이 함께 통과할 수 있다 | `#67` 구현 게이트 ①-A-2 |
 | per-Agent secret의 회전 | 회전은 살아 있는 프로세스를 재시작시키는 결정이고, 재시작을 관측·보고할 채널이 4c-A에는 없다. 워커 재기동 시 전부 새로 생성되는 것이 지금의 유일한 회전이다 | 미정 |
 | `agent_workspace_root`와 Project Git workspace의 관계 | 4c-A의 작업 디렉터리는 **프로세스의 cwd**일 뿐 checkout이 아니다. Git workspace·checkpoint는 `#69`가 소유하며, 지금 둘을 합치면 `#69`가 자기 설계를 4c-A의 디렉터리 규약에 맞춰야 한다 | `#69` |
 | Agent 프로세스의 우아한 종료 | 지금은 SIGTERM을 **보내지 않는다** — `fleet-worker`는 `#![forbid(unsafe_code)]`이고 `libc::kill`은 unsafe, `nix`는 의존성에 없다. singleton이 이미 같은 제약 아래 있으므로 4c-A가 새로 만든 문제가 아니다 | 미정 |
@@ -238,8 +238,10 @@ Task 없이도 Project를 `draining`에 붙잡는지 — 두 가지이며 `crate
   뒤진다**. `Store::update_worker_circuit_state`는 기본 구현이 no-op이므로 MemStore 기반 테스트는
   `Worker::circuit_state`를 직접 세팅한다.
 - 원장을 읽고 INSERT하기까지가 **원자적이지 않다.** 동시에 두 Agent를 만들면 둘 다 같은 Worker를
-  고를 수 있다. 상한이 없는 4a에서는 부하 분포가 잠시 기우는 것으로 끝나지만, 상한이 생기는 순간
-  초과 배정이 된다 — 그래서 CAS slot claim이 `#67` 구현 게이트 ①이다.
+  고를 수 있다. 상한이 없던 4a에서는 부하 분포가 잠시 기우는 것으로 끝났지만, 게이트 ①-A-1이
+  상한을 들여온 지금은 그 창이 초과 배정을 뜻한다 — 그래서 CAS slot claim이 `#67` 구현 게이트
+  ①-A-2다. 아래 §"배정 슬롯 상한"의 "선점은 `workers` 행의 잠금 아래에서 센다"가 그 메커니즘의
+  정본이다.
 
 ## 구현 상태 (`#67` 4b — 수렴 프로토콜)
 
@@ -590,3 +592,107 @@ Worker가 살아 있는데도 명령을 받지 못하는 구간이 생긴다.
 
 4c-A의 테스트는 이 두 값을 **반드시 구분해서** 확인한다 — 구분이 무너지는 순간의 대가가
 "함대 전체 종료"이기 때문이다.
+
+## 배정 슬롯 상한 (`#67` 구현 게이트 ①-A)
+
+[권한과 장애 전환](../control-plane-authority-and-failover.md)의 게이트 ①은 두 개의
+실패 모드가 한 칸에 묶여 있었다. **①-A는 배정 초과** — 동시에 들어온 두 생성 요청이
+같은 Worker를 골라 그 Worker의 프로세스 상한을 넘긴다. **①-B는 낡은 제어면** —
+승격된 오케스트레이터의 명령을 Worker가 거절하지 못한다. 후자는 `worker_execution_lease`
+레코드가 필요하고 그 레코드는 `task_id`를 실으므로 `#49` 2단계에 걸리지만, 전자는
+lease 테이블 자체가 필요 없다. 세어야 할 것이 lease 행이 아니라 **배정된 `agents` 행**
+이기 때문이다.
+
+①-A는 다시 둘로 나뉘고, 각각 독립적으로 검증된다.
+
+| | 내용 | 성립하는 것 |
+| --- | --- | --- |
+| **①-A-1** | Worker가 등록 시 상한을 보고 → `workers.max_agent_processes`(nullable) → `choose_worker`의 후보 필터 | 가득 찬 Worker가 후보에서 빠진다. 경합은 남는다 |
+| **①-A-2** | `workers` 행을 `FOR UPDATE`로 잠근 아래에서 세고 조건부로 배정 | 불변식이 성립한다 |
+
+①-A-1만으로는 불변식이 서지 **않는다**. 필터는 읽은 시점의 카운트로 판정하므로 동시
+요청 둘이 같은 마지막 슬롯을 보고 함께 통과할 수 있다. 그런데도 먼저 커밋하는 것은,
+필터가 없으면 ①-A-2가 잠금 아래에서 셀 **숫자 자체가 존재하지 않기** 때문이다 —
+상한이 도착하는 것이 선행 조건이고, 그것만으로도 정상 경로(경합 없는 배정)에서는
+초과가 사라진다.
+
+### 상한의 출처는 Worker이고, 경로는 등록이다
+
+`max_agent_processes`는 이미 Worker config에 있다(`fleet-worker/src/config.rs`). 4c의
+프로세스 매니저가 그 값을 집행하고, 초과 시 `observed_reason = 'cap_reached'`로 보고한다.
+없는 것은 **오케스트레이터가 그 숫자를 아는 것**뿐이다.
+
+경로는 `max_concurrent`을 그대로 비춘다 — 하트비트가 아니라 **등록**이다:
+
+```
+config.grok.max_agent_processes
+  → fleet-worker registration.rs 의 RegisterRequest.max_agent_processes
+  → fleet-api RegisterRequest → build_worker → Worker.max_agent_processes
+  → workers.max_agent_processes (마이그레이션 033)
+  → choose_worker 의 후보 필터
+```
+
+**join은 이 값을 싣지 않는다.** join 시점에는 worker.toml이 아직 없어서 워커가 자기
+상한을 모르고, 보낼 수 있는 것은 CLI 기본값 추측뿐이다 — 그것은 아래 §이 금지하는
+날조와 같은 종류다. join이 쓴 설정으로 기동한 워커가 곧바로 register를 호출하고,
+`upsert_worker`의 `ON CONFLICT`가 이 컬럼을 갱신 목록에 포함하므로 NULL은 초 단위로
+덮인다.
+
+운영자에게는 세 표면(`GET /v1/workers`, Dashboard `/api/workers`, MCP
+`fleet_list_workers`)이 이 값을 그대로 노출한다. 노출하지 않으면 "상한이 없는 Worker"와
+"상한을 보고하지 않는 Worker"가 화면에서 구분되지 않는데, 그 구분이 곧 배정 편향의
+설명이다.
+
+하트비트가 아닌 이유는 이 값이 관측이 아니라 **설정**이기 때문이다. 관측은 매 주기
+바뀔 수 있어 최신값이 의미를 갖지만, 설정은 프로세스 수명 동안 고정이고 바뀌는
+계기는 Worker 재시작뿐이다. 재시작은 register를 정확히 1회 부르므로 등록이 그 계기를
+정확히 덮는다 — `worker_version`·`liveness_mode`와 같은 취급이다.
+
+### 모르는 상한은 필터하지 않는다
+
+컬럼은 **nullable이고 기본값이 없다**. `max_concurrent`의 `NOT NULL DEFAULT 4`를
+베끼지 않은 이유는 그 기본값이 **날조**이기 때문이다 — 실제 상한이 2인 구버전
+Worker도 4로 기록되고, 배정은 그 4를 근거로 초과한다. NULL은 "이 Worker의 상한을
+모른다"를 뜻하고, 모르는 상한은 필터를 걸지 않는다.
+
+"모르면 배정하지 않는다"를 고르지 않은 것은 그것이 구버전 Worker를 **사용 불가**로
+만들기 때문이고, 그래도 되는 근거가 없기 때문이다. 근거는 방향이 반대다:
+**오케스트레이터의 상한은 유일한 방어선이 아니라 두 번째**다. 최종 집행자는 Worker의
+프로세스 매니저이고, 오케스트레이터 숫자가 없거나 틀려도 최악의 결과는 "초과 spawn"이
+아니라 "`cap_reached`로 거절된 관측"이다. 즉 이 필터가 하는 일은 불변식을 혼자
+지키는 것이 아니라 **실패를 배정 시점으로 당기는 것**이다.
+
+### `cap_reached`는 죽은 variant가 되지 않는다
+
+배정에 하드 상한이 생기면 "아무도 만들지 않는 enum variant"가 하나 생기는 것 아니냐는
+질문이 성립한다. 성립하지 않는다. 두 가지가 남는다:
+
+1. 상한을 모르는 Worker(NULL)에는 필터가 걸리지 않으므로 여전히 초과할 수 있다.
+2. 두 카운트가 **다른 것을 센다**. 오케스트레이터는 배정된 `agents` 행을 세고, Worker는
+   살아 있는 프로세스를 센다. 배정됐지만 아직 기동하지 않은 Agent, 회수 명령을 받았지만
+   아직 종료하지 않은 프로세스가 두 수를 갈라 놓는다.
+
+### 선점은 `workers` 행의 잠금 아래에서 센다 (①-A-2)
+
+`INSERT ... WHERE (SELECT COUNT(*) ...) < cap`은 **원자적이지 않다**. READ COMMITTED
+에서 두 트랜잭션이 같은 카운트를 읽고 둘 다 통과한다 — 서브쿼리는 아무 행도 잠그지
+않는 전형적인 phantom이다. 카운트 대상(`agents`)에 아직 존재하지 않는 행을 세는
+것이므로 대상 자체를 잠글 수도 없다.
+
+그래서 잠그는 것은 세는 대상이 아니라 **상한의 주인**이다. 한 트랜잭션 안에서
+`SELECT ... FROM workers WHERE id = $1 FOR UPDATE`로 그 Worker 행을 잠그고, 잠금 아래에서
+세고, 통과하면 배정을 쓰고 커밋한다. 같은 Worker를 노리는 두 번째 요청은 첫 번째의
+커밋을 기다린 뒤 다시 세므로 방금 들어온 행을 본다. 서로 다른 Worker로 가는 배정은
+그대로 병렬이다 — 잠금이 전역이 아니라 Worker별이기 때문이다.
+
+이것이 게이트 ①이 말한 "CAS slot claim"이며, `worker_execution_lease` 없이 성립한다.
+lease 테이블이 필요해지는 것은 **claim의 대상이 행이 아니라 명령의 세대**가 될 때,
+즉 ①-B다.
+
+### 만들지 않은 것
+
+| 미룬 것 | 이유 | 귀속 |
+| --- | --- | --- |
+| `worker_execution_lease` 테이블 | 위 §대로 슬롯 상한에는 필요 없고, 레코드의 `task_id`는 dispatch가 Agent를 골라야 채워진다 | `#67` 게이트 ①-B (`#49` 2단계 선행) |
+| 상한 변경의 하트비트 반영 | 설정값이므로 계기가 재시작뿐이고, 재시작은 register가 덮는다 | 계기가 생기면 |
+| 상한 초과 시의 대기열 | 배정 실패는 이미 `worker_id = NULL`이라는 정상 상태로 표현된다(§"구현 상태 (`#67` 4a)"). 대기열은 그 상태를 소비할 재배정 루프를 전제하는데, 4a가 루프를 만들지 않기로 한 근거가 그대로 유효하다 | 재배정 루프가 생기면 |

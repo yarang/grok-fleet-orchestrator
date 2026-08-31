@@ -704,6 +704,10 @@ fn worker_summary(w: &fleet_core::Worker) -> Value {
         "labels": w.labels,
         "active_tasks": w.active_tasks,
         "max_concurrent": w.max_concurrent,
+        // 로드맵 #67 게이트 ①-A. `null`은 "상한 없음"이 아니라 **워커가
+        // 보고하지 않았다**는 뜻이고, 배정은 모르는 상한을 필터하지 않는다.
+        // `max_concurrent`(Task 동시 실행 수)와 다른 축이다.
+        "max_agent_processes": w.max_agent_processes,
         "circuit_state": format!("{:?}", w.circuit_state).to_lowercase(),
         "last_seen": w.last_seen.map(|t| t.to_rfc3339()),
         "registered_at": w.registered_at.to_rfc3339(),

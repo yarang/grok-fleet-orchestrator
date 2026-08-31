@@ -277,6 +277,7 @@ fn sample_worker(name: &str, status: WorkerStatus) -> Worker {
         labels: HashMap::from([("env".into(), "test".into())]),
         active_tasks: 0,
         max_concurrent: 4,
+        max_agent_processes: None,
         circuit_state: fleet_core::CircuitState::Closed,
         last_seen: None,
         worker_version: None,

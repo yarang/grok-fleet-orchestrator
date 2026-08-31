@@ -902,9 +902,9 @@ impl Store for PgStore {
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
                  last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
-                 incarnation_started_at)
+                 incarnation_started_at, max_agent_processes)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             ON CONFLICT (id) DO UPDATE SET
                 name            = EXCLUDED.name,
                 endpoint        = EXCLUDED.endpoint,
@@ -914,6 +914,7 @@ impl Store for PgStore {
                 last_seen       = EXCLUDED.last_seen,
                 active_tasks    = EXCLUDED.active_tasks,
                 max_concurrent  = EXCLUDED.max_concurrent,
+                max_agent_processes = EXCLUDED.max_agent_processes,
                 worker_version  = EXCLUDED.worker_version,
                 liveness_mode   = EXCLUDED.liveness_mode
                 -- `registered_at`과 `incarnation_started_at`은 의도적으로 제외한다.
@@ -936,6 +937,7 @@ impl Store for PgStore {
         .bind(liveness_str)
         .bind(worker.registered_at)
         .bind(worker.incarnation_started_at)
+        .bind(worker.max_agent_processes.map(|n| n as i32))
         .execute(&self.pool)
         .await?;
 
@@ -962,7 +964,7 @@ impl Store for PgStore {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
                       last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
-                      incarnation_started_at
+                      incarnation_started_at, max_agent_processes
                FROM workers WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -976,7 +978,7 @@ impl Store for PgStore {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
                       last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
-                      incarnation_started_at
+                      incarnation_started_at, max_agent_processes
                FROM workers WHERE name = $1"#,
         )
         .bind(name)
@@ -1004,7 +1006,7 @@ impl Store for PgStore {
         let rows = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
                       last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
-                      incarnation_started_at
+                      incarnation_started_at, max_agent_processes
                FROM workers
               WHERE ($1::text IS NULL OR status = $1)
                 AND ($2::jsonb IS NULL OR labels @> $2)
@@ -1510,9 +1512,9 @@ impl Store for PgStore {
             INSERT INTO workers
                 (id, name, endpoint, labels, status, circuit_state,
                  last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
-                 incarnation_started_at)
+                 incarnation_started_at, max_agent_processes)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
         )
         .bind(worker.id.as_uuid())
@@ -1528,6 +1530,7 @@ impl Store for PgStore {
         .bind(liveness_str)
         .bind(worker.registered_at)
         .bind(worker.incarnation_started_at)
+        .bind(worker.max_agent_processes.map(|n| n as i32))
         .execute(&mut *tx)
         .await
         .map_err(|e| match e {
@@ -3797,6 +3800,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
     let liveness_str: String = row.try_get("liveness_mode")?;
     let registered_at = row.try_get("registered_at")?;
     let incarnation_started_at = row.try_get("incarnation_started_at")?;
+    let max_agent_processes: Option<i32> = row.try_get("max_agent_processes")?;
 
     let labels: Labels = serde_json::from_value(labels_json).unwrap_or_else(|_| HashMap::new());
 
@@ -3809,6 +3813,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
         last_seen,
         active_tasks: active_tasks as u32,
         max_concurrent: max_concurrent as u32,
+        max_agent_processes: max_agent_processes.map(|n| n as u32),
         circuit_state: str_to_circuit_state(&circuit_str)?,
         worker_version,
         liveness_mode: str_to_liveness_mode(&liveness_str)?,

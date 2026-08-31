@@ -140,6 +140,7 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
         last_seen: Some(chrono::Utc::now()),
         active_tasks: 0,
         max_concurrent: 2,
+        max_agent_processes: None,
         circuit_state: CircuitState::Closed,
         worker_version: None,
         liveness_mode: fleet_core::WorkerLivenessMode::Periodic,

@@ -133,6 +133,7 @@ pub async fn register_worker(
             endpoint: req.agent_endpoint.as_str(),
             labels: req.labels.clone(),
             max_concurrent: req.max_concurrent_tasks,
+            max_agent_processes: req.max_agent_processes,
             worker_version: req.worker_version.clone(),
             liveness_mode: req.liveness_mode,
         },
@@ -749,6 +750,12 @@ pub async fn join_worker(
             endpoint: req.agent_endpoint.as_str(),
             labels: req.labels.clone(),
             max_concurrent: req.max_concurrent_tasks,
+            // join은 상한을 싣지 않는다 — 이 시점에는 worker.toml이 아직
+            // 없어서 워커가 자기 상한을 모른다. 보낼 수 있는 값은 CLI 기본값
+            // 추측뿐이고, 그것은 날조다. 실제 값은 join이 쓴 설정으로 기동한
+            // 워커가 곧바로 호출하는 register가 싣고 오며, `upsert_worker`의
+            // `ON CONFLICT`가 이 컬럼을 갱신 목록에 포함하므로 덮인다.
+            max_agent_processes: None,
             worker_version: req.worker_version.clone(),
             liveness_mode: req.liveness_mode,
         },
@@ -1326,6 +1333,9 @@ struct NewWorkerParams<'a> {
     endpoint: &'a str,
     labels: HashMap<String, String>,
     max_concurrent: u32,
+    /// `None`은 "모른다"다 — 아래 [`build_worker`]가 그대로 넘기고,
+    /// 배정 필터가 모르는 상한을 통과시킨다.
+    max_agent_processes: Option<u32>,
     worker_version: Option<String>,
     liveness_mode: fleet_core::WorkerLivenessMode,
 }
@@ -1338,6 +1348,7 @@ fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worke
         endpoint,
         labels,
         max_concurrent,
+        max_agent_processes,
         worker_version,
         liveness_mode,
     } = params;
@@ -1356,6 +1367,7 @@ fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worke
         last_seen: Some(now),
         active_tasks: 0,
         max_concurrent,
+        max_agent_processes,
         circuit_state: fleet_core::CircuitState::Closed,
         worker_version,
         liveness_mode,
@@ -1409,6 +1421,7 @@ fn worker_to_summary(w: &Worker) -> WorkerSummary {
         labels: w.labels.clone(),
         active_tasks: w.active_tasks,
         max_concurrent: w.max_concurrent,
+        max_agent_processes: w.max_agent_processes,
         circuit_state: format!("{:?}", w.circuit_state).to_lowercase(),
         last_seen: w.last_seen,
         liveness_mode: WorkerSummary::liveness_mode_str(w.liveness_mode).to_string(),

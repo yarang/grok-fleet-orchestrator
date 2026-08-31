@@ -498,6 +498,12 @@ pub struct WorkerSummary {
     pub labels: HashMap<String, String>,
     pub active_tasks: u32,
     pub max_concurrent: u32,
+    /// Agent **프로세스** 상한 (로드맵 `#67` 게이트 ①-A). `max_concurrent`와
+    /// 다른 축이며, `None`은 "상한 없음"이 아니라 **이 워커가 보고하지 않았다**는
+    /// 뜻이다. 배정은 모르는 상한을 필터하지 않으므로, 운영자가 배정 편향을
+    /// 해석하려면 두 상태를 구분해서 볼 수 있어야 한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_processes: Option<u32>,
     pub circuit_state: String,
     pub last_seen: Option<DateTime<Utc>>,
     pub registered_at: DateTime<Utc>,

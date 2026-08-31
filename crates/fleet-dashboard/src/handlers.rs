@@ -333,6 +333,7 @@ fn worker_to_summary(w: &fleet_core::Worker) -> WorkerSummary {
         labels: w.labels.clone(),
         active_tasks: w.active_tasks,
         max_concurrent: w.max_concurrent,
+        max_agent_processes: w.max_agent_processes,
         circuit_state: format!("{:?}", w.circuit_state).to_lowercase(),
         last_seen: w.last_seen,
         registered_at: w.registered_at,

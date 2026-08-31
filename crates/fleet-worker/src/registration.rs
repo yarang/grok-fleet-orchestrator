@@ -3,7 +3,8 @@
 //! ## 등록 흐름
 //!
 //! 1. POST /v1/workers/register
-//!    - body: `{ name, agent_endpoint, labels, max_concurrent_tasks, existing_worker_id? }`
+//!    - body: `{ name, agent_endpoint, labels, max_concurrent_tasks,
+//!      max_agent_processes, existing_worker_id? }`
 //!    - Authorization: Bearer <operational_token>
 //!    - 응답: `{ worker_id, heartbeat_interval_secs, ... }`
 //!
@@ -118,6 +119,11 @@ struct RegisterRequest {
     #[serde(skip_serializing_if = "std::collections::HashMap::is_empty", default)]
     labels: std::collections::HashMap<String, String>,
     max_concurrent_tasks: u32,
+    /// Agent 프로세스 상한 (로드맵 `#67` 게이트 ①-A). 항상 `Some`을 싣는다 —
+    /// 설정에 기본값이 있어 워커는 자기 상한을 언제나 안다. 오케스트레이터
+    /// 쪽 `Option`은 이 필드를 **보내지 않는 구버전 워커**를 위한 것이지
+    /// 이쪽의 불확실성을 뜻하지 않는다.
+    max_agent_processes: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     existing_worker_id: Option<String>,
     /// liveness 보고 방식 (로드맵 #61). `Default`(periodic)이면 orchestrator
@@ -249,6 +255,7 @@ impl RegistrationClient {
             agent_endpoint: endpoint,
             labels,
             max_concurrent_tasks: self.config.grok.max_concurrent_tasks,
+            max_agent_processes: self.config.grok.max_agent_processes,
             existing_worker_id: self.config.worker.existing_worker_id.clone(),
             liveness_mode: self.config.worker.liveness_mode,
         };
