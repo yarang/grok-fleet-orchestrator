@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/project-feature-design.md"
-last_verified: "2026-08-28"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 ---
 

@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/project-task-agent-lifecycle.md"
-last_verified: "2026-08-27"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 ---
 

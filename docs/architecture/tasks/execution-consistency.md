@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/tasks/execution-consistency.md"
-last_verified: "2026-08-29"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 ---
 

@@ -4,7 +4,7 @@ authority: derived
 implementation: partial
 verification: code-checked
 source: "docs/architecture/implementation-reference.md"
-last_verified: "2026-08-29"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 owners: ["architecture"]
 ---

@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/project-management.md"
-last_verified: "2026-08-30"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 owners: ["project-platform", "api-contracts"]
 ---
