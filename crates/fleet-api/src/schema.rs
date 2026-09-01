@@ -170,8 +170,15 @@ pub struct HeartbeatResponse {
     pub desired_state: &'static str,
     /// 이 Worker에 배정된 Agent들의 desired state (로드맵 `#67` 4b).
     ///
-    /// 매 beat 전체를 다시 싣는다 — 그래서 `expires_at`이 필요 없고, 신선도
-    /// 판정은 각 원소의 `generation`이 한다. Worker의 `desired_state`가
+    /// 매 beat 전체를 다시 싣는다 — 그래서 `expires_at`이 필요 없다. 신선도를
+    /// 보장하는 것은 **목록을 만드는 방식**이다: `list_agent_commands`가 매 beat
+    /// 공유 DB를 다시 읽고, 이 서버는 그 결과를 담아 두지 않는다. 각 원소의
+    /// `generation`은 **신선도 판정이 아니라 전달 확인의 상관 키**다 — 워커가
+    /// [`AgentAck`]로 같은 값을 돌려주면 `last_acked_generation`이 올라 명령이
+    /// 도달했음이 증명된다. 워커의 `reconcile`은 이 값을 비교하지 않는다
+    /// (2026-09-01 정정: 이 주석은 원래 "신선도 판정은 각 원소의 `generation`이
+    /// 한다"고 적었는데, 그렇게 하는 코드가 없었다. 계약 문서가 존재하지 않는
+    /// 검사를 있다고 말하고 있었다). Worker의 `desired_state`가
     /// `"drain"`이어도 이 목록은 **비지 않는다**: drain은 "새 배정 후보에서
     /// 빠진다"는 뜻이고 4a의 배정 선택기가 이미 그것을 집행하므로, 이미 배정된
     /// Agent를 여기서 추가로 억제하면 아무도 결정한 적 없는 동작이 생긴다.
