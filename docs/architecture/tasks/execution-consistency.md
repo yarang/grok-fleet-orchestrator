@@ -227,7 +227,7 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | Failed 이후 늦은 Completed 거부 | 구현됨 | — (phase CAS로 성립. `crates/fleet-store/tests/task_cas.rs`) |
 | 취소·완료 경쟁의 단일 터미널 상태 | 구현됨 | — (같은 CAS) |
 | timeout 후 동일 key 재호출의 중복 방지 | 구현됨 | — (로드맵 `#62` 2단계) |
-| **이전 control epoch 이벤트 거부** | **Task 단위는 구현됨** (쓰기 `#62` 3단계 · 읽기 `#67` 1단계, 2026-08-27) | Agent process 단위는 미구현 — `worker_execution_lease` 부재. 아래 참고 |
+| **이전 control epoch 이벤트 거부** | **Task 단위 · Agent 명령 발행 단위 둘 다 구현됨** (Task: 쓰기 `#62` 3단계 · 읽기 `#67` 1단계, 2026-08-27. Agent 명령: `#67` 게이트 ①-B, 2026-09-01) | Agent **process** 단위는 여전히 미구현 — 프로세스에 세대를 물릴 관측 주체가 없다(`worker_execution_lease`는 만들지 않기로 확정). 아래 참고 |
 | non-idempotent tool effect 자동 재실행 금지 | 미구현 | effect ledger 부재, 그리고 **ledger를 채울 생산자 부재** |
 | redrive Task의 external idempotency key 승계 | **설계 미결** | 새 Task ID가 키를 바꾼다. 새 Task 경계를 넘는 앵커 필드가 없음 |
 | policy revision 변경 후 redrive의 동일 key | 미구현 | `policy_revision` 개념이 저장소·코드 어디에도 없음 |
@@ -301,8 +301,11 @@ Task는 Project archive를 정지시킨다. 즉 지금 만들면 오케스트레
 > 그 기능을 검토한다면 `#67` 1단계의 술어를 함께 다시 봐야 한다.
 
 여전히 열려 있는 것은 **Agent process 단위**다. 워커 안에서 실행 중인 프로세스에 세대를 물릴
-`worker_execution_lease`가 없고, 같은 세대 안에서의 재디스패치도 attempt 신원이 없어 가릴 수
-없다. 후자는 무재시도 정책(`#62` 4단계)이 재디스패치 자체를 막아 지금은 닫혀 있다 — 재시도
+방법이 없고, 같은 세대 안에서의 재디스패치도 attempt 신원이 없어 가릴 수 없다. 전자를 두고
+`worker_execution_lease` 테이블을 예고했었지만 그 테이블은 **만들지 않는다**(2026-09-01 범위
+정정) — 막힌 것은 저장할 자리가 아니라 프로세스를 볼 주체이고, 자리를 먼저 만들면 아무도 쓰지
+않는 행이 된다. 대신 `#67` 게이트 ①-B는 **명령을 발행하는 쓰기**에 같은 술어를 걸어, 낡은
+제어면이 애초에 명령을 남기지 못하게 한다. 후자는 무재시도 정책(`#62` 4단계)이 재디스패치 자체를 막아 지금은 닫혀 있다 — 재시도
 정책을 바꾸면 다시 열린다.
 
 구현된 쓰기 절반은 이것이다: Task 상태를 쓰는 CAS에 `EXISTS (SELECT 1 FROM control_plane_lease

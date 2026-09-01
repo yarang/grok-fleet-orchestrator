@@ -1,0 +1,37 @@
+-- 035: Agent 명령을 발행한 제어 평면 세대(control epoch)를 기록한다.
+--      (로드맵 #67 구현 게이트 ①-B)
+--
+-- 왜 컬럼 하나인가 — 원래 이 자리에는 `worker_execution_lease` 테이블이
+-- 계획돼 있었다(`docs/architecture/control-plane-authority-and-failover.md`의
+-- "Agent execution lease와 fencing"). 그 11개 필드를 하나씩 검토한 결과 오늘
+-- 채울 주체가 있는 것은 epoch 하나뿐이었다. 처분표는 같은 문서의
+-- "2026-09-01 범위 정정" 절에 있고, 요약하면:
+--
+--   * `agent_id`/`worker_id`는 `agents` 행의 복제고, `task_id`는 034의
+--     `tasks.agent_id`로 역질의된다.
+--   * `lease_generation`/`fencing_token`은 031의 `command_generation`이
+--     이미 하는 일이다 — DB가 발행하는 Agent별 단조 증가 값.
+--   * `worker_incarnation`은 028이 이미 만들었다(`incarnation_started_at`).
+--   * `state`/`acquired_at`/`renewed_at`/`expires_at`은 쓸 주체가 없다.
+--     배정 회수 경로를 의도적으로 만들지 않았고, 명령은 heartbeat마다 전부
+--     다시 실리므로 만료라는 개념이 필요한 창이 열리지 않는다(031).
+--
+-- **031의 유예 문구를 이 파일이 대체한다.** 031은 `fencing_token`을 미룬
+-- 이유로 "`worker_execution_lease` 테이블 자체가 없다 — 구현 게이트 ①"이라고
+-- 적었는데, 그것은 게이트 ①이 그 테이블을 가져온다는 전제 아래의 기록이었다.
+-- 그 전제가 철회됐다. 031은 적용된 마이그레이션이라 고치지 않는다.
+--
+-- 이 값만 따로 적는 이유는 026과 같다 — **사후 복원이 불가능**하다. 021의
+-- `control_plane_lease`는 *현재* epoch만 들고 있어서, 리스가 넘어가면 "이
+-- 명령을 어느 세대가 발행했는가"는 어디에도 남지 않는다.
+--
+-- `cluster_id`는 컬럼으로 두지 않는다. 026이 같은 선택을 했다: `cluster_id`는
+-- "어느 lease 행에 물어볼 것인가"를 정하므로 술어의 바인딩으로 충분하고,
+-- 행에 적히는 값은 "이 명령이 어느 세대의 것인가"라는 다른 질문의 답이다.
+--
+-- NULL의 의미도 026과 같다. HA 리스를 쓰지 않는 단일 인스턴스 배포에서는
+-- `FleetState::control_fence()`가 `None`이라 이 컬럼이 항상 NULL이다. "값을
+-- 못 구해서 비었다"가 아니라 "제어 세대라는 개념이 없는 배포"라는 뜻이다.
+-- 035 이전에 발행된 명령도 NULL이며, 소급해 채울 방법이 없다.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS command_control_epoch BIGINT
+    CHECK (command_control_epoch >= 0);

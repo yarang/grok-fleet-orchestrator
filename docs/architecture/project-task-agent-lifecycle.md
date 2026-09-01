@@ -214,8 +214,10 @@ sequenceDiagram
 - **감사 상관 필드**: `attempt_id`는 "엔티티가 생기면 채운다"가 아니라 `task_id`이며 이미 있다.
   [`#95`](../roadmap/roadmap.md)가 이 판정을 전제로 한다.
 - **실행 lease**: [`control-plane-authority-and-failover.md`](control-plane-authority-and-failover.md)의
-  `worker_execution_lease`는 `task_id`에 묶이며, WarmIdle이 Task를 들고 있지 않은 동안 nullable이다.
-  스키마 자체는 [`#67`](../roadmap/roadmap.md)의 미착수 게이트로 남는다.
+  `worker_execution_lease`는 **만들지 않는다**(2026-09-01 범위 정정). 그 문서가 그린 11필드 중
+  오늘 채울 주체가 있는 것은 `control_epoch` 하나뿐이었고, `#67` 게이트 ①-B는 그것을
+  `agents.command_control_epoch` 컬럼 하나와 명령 발행 쓰기의 술어로 대신했다. WarmIdle이
+  기다리는 것은 따라서 스키마가 아니라 **Agent 프로세스의 실행 상태 관측**이다.
 - **Project archive 조건**: "이 Project의 Task가 전부 terminal인가"는 이제 **완전한** 조건이다.
   따로 확인해야 할 비터미널 Attempt가 남아 있지 않다.
 

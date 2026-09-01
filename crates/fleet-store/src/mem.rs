@@ -40,8 +40,8 @@ use fleet_core::{
 };
 
 use crate::{
-    AdminApiToken, ControlFence, ControlLease, SlotClaim, Store, StoreError, StoredCredential,
-    WorkerOperationalCredential,
+    AdminApiToken, CommandIssue, ControlFence, ControlLease, SlotClaim, Store, StoreError,
+    StoredCredential, WorkerOperationalCredential,
 };
 
 /// 모든 메서드가 실제로 동작하는 인메모리 [`Store`] — 테스트 전용 단일 구현.
@@ -132,6 +132,27 @@ impl MemStore {
 
     fn is_failing(&self, method: &'static str) -> bool {
         self.failing.lock().unwrap().contains(method)
+    }
+
+    /// 호출자가 건 control-plane 술어가 지금도 성립하는가
+    /// (로드맵 `#67` 구현 게이트 ①-B).
+    ///
+    /// `control_leases` 락만 잡고 값을 복사해 나온다 — 호출부가 자기 락을
+    /// 잡기 **전에** 부르기 위해서다. 이유는
+    /// [`compare_and_set_task_status`](Store::compare_and_set_task_status)의
+    /// 주석과 같다: 락을 중첩시키지 않고, fenced를 다른 어떤 판정보다 먼저
+    /// 낸다.
+    fn control_fence_holds(&self, fence: Option<&ControlFence>) -> bool {
+        let Some(f) = fence else {
+            return true;
+        };
+        let held = self
+            .control_leases
+            .lock()
+            .unwrap()
+            .get(&f.cluster_id)
+            .map(|l| l.epoch);
+        held == Some(f.epoch)
     }
 
     /// 워커를 직접 주입 (빌더 스타일).
@@ -1854,7 +1875,17 @@ impl Store for MemStore {
         &self,
         id: AgentId,
         worker_id: WorkerId,
+        fence: Option<&ControlFence>,
     ) -> Result<SlotClaim, StoreError> {
+        // fenced를 존재·상한 판정보다 **먼저** 낸다. PgStore와 같은 순서이고
+        // 이유도 같다 — fenced 인스턴스가 읽은 상태에는 권위가 없으므로,
+        // 그 값을 근거로 `NoSuchAgent`/`NoSuchWorker`/`CapReached`를
+        // 돌려주면 호출자가 "나는 제어 기관이었고 이 요청만 문제였다"고
+        // 읽는다.
+        if !self.control_fence_holds(fence) {
+            return Ok(SlotClaim::Fenced);
+        }
+
         // PgStore에서는 잠금 SELECT가 하는 일이다(예전에는 `agents.worker_id`
         // FK였다). 여기서 흉내 내지 않으면 "존재하지 않는 Worker 지목"을
         // 다루는 상위 계층 테스트가 MemStore 위에서는 성공 경로를 밟아 버려,
@@ -1899,6 +1930,10 @@ impl Store for MemStore {
         // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
         // (로드맵 #67 4b).
         a.command_generation += 1;
+        // 세대를 올린 그 자리에서만 epoch을 찍는다 — 조건이 갈리면
+        // "이 명령을 발행한 세대"가 "이 행을 마지막으로 손댄 세대"로
+        // 뜻이 바뀐다. PgStore의 CASE와 같은 조건이다.
+        a.command_control_epoch = fence.map(|f| f.epoch);
         a.updated_at = now;
         Ok(SlotClaim::Claimed)
     }
@@ -1924,18 +1959,25 @@ impl Store for MemStore {
         &self,
         id: AgentId,
         desired: AgentDesiredStatus,
-    ) -> Result<bool, StoreError> {
+        fence: Option<&ControlFence>,
+    ) -> Result<CommandIssue, StoreError> {
+        // 판정 순서의 근거는 `assign_agent_worker`와 같다.
+        if !self.control_fence_holds(fence) {
+            return Ok(CommandIssue::Fenced);
+        }
+
         let mut agents = self.agents.lock().unwrap();
         match agents.get_mut(&id) {
             Some(a) => {
                 if a.desired_status != desired {
                     a.desired_status = desired;
                     a.command_generation += 1;
+                    a.command_control_epoch = fence.map(|f| f.epoch);
                 }
                 a.updated_at = Utc::now();
-                Ok(true)
+                Ok(CommandIssue::Issued)
             }
-            None => Ok(false),
+            None => Ok(CommandIssue::NoSuchAgent),
         }
     }
 
@@ -2670,5 +2712,179 @@ mod delete_worker_cascade_tests {
         let store = MemStore::new();
         let result = store.delete_worker(WorkerId::new()).await;
         assert!(matches!(result, Err(StoreError::NotFound)));
+    }
+}
+
+#[cfg(test)]
+mod agent_command_fence_tests {
+    //! Agent 명령 발행에 걸리는 control-plane 술어 (로드맵 `#67` 게이트 ①-B).
+    //!
+    //! PgStore 쪽 동치는 `tests/agents.rs`에 있다. 두 백엔드를 모두 도는
+    //! 이유는 fence 판정이 **구조적으로 다른 자리**에 있기 때문이다:
+    //! Postgres는 UPDATE 문 안의 `EXISTS` 술어가, MemStore는 락 밖의 선행
+    //! 검사가 그 일을 한다. 한쪽만 시험하면 다른 쪽이 조용히 술어를 잃어도
+    //! 알 수 없다.
+    use super::*;
+
+    /// lease를 한 번 만료시키고 다른 instance가 가져가게 해서, 첫 보유자의
+    /// fence를 **낡은 것**으로 만든다. `(살아 있는 fence, 낡은 fence)`.
+    async fn stale_and_current(store: &MemStore, cluster: &str) -> (ControlFence, ControlFence) {
+        let first = store
+            .acquire_control_lease(cluster, "instance-a", std::time::Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = store
+            .acquire_control_lease(cluster, "instance-b", std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");
+        (
+            ControlFence {
+                cluster_id: cluster.to_string(),
+                epoch: second.epoch,
+            },
+            ControlFence {
+                cluster_id: cluster.to_string(),
+                epoch: first.epoch,
+            },
+        )
+    }
+
+    async fn seeded() -> (MemStore, Agent, Worker) {
+        let store = MemStore::new();
+        let project = Project::new("fence");
+        store.create_project(&project).await.unwrap();
+        let agent = Agent::new(project.id, "fenced");
+        store.create_agent(&agent).await.unwrap();
+        let worker = Worker::new("fence-w", "wss://fence-w.local/ws");
+        store.upsert_worker(&worker).await.unwrap();
+        (store, agent, worker)
+    }
+
+    #[tokio::test]
+    async fn a_stale_holder_cannot_place_an_agent() {
+        let (store, agent, worker) = seeded().await;
+        let (_current, stale) = stale_and_current(&store, "c-place").await;
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, worker.id, Some(&stale))
+                .await
+                .unwrap(),
+            SlotClaim::Fenced
+        );
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.worker_id, None, "거절된 명령은 행을 바꾸지 않는다");
+        assert_eq!(after.command_generation, 0);
+    }
+
+    #[tokio::test]
+    async fn a_stale_holder_cannot_issue_a_desired_status() {
+        let (store, agent, _worker) = seeded().await;
+        let (_current, stale) = stale_and_current(&store, "c-desired").await;
+
+        assert_eq!(
+            store
+                .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&stale))
+                .await
+                .unwrap(),
+            CommandIssue::Fenced
+        );
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.desired_status, AgentDesiredStatus::Stopped);
+        assert_eq!(after.command_generation, 0);
+    }
+
+    /// fenced가 **존재 판정보다 먼저** 나와야 한다.
+    ///
+    /// 순서가 반대면 호출자는 "나는 제어 기관이었는데 이 Agent만 없더라"로
+    /// 읽고 없는 대상을 쫓는다. PgStore가 같은 이유로 같은 순서를 지킨다.
+    #[tokio::test]
+    async fn fenced_outranks_not_found() {
+        let (store, _agent, worker) = seeded().await;
+        let (_current, stale) = stale_and_current(&store, "c-order").await;
+        let missing = AgentId::new();
+
+        assert_eq!(
+            store
+                .assign_agent_worker(missing, worker.id, Some(&stale))
+                .await
+                .unwrap(),
+            SlotClaim::Fenced
+        );
+        assert_eq!(
+            store
+                .set_agent_desired_status(missing, AgentDesiredStatus::Running, Some(&stale))
+                .await
+                .unwrap(),
+            CommandIssue::Fenced
+        );
+    }
+
+    /// epoch은 **세대가 오를 때만** 찍힌다.
+    ///
+    /// 두 번째 호출은 같은 값을 다시 넣으므로 명령이 새로 발행되지 않는다.
+    /// 그때도 epoch을 덮으면 그 컬럼의 뜻이 "이 명령을 발행한 세대"에서
+    /// "이 행을 마지막으로 손댄 세대"로 바뀌고, 명령의 출처를 사후에
+    /// 복원할 수 없게 된다.
+    #[tokio::test]
+    async fn the_epoch_is_stamped_only_when_a_command_is_actually_issued() {
+        let (store, agent, _worker) = seeded().await;
+        let first = store
+            .acquire_control_lease("c-stamp", "instance-a", std::time::Duration::from_millis(1))
+            .await
+            .unwrap();
+        let f1 = ControlFence {
+            cluster_id: "c-stamp".into(),
+            epoch: first.epoch,
+        };
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&f1))
+            .await
+            .unwrap();
+        let issued = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(issued.command_generation, 1);
+        assert_eq!(issued.command_control_epoch, Some(first.epoch));
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = store
+            .acquire_control_lease("c-stamp", "instance-b", std::time::Duration::from_secs(30))
+            .await
+            .unwrap();
+        let f2 = ControlFence {
+            cluster_id: "c-stamp".into(),
+            epoch: second.epoch,
+        };
+        assert_eq!(
+            store
+                .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&f2))
+                .await
+                .unwrap(),
+            CommandIssue::Issued,
+            "살아 있는 보유자의 쓰기는 값이 같아도 거절이 아니다"
+        );
+        let again = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(again.command_generation, 1, "값이 같으면 세대는 그대로다");
+        assert_eq!(
+            again.command_control_epoch,
+            Some(first.epoch),
+            "발행한 세대는 1이다 — 2가 되면 컬럼의 뜻이 바뀐다"
+        );
+    }
+
+    /// fence가 없는 배포(HA lease 미사용)는 이 변경 이전과 동작이 같다.
+    #[tokio::test]
+    async fn no_fence_means_no_predicate() {
+        let (store, agent, worker) = seeded().await;
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, worker.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.command_control_epoch, None);
     }
 }

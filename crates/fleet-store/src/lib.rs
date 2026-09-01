@@ -133,6 +133,34 @@ pub enum SlotClaim {
     NoSuchAgent,
     /// 그런 Worker가 없다.
     NoSuchWorker,
+    /// 호출자가 건 control-plane epoch 술어가 더 이상 성립하지 않아 아무것도
+    /// 쓰지 않았다 (로드맵 `#67` 구현 게이트 ①-B).
+    ///
+    /// [`TransitionOutcome::Fenced`](fleet_core::TransitionOutcome::Fenced)와
+    /// 같은 이유로 나눈다. 이 값을 만들지 않으면 fence에 걸린 UPDATE가 0행을
+    /// 돌려주므로 [`NoSuchAgent`](Self::NoSuchAgent)와 구분되지 않고, 운영자는
+    /// 제어권을 잃었다는 사실 대신 **존재하지 않는 Agent를 찾으라는 안내**를
+    /// 받는다. 후속 동작도 다르다 — `NoSuchAgent`는 이 요청 하나의 결함이지만
+    /// `Fenced`는 같은 이유로 이후의 모든 쓰기가 실패한다는 뜻이다.
+    Fenced,
+}
+
+/// Agent 명령 발행 쓰기의 결과 (로드맵 `#67` 구현 게이트 ①-B).
+///
+/// [`Store::set_agent_desired_status`]가 원래 돌려주던 `bool`을 대체한다.
+/// 이유는 [`SlotClaim`]이 `bool`이 아닌 이유와 같다: fence 거절이 생기면서
+/// 실패가 **두 가지 다른 사실**이 됐는데, `false` 하나로는 "그런 Agent가
+/// 없다"(요청의 결함, 다시 해도 같다)와 "내가 더 이상 제어 기관이
+/// 아니다"(fleet의 현재 상태, 이후 모든 쓰기도 실패)를 가를 수 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandIssue {
+    /// 명령이 기록됐다. 값이 이미 같아 세대가 오르지 않은 경우도 포함한다 —
+    /// 발행자가 바란 상태가 DB에 있다는 사실은 같다.
+    Issued,
+    /// 그런 Agent가 없다.
+    NoSuchAgent,
+    /// control-plane epoch 술어가 깨졌다. [`SlotClaim::Fenced`] 참조.
+    Fenced,
 }
 
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
@@ -1203,10 +1231,18 @@ pub trait Store: Send + Sync {
     /// 후자에 건다 — 아직 존재하지 않는 행은 잠글 수 없으니
     /// `INSERT ... WHERE (SELECT COUNT(*)) < cap`은 READ COMMITTED에서
     /// phantom을 막지 못한다. 다른 Worker로의 배정은 서로 잠그지 않는다.
+    /// **`fence`는 관측이 아니라 쓰기 술어다** (로드맵 `#67` 구현 게이트 ①-B).
+    /// [`ControlFence`]의 문서가 적은 그대로이며, `compare_and_set_task_status`가
+    /// `tasks`에 대해 쓰는 것과 같은 형태다. 이 자리에 술어가 없으면 분단된
+    /// 이전 리스 보유자가 `agents` 행을 실제로 바꿀 수 있고, 그러면 Worker가
+    /// 그 명령을 나중에 거절해도 **행은 이미 바뀐 뒤**라 새 보유자의 조정 루프가
+    /// 그것을 읽어 자기 epoch로 다시 보낸다. `None`이면 술어를 걸지 않는다
+    /// (HA 리스를 쓰지 않는 배포).
     async fn assign_agent_worker(
         &self,
         _id: AgentId,
         _worker_id: WorkerId,
+        _fence: Option<&ControlFence>,
     ) -> Result<SlotClaim, StoreError> {
         Err(StoreError::Unsupported("assign_agent_worker"))
     }
@@ -1237,12 +1273,16 @@ pub trait Store: Send + Sync {
     ///
     /// 값이 실제로 바뀔 때만 `command_generation`을 올린다 — 매 호출마다
     /// 올리면 같은 의도를 반복해 눌렀다는 이유로 이미 확인된 명령이
-    /// 미확인으로 되돌아간다. 존재하지 않는 id면 `false`.
+    /// 미확인으로 되돌아간다. 존재하지 않는 id면
+    /// [`CommandIssue::NoSuchAgent`].
+    /// `fence`의 의미는 [`assign_agent_worker`](Self::assign_agent_worker)와
+    /// 같다 — 관측이 아니라 쓰기 술어다.
     async fn set_agent_desired_status(
         &self,
         _id: AgentId,
         _desired: AgentDesiredStatus,
-    ) -> Result<bool, StoreError> {
+        _fence: Option<&ControlFence>,
+    ) -> Result<CommandIssue, StoreError> {
         Err(StoreError::Unsupported("set_agent_desired_status"))
     }
 

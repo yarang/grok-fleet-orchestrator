@@ -1743,9 +1743,17 @@ pub async fn place_agent_api(
     };
 
     let previous_worker_id = agent.worker_id;
+    // 명령 발행에 이 인스턴스의 제어 세대를 술어로 건다 (로드맵 `#67` ①-B).
+    // 이걸 걸지 않으면 분할된 옛 보유자가 `agents` 행을 바꿀 수 있고, 그러면
+    // Worker 쪽 봉투 검사로는 막을 수 없다 — 새 보유자의 reconciler가 그
+    // 바뀐 행을 읽어 **자기 세대로** 다시 보내기 때문이다.
+    //
+    // `dispatcher`가 없거나 lease를 켜지 않은 배포는 `None`이고, 그때는 술어가
+    // 붙지 않아 이 줄 도입 이전과 동작이 같다.
+    let fence = state.dispatcher.as_ref().and_then(|d| d.control_fence());
     let claim = state
         .store
-        .assign_agent_worker(agent_id, worker_id)
+        .assign_agent_worker(agent_id, worker_id, fence.as_ref())
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
     match claim {
@@ -1768,6 +1776,14 @@ pub async fn place_agent_api(
             return Err(ApiError::BadRequest(format!(
                 "no such worker for agent placement: {worker_id}"
             )))
+        }
+        // 요청의 결함이 아니라 이 인스턴스가 더 이상 제어 기관이 아니라는
+        // 뜻이므로 4xx가 아니다. 503은 "다시 시도할 가치가 있다"를 말하는데,
+        // 여기서는 사실이다 — 새 보유자에게 가면 같은 요청이 성립한다.
+        fleet_store::SlotClaim::Fenced => {
+            return Err(ApiError::Unavailable(
+                "this instance is no longer the control-plane leader".into(),
+            ))
         }
     }
 
@@ -1845,11 +1861,31 @@ pub async fn start_agent_api(
     // `NULL`에서의 회복이 "먼저 배정하고 그다음 start"라는 순서 제약을 갖는데,
     // 그 순서를 강제할 이유가 없다.
     if agent.desired_status != fleet_core::AgentDesiredStatus::Running {
-        state
+        // fence의 근거는 `place_agent_api`의 같은 줄과 같다.
+        let fence = state.dispatcher.as_ref().and_then(|d| d.control_fence());
+        match state
             .store
-            .set_agent_desired_status(agent_id, fleet_core::AgentDesiredStatus::Running)
+            .set_agent_desired_status(
+                agent_id,
+                fleet_core::AgentDesiredStatus::Running,
+                fence.as_ref(),
+            )
             .await
-            .map_err(|e| ApiError::Store(e.to_string()))?;
+            .map_err(|e| ApiError::Store(e.to_string()))?
+        {
+            fleet_store::CommandIssue::Issued => {}
+            // 위에서 `get_agent`로 존재를 확인했으므로 여기 오면 그 사이에
+            // 사라진 것이다 — Agent 행은 하드 삭제되지 않으니 실제로는
+            // 도달하지 않지만, 조용히 성공으로 답하지는 않는다.
+            fleet_store::CommandIssue::NoSuchAgent => {
+                return Err(ApiError::NotFound(format!("agent {agent_id}")))
+            }
+            fleet_store::CommandIssue::Fenced => {
+                return Err(ApiError::Unavailable(
+                    "this instance is no longer the control-plane leader".into(),
+                ))
+            }
+        }
         // 세대는 저장소가 정하므로 로컬 필드를 고쳐 응답하면 실제 발행된
         // 세대와 다른 값을 싣게 된다(`place_agent_api`의 `assigned_at`과 같은
         // 이유).

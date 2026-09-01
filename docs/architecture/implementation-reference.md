@@ -45,7 +45,7 @@ flowchart LR
 | Core | `fleet-core/task.rs`, `worker.rs`, `project.rs`, `agent.rs` | `Task`, `Worker`, heartbeat에 더해 `Project`(`#48`)와 `Agent`(`#49` 1단계) 모델을 제공한다. 두 모델 모두 목표 계약보다 **좁다** — `ProjectStatus`는 3-상태, `AgentStatus`는 `Ready`/`Stopped` 2-상태다. |
 | Store | `crates/fleet-store/src/` | memory와 PostgreSQL 구현을 제공한다. Store 이벤트는 곧바로 보안 감사 정책이 아니다. |
 | API | `fleet-api/app.rs`, `handlers.rs` | `/v1` task·Worker·등록 표면을 제공한다. 인증과 join 제한은 security/enrollment 정본을 따른다. |
-| Scheduler | `fleet-scheduler/dispatcher.rs`, `selector.rs`, `breaker.rs` | ready task를 선택 가능한 Worker로 dispatch한다. Task 실행 CAS는 구현됐다(`tasks.dispatch_control_epoch`, `fleet-store/tests/task_cas.rs`) — 낡은 dispatch 세대의 워커 결과를 거절한다. side-effect fencing(`worker_execution_leases`·`fencing_token`)은 여전히 목표 계약이다. |
+| Scheduler | `fleet-scheduler/dispatcher.rs`, `selector.rs`, `breaker.rs` | ready task를 선택 가능한 Worker로 dispatch한다. Task 실행 CAS는 구현됐다(`tasks.dispatch_control_epoch`, `fleet-store/tests/task_cas.rs`) — 낡은 dispatch 세대의 워커 결과를 거절한다. Agent 명령 발행 CAS도 구현됐다(`agents.command_control_epoch`, `#67` 게이트 ①-B) — `worker_execution_leases` 테이블은 만들지 않는다. 남은 목표 계약은 tool effect 단위의 fencing이며, 그쪽은 effect ledger가 없어 미착수다. |
 | Transport | `fleet-transport/acp_transport.rs` | Worker별 ACP WebSocket, 재연결 backoff, 연결 손실 시 pending request 실패 처리를 제공한다. |
 | Worker | `fleet-worker/registration.rs`, `runner.rs` | HTTP register/heartbeat와 하나의 Grok runner를 관리한다. Agent command/ACK catalog는 없다. |
 | 표면 | `fleet-mcp/`, `fleet-dashboard/` | MCP tool과 웹 대시보드를 제공하며 `FleetStore`를 직접 잡는다. 인가를 각자 구현하므로 `fleet-api`의 capability 행렬이 이 둘을 덮지 않는다. |

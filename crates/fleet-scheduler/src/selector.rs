@@ -34,10 +34,17 @@
 //! 그 워커는 다시는 선택되지 않았을 것이다.
 //!
 //! **남아 있는 한계**: 카운트를 읽고 dispatch하기까지가 원자적이지 않다.
-//! 동시에 도는 `select()` 둘이 같은 N을 읽고 둘 다 보낼 수 있다. 슬롯을 CAS로
-//! 선점하는 것은 #67의 나머지 절반(`worker_execution_lease`)이며 아직이다.
-//! 최종 방어선은 여전히 transport의 세마포어(`acp_transport.rs`)로, 상한을
-//! 넘긴 dispatch는 `TransportError::WorkerAtCapacity`로 거부된다.
+//! 동시에 도는 `select()` 둘이 같은 N을 읽고 둘 다 보낼 수 있다. 최종
+//! 방어선은 transport의 세마포어(`acp_transport.rs`)로, 상한을 넘긴 dispatch는
+//! `TransportError::WorkerAtCapacity`로 거부된다.
+//!
+//! 예전에는 이 자리에 "슬롯을 CAS로 선점하는 것은 #67의 나머지
+//! 절반(`worker_execution_lease`)이며 아직이다"라고 적혀 있었다. **그 테이블은
+//! 만들지 않기로 했다**(2026-09-01, `#67` 게이트 ①-B — 근거는
+//! `docs/architecture/control-plane-authority-and-failover.md`의 범위 정정).
+//! 그러므로 이 한계는 "아직 오지 않은 구현을 기다리는 것"이 아니라 **현재
+//! 설계가 받아들인 것**이다. 여기서 CAS가 필요한 대상은 Task dispatch의 슬롯인데,
+//! ①-B가 술어를 건 것은 Agent **명령 발행**이라 같은 창을 닫지 않는다.
 //!
 //! ## Credential 필터 기준 필드: `task.model` (`task.resolved_model` 아님)
 //!

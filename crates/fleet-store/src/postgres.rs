@@ -37,7 +37,7 @@ use fleet_core::{
 
 use crate::error::StoreError;
 use crate::{
-    AdminApiToken, ControlFence, ControlLease, SlotClaim, Store, StoredCredential,
+    AdminApiToken, CommandIssue, ControlFence, ControlLease, SlotClaim, Store, StoredCredential,
     WorkerOperationalCredential,
 };
 
@@ -331,6 +331,29 @@ impl PgStore {
             .await?;
 
         Ok(result.rows_affected())
+    }
+
+    /// 호출자가 건 control-plane 술어가 **지금도** 성립하는지
+    /// (로드맵 `#67` 구현 게이트 ①-B).
+    ///
+    /// fence가 `None`이면 걸 술어가 없으므로 항상 참이다.
+    ///
+    /// 이것은 쓰기 술어를 **대신하지 않는다**. 관측과 쓰기 사이의 창은 여전히
+    /// UPDATE 안의 `EXISTS`가 닫는다. 이 조회의 용도는 두 가지다: 쓰기 전에
+    /// 불러 판정 **순서**를 맞추는 것(fenced 인스턴스의 읽기에는 권위가 없으므로
+    /// "그런 Agent 없음" 같은 답을 그 인스턴스가 내면 안 된다), 그리고 0행이
+    /// 나온 뒤 불러 그 원인이 술어였는지 가르는 것이다.
+    /// `compare_and_set_task_status`가 같은 두 가지 이유로 같은 조회를 한다.
+    async fn control_fence_holds(&self, fence: Option<&ControlFence>) -> Result<bool, StoreError> {
+        let Some(f) = fence else {
+            return Ok(true);
+        };
+        let held: Option<i64> =
+            sqlx::query_scalar("SELECT epoch FROM control_plane_lease WHERE cluster_id = $1")
+                .bind(f.cluster_id.as_str())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(held == Some(f.epoch))
     }
 }
 
@@ -2971,7 +2994,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, observed_status, observed_at, observed_reason, \
+                last_acked_generation, command_control_epoch, \
+                observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents WHERE id = $1",
         )
@@ -2990,7 +3014,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, observed_status, observed_at, observed_reason, \
+                last_acked_generation, command_control_epoch, \
+                observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
         )
@@ -3012,7 +3037,8 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, observed_status, observed_at, observed_reason, \
+                last_acked_generation, command_control_epoch, \
+                observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents \
               WHERE ($1::uuid IS NULL OR project_id = $1) \
@@ -3074,7 +3100,20 @@ impl Store for PgStore {
         &self,
         id: AgentId,
         worker_id: WorkerId,
+        fence: Option<&ControlFence>,
     ) -> Result<SlotClaim, StoreError> {
+        // fence를 **다른 어떤 판정보다 먼저** 확인한다. MemStore가 락 밖에서
+        // 같은 순서를 지키고, `compare_and_set_task_status`도 같다 — fenced
+        // 인스턴스가 읽은 fleet 상태에는 권위가 없으므로, 그 값을 근거로
+        // `NoSuchAgent`/`NoSuchWorker`/`CapReached`를 돌려주면 호출자를
+        // "나는 제어 기관이었고 이 요청만 문제였다"는 잘못된 결론으로 보낸다.
+        //
+        // 이 확인이 아래 UPDATE의 술어를 대신하지는 않는다. 여기서 통과한 뒤
+        // fenced되는 창은 그대로 남고, 그 창을 닫는 것은 술어다.
+        if !self.control_fence_holds(fence).await? {
+            return Ok(SlotClaim::Fenced);
+        }
+
         let mut tx = self.pool.begin().await?;
 
         // Agent의 존재를 먼저 본다. 잠그지 **않는다** — 판정의 권위는 아래
@@ -3124,31 +3163,63 @@ impl Store for PgStore {
             }
         }
 
-        let result = sqlx::query(
-            // `command_generation`을 함께 올린다(로드맵 #67 4b). 새 Worker는
-            // 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
-            // `last_acked_generation == command_generation`이 "새 Worker가
-            // 확인했다"는 거짓을 말한다. 같은 Worker로의 재배정도 올린다 —
-            // 재배정을 명시적으로 요청했다는 것 자체가 전달을 다시 확인하고
-            // 싶다는 뜻이고, 구분해서 얻는 것이 없다.
+        // `command_generation`을 함께 올린다(로드맵 #67 4b). 새 Worker는
+        // 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
+        // `last_acked_generation == command_generation`이 "새 Worker가
+        // 확인했다"는 거짓을 말한다. 같은 Worker로의 재배정도 올린다 —
+        // 재배정을 명시적으로 요청했다는 것 자체가 전달을 다시 확인하고
+        // 싶다는 뜻이고, 구분해서 얻는 것이 없다.
+        //
+        // 문장을 조립하는 이유와 자리번호 규약은 `compare_and_set_task_status`와
+        // 같다: `$3`/`$4`는 fence가 `Some`일 때만 바인딩되므로 텍스트에 넣는
+        // 조건과 아래 `bind` 조건이 어긋나면 Postgres가 문장을 거절한다.
+        let mut sql = String::from(
             "UPDATE agents \
                 SET worker_id = $2, assigned_at = NOW(), \
                     command_generation = command_generation + 1, \
-                    updated_at = NOW() \
-              WHERE id = $1",
-        )
-        .bind(id.0)
-        .bind(worker_id.0)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
+                    updated_at = NOW()",
+        );
+        if fence.is_some() {
+            sql.push_str(", command_control_epoch = $4");
+        }
+        sql.push_str(" WHERE id = $1");
+        if fence.is_some() {
+            // epoch 술어를 **같은 문장 안에** 넣는 것이 게이트 ①-B의 전부다
+            // (로드맵 `#67`). 먼저 SELECT해서 분기하면 그 사이에 fenced되어도
+            // 이미 떠난 UPDATE는 그대로 도착하고, 그러면 Worker가 그 명령을
+            // 거절해도 **행은 이미 바뀐 뒤**라 새 보유자의 조정 루프가 그것을
+            // 읽어 자기 epoch로 다시 보낸다.
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM control_plane_lease \
+                  WHERE cluster_id = $3 AND epoch = $4)",
+            );
+        }
 
-        // 위 읽기 이후에 Agent가 삭제됐다면 0행이다. 읽기가 배제만 한다고
-        // 적은 것이 이 자리다 — 권위는 여전히 여기에 있다.
+        let mut q = sqlx::query(&sql).bind(id.0).bind(worker_id.0);
+        if let Some(f) = fence {
+            q = q.bind(&f.cluster_id).bind(f.epoch);
+        }
+        let result = q.execute(&mut *tx).await?;
+
         if result.rows_affected() > 0 {
-            Ok(SlotClaim::Claimed)
-        } else {
+            tx.commit().await?;
+            return Ok(SlotClaim::Claimed);
+        }
+
+        // 0행의 이유가 둘이다. fence를 걸었다면 술어가 깨진 것이 압도적으로
+        // 흔하고(`agents` 행은 hard delete되지 않는다), 그렇지 않다면 위
+        // 읽기 이후에 사라진 것이다. 뭉개면 제어권을 잃은 인스턴스가
+        // "그런 Agent 없음"을 받아 존재하지 않는 데이터 문제를 쫓게 된다.
+        //
+        // 재조회로 가르는 것은 `compare_and_set_task_status`와 같은 방식이고
+        // 같은 한계를 갖는다 — 읽는 사이에 또 바뀔 수 있으므로 이 값은
+        // 보고용이다. 아직 커밋하지 않은 트랜잭션 안에서 읽어, 위 UPDATE가
+        // 본 것과 같은 스냅샷 위에서 판정한다.
+        tx.commit().await?;
+        if self.control_fence_holds(fence).await? {
             Ok(SlotClaim::NoSuchAgent)
+        } else {
+            Ok(SlotClaim::Fenced)
         }
     }
 
@@ -3179,23 +3250,63 @@ impl Store for PgStore {
         &self,
         id: AgentId,
         desired: AgentDesiredStatus,
-    ) -> Result<bool, StoreError> {
+        fence: Option<&ControlFence>,
+    ) -> Result<CommandIssue, StoreError> {
+        // 판정 순서의 근거는 `assign_agent_worker`와 같다.
+        if !self.control_fence_holds(fence).await? {
+            return Ok(CommandIssue::Fenced);
+        }
+
         // `WHERE desired_status <> $2`를 쓰지 않는 이유: 그러면 같은 값을 다시
         // 넣었을 때 `rows_affected = 0`이 되어 호출부가 "그런 Agent가 없다"와
         // 구분하지 못한다. 대신 CASE로 세대만 조건부로 올린다.
-        let result = sqlx::query(
+        let mut sql = String::from(
             "UPDATE agents \
                 SET desired_status = $2, \
                     command_generation = command_generation \
-                        + CASE WHEN desired_status <> $2 THEN 1 ELSE 0 END, \
-                    updated_at = NOW() \
-              WHERE id = $1",
-        )
-        .bind(id.0)
-        .bind(desired.as_str())
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() > 0)
+                        + CASE WHEN desired_status <> $2 THEN 1 ELSE 0 END",
+        );
+        if fence.is_some() {
+            // **세대와 같은 조건을 건다** (로드맵 `#67` 구현 게이트 ①-B).
+            // 조건을 떼면 값이 바뀌지 않은 호출까지 epoch를 덮어써서, "이
+            // 명령을 발행한 세대"가 "이 행을 마지막으로 손댄 세대"로 바뀐다 —
+            // 026이 `dispatch_control_epoch`를 Dispatched 전이에만 붙인 것과
+            // 같은 이유다. 그렇게 되면 세대는 N을 가리키는데 epoch는 그보다
+            // 나중을 가리키는, 서로 모순인 한 행이 남는다.
+            //
+            // UPDATE의 SET 식은 전부 **갱신 전** 행을 읽으므로, 바로 위에서
+            // `desired_status = $2`를 먼저 적어도 여기의 비교는 옛 값과 한다.
+            // 세대 CASE가 이미 그 성질에 기대고 있다.
+            sql.push_str(
+                ", command_control_epoch = \
+                     CASE WHEN desired_status <> $2 THEN $4 \
+                          ELSE command_control_epoch END",
+            );
+        }
+        sql.push_str(", updated_at = NOW() WHERE id = $1");
+        if fence.is_some() {
+            // `assign_agent_worker`와 같은 술어다. 근거는 그쪽 주석에 있다.
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM control_plane_lease \
+                  WHERE cluster_id = $3 AND epoch = $4)",
+            );
+        }
+
+        let mut q = sqlx::query(&sql).bind(id.0).bind(desired.as_str());
+        if let Some(f) = fence {
+            q = q.bind(&f.cluster_id).bind(f.epoch);
+        }
+        let result = q.execute(&self.pool).await?;
+        if result.rows_affected() > 0 {
+            return Ok(CommandIssue::Issued);
+        }
+
+        // 0행을 가르는 방식과 그 한계는 `assign_agent_worker`와 같다.
+        if self.control_fence_holds(fence).await? {
+            Ok(CommandIssue::NoSuchAgent)
+        } else {
+            Ok(CommandIssue::Fenced)
+        }
     }
 
     async fn list_agent_commands(
@@ -4083,6 +4194,7 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         desired_status,
         command_generation: row.try_get("command_generation")?,
         last_acked_generation: row.try_get("last_acked_generation")?,
+        command_control_epoch: row.try_get("command_control_epoch")?,
         observed_status,
         observed_at,
         observed_reason,

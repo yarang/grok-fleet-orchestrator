@@ -5768,3 +5768,88 @@ Agent를 들고 있는 E2E는 `#67` 4단계의 명령/ACK가 `observed_status`�
 아직 없다. 즉 **지목의 거절 경로는 네 층(단위·Postgres 왕복·MCP·Dashboard HTTP)에서
 확인했고, 지목의 성공 경로는 한 층에서만 확인했다.** migration `034`는 이 세션의
 `fleet-store` 통합 테스트 실행에서 처음 적용됐다.
+
+## 2026-09-01 — `#67` 게이트 ①-B: 테이블을 만드는 대신 문장 하나에 술어를 얹었다
+
+[권한과 장애 전환](architecture/control-plane-authority-and-failover.md)은 2026-08-20부터
+`worker_execution_lease`라는 11필드 레코드를 그려 두고, 구현 게이트 ①-B(낡은 제어면의 명령을
+거절한다)를 그 테이블에 걸어 뒀다. 이번에 그 테이블을 **만들지 않기로 확정**했다.
+
+### 왜 만들지 않기로 했나
+
+필드를 하나씩 놓고 "오늘 이 값을 채울 주체가 있는가"를 물었더니 열한 개 중 하나만 남았다.
+
+| 필드 | 처분 |
+| --- | --- |
+| `agent_id`, `worker_id` | `agents` 행이 이미 그 진실이다. 복제하면 갈릴 때 정본이 정해지지 않는다 |
+| `task_id` | `tasks.agent_id`(034)로 역질의된다 |
+| `lease_generation`, `fencing_token` | `agents.command_generation`(031)이 이름만 다르고 역할이 같다 |
+| `worker_incarnation` | `workers.incarnation_started_at`(028). 028이 이미 "판정의 입력이 다시 피통제자의 자기 신고가 된다"는 이유로 heartbeat 카운터 형태를 거절했다 |
+| `state`(`Activating\|Active\|Releasing`) | `Releasing`을 쓸 주체가 없다. 배정 회수 경로를 의도적으로 만들지 않았다 |
+| `acquired_at`, `renewed_at`, `expires_at` | 갱신 주체가 없다. heartbeat 응답이 매번 명령 전부를 다시 싣기 때문에 만료가 필요한 창이 열리지 않는다 |
+| `control_epoch` | **유일하게 채울 주체가 있고 사후 복원이 불가능하다** → `agents.command_control_epoch`(035) |
+
+즉 이 게이트가 실제로 요구한 것은 테이블이 아니라 컬럼 하나였다. 나머지 열 개를 함께 만들면
+"채울 방법이 없는 것은 미리 만들지 않는다"를 열 번 어기는 것이 된다.
+
+### 진짜 처방은 컬럼이 아니라 술어의 자리였다
+
+컬럼만으로는 아무것도 막지 못한다. 막는 것은 **그 값을 어디서 판정하느냐**다.
+
+`lease_allows_control()`처럼 먼저 읽고 분기하면 관측과 쓰기 사이에 창이 남는다. 그 창에서
+리스를 방금 잃은 인스턴스는 자기가 여전히 리더라고 믿은 채 명령을 남긴다. 그래서 `#62` 3단계가
+Task 상태 CAS에 쓴 것과 **같은 술어**를 Agent 명령 발행 UPDATE의 **같은 문장 안에** 실었다.
+
+```sql
+EXISTS (SELECT 1 FROM control_plane_lease WHERE cluster_id = $x AND epoch = $y)
+```
+
+`assign_agent_worker`(배정)와 `set_agent_desired_status`(명령 발행) 둘 다다. 이 두 자리가
+`agents.command_generation`을 올리는 유일한 자리이므로, 명령의 발행 자체가 리더십에 묶인다.
+
+### `Fenced`를 `NoSuchAgent`와 합치지 않은 이유
+
+반환 타입을 `bool`에서 `SlotClaim`/`CommandIssue`로 바꿨다. 둘을 합치면 리더가 아닌
+인스턴스가 요청자에게 **"그런 Agent 없음"이라고 거짓말한다** — 요청자는 존재하는 Agent를
+찾으러 가고, 진짜 이유(다른 인스턴스에 다시 걸면 성공한다)는 영영 전달되지 않는다.
+표면 매핑도 그 구분을 지킨다: 대시보드는 503 `ApiError::Unavailable`(404·409가 아니다 —
+요청은 정상이고 이 인스턴스가 리더가 아닐 뿐이다), MCP는 `JsonRpcError::internal`
+(`invalid_params`로 접으면 호출자가 인자를 고치러 간다).
+
+### 판정 순서: fence가 먼저다
+
+`compare_and_set_task_status`가 이미 그렇게 하고 있고(`postgres.rs`), MemStore도 마찬가지다.
+존재·상한을 먼저 보면 **fenced 인스턴스가 읽은 상태를 근거로 응답하게 된다** — 그 상태에는
+권위가 없다. 그래서 두 메서드 모두 트랜잭션을 열기 **전에** fence를 보고 조기 반환한다.
+
+0행이 돌아온 뒤의 사유 분류에는 `control_fence_holds()` 조회를 새로 썼다. 이것은 쓰기 술어를
+**대신하지 않는다** — 관측과 쓰기 사이의 창은 여전히 문장 안의 `EXISTS`가 닫고, 이 조회는
+이미 일어난 0행의 사유만 가른다.
+
+### 배운 것
+
+1. **fencing을 "레코드"로 상상한 것이 2주치 차단의 원인이었다.** `provisioning.md`는
+   "①-B는 `worker_execution_lease` 레코드가 필요하고 그 레코드는 `task_id`를 실으므로
+   `#49` 2단계에 걸린다"고 적어 뒀었다. 선행 관계가 틀린 게 아니라 **전제가 틀렸다** —
+   낡은 제어면을 막는 데 필요한 것은 명령마다의 행이 아니라, 명령을 쓰는 그 문장이
+   "지금도 내가 리더인가"를 함께 묻는 것이다. 자리를 먼저 만들었다면 아무도 쓰지 않는 행이
+   열한 필드로 남았을 것이다.
+2. **없는 것을 예고한 문서는 그 자체로 차단을 만든다.** `worker_execution_lease`는 코드에
+   한 줄도 없으면서 여덟 개 문서에 걸쳐 "선행"으로 인용되고 있었다. 취소를 확정한 뒤에
+   그 여덟 자리를 전부 고친 이유가 그것이다 — 하나라도 남으면 다음 세션이 다시 그것을
+   기다린다.
+3. **`Fenced`에 생산자를 붙이는 것이 이 작업의 절반이었다.** 타입을 나눠도 어느 테스트도
+   그 값을 만들지 않으면 "채울 주체가 없는 variant"가 하나 더 생길 뿐이다. PgStore 5건 ·
+   MemStore 5건으로 양쪽 백엔드에서 만들어 냈다 — 술어가 사는 자리가 백엔드마다 구조적으로
+   다르기 때문에(SQL 문장 안 / Mutex 밖의 사전 검사) 한쪽만으로는 증명이 되지 않는다.
+
+### 검증 한계
+
+- stale fence는 리스를 1ms TTL로 잡았다 만료시킨 뒤 **다른 instance id로 재획득**해 만든
+  것이다. 진짜 네트워크 분단이 아니며, 분단 중 양쪽이 동시에 쓰는 경합은 재현하지 않았다.
+- 503과 `JsonRpcError::internal` 매핑에는 HTTP·JSON-RPC 수준의 테스트가 **없다**. 매핑은
+  핸들러 코드를 읽어 확인한 것이지 요청을 던져 확인한 것이 아니다.
+- Agent **process** 단위의 fencing은 여전히 열려 있다. 이번 변경이 막는 것은 오케스트레이터가
+  명령을 **발행하는** 자리이고, 이미 워커 안에서 돌고 있는 프로세스에 세대를 물리는 것은
+  비교할 process inventory가 없어 게이트 ③에 남는다.
+- migration `035`는 이 세션의 `fleet-store` 통합 테스트 실행에서 처음 적용됐다.

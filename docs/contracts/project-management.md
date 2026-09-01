@@ -48,9 +48,10 @@ Attempt가 남아 있지 않기 때문이다 — 게이트를 통과하면 같�
 
 **`#49` 1단계로 Agent 엔티티는 생겼지만 두 조건은 그대로 열려 있다.** 조건 2는 *자동*
 provisioning 경로를 시험하는데 그 경로가 없다 — Task 제출은 Agent를 만들지 않고, Agent는
-`agent:manage` 보유자가 명시적으로 만들 때만 생긴다. 조건 3의 agent slot 경쟁·lease 회수는
-`worker_execution_leases`(`#67` 후속)가 여전히 없다. 즉 차단을 푸는 것은 Agent 엔티티가 아니라
-**자동 provisioning과 lease**이며, 그 둘은 `#49` 2단계·`#67` 후속에 걸려 있다.
+`agent:manage` 보유자가 명시적으로 만들 때만 생긴다. 조건 3의 agent slot 경쟁은 `#67` 게이트
+①-A-2가 닫았고, `worker_execution_leases`는 **만들지 않기로 확정됐다**(2026-09-01,
+[권한과 장애 전환](../architecture/control-plane-authority-and-failover.md) §범위 정정). 즉 차단을
+푸는 것은 Agent 엔티티도 lease도 아니라 **자동 provisioning과 배정 회수 경로**다.
 
 **2026-08-27 승인으로 이 절의 범위가 좁아졌다.** 이전 문언은 `PATCH /api/projects/{id}`와
 host·worker Project 배정·해제 endpoint를 `project:assign`·`agent:create`의 관계 승인까지 함께

@@ -39,7 +39,7 @@ use fleet_core::{
     AgentObservedStatus, AgentStatus, Project, ProjectStatus, Task, TaskFilter, TaskRequest,
     Worker,
 };
-use fleet_store::{PgStore, SlotClaim, Store, StoreError};
+use fleet_store::{CommandIssue, PgStore, SlotClaim, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
 fn database_url() -> Option<String> {
@@ -453,7 +453,7 @@ async fn assign_stamps_assigned_at_from_the_database() {
     let before = chrono::Utc::now();
     assert_eq!(
         store
-            .assign_agent_worker(agent.id, worker.id)
+            .assign_agent_worker(agent.id, worker.id, None)
             .await
             .unwrap(),
         SlotClaim::Claimed
@@ -478,7 +478,10 @@ async fn assign_reports_an_unknown_agent() {
     let worker = seed_worker(&store, "noagent").await;
     let missing = fleet_core::AgentId::new();
     assert_eq!(
-        store.assign_agent_worker(missing, worker.id).await.unwrap(),
+        store
+            .assign_agent_worker(missing, worker.id, None)
+            .await
+            .unwrap(),
         SlotClaim::NoSuchAgent,
         "없는 Agent는 오류가 아니라 판정값이다 — 호출자가 404로 번역한다"
     );
@@ -496,7 +499,7 @@ async fn assign_to_an_unknown_worker_is_reported_not_raised() {
     // 그 SELECT가 먼저 알아낸다 — 오류가 아니라 판정값이 됐다.
     assert_eq!(
         store
-            .assign_agent_worker(agent.id, fleet_core::WorkerId::new())
+            .assign_agent_worker(agent.id, fleet_core::WorkerId::new(), None)
             .await
             .unwrap(),
         SlotClaim::NoSuchWorker
@@ -638,10 +641,13 @@ async fn desired_status_bumps_the_generation_only_when_the_value_changes() {
     let agent = Agent::new(project.id, "bumper");
     store.create_agent(&agent).await.unwrap();
 
-    assert!(store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
-        .await
-        .unwrap());
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
+            .await
+            .unwrap(),
+        CommandIssue::Issued
+    );
     let first = store.get_agent(agent.id).await.unwrap().unwrap();
     assert_eq!(first.command_generation, 1);
     assert!(
@@ -651,20 +657,30 @@ async fn desired_status_bumps_the_generation_only_when_the_value_changes() {
 
     // 같은 의도를 다시 눌러도 세대는 그대로다. 매 호출마다 올리면 이미
     // 확인된 명령이 반복 클릭만으로 미확인으로 되돌아간다.
-    assert!(store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
-        .await
-        .unwrap());
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
+            .await
+            .unwrap(),
+        CommandIssue::Issued
+    );
     let again = store.get_agent(agent.id).await.unwrap().unwrap();
     assert_eq!(again.command_generation, 1);
 
-    // 존재하지 않는 id는 `false`다. 이 구분이 있으려면 UPDATE 술어에
+    // 존재하지 않는 id는 `NoSuchAgent`다. 이 구분이 있으려면 UPDATE 술어에
     // `desired_status <> $2`를 넣으면 안 된다 — 넣으면 "바뀐 것이 없음"과
     // "그런 Agent가 없음"이 같은 0-row가 된다.
-    assert!(!store
-        .set_agent_desired_status(fleet_core::AgentId::new(), AgentDesiredStatus::Running)
-        .await
-        .unwrap());
+    assert_eq!(
+        store
+            .set_agent_desired_status(
+                fleet_core::AgentId::new(),
+                AgentDesiredStatus::Running,
+                None
+            )
+            .await
+            .unwrap(),
+        CommandIssue::NoSuchAgent
+    );
 }
 
 #[tokio::test]
@@ -677,7 +693,7 @@ async fn commands_go_only_to_the_assigned_worker() {
     let agent = Agent::new(project.id, "routed").with_placement(mine.id, chrono::Utc::now());
     store.create_agent(&agent).await.unwrap();
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap();
 
@@ -703,7 +719,7 @@ async fn a_late_ack_cannot_confirm_a_command_that_was_already_superseded() {
     store.create_agent(&agent).await.unwrap();
 
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap(); // 세대 1
     store
@@ -740,7 +756,7 @@ async fn an_ack_from_a_worker_that_no_longer_owns_the_agent_is_rejected() {
     let agent = Agent::new(project.id, "moved").with_placement(old.id, chrono::Utc::now());
     store.create_agent(&agent).await.unwrap();
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap(); // 세대 1
 
@@ -748,7 +764,10 @@ async fn an_ack_from_a_worker_that_no_longer_owns_the_agent_is_rejected() {
     // 세대를 올리지 않으면 `command_delivered()`가 "새 Worker가 확인했다"는
     // 거짓을 말하게 된다.
     assert_eq!(
-        store.assign_agent_worker(agent.id, new.id).await.unwrap(),
+        store
+            .assign_agent_worker(agent.id, new.id, None)
+            .await
+            .unwrap(),
         SlotClaim::Claimed
     );
     let moved = store.get_agent(agent.id).await.unwrap().unwrap();
@@ -796,7 +815,7 @@ async fn a_repeated_ack_of_the_same_generation_is_a_noop() {
     let agent = Agent::new(project.id, "dup").with_placement(worker.id, chrono::Utc::now());
     store.create_agent(&agent).await.unwrap();
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap();
 
@@ -818,7 +837,7 @@ async fn a_stop_command_stays_on_the_list_until_it_is_acked() {
     let agent = Agent::new(project.id, "stopper").with_placement(worker.id, chrono::Utc::now());
     store.create_agent(&agent).await.unwrap();
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap();
     store
@@ -874,7 +893,7 @@ async fn acking_does_not_move_updated_at() {
     // (`desired_status`가 이미 `stopped`이므로 `CASE`가 0을 준다). 그러면
     // 확인할 명령 자체가 없어 이 테스트가 아무것도 증명하지 못한다.
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap(); // 세대 1
     store
@@ -920,7 +939,7 @@ async fn an_observation_roundtrips_and_ends_start_pending() {
     let agent = Agent::new(project.id, "watched").with_placement(worker.id, chrono::Utc::now());
     store.create_agent(&agent).await.unwrap();
     store
-        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running)
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
         .await
         .unwrap();
 
@@ -1167,7 +1186,10 @@ async fn concurrent_placements_cannot_exceed_the_cap() {
         let worker_id = worker.id;
         handles.push(tokio::spawn(async move {
             gate.wait().await;
-            store.assign_agent_worker(id, worker_id).await.unwrap()
+            store
+                .assign_agent_worker(id, worker_id, None)
+                .await
+                .unwrap()
         }));
     }
 
@@ -1329,7 +1351,7 @@ async fn replacing_onto_the_same_full_worker_is_not_capped() {
 
     assert_eq!(
         store
-            .assign_agent_worker(agent.id, worker.id)
+            .assign_agent_worker(agent.id, worker.id, None)
             .await
             .unwrap(),
         SlotClaim::Claimed,
@@ -1424,4 +1446,188 @@ async fn a_task_cannot_point_at_an_agent_that_does_not_exist() {
         msg.contains("foreign key") || msg.contains("agent_id"),
         "FK 위반이어야 한다, got: {msg}"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Agent 명령 발행의 control-plane 술어 (로드맵 #67 게이트 ①-B)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// MemStore 쪽 동치는 `src/mem.rs`의 `agent_command_fence_tests`에 있다. 두
+// 백엔드를 모두 도는 이유는 술어가 **다른 자리**에 있기 때문이다: 여기서는
+// UPDATE 문 안의 `EXISTS`가, MemStore에서는 락 밖의 선행 검사가 그 일을
+// 한다. 한쪽만 시험하면 다른 쪽이 조용히 술어를 잃어도 알 수 없다.
+
+/// lease를 만료시켜 다른 instance가 가져가게 하고 `(살아 있는, 낡은)` fence를
+/// 돌려준다. cluster_id는 테스트마다 유일하다 — 이 파일의 다른 테스트들과
+/// 같은 이유로(파일 상단 주석) 공유 상태를 지우는 대신 만들지 않는다.
+async fn fences(
+    store: &PgStore,
+    label: &str,
+) -> (fleet_store::ControlFence, fleet_store::ControlFence) {
+    let cluster = format!("agents-fence-{label}-{}", uuid::Uuid::new_v4());
+    let first = store
+        .acquire_control_lease(&cluster, "instance-a", std::time::Duration::from_millis(1))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let second = store
+        .acquire_control_lease(&cluster, "instance-b", std::time::Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");
+    (
+        fleet_store::ControlFence {
+            cluster_id: cluster.clone(),
+            epoch: second.epoch,
+        },
+        fleet_store::ControlFence {
+            cluster_id: cluster,
+            epoch: first.epoch,
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_stale_holder_cannot_place_an_agent() {
+    require_db!(store);
+    let project = seed_project(&store, "fence-place").await;
+    let worker = seed_worker(&store, "fence-place").await;
+    let agent = Agent::new(project.id, "fenced");
+    store.create_agent(&agent).await.unwrap();
+    let (_current, stale) = fences(&store, "place").await;
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, worker.id, Some(&stale))
+            .await
+            .unwrap(),
+        SlotClaim::Fenced
+    );
+    // 이것이 이 게이트의 요점이다. Worker 쪽 봉투 검사만으로는 여기까지
+    // 막지 못한다 — 행이 바뀌면 새 보유자의 reconciler가 그것을 읽어
+    // **자기 세대로** 다시 보내기 때문이다.
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.worker_id, None, "거절된 명령은 행을 바꾸지 않는다");
+    assert_eq!(after.command_generation, 0);
+}
+
+#[tokio::test]
+async fn a_stale_holder_cannot_issue_a_desired_status() {
+    require_db!(store);
+    let project = seed_project(&store, "fence-desired").await;
+    let agent = Agent::new(project.id, "fenced");
+    store.create_agent(&agent).await.unwrap();
+    let (_current, stale) = fences(&store, "desired").await;
+
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&stale))
+            .await
+            .unwrap(),
+        CommandIssue::Fenced
+    );
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.desired_status, AgentDesiredStatus::Stopped);
+    assert_eq!(after.command_generation, 0);
+    assert_eq!(after.command_control_epoch, None);
+}
+
+/// fenced가 존재 판정보다 **먼저** 나온다.
+///
+/// 순서가 반대면 호출자는 "나는 제어 기관이었는데 이 Agent만 없더라"로 읽고
+/// 없는 대상을 쫓는다. `compare_and_set_task_status`가 같은 이유로 같은
+/// 순서를 지키고, MemStore도 그렇다.
+#[tokio::test]
+async fn fenced_outranks_not_found() {
+    require_db!(store);
+    let worker = seed_worker(&store, "fence-order").await;
+    let (_current, stale) = fences(&store, "order").await;
+    let missing = fleet_core::AgentId::new();
+
+    assert_eq!(
+        store
+            .assign_agent_worker(missing, worker.id, Some(&stale))
+            .await
+            .unwrap(),
+        SlotClaim::Fenced
+    );
+    assert_eq!(
+        store
+            .set_agent_desired_status(missing, AgentDesiredStatus::Running, Some(&stale))
+            .await
+            .unwrap(),
+        CommandIssue::Fenced
+    );
+}
+
+/// 살아 있는 보유자의 명령에는 그 세대가 찍히고, **세대가 오를 때만** 찍힌다.
+///
+/// 두 번째 호출은 같은 값을 다시 넣으므로 명령이 새로 발행되지 않는다. 그때도
+/// epoch을 덮으면 컬럼의 뜻이 "이 명령을 발행한 세대"에서 "이 행을 마지막으로
+/// 손댄 세대"로 바뀐다. 026이 `tasks.dispatch_control_epoch`에서 같은 조건을
+/// 지키는 이유와 같다.
+#[tokio::test]
+async fn the_epoch_is_stamped_only_when_a_command_is_actually_issued() {
+    require_db!(store);
+    let project = seed_project(&store, "fence-stamp").await;
+    let agent = Agent::new(project.id, "stamped").with_placement(
+        seed_worker(&store, "fence-stamp").await.id,
+        chrono::Utc::now(),
+    );
+    store.create_agent(&agent).await.unwrap();
+    let (current, stale) = fences(&store, "stamp").await;
+
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&stale))
+            .await
+            .unwrap(),
+        CommandIssue::Fenced
+    );
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&current))
+            .await
+            .unwrap(),
+        CommandIssue::Issued
+    );
+    let issued = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(issued.command_generation, 1);
+    assert_eq!(issued.command_control_epoch, Some(current.epoch));
+
+    // 같은 값을 다시 — 세대도 epoch도 그대로여야 한다.
+    assert_eq!(
+        store
+            .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, Some(&current))
+            .await
+            .unwrap(),
+        CommandIssue::Issued,
+        "살아 있는 보유자의 쓰기는 값이 같아도 거절이 아니다"
+    );
+    let again = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(again.command_generation, 1);
+    assert_eq!(again.command_control_epoch, Some(current.epoch));
+}
+
+/// fence를 걸지 않은 배포(HA lease 미사용)는 이 변경 이전과 동작이 같다.
+///
+/// `command_control_epoch`가 `NULL`로 남는 것이 그 배포의 정상 상태다 —
+/// "제어 세대라는 개념이 없는 배포"라는 026의 NULL 의미와 같다.
+#[tokio::test]
+async fn no_fence_means_no_predicate() {
+    require_db!(store);
+    let project = seed_project(&store, "fence-none").await;
+    let worker = seed_worker(&store, "fence-none").await;
+    let agent = Agent::new(project.id, "unfenced");
+    store.create_agent(&agent).await.unwrap();
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, worker.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.command_control_epoch, None);
 }

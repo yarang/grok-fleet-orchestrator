@@ -40,7 +40,7 @@ flowchart LR
 | `projects` | `id`, 고유 `name`, `description`, `created_by`, `max_active_agents`, `max_warm_agents`, worker eligibility selector, 정책 revision, `retention_policy_id`, `retain_until`, 생성·갱신 시각 | Project의 지속적 정책 경계. **1단계(#48, 완료)**: `id`/`name`/`description`/`created_by`/`status`(3-상태)/생성·갱신 시각만 실제 테이블(`projects`, migration 022)에 존재한다. `max_active_agents`/`max_warm_agents`/worker eligibility selector/정책 revision/`retention_policy_id`/`retain_until`은 Agent·AgentTemplate·effect ledger가 없어 아직 컬럼조차 없다 — 미리 만들면 항상 `NULL`인 죽은 컬럼이 된다(`#70` 조사에서 죽은 `FailureKind` variant를 제거한 것과 같은 이유) |
 | `tasks` | nullable `project_id` | 값이 없으면 일반 풀 Task. **1단계**: 존재만 검증한다(제출 시 project 존재·`active` 상태 확인) — Agent/Worker 후보를 Project로 제한하는 디스패치 자격(아래 절)은 아직 미구현 |
 | `agents` | immutable `project_id`, role/context, 상태 | Project가 소유하는 논리 실행 주체. **미구현** — `Agent` 엔티티 자체가 이 저장소에 없다 |
-| `worker_execution_leases` | `agent_id`, `worker_id`, generation, 상태, 시각 | 활성 Agent의 일시적 Worker slot 점유. **미구현** — 로드맵 `#67` |
+| ~~`worker_execution_leases`~~ | `agent_id`, `worker_id`, generation, 상태, 시각 | **만들지 않는다**(2026-09-01 확정). 열거된 값들이 이미 다른 곳에 있다 — 점유는 `agents.worker_id`, generation은 `agents.command_generation`(031). 정본은 [권한과 장애 전환](control-plane-authority-and-failover.md) §2026-09-01 범위 정정 |
 | `project_archive_holds` | `project_id`, kind, reason, opened/resolved 시각, actor, evidence | effect·cleanup·security/legal hold가 archive를 막는 기록. **미구현** — 현재 archive 게이트는 "비종료 Task 없음"(`Store::project_has_active_tasks`)과 "살아 있는 Agent 없음"(`Store::project_has_live_agents`, `#49` 1단계) 두 조건이며, 둘 다 hold 기록이 아니라 즉석 조회다 |
 
 Agent provisioning 관련 기본 템플릿, 유휴 시간, 작업 디렉터리 같은 설정은 Project가 정책 값으로 제공할 수 있지만, Agent 템플릿과 실행 수명은 Agent 도메인이 소유한다. 정책이 바뀌면 revision을 올리고 새 Task에만 적용한다. 이미 실행 중인 Task는 제출 시점 snapshot을 유지한다.
@@ -89,9 +89,11 @@ Project 권한 종류는 `project:create`, `project:read`, `project:update`, `pr
 
 **`#49` 1단계(2026-08-28)로 `agents` 테이블이 생겼지만 2·3번은 그대로다.** 2번이 시험하는 것은
 *자동* provisioning 경로인데 1단계에는 그 경로가 없다 — Agent는 `agent:manage` 보유자가 명시적으로
-만들 때만 생기고 Task 제출은 Agent를 만들지 않는다. 3번의 agent slot 경쟁·lease 회수는
-`worker_execution_leases`(`#67` 후속)가 여전히 없다. 엔티티의 존재가 아니라 **자동 provisioning과
-lease**가 이 차단을 푸는 조건이다.
+만들 때만 생기고 Task 제출은 Agent를 만들지 않는다. 3번의 agent slot 경쟁은 `#67` 게이트 ①-A-2가
+`workers` 행 잠금 아래의 조건부 배정으로 닫았다. 남은 것은 **회수**다 — 배정을 되돌리는 경로를
+의도적으로 만들지 않았고(`worker_execution_leases`는 만들지 않기로 확정됐다, 2026-09-01),
+지금은 `status <> 'stopped'` 필터로 슬롯이 스스로 풀린다. 즉 이 차단을 푸는 조건은 lease가 아니라
+**자동 provisioning**과 그 회수 경로다.
 
 **이 차단은 정책 변경에만 걸린다.** `name`·`description` 같은 Project 메타데이터 편집은 Agent를
 만들지 않으므로 이 조건의 대상이 아니다(승인 결정 3). `#86`의 템플릿 편집을 같은 이유로 이 차단에서

@@ -1280,10 +1280,14 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
             .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?,
     };
 
+    // 명령 발행에 이 인스턴스의 제어 세대를 술어로 건다 (로드맵 `#67` ①-B).
+    // Dashboard의 같은 경로와 근거가 같다 — 봉투 검사만으로는 분할된 옛
+    // 보유자의 행 변경을 막지 못한다.
+    let fence = ctx.state.control_fence();
     let claim = ctx
         .state
         .store
-        .assign_agent_worker(agent_id, worker_id)
+        .assign_agent_worker(agent_id, worker_id, fence.as_ref())
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
     match claim {
@@ -1305,6 +1309,14 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
             return Err(JsonRpcError::invalid_params(format!(
                 "no such worker for agent placement: {worker_id}"
             )))
+        }
+        // 위의 셋과 달리 요청의 결함이 아니다 — 이 인스턴스가 더 이상 제어
+        // 기관이 아니라는 뜻이므로 `invalid_params`로 묶으면 호출자가 인자를
+        // 고치려 든다. Dashboard가 같은 이유로 4xx가 아닌 503을 준다.
+        fleet_store::SlotClaim::Fenced => {
+            return Err(JsonRpcError::internal(
+                "this instance is no longer the control-plane leader".to_string(),
+            ))
         }
     }
 
@@ -1417,11 +1429,31 @@ async fn handle_start_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
     // 미배정(`worker_id` 없음)은 거부하지 않는다: 명령은 갈 곳이 없을 뿐
     // 잃어버리지 않으며 다음 배정이 세대를 올릴 때 실려 간다.
     if agent.desired_status != fleet_core::AgentDesiredStatus::Running {
-        ctx.state
+        // fence의 근거는 `handle_place_agent`의 같은 줄과 같다.
+        let fence = ctx.state.control_fence();
+        match ctx
+            .state
             .store
-            .set_agent_desired_status(agent_id, fleet_core::AgentDesiredStatus::Running)
+            .set_agent_desired_status(
+                agent_id,
+                fleet_core::AgentDesiredStatus::Running,
+                fence.as_ref(),
+            )
             .await
-            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
+        {
+            fleet_store::CommandIssue::Issued => {}
+            fleet_store::CommandIssue::NoSuchAgent => {
+                return Err(JsonRpcError::invalid_params(format!(
+                    "no such agent: {agent_id}"
+                )))
+            }
+            fleet_store::CommandIssue::Fenced => {
+                return Err(JsonRpcError::internal(
+                    "this instance is no longer the control-plane leader".to_string(),
+                ))
+            }
+        }
         agent = ctx
             .state
             .store

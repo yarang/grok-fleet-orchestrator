@@ -178,7 +178,7 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `WarmIdle` | execution lease가 없어 "slot을 잡은 채 쉬는 상태"를 표현할 수 없다 | `#67` 후속 |
 | `Hibernated` | snapshot 불일치 판정에 AgentTemplate과 harness 구성이 필요하다 | `#86`, `#51` |
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
-| `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ①-B |
+| ~~`fencing_token`~~ | 4b 시점의 유예 사유는 "생산자 자체가 없다 — `worker_execution_lease` 테이블이 존재하지 않는다"였고, 그 사유는 테이블이 언젠가 온다는 전제 위에 있었다. **그 전제가 철회됐다** — 테이블은 만들지 않고, 봉투가 이미 싣고 있는 `generation`(`agents.command_generation`, 031)이 그 역할을 그대로 한다. 봉투는 여전히 8-필드이며 **필드가 늘지 않았다**: 부족했던 것은 값이 아니라 그 값을 발행할 권한의 판정이었고, 그것은 봉투가 아니라 **쓰기 술어**에 있다 | **①-B 해소** ([권한과 장애 전환](../control-plane-authority-and-failover.md) §2026-09-01 범위 정정) |
 | 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
 | ~~`tasks.agent_id`~~ | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | **`#49` 2단계 해소** (`034_task_agent_id.sql`). 단 사유의 부정이 그대로 구현된 것은 아니다 — 채우는 주체는 dispatch가 아니라 **제출자**이고 dispatch는 지킬 뿐이다(아래 §"`#49` 2단계의 설계") |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
@@ -732,10 +732,16 @@ Worker가 살아 있는데도 명령을 받지 못하는 구간이 생긴다.
 [권한과 장애 전환](../control-plane-authority-and-failover.md)의 게이트 ①은 두 개의
 실패 모드가 한 칸에 묶여 있었다. **①-A는 배정 초과** — 동시에 들어온 두 생성 요청이
 같은 Worker를 골라 그 Worker의 프로세스 상한을 넘긴다. **①-B는 낡은 제어면** —
-승격된 오케스트레이터의 명령을 Worker가 거절하지 못한다. 후자는 `worker_execution_lease`
-레코드가 필요하고 그 레코드는 `task_id`를 실으므로 `#49` 2단계에 걸리지만, 전자는
-lease 테이블 자체가 필요 없다. 세어야 할 것이 lease 행이 아니라 **배정된 `agents` 행**
-이기 때문이다.
+승격된 오케스트레이터의 명령을 Worker가 거절하지 못한다. 둘 다 lease 테이블 없이
+성립한다 — ①-A는 세어야 할 것이 lease 행이 아니라 **배정된 `agents` 행**이기 때문이고,
+①-B는 판정이 레코드가 아니라 **쓰기 술어**에 살기 때문이다(2026-09-01 확정,
+[권한과 장애 전환](../control-plane-authority-and-failover.md) §범위 정정).
+
+> 이 문단은 2026-08-31까지 "후자는 `worker_execution_lease` 레코드가 필요하고 그
+> 레코드는 `task_id`를 실으므로 `#49` 2단계에 걸린다"고 적었다. 그 판단이 틀렸던
+> 지점은 선행 관계가 아니라 **fencing을 레코드로 상상한 것**이다. 낡은 제어면을
+> 막는 데 필요한 것은 명령마다의 행이 아니라, 명령을 쓰는 그 문장이 "지금도 내가
+> 리더인가"를 함께 묻는 것이다.
 
 ①-A는 다시 둘로 나뉘고, 각각 독립적으로 검증된다.
 
@@ -821,8 +827,9 @@ Worker도 4로 기록되고, 배정은 그 4를 근거로 초과한다. NULL은 
 그대로 병렬이다 — 잠금이 전역이 아니라 Worker별이기 때문이다.
 
 이것이 게이트 ①이 말한 "CAS slot claim"이며, `worker_execution_lease` 없이 성립한다.
-lease 테이블이 필요해지는 것은 **claim의 대상이 행이 아니라 명령의 세대**가 될 때,
-즉 ①-B다.
+①-B도 마찬가지다 — claim의 대상이 명령의 세대로 바뀌어도 필요한 것은 새 테이블이
+아니라 같은 문장 안의 술어 하나였다(`EXISTS (SELECT 1 FROM control_plane_lease ...)`).
+두 게이트가 같은 처방을 공유하는 이유는 같다: **관측하고 나서 쓰면 그 사이가 창이다.**
 
 READ COMMITTED이라서 `FOR UPDATE`만으로 충분하다는 점이 중요하다. 이 격리 수준에서는
 **문 하나하나가 새 스냅샷을 뜨므로**, 잠금을 얻고 나서 다시 센 `COUNT(*)`가 방금
@@ -936,6 +943,6 @@ Agent를 같은 Worker로 다시 배정하는 것은 슬롯을 **추가로 쓰�
 
 | 미룬 것 | 이유 | 귀속 |
 | --- | --- | --- |
-| `worker_execution_lease` 테이블 | 위 §대로 슬롯 상한에는 필요 없고, 레코드의 `task_id`는 dispatch가 Agent를 골라야 채워진다 | `#67` 게이트 ①-B (`#49` 2단계 선행) |
+| ~~`worker_execution_lease` 테이블~~ | 슬롯 상한에 필요 없다는 판단은 그대로이고, ①-B에도 필요 없는 것으로 **확정됐다** — 11필드 중 오늘 채울 주체가 있는 것은 `control_epoch` 하나뿐이었고, 그것은 테이블이 아니라 `agents` 컬럼 하나로 충분하다 | **만들지 않기로 확정 (2026-09-01)** — [권한과 장애 전환](../control-plane-authority-and-failover.md) §범위 정정이 정본 |
 | 상한 변경의 하트비트 반영 | 설정값이므로 계기가 재시작뿐이고, 재시작은 register가 덮는다 | 계기가 생기면 |
 | 상한 초과 시의 대기열 | 배정 실패는 이미 `worker_id = NULL`이라는 정상 상태로 표현된다(§"구현 상태 (`#67` 4a)"). 대기열은 그 상태를 소비할 재배정 루프를 전제하는데, 4a가 루프를 만들지 않기로 한 근거가 그대로 유효하다 | 재배정 루프가 생기면 |

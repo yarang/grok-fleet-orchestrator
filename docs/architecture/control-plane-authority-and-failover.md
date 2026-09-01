@@ -76,6 +76,49 @@ sequenceDiagram
 - Worker 재기동은 새 incarnation을 발급한다. 재기동 뒤 남은 process는 최신 token lease와 일치하지
   않으면 cleanup하며, 이전 incarnation의 늦은 ACK는 감사만 남기고 상태를 바꾸지 않는다.
 
+### 2026-09-01 범위 정정 — `worker_execution_lease` 테이블을 만들지 않는다
+
+위 절이 그린 11필드 레코드는 **구현하지 않는다**. 구현 게이트 ①-B는 그 자리에
+`agents` 컬럼 하나(`command_control_epoch`)와 명령 발행 쓰기의 epoch 술어로
+대신한다. 이 절의 나머지 규칙(Worker의 stale 거절, self-fence/drain,
+`OutcomeUnknown`, 재기동 incarnation)은 그대로 유효하다.
+
+근거는 이 문서가 그린 필드 대부분이 **오늘 채울 주체가 없다**는 것이다. 같은
+판단을 마이그레이션 028이 이미 이 절에 대해 한 번 내렸다 — 이 절의
+`worker_incarnation`은 heartbeat가 실어 오는 카운터로 그려져 있지만, 028은
+"판정의 입력이 다시 피통제자의 자기 신고가 된다"는 이유로 그것을 거절하고
+관측에서 유도되는 `workers.incarnation_started_at TIMESTAMPTZ`로 만들었다.
+
+| 이 문서의 필드 | 처분 | 이유 |
+| --- | --- | --- |
+| `agent_id`, `worker_id` | 만들지 않음 | `agents` 행이 이미 그 진실이다. 레코드로 복제하면 둘이 갈릴 때 어느 쪽이 정본인지 정해지지 않는다. |
+| `task_id` | 만들지 않음 | `tasks.agent_id`(034)로 역질의된다. |
+| `lease_generation`, `fencing_token` | `agents.command_generation`으로 충족 | 031이 이미 DB가 발행하는 Agent별 단조 증가 값을 만들었다. 이름만 다르고 역할이 같다. |
+| `control_epoch` | **새로 만든다** (`agents.command_control_epoch`) | 유일하게 오늘 채울 주체가 있고, 사후 복원이 불가능하다. 026이 `tasks`에 대해 내린 판단과 같다. |
+| `worker_incarnation` | 이미 있음 (`workers.incarnation_started_at`, 028) | 형태가 이 문서와 다르다. 위 문단 참조. |
+| `state`(`Activating|Active|Releasing`) | 만들지 않음 | `Releasing`을 쓸 주체가 없다. 배정 회수 경로를 의도적으로 만들지 않았고(원장이 `status <> 'stopped'`로 걸러 슬롯이 스스로 풀린다), 나머지 둘은 `(status, desired_status)`의 파생이다. |
+| `acquired_at`, `renewed_at`, `expires_at` | 만들지 않음 | 갱신 주체가 없다. 031이 적었듯 heartbeat 응답이 **매번 명령 전부를 다시 싣기** 때문에 만료라는 개념이 필요한 창이 열리지 않는다. |
+
+**031의 유예 문구는 이 정정이 대체한다.** `031_agent_desired_state.sql`은
+`fencing_token`을 미룬 이유로 "`worker_execution_lease` 테이블 자체가 없다 —
+구현 게이트 ①"이라고 적었는데, 그것은 게이트 ①이 그 테이블을 가져온다는 전제
+아래의 유예 기록이었다. 그 전제가 여기서 철회된다. 031은 적용된 마이그레이션이라
+고치지 않으며, 정정은 이 절과 035의 주석에 둔다.
+
+**epoch를 관측이 아니라 쓰기 술어로 건다.** 이것이 이 게이트의 실질이다.
+`lease_allows_control()`처럼 먼저 읽고 분기하면 관측과 쓰기 사이에 창이 남아,
+분단된 이전 보유자가 그 창에서 `agents` 행을 실제로 바꿀 수 있다. 그러면 Worker가
+그 명령을 나중에 거절해도 **행은 이미 바뀐 뒤**이고, 새 보유자의 reconciler가 그
+행을 읽어 자기 epoch로 다시 보낸다 — 봉투 검사만으로는 닫히지 않는 누수다.
+`#62` 3단계가 `tasks`에 대해 쓴 것과 같은 형태를 쓴다.
+
+**저장하는 것은 epoch뿐이고 `cluster_id`는 컬럼으로 두지 않는다.** 026이 같은
+선택을 했다. `cluster_id`는 "어느 lease 행에 물어볼 것인가"를 정하므로 술어의
+바인딩으로 충분하고, 행에 적히는 값은 "이 명령이 어느 세대의 것인가"라는 다른
+질문의 답이다.
+
+**시간 기반 펜싱으로 대신하지 않는다**는 아래 규칙은 이 정정으로 약해지지 않는다.
+
 ## Lease와 상태 전이
 
 영속 lease는 최소 `cluster_id`, `active_instance_id`, `epoch`, `acquired_at`, `expires_at`,

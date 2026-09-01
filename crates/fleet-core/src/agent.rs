@@ -344,6 +344,19 @@ pub struct Agent {
     /// 조용한 오탐이 된다.
     #[serde(default)]
     pub last_acked_generation: i64,
+    /// 지금 실린 명령을 발행한 control-plane 세대
+    /// (로드맵 `#67` 구현 게이트 ①-B).
+    ///
+    /// [`command_generation`](Self::command_generation)이 오를 때만 함께
+    /// 바뀐다. 조건을 떼면 "이 명령을 발행한 세대"가 "이 행을 마지막으로
+    /// 손댄 세대"로 뜻이 바뀌어, 세대와 epoch가 서로 다른 시점을 가리키는
+    /// 모순된 행이 남는다.
+    ///
+    /// `None`의 뜻은 `Task::dispatch_control_epoch`와 같다 — "값을 못 구했다"가
+    /// 아니라 **제어 세대라는 개념이 없는 배포**(HA 리스 미사용)이거나, 035
+    /// 이전에 발행된 명령이다. 지나간 epoch는 소급 복원되지 않는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_control_epoch: Option<i64>,
     /// Worker가 마지막으로 본 이 Agent 프로세스의 상태 (로드맵 `#67` 4c-B).
     ///
     /// `None`은 "아직 아무도 보지 않았다"다. 배정이 없거나, 배정된 Worker가
@@ -388,6 +401,7 @@ impl Agent {
             desired_status: AgentDesiredStatus::Stopped,
             command_generation: 0,
             last_acked_generation: 0,
+            command_control_epoch: None,
             observed_status: None,
             observed_at: None,
             observed_reason: None,

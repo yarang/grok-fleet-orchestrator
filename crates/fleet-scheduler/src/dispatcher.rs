@@ -14,6 +14,7 @@ use fleet_core::{
     CircuitState, FailureKind, FleetEvent, IdempotentInsert, Task, TaskFailure, TaskId, TaskPhase,
     TaskStatus, TransitionOrigin, TransitionOutcome, WorkerId,
 };
+use fleet_store::ControlFence;
 use fleet_transport::{DispatchRequest, FailureObservation, TransportError, WorkerEvent};
 use tracing::{info, warn};
 
@@ -60,6 +61,25 @@ impl Dispatcher {
             event_rx: tokio::sync::Mutex::new(None),
             max_dispatch_retries: 0,
         }
+    }
+
+    /// 이 인스턴스가 지금 쓰기에 걸어야 할 control-plane 술어
+    /// (로드맵 `#67` 구현 게이트 ①-B).
+    ///
+    /// Dashboard는 `FleetState`를 갖지 않는다 — `DashboardState`가 `store`와
+    /// `Option<Arc<Dispatcher>>`만 든다. 그런데 Agent 명령
+    /// 발행(`assign_agent_worker`·`set_agent_desired_status`)은 dispatch와
+    /// **같은** 제어권 아래 있어야 하므로 그 표면도 같은 fence를 얻어야 한다.
+    /// `state`를 공개하는 대신 이 값 하나만 내보낸다 — 표면이 store를 직접
+    /// 부르는 것은 이미 하고 있는 일이고, 넓히는 것은 그 호출에 붙는 술어뿐이다.
+    /// MCP는 `ToolContext`가 `Arc<FleetState>`를 들고 있어 이 통로가 필요 없고,
+    /// [`FleetState::control_fence`](crate::state::FleetState::control_fence)를
+    /// 직접 부른다.
+    ///
+    /// lease를 켜지 않은 배포는 `None`이며, 그 경우 store 쪽 술어도 붙지
+    /// 않는다(`FleetState::control_fence`와 같은 이유).
+    pub fn control_fence(&self) -> Option<ControlFence> {
+        self.state.control_fence()
     }
 
     /// dispatch 실패 시 최대 재시도 횟수를 설정한다 (로드맵 #38). `n == 0`
