@@ -94,10 +94,13 @@ Worker 이동 복구 E2E)인데, 착수 시점에 **셋은 정본에 대상이 �
   repository를 **갖지 않을 수 있고**, 그때는 지금과 똑같이 동작한다(worktree 없음, `Task.cwd`만).
   이 NULL은 자리표시자가 아니라 "이 Project는 Git을 쓰지 않는다"는 도달 가능한 상태다 — `#67`
   4a가 `agents.worker_id`의 NULL을 다룬 방식과 같다.
-- **worktree**: Worker가 `agent_workspace_root/<agent_id>`에 만드는 **checkout**. 지금 그 경로는
-  프로세스의 cwd일 뿐이며([프로비저닝](provisioning.md)의 유예 표), 1단계가 그 디렉터리의 규약을
-  바꾼다. 유예 표가 "지금 둘을 합치면 `#69`가 자기 설계를 4c-A의 디렉터리 규약에 맞춰야 한다"고
-  적어 미뤄 둔 합침을, 여기서 `#69` 쪽 규약으로 한다.
+- **Agent 디렉터리**: Worker가 `agent_workspace_root/<agent_id>`에 만드는 작업 디렉터리. 지금 그
+  경로는 프로세스의 cwd일 뿐이며([프로비저닝](provisioning.md)의 유예 표), **1단계가 정하는 것은
+  이 디렉터리의 경계와 생명주기다.** 유예 표가 "지금 둘을 합치면 `#69`가 자기 설계를 4c-A의
+  디렉터리 규약에 맞춰야 한다"고 적어 미뤄 둔 합침을, 여기서 `#69` 쪽 규약으로 한다.
+- **worktree**: Agent 디렉터리가 Project repository의 **checkout**이 된 상태. 1단계는 여기까지
+  가지 않는다 — 아래 "1단계가 Git을 하지 않는 이유"를 보라. 이 문서의 2026-09-02 첫 판은 Agent
+  디렉터리와 worktree를 한 낱말로 묶어 1단계를 checkout까지로 적었고, 그것이 아래 정정의 대상이다.
 - **checkpoint**: worktree의 작업을 Project repository의 **원격 ref로 올린 것**. 로컬 커밋만으로는
   checkpoint가 아니다 — Worker 이동은 디스크를 바꾸므로 로컬 커밋은 따라가지 않는다. 이 정의가
   아래 표에서 게이트 2·4를 push credential에 묶는다.
@@ -115,23 +118,89 @@ Worker 이동 복구 E2E)인데, 착수 시점에 **셋은 정본에 대상이 �
 
 | 게이트 | 실제 선행 | 1단계 |
 | --- | --- | --- |
-| Agent worktree isolation | `#49` 2단계(닫힘) + Project repository 바인딩 | 닫는다 |
+| Agent 디렉터리 경계·생명주기 | `#49` 2단계(닫힘) | 닫는다 |
+| Agent worktree isolation (checkout) | Git credential을 발급하는 주체 + Project repository 바인딩 | 아니다 |
 | checkpoint push/restore | push credential을 발급하는 주체 | 아니다 |
 | secret scan | checkpoint push가 존재할 것 | 아니다 |
 | Worker 이동 복구 E2E | 위 둘 | 아니다 |
 
-"`#49` 2단계가 닫혔으니 `#69`가 열렸다"고 읽으면 나머지 셋을 착수한 뒤에 막힘을 재발견한다.
+"`#49` 2단계가 닫혔으니 `#69`가 열렸다"고 읽으면 나머지를 착수한 뒤에 막힘을 재발견한다.
+
+#### 1단계가 Git을 하지 않는 이유
+
+위 결정의 credential 조항은 **push**를 말하므로, 첫 판은 clone·fetch는 걸리지 않는다고 읽고
+1단계를 checkout까지로 잡았다. 그 독해는 조항으로는 맞지만 사실로는 틀렸다 — 조항이 금지해서가
+아니라 **발급자가 아예 없어서** clone도 막힌다.
+
+- credential 마이그레이션은 `005_worker_credentials.sql`과 `018_worker_operational_credentials.sql`
+  둘뿐이고 **모두 Worker 소유**다. 라우트도 `/:name/credentials/:model_id/...` 형태의 LLM 자격
+  증명이다.
+- `fleet-core`에는 `Credential` 타입이 **하나도 없다**.
+
+즉 Fleet가 발급하는 Git 자격 증명은 push용도 fetch용도 존재하지 않는다. 공개 repository라면
+익명 clone이 되지만, 그것만 되는 checkout은 게이트가 요구하는 isolation이 아니라 "공개 repo에
+한해 동작하는 경로"이고, 그 위에 secret scan도 checkpoint도 올릴 수 없다. **따라서 1단계는 Git을
+전혀 하지 않는다.** 아래 "Worker는 repository를 어떻게 아는가"의 결정은 그대로 유효하되,
+1단계에서 **구현하지 않는다** — 읽는 쪽이 없는 컬럼과 엔드포인트를 미리 만들지 않는다.
 
 #### 1단계가 아닌 것
 
 | 미룬 것 | 왜 | 어디로 |
 | --- | --- | --- |
+| Agent 디렉터리를 checkout으로 만드는 것 | Fleet가 발급하는 Git credential이 push용도 fetch용도 없다(위 절). 익명 clone만 되는 checkout은 게이트가 말하는 isolation이 아니다 | Security Manager 이후 |
+| `projects`의 repository 컬럼과 workspace 엔드포인트 | 위가 없으면 읽는 쪽이 없다. 결정은 아래에 남기되 구현하지 않는다 | 위와 같이 |
 | checkpoint push/restore | Git push credential을 발급하는 Security Manager가 없다. 위 결정은 user global credential store·SSH agent forwarding·repository config의 embedded token을 **모두** 금지하므로, 발급자가 없으면 push할 수단 자체가 없다 | 미정(Security Manager를 소유하는 로드맵 항목이 아직 없다) |
 | secret scan | 위가 없으면 검사 대상(push될 tree)이 생기지 않는다 | checkpoint push 이후 |
 | Worker 이동 복구 E2E | 이동은 디스크를 바꾸므로 원격 ref 없이는 복구할 것이 없다 | 위 둘 이후 |
-| worktree containment 판정 | 위 "현재 구현"이 적은 그대로다 — 오케스트레이터의 `canonicalize`는 워커의 파일시스템을 보지 못한다. worktree를 **워커가** 만들면 그 경로는 워커가 정한 것이므로 클라이언트 입력보다 낫지만, 그것은 검증이 아니라 출처의 차이다 | 워커측 relay 또는 `#64` |
+| `Task.cwd` containment 판정 | 위 "현재 구현"이 적은 그대로다 — 오케스트레이터의 `canonicalize`는 워커의 파일시스템을 보지 못한다 | 워커측 relay 또는 `#64` |
 | execution snapshot의 remote/ref 고정 | snapshot 필드는 아래 "실행 snapshot과 cleanup"이 소유하고, 그 고정은 dispatcher capability 검증(게이트 1)과 함께 간다 | 게이트 1 |
 | Project 하나에 repository 여럿 | 복수는 worktree 배치 규약을 바꾸므로 checkpoint 정의가 굳기 전에 정하면 두 번 바꾸게 된다 | 미정 |
+
+#### 1단계가 실제로 닫는 것
+
+**(1) 경계.** 지금 `AgentProcessManager`는 `workspace_root.join(agent_id.to_string())`으로 경로를
+만들 뿐 그 결과가 root 아래인지 확인하지 않는다. `agent_id`는 UUID라 `..`가 원리적으로 섞일 수
+없으므로 여기서 값어치를 하는 검사는 경로 조작 방어가 아니라 **symlink 저항**이다 — root 자체나
+그 하위가 심볼릭 링크면 canonical 경로는 root 밖으로 나간다. 이 검사는 워커가 자기 파일시스템
+위에서 하므로 위 유예 표의 `Task.cwd` 문제와 다르다. 거기서 막힌 것은 오케스트레이터가 **남의**
+파일시스템을 canonicalize할 수 없다는 사실이었고, 여기서는 경로를 정한 쪽과 확인하는 쪽이 같다.
+
+**(2) 생명주기.** Agent 디렉터리는 지금 **만들어지기만 하고 지워지지 않는다** —
+`agent_process.rs`에 `remove_dir`가 한 번도 나오지 않는다. 아래 "실행 snapshot과 cleanup"이
+cleanup 규약을 정해 두었지만 그것을 수행하는 코드가 없다. 1단계가 그 구현이다.
+
+#### 디렉터리는 언제 지우는가
+
+`reconcile`은 명령 목록을 **권위 있는 전체 집합**으로 읽고 목록에 없는 프로세스를 종료한다. 그
+주석은 목록에서 사라진 것을 "다른 Worker로 재배정됐거나 이미 회수가 확인된 경우이며, 어느
+쪽이든 이 Worker가 계속 들고 있을 이유가 없다"고 적었다. **프로세스에 대해서는 맞고, 디렉터리에
+대해서는 틀리다.** 종료는 잘못해도 다시 띄우면 되지만, 삭제는 되돌릴 수 없고 checkpoint push가
+없는 지금은 그 작업물의 복구 경로가 아예 없다.
+
+부재가 모호한 이유는 `list_agent_commands`의 술어에 있다:
+
+```sql
+WHERE worker_id = $1 AND (status <> 'stopped' OR last_acked_generation < command_generation)
+```
+
+`worker_id`가 바뀌었을 때(다른 Worker로 이동), NULL이 됐을 때(미배치), 그리고 회수가 **확인까지
+끝났을 때** 모두 행이 목록에서 조용히 빠진다. 셋은 서로 다른 사실인데 Worker에 도착하는 값은
+하나다. `Option`의 `None`은 조회의 **전체** 실패만 덮으므로 이 셋을 가르지 못한다.
+
+그래서 판정을 뒤집는다 — **부재가 아니라 명시적 `desired_status = Stopped`를 삭제 근거로 삼는다.**
+회수 명령은 위 술어의 `last_acked_generation < command_generation` 덕분에 확인이 올 때까지 매
+beat 실려 오므로, 그 창 안에서 Worker는 "이 Agent는 회수됐다"를 **모호하지 않게** 본다.
+
+틀리는 방향이 이 선택의 근거다.
+
+| 놓치면 | 결과 |
+| --- | --- |
+| 명시적 `Stopped`를 보고도 못 지움(그 사이 Worker 재시작 등) | 디렉터리가 남는다 — 누수이고, 다음 회수 명령이나 운영 정리로 회수 가능 |
+| 부재를 근거로 지움 | 이동 중인 Agent의 작업물이 사라진다 — 복구 경로 없음 |
+
+누수는 되돌릴 수 있고 소실은 되돌릴 수 없다. `Agent` 행은 하드 삭제되지 않으므로
+(`DELETE FROM agents`가 코드베이스에 없다) 회수 신호를 낼 주체는 언제나 존재하고, 누수분은
+나중에 그 신호로 회수된다.
 
 #### Worker는 repository를 어떻게 아는가
 
@@ -153,6 +222,10 @@ worktree를 만들려면 Worker가 Agent의 Project와 그 repository를 알아�
 
 **후자로 간다.** 근거는 취향이 아니라 비대칭이다 — 전자의 비용은 되돌릴 수 없고(응답의 로깅
 안전성은 한 번 깨지면 그 뒤의 모든 코드가 그 전제로 쓰인다), 후자의 비용은 엔드포인트 하나다.
+
+**이 결정은 1단계에서 구현하지 않는다.** 1단계가 Git을 하지 않으므로 repository를 읽는 쪽이
+없고, 읽는 쪽이 없는 컬럼과 엔드포인트를 미리 만들면 항상 NULL인 컬럼과 아무도 부르지 않는
+라우트가 남는다. 문서는 코드보다 앞서 결정을 적을 수 있고, 여기가 그 자리다.
 
 ## sudo와 privileged operation
 

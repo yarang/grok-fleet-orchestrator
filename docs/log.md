@@ -6131,3 +6131,56 @@ URL은 `https://user:token@host/...` 형태를 가질 수 있으므로 응답이
 **검증 한계**: 이 커밋은 문서만 바꾼다. 정의한 대상 중 코드에 존재하는 것은 아직 없고,
 `projects` 테이블에는 repository 컬럼이 없으며 워크스페이스에 Git 라이브러리 의존성도 없다
 (`git2`/`gix` 모두 없음). 1단계 구현은 다음 커밋이다.
+
+## 2026-09-02 — 범위를 정의한 커밋이 같은 날 두 번째 정정을 받았다
+
+`584ee78`이 `#69`의 게이트 넷에 대상을 부여하면서 1단계를 "worktree isolation 하나"로 잡았다.
+그 커밋을 밀자마자 표면 조사를 한 번 더 돌렸고, 두 가지가 나왔다.
+
+**(1) credential 부재는 push보다 넓다.** 정본의 조항은 "Git push credential은 Security Manager가
+발급한 것만"이라고 말하므로, 첫 판은 clone·fetch는 걸리지 않는다고 읽었다. 조항으로는 맞는
+독해다. 사실로는 틀렸다 — 조항이 금지해서가 아니라 발급자가 아예 없어서 clone도 막힌다.
+credential 마이그레이션은 `005_worker_credentials.sql`과 `018_worker_operational_credentials.sql`
+둘뿐이고 모두 Worker 소유의 LLM 자격 증명이며, `fleet-core`에 `Credential` 타입은
+`grep 'pub struct.*Credential\|pub enum.*Credential'`로 **0건**이다. 익명 clone만 되는 checkout은
+게이트가 말하는 isolation이 아니고, 그 위에 secret scan도 checkpoint도 올릴 수 없다.
+
+**금지 조항을 읽고 범위를 정하면 이렇게 틀린다.** 조항은 "무엇을 쓰면 안 되는가"를 말하고
+범위는 "무엇을 쓸 수 있는가"에 달려 있는데, 둘은 같은 문장에서 읽히지 않는다. 조항이 push만
+언급했다는 사실은 fetch가 가능하다는 뜻이 아니라 **fetch에 대해 아무 말도 하지 않았다**는
+뜻이었다. 확인은 문서가 아니라 마이그레이션 목록과 타입 grep이 해 줬다.
+
+**(2) Agent 디렉터리는 만들어지기만 하고 지워지지 않는다.** `agent_process.rs`에 `remove_dir`가
+한 번도 나오지 않는다. 정본의 "실행 snapshot과 cleanup"이 cleanup 규약을 정해 두었지만 그것을
+수행하는 코드가 없다. `584ee78`의 범위 절은 이 사실을 적지 않았다 — 게이트 이름을 정의하는 데
+집중하느라 이름이 붙지 않은 결함을 지나쳤다.
+
+이 둘이 합쳐져 1단계가 바뀐다. Git이 빠지고 **Agent 디렉터리의 경계와 생명주기**가 들어온다.
+경계 쪽에서 값어치를 하는 검사는 `..` 거절이 아니라 symlink 저항이다 — `agent_id`는 UUID라
+경로 조작이 원리적으로 섞이지 않지만, workspace root나 그 하위가 심볼릭 링크면 canonical 경로는
+root 밖으로 나간다. 이 검사가 `Task.cwd`의 containment와 다른 이유는 **경로를 정한 쪽과 확인하는
+쪽이 같기** 때문이다. 거기서 막힌 것은 오케스트레이터가 남의 파일시스템을 canonicalize할 수
+없다는 사실이었지 검사 자체가 아니었다.
+
+**삭제 판정이 이 정정의 핵심이고, 그것 때문에 구현을 시작할 수 없었다.** `reconcile`은 명령
+목록을 권위 있는 전체 집합으로 읽고 목록에 없는 프로세스를 종료하며, 그 주석은 사라진 것을
+"재배정됐거나 이미 회수가 확인된 경우이며 어느 쪽이든 들고 있을 이유가 없다"고 적었다.
+프로세스에 대해서는 맞다. 디렉터리에 그대로 적용하면 틀린다 — 종료는 다시 띄우면 되지만 삭제는
+되돌릴 수 없고, checkpoint push가 없는 지금은 그 작업물의 복구 경로가 아예 없다.
+
+부재가 모호한 이유는 `list_agent_commands`의 술어에 있다:
+`WHERE worker_id = $1 AND (status <> 'stopped' OR last_acked_generation < command_generation)`.
+`worker_id`가 다른 Worker로 바뀌었을 때, NULL이 됐을 때, 그리고 회수가 **확인까지 끝났을 때**
+모두 행이 조용히 빠진다. 셋은 서로 다른 사실인데 도착하는 값은 하나다. `Option`의 `None`은
+조회의 전체 실패만 덮으므로 이 셋을 가르지 못한다.
+
+그래서 판정을 뒤집는다 — 부재가 아니라 **명시적 `desired_status = Stopped`**를 삭제 근거로 삼는다.
+같은 술어의 `last_acked_generation < command_generation` 덕분에 회수 명령은 확인이 올 때까지 매
+beat 실려 오므로, 그 창 안에서 Worker는 회수를 모호하지 않게 본다. 놓치면 디렉터리가 남고(누수,
+다음 회수 신호나 운영 정리로 회수 가능), 부재로 지우면 작업물이 사라진다(복구 없음).
+`DELETE FROM agents`가 코드베이스에 없어 Agent 행은 하드 삭제되지 않으므로, 회수 신호를 낼
+주체는 언제나 존재한다.
+
+**검증 한계**: 여기까지는 문서와 조사뿐이고 코드는 아직 한 줄도 바뀌지 않았다. 위 술어에 대한
+독해는 `postgres.rs`의 쿼리와 그 주석에 근거하며, `mem.rs`가 같은 술어를 흉내 내는지는 이
+시점에 확인하지 않았다 — 구현할 때 확인한다.
