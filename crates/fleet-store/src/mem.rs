@@ -40,7 +40,7 @@ use fleet_core::{
 };
 
 use crate::{
-    AdminApiToken, ControlFence, ControlLease, Store, StoreError, StoredCredential,
+    AdminApiToken, ControlFence, ControlLease, SlotClaim, Store, StoreError, StoredCredential,
     WorkerOperationalCredential,
 };
 
@@ -85,6 +85,10 @@ pub struct MemStore {
     /// 실패 주입 대상 메서드 이름 집합 — `check`/`record` 자체가 아니라
     /// 테스트 셋업 편의를 위한 것이므로 트레이트 밖 필드.
     failing: Mutex<HashSet<&'static str>>,
+    /// `create_agent`가 후보 Worker를 받아도 **배정 없이** 저장하게 만드는
+    /// 주입 스위치. 상한 잠금이 선점에 실패한 결과를 결정적으로 세운다
+    /// (`dropping_placements` 참고).
+    drop_placements: Mutex<bool>,
     last_delete_old_login_attempts_cutoff: Mutex<Option<DateTime<Utc>>>,
 }
 
@@ -107,6 +111,22 @@ impl MemStore {
     /// 시험하기 위함).
     pub fn with_failing(self, methods: &[&'static str]) -> Self {
         self.failing.lock().unwrap().extend(methods.iter().copied());
+        self
+    }
+
+    /// `create_agent`가 후보 Worker를 실어 보내도 배정 없이 저장하도록
+    /// 만든다 — 상한 잠금이 선점에 실패한 결과(`Ok(None)`)를 결정적으로
+    /// 재현한다. `with_failing`과 달리 **오류가 아니다**: 선점 실패는
+    /// 생성을 막지 않고 배정만 떨어뜨리는 정상 경로이기 때문이다.
+    ///
+    /// 이 스위치가 필요한 이유는 경합으로 그 상태를 만들 수 없기
+    /// 때문이다. MemStore의 연산 사이에는 `.await` 양보점이 없어
+    /// `place_on_create`와 `create_agent`가 한 태스크 안에서 이어 붙고,
+    /// 8-way 배리어로 동시 생성을 던져도 두 요청이 겹치지 않았다(12회
+    /// 중 0건). 상위 계층(Dashboard·MCP 생성 핸들러)이 저장된 사실에
+    /// 되맞추는지는 결과를 직접 세워야 검증된다.
+    pub fn dropping_placements(self) -> Self {
+        *self.drop_placements.lock().unwrap() = true;
         self
     }
 
@@ -1662,7 +1682,19 @@ impl Store for MemStore {
 
     // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
 
-    async fn create_agent(&self, agent: &Agent) -> Result<(), StoreError> {
+    async fn create_agent(&self, agent: &Agent) -> Result<Option<WorkerId>, StoreError> {
+        // 상한을 `agents` 잠금 **앞에서** 읽는다. `assign_agent_worker`가
+        // `workers → agents` 순서로 잡으므로, 여기서 반대로 잡으면 두
+        // 경로가 서로를 기다린다. PgStore에서 잠금 순서를 하나로 유지한
+        // 것과 같은 이유이고, 여기서는 Mutex라 위반이 곧 데드락이다.
+        let worker_cap: Option<(bool, Option<u32>)> = agent.worker_id.map(|w| {
+            let workers = self.workers.lock().unwrap();
+            match workers.get(&w) {
+                Some(worker) => (true, worker.max_agent_processes),
+                None => (false, None),
+            }
+        });
+
         let mut agents = self.agents.lock().unwrap();
         // 유일성은 이름 전역이 아니라 `(project_id, name)` — Postgres의
         // UNIQUE 제약과 같은 범위여야 두 Store가 같은 입력에 같은 답을 낸다.
@@ -1708,8 +1740,44 @@ impl Store for MemStore {
                 )));
             }
         }
-        agents.insert(agent.id, agent.clone());
-        Ok(())
+
+        // 슬롯 선점 (로드맵 `#67` 구현 게이트 ①-A-2). PgStore와 **같은
+        // 판정**이어야 한다 — 상한을 PgStore에만 넣으면 MemStore 위의 상위
+        // 계층 테스트가 상한 경로를 한 번도 밟지 않은 채 성공 경로로
+        // 통과한다. `assign_agent_worker`가 FK에 대해 적어 둔 것과 같은
+        // 함정이다.
+        let mut placed = agent.worker_id;
+        if let Some((found, cap)) = worker_cap {
+            if !found {
+                placed = None;
+            } else if let Some(cap) = cap {
+                // 세는 술어는 `count_agents_by_worker`와 같다. 자기 자신은
+                // 아직 삽입되지 않았으므로 뺄 것이 없다.
+                let n = agents
+                    .values()
+                    .filter(|a| a.worker_id == agent.worker_id && a.status != AgentStatus::Stopped)
+                    .count();
+                if n >= cap as usize {
+                    placed = None;
+                }
+            }
+        }
+        // 테스트 주입(`dropping_placements`)은 실제 판정 **뒤**에 둔다.
+        // 앞에 두면 진짜 상한 경로가 이 스위치에 가려져, 상한을 지워도
+        // 테스트가 초록으로 통과한다.
+        if *self.drop_placements.lock().unwrap() {
+            placed = None;
+        }
+
+        let mut stored = agent.clone();
+        if placed.is_none() {
+            // 둘을 함께 떨어뜨려야 `030`의 `agents_placement_complete`와
+            // 같은 불변식이 MemStore에서도 성립한다.
+            stored.worker_id = None;
+            stored.assigned_at = None;
+        }
+        agents.insert(agent.id, stored);
+        Ok(placed)
     }
 
     async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
@@ -1786,37 +1854,53 @@ impl Store for MemStore {
         &self,
         id: AgentId,
         worker_id: WorkerId,
-    ) -> Result<bool, StoreError> {
-        // PgStore에서는 `agents.worker_id` FK가 하는 일이다. 여기서 흉내
-        // 내지 않으면 "존재하지 않는 Worker 지목"을 다루는 상위 계층
-        // 테스트가 MemStore 위에서는 성공 경로를 밟아 버려, 검증하려던
-        // 400 경로를 **한 번도 실행하지 않은 채** 통과한다.
+    ) -> Result<SlotClaim, StoreError> {
+        // PgStore에서는 잠금 SELECT가 하는 일이다(예전에는 `agents.worker_id`
+        // FK였다). 여기서 흉내 내지 않으면 "존재하지 않는 Worker 지목"을
+        // 다루는 상위 계층 테스트가 MemStore 위에서는 성공 경로를 밟아 버려,
+        // 검증하려던 400 경로를 **한 번도 실행하지 않은 채** 통과한다.
         //
-        // 판정 순서까지 맞춘다. PgStore의 UPDATE는 Agent가 없으면 0행을
-        // 갱신하고 FK 검사에 **닿지도 않으므로** 둘 다 없을 때의 답은
-        // `Ok(false)`(→ 404)이지 FK 위반이 아니다. 존재 여부는 미리
-        // 계산해 두고 판정만 Agent를 찾은 뒤로 미루면, 잠금을 중첩하지
-        // 않고도 그 순서가 된다.
-        let worker_exists = self.workers.lock().unwrap().contains_key(&worker_id);
+        // 판정 순서까지 맞춘다. PgStore는 Agent의 존재를 먼저 확인하므로
+        // 둘 다 없을 때의 답은 `NoSuchAgent`(→ 404)이지 `NoSuchWorker`가
+        // 아니다. Worker 조회는 미리 해 두고 판정만 Agent를 찾은 뒤로
+        // 미루면, 잠금을 중첩하지 않고도 그 순서가 된다 — 그리고 그
+        // 순서(`workers → agents`)는 `create_agent`와도 같아야 한다.
+        let worker_cap = self
+            .workers
+            .lock()
+            .unwrap()
+            .get(&worker_id)
+            .map(|w| w.max_agent_processes);
         let mut agents = self.agents.lock().unwrap();
-        match agents.get_mut(&id) {
-            Some(a) => {
-                if !worker_exists {
-                    return Err(StoreError::Conflict(format!(
-                        "worker {worker_id} does not exist"
-                    )));
-                }
-                let now = Utc::now();
-                a.worker_id = Some(worker_id);
-                a.assigned_at = Some(now);
-                // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
-                // (로드맵 #67 4b).
-                a.command_generation += 1;
-                a.updated_at = now;
-                Ok(true)
-            }
-            None => Ok(false),
+        if !agents.contains_key(&id) {
+            return Ok(SlotClaim::NoSuchAgent);
         }
+        let Some(cap) = worker_cap else {
+            return Ok(SlotClaim::NoSuchWorker);
+        };
+        if let Some(cap) = cap {
+            // 자기 자신을 뺀다 — 이미 그 Worker에 있는 Agent를 같은
+            // Worker로 다시 배정하는 것은 슬롯을 더 쓰지 않는다.
+            let n = agents
+                .values()
+                .filter(|a| {
+                    a.worker_id == Some(worker_id) && a.status != AgentStatus::Stopped && a.id != id
+                })
+                .count();
+            if n >= cap as usize {
+                return Ok(SlotClaim::CapReached);
+            }
+        }
+        // 위에서 존재를 확인했고 그동안 잠금을 놓지 않았다.
+        let a = agents.get_mut(&id).expect("checked above");
+        let now = Utc::now();
+        a.worker_id = Some(worker_id);
+        a.assigned_at = Some(now);
+        // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
+        // (로드맵 #67 4b).
+        a.command_generation += 1;
+        a.updated_at = now;
+        Ok(SlotClaim::Claimed)
     }
 
     async fn count_agents_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {

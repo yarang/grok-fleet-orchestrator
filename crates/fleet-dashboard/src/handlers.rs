@@ -1606,13 +1606,28 @@ pub async fn create_agent_api(
 
     // pin이 지금도 유효한지(revoke·retire 여부)는 Store가 트랜잭션 안에서
     // 본다. 여기서 미리 읽어 검사하면 그 사이에 revoke가 끼어들 수 있다.
-    state.store.create_agent(&agent).await.map_err(|e| {
+    let placed = state.store.create_agent(&agent).await.map_err(|e| {
         if let fleet_store::StoreError::Conflict(msg) = &e {
             return ApiError::Conflict(msg.clone());
         }
         tracing::error!(error = %e, "create_agent failed");
         ApiError::Store(e.to_string())
     })?;
+
+    // 저장된 사실에 로컬 구조체를 되맞춘다 (로드맵 `#67` 구현 게이트 ①-A-2).
+    // Store가 상한 잠금 아래에서 선점에 실패하면 배정 없이 생성하는데,
+    // 아래 감사 로그와 응답이 모두 이 구조체에서 나오므로 되맞추지 않으면
+    // **일어나지 않은 배정을 기록한다**. 응답의 거짓은 다시 조회하면
+    // 드러나지만 감사 로그의 거짓은 남는다.
+    if placed != agent.worker_id {
+        tracing::info!(
+            target: "fleet::placement",
+            agent_id = %agent.id,
+            attempted_worker = ?agent.worker_id.map(|w| w.to_string()),
+            "placement dropped at slot claim; agent created unplaced"
+        );
+        agent = agent.without_placement();
+    }
 
     crate::audit::record(
         &state,
@@ -1692,19 +1707,32 @@ pub async fn place_agent_api(
     };
 
     let previous_worker_id = agent.worker_id;
-    let updated = state
+    let claim = state
         .store
         .assign_agent_worker(agent_id, worker_id)
         .await
-        .map_err(|e| match e {
-            // 존재하지 않는 Worker를 지목한 경우 — FK가 잡는다. 미리 읽어
-            // 검사하지 않는 이유는 그 사이에 등록 해제가 끼어들 수 있어
-            // 검사가 보장을 주지 못하기 때문이다(pin 검증과 같은 논리).
-            fleet_store::StoreError::Conflict(msg) => ApiError::BadRequest(msg),
-            other => ApiError::Store(other.to_string()),
-        })?;
-    if !updated {
-        return Err(ApiError::NotFound(format!("agent {id}")));
+        .map_err(|e| ApiError::Store(e.to_string()))?;
+    match claim {
+        fleet_store::SlotClaim::Claimed => {}
+        // 지금의 fleet 상태이지 요청의 결함이 아니다 — 위의 후보 없음과
+        // 같은 이유로 409다. 운영자는 다른 Worker를 지목하거나 그 Worker에서
+        // Agent를 회수한 뒤 그대로 다시 시도하면 된다.
+        fleet_store::SlotClaim::CapReached => {
+            return Err(ApiError::Conflict(format!(
+                "worker {worker_id} is at its agent process cap"
+            )))
+        }
+        fleet_store::SlotClaim::NoSuchAgent => {
+            return Err(ApiError::NotFound(format!("agent {id}")))
+        }
+        // 등록 해제가 선택과 선점 사이에 끼어든 경우. 예전에는 FK 위반이
+        // `Conflict`로 올라와 400이 됐고, 여기서도 400을 유지한다 —
+        // 다시 시도해도 같은 답이 나오는 종류의 실패다.
+        fleet_store::SlotClaim::NoSuchWorker => {
+            return Err(ApiError::BadRequest(format!(
+                "no such worker for agent placement: {worker_id}"
+            )))
+        }
     }
 
     // `assigned_at`은 DB의 `NOW()`가 정하므로 로컬 구조체를 고쳐 응답하면

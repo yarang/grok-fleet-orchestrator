@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/provisioning.md"
-last_verified: "2026-08-31"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 ---
 
@@ -237,11 +237,13 @@ Task 없이도 Project를 `draining`에 붙잡는지 — 두 가지이며 `crate
   (Dashboard의 `DashboardState`에는 `FleetState`가 없다). 따라서 **레지스트리보다 한 번의 쓰기만큼
   뒤진다**. `Store::update_worker_circuit_state`는 기본 구현이 no-op이므로 MemStore 기반 테스트는
   `Worker::circuit_state`를 직접 세팅한다.
-- 원장을 읽고 INSERT하기까지가 **원자적이지 않다.** 동시에 두 Agent를 만들면 둘 다 같은 Worker를
-  고를 수 있다. 상한이 없던 4a에서는 부하 분포가 잠시 기우는 것으로 끝났지만, 게이트 ①-A-1이
-  상한을 들여온 지금은 그 창이 초과 배정을 뜻한다 — 그래서 CAS slot claim이 `#67` 구현 게이트
-  ①-A-2다. 아래 §"배정 슬롯 상한"의 "선점은 `workers` 행의 잠금 아래에서 센다"가 그 메커니즘의
-  정본이다.
+- ~~원장을 읽고 INSERT하기까지가 **원자적이지 않다.**~~ 4a 시점의 한계였고 게이트 ①-A-2가
+  닫았다. 동시에 두 Agent를 만들면 둘 다 같은 Worker를 고를 수 있었는데, 상한이 없던 4a에서는
+  부하 분포가 잠시 기우는 것으로 끝났지만 게이트 ①-A-1이 상한을 들여온 뒤로는 그 창이 초과
+  배정을 뜻했다. `choose_worker`의 선택은 여전히 원자적이지 않지만, **쓰기 시점의 선점**이
+  그 뒤에서 불변식을 세운다 — 아래 §"배정 슬롯 상한"의 "선점은 `workers` 행의 잠금 아래에서
+  센다"가 그 메커니즘의 정본이다. 남은 것은 불변식이 아니라 배정을 놓치는 것뿐이다
+  (같은 §의 "남은 한계: 헛도는 미배정").
 
 ## 구현 상태 (`#67` 4b — 수렴 프로토콜)
 
@@ -605,16 +607,17 @@ lease 테이블 자체가 필요 없다. 세어야 할 것이 lease 행이 아�
 
 ①-A는 다시 둘로 나뉘고, 각각 독립적으로 검증된다.
 
-| | 내용 | 성립하는 것 |
-| --- | --- | --- |
-| **①-A-1** | Worker가 등록 시 상한을 보고 → `workers.max_agent_processes`(nullable) → `choose_worker`의 후보 필터 | 가득 찬 Worker가 후보에서 빠진다. 경합은 남는다 |
-| **①-A-2** | `workers` 행을 `FOR UPDATE`로 잠근 아래에서 세고 조건부로 배정 | 불변식이 성립한다 |
+| | 내용 | 성립하는 것 | 상태 |
+| --- | --- | --- | --- |
+| **①-A-1** | Worker가 등록 시 상한을 보고 → `workers.max_agent_processes`(nullable) → `choose_worker`의 후보 필터 | 가득 찬 Worker가 후보에서 빠진다. 경합은 남는다 | 완료 |
+| **①-A-2** | `workers` 행을 `FOR UPDATE`로 잠근 아래에서 세고 조건부로 배정 | 불변식이 성립한다 | 완료 |
 
-①-A-1만으로는 불변식이 서지 **않는다**. 필터는 읽은 시점의 카운트로 판정하므로 동시
-요청 둘이 같은 마지막 슬롯을 보고 함께 통과할 수 있다. 그런데도 먼저 커밋하는 것은,
+①-A-1만으로는 불변식이 서지 **않았다**. 필터는 읽은 시점의 카운트로 판정하므로 동시
+요청 둘이 같은 마지막 슬롯을 보고 함께 통과할 수 있다. 그런데도 먼저 커밋한 것은,
 필터가 없으면 ①-A-2가 잠금 아래에서 셀 **숫자 자체가 존재하지 않기** 때문이다 —
 상한이 도착하는 것이 선행 조건이고, 그것만으로도 정상 경로(경합 없는 배정)에서는
-초과가 사라진다.
+초과가 사라진다. ①-A-2가 그 위에 잠금을 얹으면서 불변식은 이제 성립한다(아래
+§"선점은 `workers` 행의 잠금 아래에서 센다").
 
 ### 상한의 출처는 Worker이고, 경로는 등록이다
 
@@ -688,6 +691,114 @@ Worker도 4로 기록되고, 배정은 그 4를 근거로 초과한다. NULL은 
 이것이 게이트 ①이 말한 "CAS slot claim"이며, `worker_execution_lease` 없이 성립한다.
 lease 테이블이 필요해지는 것은 **claim의 대상이 행이 아니라 명령의 세대**가 될 때,
 즉 ①-B다.
+
+READ COMMITTED이라서 `FOR UPDATE`만으로 충분하다는 점이 중요하다. 이 격리 수준에서는
+**문 하나하나가 새 스냅샷을 뜨므로**, 잠금을 얻고 나서 다시 센 `COUNT(*)`가 방금
+커밋된 승자의 행을 본다. REPEATABLE READ였다면 같은 코드가 직렬화 오류를 올렸을 것이고
+재시도 루프가 필요했을 것이다 — 즉 여기서 격리 수준은 배경이 아니라 설계의 전제다.
+
+#### 실패는 하나가 아니라 둘이다
+
+선점 결과를 `bool`로 돌리지 않는다. 실패가 **서로 다른 두 사실**이기 때문이다. 상한에
+걸린 것은 지금의 fleet 상태이므로 나중에 다시 하면 되고(409), 존재하지 않는 대상을
+지목한 것은 요청의 결함이므로 다시 해도 같다(404/400). `bool`은 그 둘을 한 칸에 뭉개
+호출부가 반드시 한쪽으로 오분류하게 만든다. 그래서 `Store::assign_agent_worker`는
+`SlotClaim::{Claimed, CapReached, NoSuchAgent, NoSuchWorker}`를 돌린다.
+
+**`NoSuchAgent`가 `NoSuchWorker`보다 우선한다.** Postgres 구현의 UPDATE는 Agent가 없으면
+0행을 갱신하고 FK 검사에 닿지도 않으므로, 그 순서가 구현의 사실이다. MemStore도 같은
+순서를 흉내 낸다. 이 순서를 지키려고 Agent 존재 확인을 **잠그지 않고** 먼저 읽는다 —
+`SELECT ... FOR UPDATE`로 잠그면 `agents → workers` 순서가 생겨 아래 §의 잠금 순서를
+깨뜨린다.
+
+#### 잠금 순서는 `workers → agents` 하나뿐이다
+
+두 경로(`create_agent`의 INSERT, `assign_agent_worker`의 UPDATE)가 모두 `workers` 행을
+먼저 잠근 뒤 `agents`를 만진다. 순서가 하나뿐이면 순환이 없고, 순환이 없으면 데드락이
+없다. MemStore에서는 이것이 권고가 아니라 **강제**다 — Mutex 두 개를 반대 순서로 잡으면
+곧바로 서로를 기다리므로, `create_agent`에서 상한을 읽는 코드가 `agents` 잠금 **앞에**
+있어야 한다.
+
+#### 생성은 실패하지 않고, 배정만 떨어진다
+
+`create_agent`가 상한에 걸렸을 때 Agent 생성 자체를 실패시키지 않는다. §"구현 상태
+(`#67` 4a)"가 정한 대로 `worker_id = NULL`은 정상 상태이고, 재배정 경로
+(`POST /api/agents/{id}/place`)가 회복을 맡는다. 그래서 `create_agent`의 반환형이
+`Result<Option<WorkerId>, StoreError>`다 — **실제로 기록된 배정**을 돌려주고, 호출부는
+로컬 구조체를 그 사실에 되맞춘다.
+
+되맞추지 않으면 응답과 **감사 로그**가 일어나지 않은 배정을 기록한다. 두 생성 핸들러
+(Dashboard·MCP)가 응답과 감사 detail을 같은 구조체에서 만들기 때문이다. 응답의 거짓은
+다시 조회하면 드러나지만 감사 로그의 거짓은 남는다 — 저장소가 조용히 강등하면 안 되는
+이유가 이것이고, 반환형을 넓힌 이유도 이것이다. 배정을 지울 때는
+`Agent::without_placement()`로 `worker_id`와 `assigned_at`을 **함께** 지운다.
+마이그레이션 `030`의 `agents_placement_complete` CHECK가 "둘 다 있거나 둘 다 없거나"를
+요구한다.
+
+#### 재배정은 자기를 세지 않는다
+
+`assign_agent_worker`의 카운트에는 `AND id <> $agent_id`가 붙는다. 이미 그 Worker에 있는
+Agent를 같은 Worker로 다시 배정하는 것은 슬롯을 **추가로 쓰지 않으므로**, 자기 제외가
+없으면 정확히 가득 찬 Worker에서 그 무해한 no-op이 `CapReached`로 거절된다.
+`create_agent`에는 이 제외가 필요 없다 — 그 시점에는 행이 아직 없다.
+
+카운트 조건은 필터와 선점에서 **같아야 한다**(`status <> 'stopped'`). 둘이 슬롯의 정의를
+달리 보면 필터를 통과한 Worker가 선점에서 거절되어, 배정이 이유 없이 실패한다.
+
+#### 증명은 잠금 자리마다 따로 필요하다
+
+`create_agent`와 `assign_agent_worker`는 각자 `FOR UPDATE`를 잡는다. 한쪽을 붉힌 것은
+다른 쪽에 대해 아무것도 말하지 않으므로 테스트도 둘이다 —
+`concurrent_creates_cannot_exceed_the_cap`과 `concurrent_placements_cannot_exceed_the_cap`이
+상한 1인 Worker에 8-way 배리어 경합을 걸고, 반환 variant의 분포뿐 아니라 **저장된 행 수**도
+함께 단정한다(반환값만 보면 Store가 거짓말을 해도 통과한다).
+
+**동시성 테스트의 풀은 크기를 정하는 것으로 부족하고 미리 채워야 한다.** sqlx의 `connect()`는
+커넥션을 하나만 열고 `min_connections`의 기본값은 0이므로, `max_connections`만 올리면 직렬화가
+체크아웃에서 **접속**으로 한 겹 내려갈 뿐이다. 실측으로 실효 동시성이 2였고, 그 하네스에서
+잠금을 지운 코드는 6회 내내 `left: (2, 6)`을 냈다 — 값이 흔들리지 않는 것은 창이 좁다는 뜻이
+아니라 하네스가 묶고 있다는 단서였다. 커넥션 N개를 직접 `acquire()`했다 버리는 `race_pool()`을
+쓰면 같은 코드가 `left: (8, 0)`이 된다. 8개 **전부**가 상한 1인 Worker에 앉는다.
+
+**핸들러 쪽 되맞춤은 경합으로 증명할 수 없고, 결과를 직접 세워 증명한다.** 되맞춤
+(§"생성은 실패하지 않고, 배정만 떨어진다")은 순차 경로에서 도달할 수 없다 — ①-A-1의 필터와
+①-A-2의 선점이 `status <> 'stopped'`라는 같은 술어를 쓰므로 `choose_worker`가 가득 찬 Worker를
+지목하지 않는다. 그렇다고 경합으로 닿을 수 있는 것도 아니다: MemStore의 연산 사이에는 `.await`
+양보점이 없어 `place_on_create`와 `create_agent`가 한 태스크 안에서 이어 붙는다. 되맞춤을 지운
+트리에서 2-way `tokio::join!` 12회, 8-way 배리어 12회 **모두 0건**이 붉어졌다 — 동시성을 올려
+넓힐 창이 애초에 없다.
+
+그래서 `MemStore::dropping_placements()`로 결과를 직접 세운다. 후보 Worker를 실어 보내도 배정
+없이 저장하는 주입 스위치이며, 기존 `with_failing`으로는 표현할 수 없다 — 선점 실패는 오류가
+아니라 `Ok(None)`이고, 생성은 성공한 채 배정만 떨어지기 때문이다. 스위치는 `if n >= cap`이라는
+**진짜 판정 뒤에** 놓는다. 앞에 두면 상한 경로가 가려져 상한을 지워도 초록이 된다. 두 테스트
+모두 `place_on_create`가 여전히 `Some`을 돌려주는지 먼저 단정해 공허한 통과를 막는다.
+
+| 테스트 | 위치 | 무엇을 증명하는가 |
+|---|---|---|
+| `concurrent_creates_through_the_api_cannot_exceed_the_cap` | `fleet-dashboard/tests/dashboard_api.rs` | 8-way 경합에서 API 계층의 상한. **되맞춤 분기에는 닿지 못한다**(위 실측) |
+| `create_agent_follows_the_store_when_the_slot_claim_drops_the_placement` | 같은 파일 | 선점이 떨어진 결과를 결정적으로 세워, 응답과 **감사 로그**가 저장된 사실을 따르는지 |
+| `create_agent_follows_the_store_when_the_slot_claim_drops_the_placement` | `fleet-mcp/src/handlers.rs` 테스트 모듈 | 같은 시나리오의 MCP 표면. **감사 기록 호출이 없으므로 응답만** 본다 |
+
+**두 표면의 위험 등급은 다르다.** 대시보드는 되맞춤 뒤에 `crate::audit::record`를 부르므로
+되맞춤이 없으면 일어나지 않은 배정이 감사 로그에 영구히 남는다. `fleet-mcp`의
+`handle_create_agent`에는 감사 기록 호출이 없어 거짓이 응답에만 실리고, 응답은 다시 읽으면
+드러난다. 코드는 공유하지만 위험은 공유하지 않는다.
+
+**두 증명이 만나는 자리는 실검증뿐이다.** 상한 테스트는 PgStore를 핸들러 없이 때리고
+되맞춤 테스트는 핸들러를 MemStore로 때리므로, "Postgres가 잠금 아래에서 `Ok(None)`을
+준다 → 핸들러가 되맞춘다 → 감사 로그에 null이 남는다"라는 합성은 트리 안의 어느
+테스트도 통째로 밟지 않는다. 살아 있는 서버에 8-way로 `POST /api/agents`를 던져 그
+합성을 확인했다 — 배정 성공 1건, **되맞춤 2건**(`placement dropped at slot claim`,
+`attempted_worker=Some(...)`), 후보 없음 5건이고 8건 전부 응답·감사 로그·저장된 행이
+일치했다. 되맞춤 여부는 응답으로는 구분되지 않고 `fleet::placement` 로그로만 갈린다.
+
+#### 남은 한계: 헛도는 미배정
+
+`choose_worker`는 승자를 **하나만** 돌려준다. 두 요청이 같은 후보를 골랐다가 한쪽이
+선점에 실패하면, 다른 Worker가 비어 있어도 그 요청은 미배정으로 끝난다. 불변식은
+깨지지 않고 **배정이 놓칠 뿐**이다. 답은 후보를 순위 목록으로 돌려 흘러내리게 하는
+것이지만, `POST /api/agents/{id}/place`가 이미 회복 경로이므로 미룬다.
 
 ### 만들지 않은 것
 

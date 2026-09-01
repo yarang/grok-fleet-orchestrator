@@ -38,7 +38,7 @@ use fleet_core::{
     Agent, AgentDesiredStatus, AgentFilter, AgentObservation, AgentObservationReason,
     AgentObservedStatus, AgentStatus, Project, ProjectStatus, Worker,
 };
-use fleet_store::{PgStore, Store, StoreError};
+use fleet_store::{PgStore, SlotClaim, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
 fn database_url() -> Option<String> {
@@ -78,6 +78,41 @@ async fn seed_project(store: &PgStore, label: &str) -> Project {
     let project = Project::new(format!("agents-{label}-{}", uuid::Uuid::new_v4()));
     store.create_project(&project).await.unwrap();
     project
+}
+
+/// 참가자 수만큼 **미리 열어 둔** 풀 위의 `PgStore` — 경합 테스트 전용
+/// (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// 공유 `try_connect`의 4개짜리 풀로 8-way 경합을 돌리면 커넥션 **체크아웃**
+/// 에서 먼저 직렬화되어, `FOR UPDATE`가 없어도 테스트가 통과한다. 그런데
+/// `max_connections`만 키우는 것으로는 부족하다. sqlx의 `connect()`는 커넥션
+/// 하나만 세우고 `min_connections`의 기본값은 0이라, 배리어가 풀리는 순간
+/// 나머지 N-1개를 **그 자리에서** 수립해야 한다. 그 수립 비용이 태스크들을
+/// 어긋나게 해서 실효 동시성이 떨어진다 — 체크아웃 직렬화와 같은 결함이 한
+/// 겹 아래에서 반복되는 것이다. 실측이 그것을 보여 준다: 잠금을 뺀 상태에서
+/// 미리 채우지 않은 풀은 8회 시도 중 **매번 정확히 2건**만 겹쳤고, 미리 채운
+/// 뒤에는 8건이 겹쳤다. 전자에서는 더 느리거나 더 빠른 기계가 1건을 내놓아
+/// 잠금 없는 코드가 초록으로 통과할 수 있다.
+///
+/// `min_connections`를 올리는 것만으로도 부족하다 — 그것을 채우는 것은
+/// 백그라운드 태스크라 `connect()`가 돌아온 시점에 다 찼다는 보장이 없고,
+/// 여기서 필요한 것은 보장이다. 그래서 N개를 실제로 잡았다 놓는다.
+async fn race_pool(n: usize) -> std::sync::Arc<PgStore> {
+    let url = database_url().expect("race_pool은 DATABASE_URL이 있을 때만 부른다");
+    let pool = PgPoolOptions::new()
+        .max_connections(n as u32)
+        .min_connections(n as u32)
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("DATABASE_URL={url} set but connection failed: {e}"));
+    let mut warm = Vec::with_capacity(n);
+    for _ in 0..n {
+        warm.push(pool.acquire().await.expect("풀을 미리 채우지 못했다"));
+    }
+    drop(warm);
+    let store = PgStore::from_pool(pool);
+    store.migrate().await.unwrap();
+    std::sync::Arc::new(store)
 }
 
 #[tokio::test]
@@ -415,10 +450,13 @@ async fn assign_stamps_assigned_at_from_the_database() {
     store.create_agent(&agent).await.unwrap();
 
     let before = chrono::Utc::now();
-    assert!(store
-        .assign_agent_worker(agent.id, worker.id)
-        .await
-        .unwrap());
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, worker.id)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
 
     // 호출자가 손에 든 `agent`는 여전히 미배정이다. 저장된 행을 **다시
     // 읽어야** `assigned_at`을 알 수 있다 — `NOW()`를 찍는 것이 DB이기
@@ -434,32 +472,33 @@ async fn assign_stamps_assigned_at_from_the_database() {
 }
 
 #[tokio::test]
-async fn assign_returns_false_for_an_unknown_agent() {
+async fn assign_reports_an_unknown_agent() {
     require_db!(store);
     let worker = seed_worker(&store, "noagent").await;
     let missing = fleet_core::AgentId::new();
-    assert!(
-        !store.assign_agent_worker(missing, worker.id).await.unwrap(),
-        "없는 Agent는 오류가 아니라 `false`다 — 호출자가 404로 번역한다"
+    assert_eq!(
+        store.assign_agent_worker(missing, worker.id).await.unwrap(),
+        SlotClaim::NoSuchAgent,
+        "없는 Agent는 오류가 아니라 판정값이다 — 호출자가 404로 번역한다"
     );
 }
 
 #[tokio::test]
-async fn assign_to_an_unknown_worker_is_a_conflict() {
+async fn assign_to_an_unknown_worker_is_reported_not_raised() {
     require_db!(store);
     let project = seed_project(&store, "badworker").await;
     let agent = Agent::new(project.id, "target");
     store.create_agent(&agent).await.unwrap();
 
-    // 미리 조회해서 막지 않는 이유: 조회와 UPDATE 사이에 등록 해제가 끼어들
-    // 수 있어 어차피 FK가 최종 판정자다(template pin 검증과 같은 논리).
-    let err = store
-        .assign_agent_worker(agent.id, fleet_core::WorkerId::new())
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, StoreError::Conflict(_)),
-        "FK 위반은 서버 결함이 아니라 지목한 대상이 없다는 뜻이다: {err:?}"
+    // 예전에는 FK 위반이 `StoreError::Conflict`로 올라왔다. ①-A-2가 상한을
+    // 보려고 `workers` 행을 `FOR UPDATE`로 먼저 잠그면서, 없는 Worker는
+    // 그 SELECT가 먼저 알아낸다 — 오류가 아니라 판정값이 됐다.
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, fleet_core::WorkerId::new())
+            .await
+            .unwrap(),
+        SlotClaim::NoSuchWorker
     );
 }
 
@@ -707,7 +746,10 @@ async fn an_ack_from_a_worker_that_no_longer_owns_the_agent_is_rejected() {
     // 재배정도 세대를 올린다 — 새 Worker는 이 명령을 아직 본 적이 없으므로
     // 세대를 올리지 않으면 `command_delivered()`가 "새 Worker가 확인했다"는
     // 거짓을 말하게 된다.
-    assert!(store.assign_agent_worker(agent.id, new.id).await.unwrap());
+    assert_eq!(
+        store.assign_agent_worker(agent.id, new.id).await.unwrap(),
+        SlotClaim::Claimed
+    );
     let moved = store.get_agent(agent.id).await.unwrap().unwrap();
     assert_eq!(moved.command_generation, 2);
     assert_eq!(moved.last_acked_generation, 0);
@@ -1078,5 +1120,218 @@ async fn observing_does_not_move_updated_at() {
         after.updated_at.timestamp_micros(),
         before.timestamp_micros(),
         "관측은 Agent의 갱신 시각을 밀지 않는다"
+    );
+}
+
+/// 상한이 **집행되는 불변식**인지 (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// ①-A-1이 넣은 것은 `choose_worker`의 후보 필터였고, 그것은 읽은 시점의
+/// 카운트로 판정하므로 동시에 들어온 두 배정이 **둘 다** 상한 미만을 보고
+/// 둘 다 통과할 수 있었다. 여기서 증명하려는 것은 그 창이 닫혔다는 것이다.
+///
+/// **이 테스트는 MemStore로 대체할 수 없다.** 잠금이 하는 일을 흉내 내는
+/// 것이 아니라 잠금이 실재하는지를 보는 것이므로 실 DB여야 한다. 하네스가
+/// 판정을 위조하지 않게 하는 자리는 `race_pool`이 맡는다 — 왜 그것이
+/// 필요한지는 그쪽 주석에 있다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_placements_cannot_exceed_the_cap() {
+    const N: usize = 8;
+    if database_url().is_none() {
+        return;
+    }
+    let store = race_pool(N).await;
+
+    let project = seed_project(&store, "cap-race").await;
+    let name = format!("agents-w-caprace-{}", uuid::Uuid::new_v4());
+    let mut worker = Worker::new(name.clone(), format!("http://{name}.invalid"));
+    // 상한 1 — 성공해야 하는 배정이 정확히 하나여야 세는 실수가 숨지 않는다.
+    worker.max_agent_processes = Some(1);
+    store.upsert_worker(&worker).await.unwrap();
+
+    let mut ids = Vec::with_capacity(N);
+    for i in 0..N {
+        let agent = Agent::new(project.id, format!("racer-{i}"));
+        store.create_agent(&agent).await.unwrap();
+        ids.push(agent.id);
+    }
+
+    // Barrier가 없으면 앞선 태스크가 끝난 뒤에 다음이 시작해서, 경합이
+    // 일어났는지가 스케줄러의 기분에 달리게 된다. 확률적으로 통과하는
+    // 테스트는 통과해도 아무것도 증명하지 않는다.
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(N));
+    let mut handles = Vec::with_capacity(N);
+    for id in ids {
+        let store = store.clone();
+        let gate = gate.clone();
+        let worker_id = worker.id;
+        handles.push(tokio::spawn(async move {
+            gate.wait().await;
+            store.assign_agent_worker(id, worker_id).await.unwrap()
+        }));
+    }
+
+    let mut claimed = 0usize;
+    let mut cap_reached = 0usize;
+    for h in handles {
+        match h.await.unwrap() {
+            SlotClaim::Claimed => claimed += 1,
+            SlotClaim::CapReached => cap_reached += 1,
+            other => panic!("배정도 상한도 아닌 판정이 나왔다: {other:?}"),
+        }
+    }
+    assert_eq!(
+        (claimed, cap_reached),
+        (1, N - 1),
+        "상한 1인 Worker에 {N}개가 동시에 달려들면 하나만 성공해야 한다"
+    );
+
+    // 반환값만 보면 Store가 거짓말을 해도 통과한다. 저장된 행을 센다.
+    let load = store.count_agents_by_worker().await.unwrap();
+    assert_eq!(
+        load.get(&worker.id).copied().unwrap_or(0),
+        1,
+        "판정과 저장된 행이 어긋나면 판정 쪽이 거짓이다"
+    );
+}
+
+/// 동시 **생성**은 상한을 넘기지 못한다 (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// 바로 위의 테스트가 증명하는 것은 `assign_agent_worker`의 UPDATE 경로다.
+/// 그런데 ①-A가 애초에 지목한 시나리오는 **생성** 쪽이었다 — "동시에 들어온
+/// 두 생성 요청이 같은 Worker를 골라 그 Worker의 프로세스 상한을 넘긴다".
+/// 두 경로는 각자 따로 잠금을 걸므로 한쪽의 붉은 증거가 다른 쪽을 대신하지
+/// 않는다. 한쪽만 붉혀 놓고 "둘 다 닫혔다"고 적으면 증거보다 강한 주장이
+/// 된다.
+///
+/// 생성 트랜잭션은 pin 검증까지 포함해 배정보다 길다. 잠금이 없으면 창이
+/// 그만큼 넓어지므로 실패는 여기서 더 크게 나타난다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_creates_cannot_exceed_the_cap() {
+    const N: usize = 8;
+    if database_url().is_none() {
+        return;
+    }
+    let store = race_pool(N).await;
+
+    let project = seed_project(&store, "create-race").await;
+    let name = format!("agents-w-createrace-{}", uuid::Uuid::new_v4());
+    let mut worker = Worker::new(name.clone(), format!("http://{name}.invalid"));
+    worker.max_agent_processes = Some(1);
+    store.upsert_worker(&worker).await.unwrap();
+
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(N));
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let store = store.clone();
+        let gate = gate.clone();
+        let worker_id = worker.id;
+        let project_id = project.id;
+        handles.push(tokio::spawn(async move {
+            // Agent 구성은 배리어 **앞에서** 끝낸다. 배리어 뒤에 남는 것이
+            // 적을수록 겹치는 구간이 정확히 선점 트랜잭션이 된다.
+            let agent = Agent::new(project_id, format!("creator-{i}"))
+                .with_placement(worker_id, chrono::Utc::now());
+            let id = agent.id;
+            gate.wait().await;
+            (id, store.create_agent(&agent).await.unwrap())
+        }));
+    }
+
+    let mut placed = 0usize;
+    let mut unplaced = 0usize;
+    for h in handles {
+        let (id, result) = h.await.unwrap();
+        match result {
+            Some(w) => {
+                assert_eq!(w, worker.id, "요청한 Worker가 아닌 곳에 배정됐다");
+                placed += 1;
+            }
+            None => unplaced += 1,
+        }
+        // 어느 쪽이든 Agent 자체는 살아 있어야 한다. 상한은 배정을 떨어뜨릴
+        // 뿐 생성을 되돌리지 않는다 — 4a가 정한 것이다.
+        assert!(
+            store.get_agent(id).await.unwrap().is_some(),
+            "상한이 Agent 생성을 되돌렸다"
+        );
+    }
+    assert_eq!(
+        (placed, unplaced),
+        (1, N - 1),
+        "상한 1인 Worker로 {N}개가 동시에 생성되면 배정은 하나뿐이어야 한다"
+    );
+
+    // 반환값이 아니라 저장된 행을 센다. 둘이 어긋나면 거짓인 쪽은 반환값이고,
+    // 상위 계층의 감사 로그는 그 반환값을 그대로 적는다.
+    let load = store.count_agents_by_worker().await.unwrap();
+    assert_eq!(
+        load.get(&worker.id).copied().unwrap_or(0),
+        1,
+        "판정과 저장된 행이 어긋나면 판정 쪽이 거짓이다"
+    );
+}
+
+/// 상한에 걸린 배정은 생성을 되돌리지 않는다 (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// 4a가 정한 것은 "Agent 정의가 Worker 가용성에 인질로 잡히지 않는다"였다.
+/// 선점을 생성 트랜잭션 안으로 옮기면서 그 결정이 뒤집히지 않았는지 본다 —
+/// 그리고 반환값이 **실제로 기록된 배정**인지도 함께 본다. 반환값이
+/// 거짓이면 상위 계층의 감사 로그가 일어나지 않은 배정을 적는다.
+#[tokio::test]
+async fn creating_onto_a_full_worker_drops_the_placement_not_the_agent() {
+    require_db!(store);
+    let project = seed_project(&store, "create-cap").await;
+    let name = format!("agents-w-createcap-{}", uuid::Uuid::new_v4());
+    let mut worker = Worker::new(name.clone(), format!("http://{name}.invalid"));
+    worker.max_agent_processes = Some(1);
+    store.upsert_worker(&worker).await.unwrap();
+
+    let first = Agent::new(project.id, "first").with_placement(worker.id, chrono::Utc::now());
+    assert_eq!(store.create_agent(&first).await.unwrap(), Some(worker.id));
+
+    let second = Agent::new(project.id, "second").with_placement(worker.id, chrono::Utc::now());
+    assert_eq!(
+        store.create_agent(&second).await.unwrap(),
+        None,
+        "상한에 걸린 배정은 `None`으로 보고된다"
+    );
+
+    let stored = store
+        .get_agent(second.id)
+        .await
+        .unwrap()
+        .expect("agent row");
+    assert!(stored.worker_id.is_none(), "Agent 자체는 생성됐다");
+    assert!(
+        stored.assigned_at.is_none(),
+        "`030`의 CHECK가 요구하는 대로 두 반쪽이 함께 비어야 한다"
+    );
+}
+
+/// 같은 Worker로의 재배정은 자기 슬롯을 두 번 세지 않는다
+/// (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// 카운트에서 자기 자신을 빼지 않으면, 정확히 가득 찬 Worker에 이미 있는
+/// Agent를 같은 Worker로 다시 배정하는 것이 거절된다. 그 재배정은 슬롯을
+/// 하나도 더 쓰지 않으므로 상한과 아무 상관이 없다.
+#[tokio::test]
+async fn replacing_onto_the_same_full_worker_is_not_capped() {
+    require_db!(store);
+    let project = seed_project(&store, "self-cap").await;
+    let name = format!("agents-w-selfcap-{}", uuid::Uuid::new_v4());
+    let mut worker = Worker::new(name.clone(), format!("http://{name}.invalid"));
+    worker.max_agent_processes = Some(1);
+    store.upsert_worker(&worker).await.unwrap();
+
+    let agent = Agent::new(project.id, "resident").with_placement(worker.id, chrono::Utc::now());
+    assert_eq!(store.create_agent(&agent).await.unwrap(), Some(worker.id));
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, worker.id)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed,
+        "이미 그 Worker에 있는 Agent의 재배정은 슬롯을 더 쓰지 않는다"
     );
 }

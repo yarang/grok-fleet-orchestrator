@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-08-30"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 owners: ["architecture", "operations"]
 ---
@@ -158,7 +158,7 @@ control_plane_lease.expires_at < NOW()`). 이 술어는 lease가 **왜** 만료�
 | 4. Primary 종료 뒤 수동 승격 · Worker 재연결 · pending reconciliation E2E | **미착수** | 라이브 실행은 lease 인수인계만 관찰했다. 수동 승격 절차, Worker 재연결, reconciliation은 어느 것도 실행하지 않았다 |
 | 5. schema/binary 비호환 Standby 기동 거부 | **부분** | **schema 절반은 닫혔다** — 아래 "기동 호환성 게이트" 참고. **binary 버전 검사는 미착수** — 버전을 DB에 쓰는 생산자가 없다 |
 | 6. partition 중 Worker self-fencing과 stale process cleanup E2E | **미착수** | Worker self-fencing 미구현 |
-| 7. 동시 slot claim · ACK 유실 · Worker reincarnation에서 Agent 중복 process 없음 | **미착수** | `worker_execution_lease`가 없다 — Agent 엔티티는 `#49` 1단계(2026-08-28)로 생겼으므로 이 칸의 "Agent 엔티티가 없다"는 더 이상 이유가 아니다. **reincarnation의 관측 절반은 `#67` 2단계(2026-08-29)가 닫았다** — `workers.incarnation_started_at`이 워커 재시작을 오케스트레이터 관측으로 기록하고 reconciler가 그보다 앞선 dispatch를 고아로 회수한다. 그러나 그것은 **Task 회수**이지 Agent process 중복 방지가 아니다 — 워커 안에서 살아남은 프로세스를 죽일 수단은 여전히 없다 |
+| 7. 동시 slot claim · ACK 유실 · Worker reincarnation에서 Agent 중복 process 없음 | **부분** | **slot claim은 Store의 두 진입점 모두에서 닫혔다** — `#67` 4a 후속(①-A-2)이 `workers` 행을 `FOR UPDATE`로 잠근 아래에서 다시 세고 조건부로 배정한다(`PgStore::create_agent`·`assign_agent_worker`, [Agent 프로비저닝](agents/provisioning.md)의 §"배정 슬롯 상한"). 잠금이 두 자리에 따로 걸려 있으므로 증명도 둘이다 — `fleet-store`의 `concurrent_creates_cannot_exceed_the_cap`과 `concurrent_placements_cannot_exceed_the_cap`이 각각 8-way 경합으로 증명하며, `FOR UPDATE`를 한 자리씩 지운 트리에서 각 3회 전부 붉어지는 것을 먼저 관찰했다. **API 표면이 저장된 사실을 따르는지는 별도로 닫았다** — Dashboard·MCP의 생성 핸들러가 선점 실패 시 응답(과 Dashboard의 경우 감사 로그)에서 배정을 거두는지를 `MemStore::dropping_placements()` 주입으로 결정적으로 증명한다(각 표면 GREEN 3/3, 되맞춤을 한 표면씩만 지우면 RED 3/3). 경합으로는 그 분기에 닿지 못한다 — MemStore에는 `.await` 양보점이 없어 2-way·8-way 각 12회 모두 0건이었다. 두 증명의 합성은 실검증에서 닫았다 — 살아 있는 서버에 8-way로 던져 배정 1건·되맞춤 2건·후보 없음 5건으로 갈렸고, 8건 전부 응답·감사 로그·저장된 행이 일치했다. **나머지 절반은 열려 있다** — `worker_execution_lease`가 없다. Agent 엔티티는 `#49` 1단계(2026-08-28)로 생겼으므로 이 칸의 "Agent 엔티티가 없다"는 더 이상 이유가 아니다. **reincarnation의 관측 절반은 `#67` 2단계(2026-08-29)가 닫았다** — `workers.incarnation_started_at`이 워커 재시작을 오케스트레이터 관측으로 기록하고 reconciler가 그보다 앞선 dispatch를 고아로 회수한다. 그러나 그것은 **Task 회수**이지 Agent process 중복 방지가 아니다 — 워커 안에서 살아남은 프로세스를 죽일 수단은 여전히 없다 |
 
 ### epoch 강제(불변식 4·5)를 미룬 이유와 귀속
 

@@ -1186,7 +1186,8 @@ async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, J
         agent = agent.with_placement(worker_id, assigned_at);
     }
 
-    ctx.state
+    let placed = ctx
+        .state
         .store
         .create_agent(&agent)
         .await
@@ -1194,6 +1195,19 @@ async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, J
             fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
             other => JsonRpcError::internal(format!("store error: {other}")),
         })?;
+
+    // 저장된 사실에 되맞춘다 (로드맵 `#67` 구현 게이트 ①-A-2). Store가 상한
+    // 잠금 아래에서 선점에 실패하면 배정 없이 생성되므로, 되맞추지 않으면
+    // 응답이 일어나지 않은 배정을 말한다. Dashboard 생성 경로와 같은 처리다.
+    if placed != agent.worker_id {
+        tracing::info!(
+            target: "fleet::placement",
+            agent_id = %agent.id,
+            attempted_worker = ?agent.worker_id.map(|w| w.to_string()),
+            "placement dropped at slot claim; agent created unplaced"
+        );
+        agent = agent.without_placement();
+    }
 
     Ok(schema::tool_json(&agent_json(&agent)))
 }
@@ -1240,14 +1254,33 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
             .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?,
     };
 
-    ctx.state
+    let claim = ctx
+        .state
         .store
         .assign_agent_worker(agent_id, worker_id)
         .await
-        .map_err(|e| match e {
-            fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
-            other => JsonRpcError::internal(format!("store error: {other}")),
-        })?;
+        .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    match claim {
+        fleet_store::SlotClaim::Claimed => {}
+        // JSON-RPC에는 409가 없다. `choose_worker`의 후보 없음도 이미
+        // `invalid_params`로 내려가고 있으므로, 같은 성질의 실패를 같은
+        // 코드로 돌려 두 경로가 호출자에게 한 가지로 보이게 한다.
+        fleet_store::SlotClaim::CapReached => {
+            return Err(JsonRpcError::invalid_params(format!(
+                "worker {worker_id} is at its agent process cap"
+            )))
+        }
+        fleet_store::SlotClaim::NoSuchAgent => {
+            return Err(JsonRpcError::invalid_params(format!(
+                "no such agent: {agent_id}"
+            )))
+        }
+        fleet_store::SlotClaim::NoSuchWorker => {
+            return Err(JsonRpcError::invalid_params(format!(
+                "no such worker for agent placement: {worker_id}"
+            )))
+        }
+    }
 
     // 저장된 행을 다시 읽어 돌려준다 — `assigned_at`은 DB의 `NOW()`가 정하므로
     // 로컬 구조체를 고쳐 응답하면 저장된 값과 다른 시각을 싣게 된다. `#49`
@@ -1907,6 +1940,50 @@ mod tests {
         let stored = ctx.state.store.get_agent(agent_id).await.unwrap().unwrap();
         assert_eq!(stored.worker_id, Some(worker.id));
         assert!(stored.assigned_at.is_some());
+    }
+
+    /// MCP 생성 표면도 저장된 사실에 되맞춘다 (게이트 ①-A-2). Dashboard와
+    /// **같은 코드**지만 위험 등급은 다르다 — 이쪽에는 감사 기록이 없어
+    /// 거짓이 응답에만 실리고, 응답의 거짓은 재조회로 드러난다. 그래도
+    /// 되맞추지 않으면 호출자는 있지도 않은 배정을 근거로 다음 판단을 한다.
+    ///
+    /// 상한 경합 자체는 MemStore에서 재현할 수 없다 — 연산 사이에 `.await`
+    /// 양보점이 없어 `place_on_create`와 `create_agent`가 한 태스크 안에서
+    /// 이어 붙는다. 그래서 결과를 `dropping_placements`로 직접 세운다.
+    #[tokio::test]
+    async fn create_agent_follows_the_store_when_the_slot_claim_drops_the_placement() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new().dropping_placements());
+        let (project_id, _worker) = seed_placeable(&ctx).await;
+
+        // 헛돌지 않는지 먼저 본다 — 스위치는 `create_agent`만 건드리므로
+        // 후보 지명은 살아 있어야 한다. 이 단정이 없으면 "후보가 없어서
+        // 미배정"과 "선점에 실패해서 미배정"이 구분되지 않는다.
+        assert!(
+            fleet_scheduler::placement::place_on_create(ctx.state.store.as_ref())
+                .await
+                .is_some(),
+            "후보 지명이 죽어 있으면 되맞춤 분기에 들어가지 않는다"
+        );
+
+        let out = dispatch_tool(
+            &ctx,
+            TOOL_CREATE_AGENT,
+            &json!({"project_id": project_id.to_string(), "name": "dropped"}),
+        )
+        .await
+        .unwrap();
+
+        let body: Value =
+            serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(
+            body["worker_id"].is_null(),
+            "선점이 실패했는데 응답이 배정을 말한다: {body}"
+        );
+
+        let agent_id: fleet_core::AgentId = body["id"].as_str().unwrap().parse().unwrap();
+        let stored = ctx.state.store.get_agent(agent_id).await.unwrap().unwrap();
+        assert_eq!(stored.worker_id, None);
+        assert_eq!(stored.assigned_at, None);
     }
 
     #[tokio::test]

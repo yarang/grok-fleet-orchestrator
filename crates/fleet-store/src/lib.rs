@@ -109,6 +109,30 @@ pub struct ControlFence {
     pub epoch: i64,
 }
 
+/// 슬롯 선점의 결과 (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// `bool`이 아닌 이유는 실패가 **두 가지 다른 사실**이기 때문이다. 상한에
+/// 걸린 것은 지금의 fleet 상태이고(409, 나중에 다시 하면 된다), 존재하지
+/// 않는 대상을 지목한 것은 요청의 결함이다(404/400, 다시 해도 같다).
+/// `bool`로 뭉개면 호출부가 그 둘을 구분할 방법이 없어 한쪽으로 오분류한다.
+///
+/// **`NoSuchAgent`가 `NoSuchWorker`보다 우선한다.** PgStore의 UPDATE는
+/// Agent가 없으면 0행을 갱신하므로 Worker의 존재 여부에 닿지도 않으며,
+/// MemStore도 그 순서를 흉내 내고 있다(`mem::MemStore::assign_agent_worker`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotClaim {
+    /// 배정이 기록됐다.
+    Claimed,
+    /// Worker가 이미 `max_agent_processes`만큼 들고 있다. 재배정에서
+    /// 자기 자신은 세지 않으므로, 이미 그 Worker에 있는 Agent를 같은
+    /// Worker로 다시 배정하는 것은 이 값을 내지 않는다.
+    CapReached,
+    /// 그런 Agent가 없다.
+    NoSuchAgent,
+    /// 그런 Worker가 없다.
+    NoSuchWorker,
+}
+
 /// 영속 저장소 trait. 모든 상태 조회/변경은 이 인터페이스를 경유합니다.
 ///
 /// 구현체:
@@ -1103,7 +1127,14 @@ pub trait Store: Send + Sync {
     /// `StoreError::Conflict`. `project_id`가 실재하는지는 호출부가
     /// `project_rules::ensure_project_accepts_new_agents`로 먼저 검사한다 —
     /// FK 위반은 그 검사를 통과한 뒤의 경합에서만 나타나는 2차 방어선이다.
-    async fn create_agent(&self, _agent: &Agent) -> Result<(), StoreError> {
+    ///
+    /// **반환값은 실제로 기록된 배정이다** (로드맵 `#67` 구현 게이트 ①-A-2).
+    /// `agent.worker_id`가 `Some`이어도 그 Worker가 상한에 걸려 있으면
+    /// 배정 없이 생성되고 `None`이 돌아온다 — 배정 실패가 생성을 되돌리지
+    /// 않는다는 4a의 결정을 그대로 지킨다. 호출부는 이 값으로 로컬
+    /// 구조체를 **되맞춰야** 한다. 그러지 않으면 응답과 감사 로그가
+    /// 일어나지 않은 배정을 기록한다.
+    async fn create_agent(&self, _agent: &Agent) -> Result<Option<WorkerId>, StoreError> {
         Err(StoreError::Unsupported("create_agent"))
     }
 
@@ -1150,7 +1181,7 @@ pub trait Store: Send + Sync {
     }
 
     /// Agent를 Worker에 (재)배정하고 `assigned_at`/`updated_at`을 갱신한다
-    /// (로드맵 `#67` 4a). 존재하지 않는 id면 `false`.
+    /// (로드맵 `#67` 4a). 존재하지 않는 id면 [`SlotClaim::NoSuchAgent`].
     ///
     /// **`command_generation`도 함께 올린다**(로드맵 `#67` 4b). 새 Worker는
     /// 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
@@ -1163,11 +1194,18 @@ pub trait Store: Send + Sync {
     /// 두 가지가 모두 다른 곳에서 처리된다. Worker 등록 해제는 `030`의
     /// `ON DELETE SET NULL`이, Agent 회수는 아래 원장이 `stopped`를 세지
     /// 않는 것이 처리한다.
+    ///
+    /// **상한을 `workers` 행 잠금 아래에서 집행한다**
+    /// (로드맵 `#67` 구현 게이트 ①-A-2). 세는 대상은 그 Worker에 배정된
+    /// `agents` 행이고, 상한을 소유한 것은 `workers` 행이므로 잠금은
+    /// 후자에 건다 — 아직 존재하지 않는 행은 잠글 수 없으니
+    /// `INSERT ... WHERE (SELECT COUNT(*)) < cap`은 READ COMMITTED에서
+    /// phantom을 막지 못한다. 다른 Worker로의 배정은 서로 잠그지 않는다.
     async fn assign_agent_worker(
         &self,
         _id: AgentId,
         _worker_id: WorkerId,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<SlotClaim, StoreError> {
         Err(StoreError::Unsupported("assign_agent_worker"))
     }
 

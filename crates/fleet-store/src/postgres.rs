@@ -37,7 +37,8 @@ use fleet_core::{
 
 use crate::error::StoreError;
 use crate::{
-    AdminApiToken, ControlFence, ControlLease, Store, StoredCredential, WorkerOperationalCredential,
+    AdminApiToken, ControlFence, ControlLease, SlotClaim, Store, StoredCredential,
+    WorkerOperationalCredential,
 };
 
 /// `migrations/` 디렉터리를 컴파일 타임에 임베드한 마이그레이터.
@@ -2814,7 +2815,7 @@ impl Store for PgStore {
 
     // ── Agent (로드맵 #49, 1단계) ─────────────────────────────────────
 
-    async fn create_agent(&self, agent: &Agent) -> Result<(), StoreError> {
+    async fn create_agent(&self, agent: &Agent) -> Result<Option<WorkerId>, StoreError> {
         // pin 검증을 INSERT와 **같은 트랜잭션 안에서** 한다. 표면이 둘
         // (MCP·Dashboard)이므로 검증을 표면에 두면 한쪽만 고쳐지는 순간
         // 불변식이 깨지고, 트랜잭션 밖에 두면 검증과 INSERT 사이에 revision이
@@ -2860,6 +2861,50 @@ impl Store for PgStore {
                 )));
             }
         }
+
+        // 슬롯 선점 (로드맵 `#67` 구현 게이트 ①-A-2). 이미 열려 있는 pin
+        // 검증 트랜잭션 안에서 한다 — 세는 것과 INSERT가 같은 트랜잭션에
+        // 있어야 그 사이에 다른 배정이 끼어들지 못한다.
+        //
+        // 잠금은 `agents`가 아니라 `workers` 행에 건다. 세는 대상은
+        // `agents`지만 아직 존재하지 않는 행은 잠글 수 없고, READ COMMITTED는
+        // 그 phantom을 막지 않는다. 상한을 **소유한** 행을 잠그면 같은
+        // Worker를 노리는 배정들만 직렬화되고, 다른 Worker로의 배정은
+        // 그대로 병렬이다.
+        let mut placed = agent.worker_id;
+        if let Some(worker_id) = agent.worker_id {
+            let cap: Option<Option<i32>> = sqlx::query_scalar(
+                "SELECT max_agent_processes FROM workers WHERE id = $1 FOR UPDATE",
+            )
+            .bind(worker_id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match cap {
+                // 그런 Worker가 없다. 예전에는 INSERT의 FK 위반이 이것을
+                // 잡았지만, 잠금 SELECT가 먼저 알아낸다.
+                None => placed = None,
+                // 상한 미상 — 통과시킨다. `None`은 "이 Worker의 상한을
+                // 모른다"이지 "상한이 없다"가 아니며, 모르는 값으로 배정을
+                // 막으면 구버전 Worker가 통째로 쓸모없어진다.
+                Some(None) => {}
+                Some(Some(cap)) => {
+                    // `count_agents_by_worker`와 **같은 술어**여야 한다.
+                    // 필터와 선점이 슬롯의 정의에 대해 다른 말을 하면
+                    // 후보에 남은 Worker가 선점에서 거절당한다.
+                    let n: i64 = sqlx::query_scalar(
+                        "SELECT COUNT(*) FROM agents \
+                          WHERE worker_id = $1 AND status <> 'stopped'",
+                    )
+                    .bind(worker_id.0)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if n >= i64::from(cap) {
+                        placed = None;
+                    }
+                }
+            }
+        }
+
         sqlx::query(
             r#"
             INSERT INTO agents
@@ -2880,10 +2925,15 @@ impl Store for PgStore {
         .bind(agent.template_pin.map(|p| p.revision_id.0))
         // 배정을 생성과 같은 INSERT에 넣는다(로드맵 #67 4a). 생성 후 UPDATE로
         // 나누면 INSERT만 성공했을 때 배정 없는 행이 남고, 그것을 되돌릴
-        // 주체가 없다. FK 위반은 아래 매핑이 `Conflict`로 옮긴다 — 배정
-        // 대상 Worker가 선택과 INSERT 사이에 사라진 경우다.
-        .bind(agent.worker_id.map(|w| w.0))
-        .bind(agent.assigned_at)
+        // 주체가 없다.
+        //
+        // 넣는 것은 `agent.worker_id`가 아니라 위에서 **선점에 성공한**
+        // `placed`다. 상한에 걸리면 배정 없이 생성한다 — 배정 실패가 생성을
+        // 되돌리지 않는다는 4a의 결정 그대로다. `assigned_at`도 함께
+        // 떨어뜨려야 `030`의 `agents_placement_complete` CHECK(둘 다 있거나
+        // 둘 다 없거나)를 지킨다.
+        .bind(placed.map(|w| w.0))
+        .bind(placed.and(agent.assigned_at))
         // 생성 시 desired state는 `Agent::new`가 정한 `stopped`다(로드맵 #67
         // 4b). 생성만으로 명령이 나가면 `AgentStatus::Ready`("아직 시작 명령을
         // 받지 않았다")가 뜻을 잃는다.
@@ -2912,7 +2962,7 @@ impl Store for PgStore {
             other => StoreError::Sqlx(other),
         })?;
         tx.commit().await?;
-        Ok(())
+        Ok(placed)
     }
 
     async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
@@ -3023,7 +3073,56 @@ impl Store for PgStore {
         &self,
         id: AgentId,
         worker_id: WorkerId,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<SlotClaim, StoreError> {
+        let mut tx = self.pool.begin().await?;
+
+        // Agent의 존재를 먼저 본다. 잠그지 **않는다** — 판정의 권위는 아래
+        // UPDATE의 `rows_affected`에 있고, 이 읽기는 배제만 한다. 잠그지
+        // 않으므로 `agents`를 잡은 채 `workers`를 기다리는 트랜잭션이
+        // 생기지 않아 배정끼리의 잠금 순서는 `workers → agents` 하나로
+        // 남는다.
+        //
+        // 이 읽기가 필요한 것은 순서 때문이다. MemStore가 "Agent 없음"을
+        // "Worker 없음"보다 먼저 판정하도록 맞춰 두었고(그쪽 주석 참조),
+        // 여기서 Worker부터 보면 둘 다 없을 때 두 Store가 다른 답을 낸다.
+        let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM agents WHERE id = $1")
+            .bind(id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Ok(SlotClaim::NoSuchAgent);
+        }
+
+        // 상한의 소유자를 잠근다 (로드맵 `#67` 구현 게이트 ①-A-2).
+        let cap: Option<Option<i32>> =
+            sqlx::query_scalar("SELECT max_agent_processes FROM workers WHERE id = $1 FOR UPDATE")
+                .bind(worker_id.0)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(cap) = cap else {
+            // 예전에는 UPDATE의 FK 위반이 이것을 잡았다. 잠금 SELECT가
+            // 먼저 알아내므로 그 매핑은 도달 불가가 됐고, 도달 불가 코드를
+            // 남기지 않기 위해 여기서 명시적 variant로 바꿨다.
+            return Ok(SlotClaim::NoSuchWorker);
+        };
+        if let Some(cap) = cap {
+            // **자기 자신을 빼고 센다.** 이미 그 Worker에 있는 Agent를 같은
+            // Worker로 다시 배정하는 것은 슬롯을 하나도 더 쓰지 않는데,
+            // 빼지 않으면 정확히 가득 찬 Worker에서 그 무해한 재배정이
+            // 거절된다.
+            let n: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agents \
+                  WHERE worker_id = $1 AND status <> 'stopped' AND id <> $2",
+            )
+            .bind(worker_id.0)
+            .bind(id.0)
+            .fetch_one(&mut *tx)
+            .await?;
+            if n >= i64::from(cap) {
+                return Ok(SlotClaim::CapReached);
+            }
+        }
+
         let result = sqlx::query(
             // `command_generation`을 함께 올린다(로드맵 #67 4b). 새 Worker는
             // 이전 Worker가 받은 명령을 본 적이 없으므로, 올리지 않으면
@@ -3039,18 +3138,17 @@ impl Store for PgStore {
         )
         .bind(id.0)
         .bind(worker_id.0)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| match e {
-            // 선택과 UPDATE 사이에 Worker가 등록 해제된 경우. 서버 결함이
-            // 아니라 호출자가 지목한 대상이 더는 유효하지 않다는 뜻이므로
-            // `create_agent`의 project FK와 같은 취급을 한다.
-            sqlx::Error::Database(ref db) if db.is_foreign_key_violation() => StoreError::Conflict(
-                format!("no such worker for agent placement: {}", db.message()),
-            ),
-            other => StoreError::Sqlx(other),
-        })?;
-        Ok(result.rows_affected() > 0)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        // 위 읽기 이후에 Agent가 삭제됐다면 0행이다. 읽기가 배제만 한다고
+        // 적은 것이 이 자리다 — 권위는 여전히 여기에 있다.
+        if result.rows_affected() > 0 {
+            Ok(SlotClaim::Claimed)
+        } else {
+            Ok(SlotClaim::NoSuchAgent)
+        }
     }
 
     async fn count_agents_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {

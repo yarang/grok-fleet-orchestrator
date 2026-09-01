@@ -4005,6 +4005,192 @@ async fn create_agent_succeeds_when_no_worker_qualifies() {
     assert!(created.get("assigned_at").is_none(), "{created}");
 }
 
+/// 감사 로그는 **일어나지 않은 배정**을 적지 않는다
+/// (로드맵 `#67` 구현 게이트 ①-A-2).
+///
+/// `create_agent`의 반환형을 `Option<WorkerId>`로 넓힌 유일한 이유가 이것이다.
+/// 응답과 감사 detail이 **둘 다** 핸들러의 로컬 `agent` 구조체에서 나오므로,
+/// Store가 상한 잠금 아래에서 선점에 실패했는데 되맞추지 않으면 두 곳이 함께
+/// 거짓말을 한다. 응답의 거짓은 다시 조회하면 드러나지만 감사 로그의 거짓은
+/// 남는다.
+///
+/// **왜 경합으로만 볼 수 있는가.** ①-A-1의 후보 필터와 ①-A-2의 선점은 같은
+/// 술어(`status <> 'stopped'`)로 센다. 그래서 순차 경로에서는 필터가 가득 찬
+/// Worker를 애초에 지명하지 않고, 되맞춤 분기에 도달할 방법이 없다. 그 분기는
+/// 정의상 경합 전용이다.
+///
+/// **그런데도 이 테스트는 flaky하지 않다.** 단정 두 개가 경합이 일어났든 아니든
+/// 항상 참이어야 하는 것들이기 때문이다 — 배정은 정확히 하나, 그리고 모든
+/// 감사 detail이 저장된 행과 일치. 경합이 실제로 겹치는지 여부는 되맞춤 분기가
+/// **실행되는지**를 정할 뿐 판정을 흔들지 않는다. 즉 이 테스트는 결함을 확률적
+/// 으로 잡고 결정적으로 통과한다. 되맞춤을 지우면 겹칠 때마다 붉어진다.
+/// 상한 1인 Worker에 N개의 생성을 동시에 던져도 배정은 하나뿐이다 —
+/// HTTP 표면을 통과한 상한 집행을 본다.
+///
+/// **이 테스트는 되맞춤 분기(`if placed != agent.worker_id`)에 닿지
+/// 못한다.** MemStore의 연산 사이에는 `.await` 양보점이 없어
+/// `place_on_create`와 `create_agent`가 한 태스크 안에서 이어 붙기
+/// 때문이다. 실측으로도 되맞춤을 지운 트리에서 12회 전부 통과했다
+/// (2-way `join!` 12회, 8-way 배리어 12회 모두 0건). 그 분기는 바로
+/// 아래 `create_agent_follows_the_store_when_the_slot_claim_drops_the_placement`
+/// 가 결정적으로 덮는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_creates_through_the_api_cannot_exceed_the_cap() {
+    const N: usize = 8;
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let mut worker = Worker::new("capped", "wss://capped.invalid/ws");
+    worker.max_agent_processes = Some(1);
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "audit-race").await;
+
+    // 배리어로 요청 **구성** 편차를 걷어낸다. 없으면 마지막 요청이 만들어질
+    // 때 첫 요청은 이미 저장을 끝냈을 수 있고, 그러면 순차 실행과 구분되지
+    // 않는다.
+    let barrier = Arc::new(tokio::sync::Barrier::new(N));
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let client = client.clone();
+        let cookie = cookie.clone();
+        let project_id = project_id.clone();
+        let barrier = Arc::clone(&barrier);
+        let addr = server.addr;
+        handles.push(tokio::spawn(async move {
+            let req = authed_json(
+                &client,
+                reqwest::Method::POST,
+                &format!("http://{addr}/api/agents"),
+                &cookie,
+            )
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "name": format!("racer-{i}"),
+            }));
+            barrier.wait().await;
+            let resp = req.send().await.unwrap();
+            assert_eq!(resp.status(), 200);
+            resp.json::<serde_json::Value>().await.unwrap()
+        }));
+    }
+    let mut bodies = Vec::with_capacity(N);
+    for h in handles {
+        bodies.push(h.await.unwrap());
+    }
+
+    let placed_in_responses = bodies
+        .iter()
+        .filter(|v| {
+            v.get("worker_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        })
+        .count();
+    assert_eq!(
+        placed_in_responses, 1,
+        "상한 1인 Worker에 배정을 보고한 응답이 정확히 하나여야 한다: {bodies:?}"
+    );
+
+    // 감사 로그는 저장된 행과 한 글자도 달라선 안 된다. 응답의 거짓은 다시
+    // 조회하면 드러나지만 감사 로그의 거짓은 남는다.
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_CREATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), N, "{events:?}");
+
+    for event in &events {
+        let id: fleet_core::AgentId = event
+            .target_id
+            .as_deref()
+            .expect("agent.create는 대상 id를 실어야 한다")
+            .parse()
+            .unwrap();
+        let stored = store.get_agent(id).await.unwrap().expect("agent row");
+        let audited = event.detail["worker_id"].as_str().map(str::to_owned);
+        assert_eq!(
+            audited,
+            stored.worker_id.map(|w| w.to_string()),
+            "감사 로그가 저장된 배정과 다르다 — 기록된 쪽이 거짓이다: {event:?}"
+        );
+    }
+}
+
+/// 상한 잠금이 선점에 실패하면 생성은 성공하고 **배정만** 떨어진다. 그때
+/// 핸들러가 저장된 사실에 되맞추지 않으면 응답과 감사 로그가 일어나지 않은
+/// 배정을 말한다.
+///
+/// 그 분기는 순차 경로에서 도달 불가능하고(①-A-1의 필터와 ①-A-2의 선점이
+/// `status <> 'stopped'`라는 같은 술어를 쓰므로 `choose_worker`가 가득 찬
+/// Worker를 지목하지 않는다) 경합으로도 닿지 못하므로(위 테스트),
+/// `MemStore::dropping_placements`로 **결과를 직접 세운다**. 상한 경합
+/// 자체는 `fleet-store`의 `concurrent_creates_cannot_exceed_the_cap`이
+/// Postgres 위에서 따로 증명한다 — 둘을 합쳐야 논증이 닫힌다.
+#[tokio::test]
+async fn create_agent_follows_the_store_when_the_slot_claim_drops_the_placement() {
+    let (server, cookie, store) =
+        spawn_authed_server_with_store_handle(MemStore::new().dropping_placements()).await;
+    let client = reqwest::Client::new();
+    // 배정 **가능한** Worker가 있어야 한다. 없으면 `place_on_create`가 후보를
+    // 고르지 않아 되맞춤 분기에 애초에 들어가지 않고, 이 테스트는 평범한
+    // 미배정 생성과 구분되지 않는다.
+    let worker = Worker::new("claimable", "wss://claimable.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "claim-drop").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "dropped"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    // 헛돌지 않는지 먼저 본다: 스위치는 `create_agent`만 건드리므로 후보
+    // 지명은 살아 있어야 한다. 이 단정이 없으면 "Worker가 없어서 미배정"과
+    // "선점에 실패해서 미배정"이 구분되지 않는다.
+    let nominated = fleet_scheduler::placement::place_on_create(store.as_ref()).await;
+    assert!(
+        nominated.is_some(),
+        "후보 지명이 죽어 있으면 되맞춤 분기에 들어가지 않는다"
+    );
+
+    assert!(
+        created
+            .get("worker_id")
+            .and_then(serde_json::Value::as_str)
+            .is_none(),
+        "선점이 실패했는데 응답이 배정을 말한다: {created}"
+    );
+
+    let agent_id: fleet_core::AgentId = created["id"].as_str().unwrap().parse().unwrap();
+    let stored = store.get_agent(agent_id).await.unwrap().expect("agent row");
+    assert_eq!(stored.worker_id, None);
+    assert_eq!(stored.assigned_at, None);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_CREATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(
+        events[0].detail["worker_id"].is_null(),
+        "감사 로그가 일어나지 않은 배정을 적었다: {:?}",
+        events[0]
+    );
+}
+
 #[tokio::test]
 async fn place_agent_recovers_an_unplaced_agent_and_audits_the_move() {
     let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
