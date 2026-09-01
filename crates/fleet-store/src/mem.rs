@@ -29,14 +29,15 @@ use uuid::Uuid;
 
 use fleet_core::{
     Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentId, AgentObservation,
-    AgentStatus, AgentTemplate, AgentTemplateBody, AgentTemplateFilter, AgentTemplateId,
-    AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus, AuditEvent, AuditFilter,
-    BootstrapToken, CloseReason, EmailVerificationToken, EventEntry, FleetEvent, Host, HostEvent,
-    IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId, IssueStatus, IssueTaskLink,
-    LoginAttempt, Permission, PermissionId, Project, ProjectFilter, ProjectId, ProjectStatus, Role,
-    RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome, TaskFilter, TaskId, TaskOutput,
-    TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter, TransitionOrigin, TransitionOutcome,
-    User, UserId, Worker, WorkerFilter, WorkerHeartbeat, WorkerId,
+    AgentObservedStatus, AgentStatus, AgentTemplate, AgentTemplateBody, AgentTemplateFilter,
+    AgentTemplateId, AgentTemplateRevision, AgentTemplateRevisionId, AgentTemplateStatus,
+    AuditEvent, AuditFilter, BootstrapToken, CloseReason, EmailVerificationToken, EventEntry,
+    FleetEvent, Host, HostEvent, IdempotentInsert, Issue, IssueComment, IssueFilter, IssueId,
+    IssueStatus, IssueTaskLink, LoginAttempt, Permission, PermissionId, Project, ProjectFilter,
+    ProjectId, ProjectStatus, Role, RoleId, Session, SessionId, SshKey, Task, TaskDeleteOutcome,
+    TaskFilter, TaskId, TaskOutput, TaskOutputChunk, TaskPhase, TaskStatus, TaskStatusFilter,
+    TransitionOrigin, TransitionOutcome, User, UserId, Worker, WorkerFilter, WorkerHeartbeat,
+    WorkerId,
 };
 
 use crate::{
@@ -588,6 +589,26 @@ impl Store for MemStore {
             .lock()
             .unwrap()
             .retain(|(name, _model), _| name != &worker.name);
+
+        // CASCADE 3: agents의 배치와 관측 (030의 FK `ON DELETE SET NULL` +
+        // 036의 트리거). 이것이 없으면 `agents.worker_id`가 지워진 Worker를
+        // 계속 가리키고, 게이트 ②의 술어가 stale한 `running`에 막혀 그
+        // Agent를 **영구히 옮길 수 없게** 된다 — 036이 없애려는 바로 그
+        // 상태이며, PgStore에서는 일어나지 않는다.
+        //
+        // 다섯 필드를 함께 비우는 이유는 짝 맞춤 CHECK 둘 때문이다:
+        // 030의 `agents_placement_complete`(worker_id/assigned_at)와 032의
+        // `agents_observation_complete`(관측 세 컬럼). 절반만 지우면 PgStore
+        // 쪽에서는 애초에 쓸 수 없는 행이 된다.
+        for agent in self.agents.lock().unwrap().values_mut() {
+            if agent.worker_id == Some(id) {
+                agent.worker_id = None;
+                agent.assigned_at = None;
+                agent.observed_status = None;
+                agent.observed_at = None;
+                agent.observed_reason = None;
+            }
+        }
 
         Ok(())
     }
@@ -1922,11 +1943,44 @@ impl Store for MemStore {
                 return Ok(SlotClaim::CapReached);
             }
         }
+        // 게이트 ②: **다른** Worker가 돌리고 있다고 보고한 Agent는 옮기지
+        // 않는다 (로드맵 #67).
+        //
+        // **cap 판정보다 뒤에 둔다.** PgStore에서는 cap이 사전 검사이고 관측은
+        // UPDATE 안의 술어라, 둘 다 걸릴 상황에서 나오는 값이 `CapReached`다.
+        // 여기서 순서를 뒤집으면 같은 입력에 두 저장소가 다른 답을 내고, 그
+        // 차이는 저장소를 바꿔 끼우는 호출부 테스트가 어느 쪽을 골랐느냐에
+        // 따라서만 드러난다.
+        {
+            let a = agents.get(&id).expect("checked above");
+            if a.observed_status == Some(AgentObservedStatus::Running)
+                && a.worker_id != Some(worker_id)
+            {
+                return Ok(SlotClaim::ObservedRunning);
+            }
+        }
         // 위에서 존재를 확인했고 그동안 잠금을 놓지 않았다.
         let a = agents.get_mut(&id).expect("checked above");
         let now = Utc::now();
+        let moved = a.worker_id != Some(worker_id);
         a.worker_id = Some(worker_id);
         a.assigned_at = Some(now);
+        // 배치가 **실제로 옮겨갔을 때만** 관측을 비운다. 관측은 "어떤 Worker가
+        // 이 프로세스에 대해 한 말"이라, 다른 Worker로 옮기는 순간 새 자리에
+        // 대해서는 거짓이 된다 — 옛 Worker의 `failed`가 따라오면 새 Worker가
+        // 시도조차 하지 않았는데 실패한 것으로 보인다.
+        //
+        // 같은 Worker로의 재배정에서는 **남긴다.** 프로세스가 움직이지 않았으니
+        // 그 말은 여전히 참이고, 여기서 지우면 "같은 Worker로 한 번 재배정해
+        // 관측을 없앤 뒤 아무 데로나 옮긴다"는 2단계로 게이트 ②가 뚫린다.
+        //
+        // 마이그레이션 036의 `agents_clear_placement_and_observation` 트리거와
+        // 같은 규칙이다(그쪽은 `NEW.worker_id IS DISTINCT FROM OLD.worker_id`).
+        if moved {
+            a.observed_status = None;
+            a.observed_at = None;
+            a.observed_reason = None;
+        }
         // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
         // (로드맵 #67 4b).
         a.command_generation += 1;
@@ -2886,5 +2940,217 @@ mod agent_command_fence_tests {
         );
         let after = store.get_agent(agent.id).await.unwrap().unwrap();
         assert_eq!(after.command_control_epoch, None);
+    }
+}
+
+#[cfg(test)]
+mod agent_observation_gate_tests {
+    //! 게이트 ② — 다른 Worker가 돌리고 있다고 보고한 Agent는 옮기지 않는다
+    //! (로드맵 `#67`).
+    //!
+    //! PgStore 쪽 동치는 `tests/agents.rs`에 있다. 두 백엔드를 모두 도는
+    //! 이유는 `agent_command_fence_tests`와 같다 — 판정이 구조적으로 다른
+    //! 자리에 있다. Postgres는 UPDATE 문 안의 술어가, 여기서는 락 안의 선행
+    //! 검사가 그 일을 한다.
+    use super::*;
+    // 관측 **사유**는 술어가 보지 않으므로(보는 것은 `observed_status`뿐)
+    // 생산 코드에는 등장하지 않는다. 테스트만 값을 심는다.
+    use fleet_core::AgentObservationReason;
+
+    async fn seeded(cap: Option<u32>) -> (MemStore, Project, Worker, Worker) {
+        let store = MemStore::new();
+        let project = Project::new("gate2");
+        store.create_project(&project).await.unwrap();
+        let mut owner = Worker::new("gate2-owner", "wss://owner.local/ws");
+        let mut other = Worker::new("gate2-other", "wss://other.local/ws");
+        owner.max_agent_processes = cap;
+        other.max_agent_processes = cap;
+        store.upsert_worker(&owner).await.unwrap();
+        store.upsert_worker(&other).await.unwrap();
+        (store, project, owner, other)
+    }
+
+    async fn placed_and_running(
+        store: &MemStore,
+        project: &Project,
+        owner: &Worker,
+        name: &str,
+    ) -> Agent {
+        let agent = Agent::new(project.id, name).with_placement(owner.id, Utc::now());
+        store.create_agent(&agent).await.unwrap();
+        let changed = store
+            .apply_agent_observations(
+                owner.id,
+                &[AgentObservation::Running { agent_id: agent.id }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+        agent
+    }
+
+    #[tokio::test]
+    async fn running_observation_blocks_moving_to_another_worker() {
+        let (store, project, owner, other) = seeded(None).await;
+        let agent = placed_and_running(&store, &project, &owner, "busy").await;
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::ObservedRunning
+        );
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.worker_id, Some(owner.id), "옮기지 않았다");
+        assert_eq!(after.command_generation, agent.command_generation);
+    }
+
+    #[tokio::test]
+    async fn same_worker_reassignment_is_allowed_while_running() {
+        let (store, project, owner, other) = seeded(None).await;
+        let agent = placed_and_running(&store, &project, &owner, "busy-same").await;
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, owner.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
+
+        // **관측이 살아남아야 한다.** 프로세스가 움직이지 않았으니 그 말은
+        // 여전히 참이다. 여기서 지워지면 게이트 ②가 2단계로 뚫린다 — 같은
+        // Worker로 한 번 재배정해(술어의 `worker_id = $2` 갈래가 허용한다)
+        // 관측을 없앤 뒤, 그다음에 아무 데로나 옮기면 된다.
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.observed_status, Some(AgentObservedStatus::Running));
+        assert!(after.observed_at.is_some());
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::ObservedRunning,
+            "재배정을 거쳐도 다른 Worker로는 여전히 못 간다"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_and_absent_observations_do_not_block() {
+        let (store, project, owner, other) = seeded(None).await;
+
+        let never_seen = Agent::new(project.id, "unseen").with_placement(owner.id, Utc::now());
+        store.create_agent(&never_seen).await.unwrap();
+        assert_eq!(
+            store
+                .assign_agent_worker(never_seen.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
+
+        let rejected = Agent::new(project.id, "rejected").with_placement(owner.id, Utc::now());
+        store.create_agent(&rejected).await.unwrap();
+        store
+            .apply_agent_observations(
+                owner.id,
+                &[AgentObservation::Failed {
+                    agent_id: rejected.id,
+                    reason: AgentObservationReason::SpawnFailed,
+                }],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .assign_agent_worker(rejected.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
+        // 옛 Worker의 `failed`가 따라오면 안 된다. 새 Worker는 아직 시도조차
+        // 하지 않았는데 "시도했고 실패했다"가 되고, 그 값은 다음 beat까지
+        // 지워지지 않는다. PgStore에서는 036의 트리거가 같은 일을 한다.
+        let after = store.get_agent(rejected.id).await.unwrap().unwrap();
+        assert_eq!(after.observed_status, None);
+        assert_eq!(after.observed_at, None);
+        assert_eq!(after.observed_reason, None);
+    }
+
+    /// **cap이 관측보다 먼저 판정된다.** PgStore에서는 cap이 사전 검사이고
+    /// 관측은 UPDATE 안의 술어라, 둘 다 걸리는 입력의 답이 `CapReached`다.
+    /// 이 테스트가 없으면 두 저장소가 조용히 갈라지고, 그 차이는 호출부
+    /// 테스트가 어느 저장소를 골랐느냐에 따라서만 드러난다.
+    #[tokio::test]
+    async fn cap_is_decided_before_the_observation() {
+        let (store, project, owner, other) = seeded(Some(1)).await;
+        // 목적지를 가득 채운다.
+        let squatter = Agent::new(project.id, "squatter").with_placement(other.id, Utc::now());
+        store.create_agent(&squatter).await.unwrap();
+        // 그리고 옮기려는 Agent는 관측까지 걸려 있다.
+        let agent = placed_and_running(&store, &project, &owner, "both").await;
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::CapReached
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_observation_reopens_the_move() {
+        let (store, project, owner, other) = seeded(None).await;
+        let agent = placed_and_running(&store, &project, &owner, "recalled").await;
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::ObservedRunning
+        );
+
+        // 회수하면 다음 beat의 목록에서 빠지고, 말해지지 않은 것이 지워진다.
+        store.apply_agent_observations(owner.id, &[]).await.unwrap();
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
+    }
+
+    /// CASCADE 3 — `delete_worker`가 배치와 관측을 함께 지운다.
+    ///
+    /// PgStore에서는 030의 FK `ON DELETE SET NULL`과 036의 트리거가 한다.
+    /// MemStore가 worker row만 지우면 `agents.worker_id`가 지워진 Worker를
+    /// 계속 가리키고, stale한 `running`이 그 Agent를 영구히 묶는다.
+    #[tokio::test]
+    async fn deleting_the_worker_clears_placement_and_observation() {
+        let (store, project, owner, other) = seeded(None).await;
+        let agent = placed_and_running(&store, &project, &owner, "stranded").await;
+
+        store.delete_worker(owner.id).await.unwrap();
+
+        let after = store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.worker_id, None, "FK의 SET NULL 몫");
+        assert_eq!(after.assigned_at, None, "030 트리거의 몫");
+        assert_eq!(after.observed_status, None, "036 트리거의 몫");
+        assert_eq!(after.observed_at, None);
+        assert_eq!(after.observed_reason, None);
+        // Agent 정의 자체는 살아 있다.
+        assert_eq!(after.status, AgentStatus::Ready);
+
+        assert_eq!(
+            store
+                .assign_agent_worker(agent.id, other.id, None)
+                .await
+                .unwrap(),
+            SlotClaim::Claimed
+        );
     }
 }

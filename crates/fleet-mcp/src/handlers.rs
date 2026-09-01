@@ -1250,22 +1250,27 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         .parse()
         .map_err(|_| JsonRpcError::invalid_params("agent_id must be a UUID"))?;
 
-    let agent = ctx
+    // 존재 검사만 한다. 아래 `SlotClaim::NoSuchAgent`도 같은 답을 주지만
+    // 그것은 `choose_worker` **뒤**라, Agent가 없고 후보 Worker도 없을 때
+    // "no candidate worker"라는 엉뚱한 이유가 먼저 나온다. 요청의 결함을
+    // fleet의 상태보다 먼저 말해 준다. Dashboard는 이 자리에서 읽은 행을
+    // 감사 로그의 `previous_worker_id`로도 쓰지만 MCP에는 감사가 없다.
+    if ctx
         .state
         .store
         .get_agent(agent_id)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
-        .ok_or_else(|| JsonRpcError::invalid_params(format!("no such agent: {agent_id}")))?;
-
-    // 회수된 Agent는 배정하지 않는다. 원장이 `stopped`를 세지 않으므로 배정해
-    // 봐야 부하에도 잡히지 않고, 4b의 desired state도 실릴 일이 없다 —
-    // 아무도 읽지 않는 값을 쓰는 것이 된다.
-    if agent.status == fleet_core::AgentStatus::Stopped {
+        .is_none()
+    {
         return Err(JsonRpcError::invalid_params(format!(
-            "agent {agent_id} is stopped and cannot be placed"
+            "no such agent: {agent_id}"
         )));
     }
+
+    // **회수된 Agent도 배정한다.** 근거는 Dashboard의 같은 경로와 같다 —
+    // 게이트 ② 아래에서는 "회수 → 관측 소멸 → 이동"이 살아 있는 Agent를
+    // 옮기는 유일한 안전한 순서이고, 옛 가드는 그 두 번째 걸음을 막았다.
 
     // `worker_id`를 명시하면 그 Worker로, 없으면 자동 선택. 명시 경로가 있는
     // 이유는 자동 선택이 least-loaded뿐이라 운영자가 특정 Worker를 지목할
@@ -1313,6 +1318,14 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         // 위의 셋과 달리 요청의 결함이 아니다 — 이 인스턴스가 더 이상 제어
         // 기관이 아니라는 뜻이므로 `invalid_params`로 묶으면 호출자가 인자를
         // 고치려 든다. Dashboard가 같은 이유로 4xx가 아닌 503을 준다.
+        // Dashboard가 409를 주는 자리다. `CapReached`와 같은 성질(요청은
+        // 올바르고 지금의 fleet 상태가 거절한다)이라 여기서도 같은 코드를 준다.
+        fleet_store::SlotClaim::ObservedRunning => {
+            return Err(JsonRpcError::invalid_params(format!(
+                "agent {agent_id} is reported running on its current worker; \
+                 stop it before moving it to another worker"
+            )))
+        }
         fleet_store::SlotClaim::Fenced => {
             return Err(JsonRpcError::internal(
                 "this instance is no longer the control-plane leader".to_string(),
@@ -2120,10 +2133,24 @@ mod tests {
         );
     }
 
+    /// **회수된(`stopped`) Agent도 배정된다.** 예전에는 여기서 400/`-32602`로
+    /// 막았고 그 근거는 "아무도 읽지 않을 값을 쓰는 셈"이었는데, 그 근거가
+    /// 틀렸다 — `list_agent_commands`는
+    /// `status <> 'stopped' OR last_acked_generation < command_generation`으로
+    /// 고르므로 미ack 상태의 `stopped` 행을 **싣는다**. 즉 배정은 실제로
+    /// 워커에게 전달되는 desired state를 만든다.
+    ///
+    /// cap을 우회하지도 않는다. `count_agents_by_worker`가
+    /// `status <> 'stopped'`로 세는 것은 맞지만, 워커가 spawn 시점에 자기 cap을
+    /// 다시 강제하고 넘치면 `failed`/`cap_reached`로 보고한다.
+    ///
+    /// 이 계약 변경이 필요했던 이유는 게이트 ②가 이동 경로를 전부 닫아
+    /// 버렸기 때문이다: `running`인 Agent는 술어가 막고, 회수된 Agent는 이
+    /// 가드가 막으면 남는 것이 최초 배치뿐이 된다.
     #[tokio::test]
-    async fn place_agent_rejects_a_stopped_agent() {
+    async fn place_agent_accepts_a_stopped_agent() {
         let ctx = test_ctx(fleet_store::mem::MemStore::new());
-        let (project_id, _w) = seed_placeable(&ctx).await;
+        let (project_id, worker) = seed_placeable(&ctx).await;
         let agent = fleet_core::Agent::new(project_id, "retired");
         ctx.state.store.create_agent(&agent).await.unwrap();
         ctx.state
@@ -2132,16 +2159,25 @@ mod tests {
             .await
             .unwrap();
 
-        let err = dispatch_tool(
+        let out = dispatch_tool(
             &ctx,
             TOOL_PLACE_AGENT,
             &json!({"agent_id": agent.id.to_string()}),
         )
         .await
-        .unwrap_err();
-        // 원장이 `stopped`를 세지 않으므로 배정해도 부하에 잡히지 않고
-        // 4b의 desired state에도 실리지 않는다 — 아무도 읽지 않을 값을 쓰는 셈이다.
-        assert!(err.message.contains("stopped"), "{}", err.message);
+        .unwrap();
+        assert!(
+            serde_json::to_string(&out)
+                .unwrap()
+                .contains(&worker.id.to_string()),
+            "{out:?}"
+        );
+
+        let after = ctx.state.store.get_agent(agent.id).await.unwrap().unwrap();
+        assert_eq!(after.worker_id, Some(worker.id));
+        // 상태는 손대지 않는다 — 배정은 배치를 정하는 일이고, 회수를 되돌리는
+        // 일이 아니다. 다시 돌릴지는 desired state가 따로 말한다.
+        assert_eq!(after.status, fleet_core::AgentStatus::Stopped);
     }
 
     #[tokio::test]

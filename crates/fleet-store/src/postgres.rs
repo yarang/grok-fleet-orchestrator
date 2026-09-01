@@ -3182,7 +3182,22 @@ impl Store for PgStore {
         if fence.is_some() {
             sql.push_str(", command_control_epoch = $4");
         }
-        sql.push_str(" WHERE id = $1");
+        // 게이트 ②의 술어. **다른** Worker가 돌리고 있다고 보고한 Agent는
+        // 옮기지 않는다. 이것을 미리 SELECT해서 분기하지 않는 이유는 바로
+        // 아래 ①-B 주석과 같다 — 그 사이에 beat이 `running`을 적어도 이미
+        // 떠난 UPDATE는 그대로 도착하고, 그게 정확히 막으려는 중복이다.
+        //
+        // `worker_id = $2`(같은 Worker로의 재배정)를 허용하는 것은 프로세스가
+        // 움직이지 않아 중복이 생길 여지가 없기 때문이고, 이는 위 cap 계산이
+        // 자기 자신을 빼는 것과 같은 근거다. `failed`를 허용하는 것은 그 세
+        // 이유(`cap_reached`/`no_free_port`/`spawn_failed`)가 전부 **프로세스가
+        // 생기지 않았다**는 뜻이라서다. NULL은 036의 CHECK 덕분에 미배치
+        // Agent에서도 안전하게 "아무도 돌리고 있지 않다"를 뜻한다.
+        sql.push_str(
+            " WHERE id = $1 \
+                AND (worker_id = $2 OR observed_status IS NULL \
+                     OR observed_status = 'failed')",
+        );
         if fence.is_some() {
             // epoch 술어를 **같은 문장 안에** 넣는 것이 게이트 ①-B의 전부다
             // (로드맵 `#67`). 먼저 SELECT해서 분기하면 그 사이에 fenced되어도
@@ -3206,20 +3221,42 @@ impl Store for PgStore {
             return Ok(SlotClaim::Claimed);
         }
 
-        // 0행의 이유가 둘이다. fence를 걸었다면 술어가 깨진 것이 압도적으로
-        // 흔하고(`agents` 행은 hard delete되지 않는다), 그렇지 않다면 위
-        // 읽기 이후에 사라진 것이다. 뭉개면 제어권을 잃은 인스턴스가
-        // "그런 Agent 없음"을 받아 존재하지 않는 데이터 문제를 쫓게 된다.
+        // 0행의 이유가 셋이다. fence를 걸었다면 그 술어가 깨진 것이 압도적으로
+        // 흔하고(`agents` 행은 hard delete되지 않는다), 게이트 ②의 술어가
+        // 깨졌을 수도 있고, 그렇지 않다면 위 읽기 이후에 사라진 것이다.
+        // 뭉개면 제어권을 잃은 인스턴스가 "그런 Agent 없음"을 받아 존재하지
+        // 않는 데이터 문제를 쫓게 된다.
         //
         // 재조회로 가르는 것은 `compare_and_set_task_status`와 같은 방식이고
-        // 같은 한계를 갖는다 — 읽는 사이에 또 바뀔 수 있으므로 이 값은
-        // 보고용이다. 아직 커밋하지 않은 트랜잭션 안에서 읽어, 위 UPDATE가
-        // 본 것과 같은 스냅샷 위에서 판정한다.
+        // **같은 한계를 갖는다 — 이 값은 보고용이다.** 실패한 UPDATE는 어떤
+        // 행도 잠그지 않았으므로, 읽는 사이에 beat이 관측을 지우거나 다른
+        // 인스턴스가 lease를 가져갈 수 있다. 그러면 여기서 고른 이름이 그
+        // 순간의 진실보다 한 발 늦는다. 정확한 판정을 원하면 행을 잠가야
+        // 하는데, 그러면 `agents` → `workers` 순서가 되어 위 cap 계산의
+        // `workers` 잠금과 순환한다 — 보고의 정밀도를 위해 데드락을 사는
+        // 거래라 하지 않는다.
+        let leftover: Option<(Option<Uuid>, Option<String>)> =
+            sqlx::query_as("SELECT worker_id, observed_status FROM agents WHERE id = $1")
+                .bind(id.0)
+                .fetch_optional(&mut *tx)
+                .await?;
         tx.commit().await?;
-        if self.control_fence_holds(fence).await? {
-            Ok(SlotClaim::NoSuchAgent)
-        } else {
-            Ok(SlotClaim::Fenced)
+
+        // fence가 `ObservedRunning`보다 우선한다. 제어권을 잃었다면 이 인스턴스가
+        // 본 관측 자체가 권한 없는 읽기이고, 후속 동작도 그쪽이 더 넓다 —
+        // `ObservedRunning`은 이 Agent 하나의 문제지만 fence는 이후 모든 쓰기의
+        // 문제다.
+        if !self.control_fence_holds(fence).await? {
+            return Ok(SlotClaim::Fenced);
+        }
+        match leftover {
+            // 관측이 막은 것이 확인됐다. `worker_id`가 목적지와 다른지까지 보는
+            // 이유는 같은 Worker로의 재배정이 술어를 통과하기 때문이다 — 그
+            // 갈래로 0행이 나올 수는 없으므로, 여기서 같다면 관측이 원인이 아니다.
+            Some((w, Some(obs))) if obs == "running" && w != Some(worker_id.0) => {
+                Ok(SlotClaim::ObservedRunning)
+            }
+            _ => Ok(SlotClaim::NoSuchAgent),
         }
     }
 
@@ -3301,7 +3338,10 @@ impl Store for PgStore {
             return Ok(CommandIssue::Issued);
         }
 
-        // 0행을 가르는 방식과 그 한계는 `assign_agent_worker`와 같다.
+        // 0행을 가르는 **방식**과 그 한계(커밋 뒤에 읽으므로 판정이
+        // 원자적이지 않다)는 `assign_agent_worker`와 같다. 다만 원인의
+        // 수가 다르다 — 이쪽 UPDATE의 술어는 `id`와 fence뿐이라 0행은
+        // 둘 중 하나이고, 저쪽은 관측 술어가 하나 더 붙어 셋이다.
         if self.control_fence_holds(fence).await? {
             Ok(CommandIssue::NoSuchAgent)
         } else {

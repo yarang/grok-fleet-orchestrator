@@ -63,6 +63,15 @@ start가 별도 표면인 이유와, 생성·배정이 그 생산자가 **아닌
 것과 대칭이기도 하다. start는 `stopped` Agent에는 거부되지만 **미배정 Agent에는 허용된다** —
 명령은 다음 배정이 세대를 올릴 때 실려 간다.
 
+**배정은 2026-09-01(`#67` 게이트 ②)에 두 방향으로 바뀌었다.** ① 다른 Worker가 `running`으로
+보고한 Agent의 이동은 거절한다(Dashboard 409, MCP `-32602`) — 같은 Worker로의 재배정은 프로세스가
+움직이지 않으므로 거절하지 않는다. ② 반대로 회수된(`stopped`) Agent의 배정은 이제 **거절하지
+않는다**. 전에는 400이었으므로 이것은 거절하던 요청이 성공하는 계약 변경이다. 근거는 ①과 ②가
+같은 결정의 양면이라는 것이다 — ① 아래에서 살아 있는 Agent를 옮기는 유일한 안전한 순서가
+"회수 → 관측 소멸 → 이동 → 재기동"이고, 그 두 번째 걸음에서 `status`가 `stopped`다. 실패 코드의
+전체 표는 [Dashboard API](dashboard-api.md)가 정본이다. start의 `stopped` 거부는 그대로다 —
+그쪽은 프로세스를 띄우는 명령이라 회수 직후 자동으로 되살아나면 회수가 뜻을 잃는다.
+
 입력은 `project_id`, `name`, 선택 `description`이며 template/runtime 참조는 없다 — AgentTemplate
 (`#86`)이 아직 없기 때문이다. 상태는 `ready`/`stopped` 둘뿐이라 응답에 `generation`도 마지막 ACK도
 없다. 이름은 `(project_id, name)` 범위에서 유일하고, 중복은 `409`(MCP는 `invalid_params`)다.

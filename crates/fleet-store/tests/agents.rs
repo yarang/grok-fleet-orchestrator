@@ -1631,3 +1631,206 @@ async fn no_fence_means_no_predicate() {
     let after = store.get_agent(agent.id).await.unwrap().unwrap();
     assert_eq!(after.command_control_epoch, None);
 }
+
+// ---------------------------------------------------------------------------
+// 게이트 ② — 다른 Worker가 돌리고 있다고 보고한 Agent는 옮기지 않는다
+// (로드맵 #67).
+// ---------------------------------------------------------------------------
+
+/// 관측을 실제 beat 경로로 심는다. 컬럼에 직접 UPDATE하지 않는 이유는, 술어가
+/// 막아야 할 값이 **워커 보고로 생긴 값**이기 때문이다 — 생산 경로를 우회해서
+/// 심으면 그 경로가 바뀌었을 때 테스트가 따라오지 않는다.
+async fn observe_running(store: &PgStore, worker: &Worker, agent_id: fleet_core::AgentId) {
+    let changed = store
+        .apply_agent_observations(worker.id, &[AgentObservation::Running { agent_id }])
+        .await
+        .unwrap();
+    assert_eq!(changed, 1, "관측이 실제로 실렸어야 한다");
+}
+
+#[tokio::test]
+async fn running_observation_blocks_moving_to_another_worker() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-block").await;
+    let owner = seed_worker(&store, "gate2-owner").await;
+    let other = seed_worker(&store, "gate2-other").await;
+    let agent = Agent::new(project.id, "busy").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    observe_running(&store, &owner, agent.id).await;
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::ObservedRunning
+    );
+    // 거절은 아무것도 쓰지 않았어야 한다. 세대가 올랐다면 새 Worker가 받지도
+    // 않을 명령이 발행된 것이고, `command_delivered()`가 영영 false가 된다.
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.worker_id, Some(owner.id), "옮기지 않았다");
+    assert_eq!(after.command_generation, agent.command_generation);
+}
+
+#[tokio::test]
+async fn running_observation_allows_reassigning_to_the_same_worker() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-same").await;
+    let owner = seed_worker(&store, "gate2-same").await;
+    let agent = Agent::new(project.id, "busy-same").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    observe_running(&store, &owner, agent.id).await;
+
+    // 프로세스가 움직이지 않으므로 중복이 생길 여지가 없다 — cap 계산이 자기
+    // 자신을 빼는 것과 같은 근거다.
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, owner.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+
+    // **관측이 살아남아야 한다.** 036의 트리거는 `worker_id`가 실제로 바뀔
+    // 때만 관측을 비우는데, 그 조건이 여기서 load-bearing이다 — 같은 Worker로
+    // 옮길 때도 지워 버리면 게이트 ②가 2단계로 뚫린다. 같은 Worker로 한 번
+    // 재배정해(술어의 `worker_id = $2` 갈래가 허용한다) 관측을 없앤 뒤,
+    // 그다음에 아무 데로나 옮기면 되기 때문이다.
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_status, Some(AgentObservedStatus::Running));
+    assert!(after.observed_at.is_some());
+    let other = seed_worker(&store, "gate2-same-t").await;
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::ObservedRunning,
+        "재배정을 거쳐도 다른 Worker로는 여전히 못 간다"
+    );
+}
+
+#[tokio::test]
+async fn failed_observation_does_not_block_moving() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-failed").await;
+    let owner = seed_worker(&store, "gate2-failed-o").await;
+    let other = seed_worker(&store, "gate2-failed-t").await;
+    let agent = Agent::new(project.id, "rejected").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    // `cap_reached`/`no_free_port`/`spawn_failed`는 전부 "프로세스가 생기지
+    // 않았다"는 뜻이라, 옮겨도 두 곳에서 돌 것이 없다.
+    store
+        .apply_agent_observations(
+            owner.id,
+            &[AgentObservation::Failed {
+                agent_id: agent.id,
+                reason: AgentObservationReason::CapReached,
+            }],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+    let after = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(after.worker_id, Some(other.id));
+    // 새 Worker의 관측은 아직 없다 — 옛 Worker의 `failed`가 따라오면 새
+    // 자리에서 실패했다는 거짓이 된다.
+    assert_eq!(after.observed_status, None);
+}
+
+#[tokio::test]
+async fn clearing_the_observation_reopens_the_move() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-reopen").await;
+    let owner = seed_worker(&store, "gate2-reopen-o").await;
+    let other = seed_worker(&store, "gate2-reopen-t").await;
+    let agent = Agent::new(project.id, "recalled").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    observe_running(&store, &owner, agent.id).await;
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::ObservedRunning
+    );
+
+    // 회수하면 Worker가 프로세스를 죽이고, 다음 beat의 목록에서 빠진다.
+    // `apply_agent_observations`는 말해지지 않은 것을 먼저 지운다.
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Stopped, None)
+        .await
+        .unwrap();
+    store.apply_agent_observations(owner.id, &[]).await.unwrap();
+
+    // 이 단정이 게이트 ②에 **회복 경로가 존재한다**는 증거다. 이것이 없으면
+    // 술어는 안전한 것이 아니라 그냥 이동을 없앤 것이다.
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+}
+
+#[tokio::test]
+async fn stopped_agents_can_still_be_placed() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-stopped").await;
+    let owner = seed_worker(&store, "gate2-stopped-o").await;
+    let other = seed_worker(&store, "gate2-stopped-t").await;
+    let agent = Agent::new(project.id, "halted").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    store
+        .update_agent_status(agent.id, AgentStatus::Stopped)
+        .await
+        .unwrap();
+
+    // 회수 → 이동 → 재기동이 살아 있는 Agent를 옮기는 유일한 안전한 순서이므로,
+    // 저장소가 `stopped`를 거절하면 게이트 ②는 이동 자체를 없앤 것이 된다.
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+}
+
+#[tokio::test]
+async fn deleting_the_worker_clears_the_observation_too() {
+    require_db!(store);
+    let project = seed_project(&store, "gate2-delete").await;
+    let owner = seed_worker(&store, "gate2-delete-o").await;
+    let other = seed_worker(&store, "gate2-delete-t").await;
+    let agent = Agent::new(project.id, "stranded").with_placement(owner.id, chrono::Utc::now());
+    store.create_agent(&agent).await.unwrap();
+    observe_running(&store, &owner, agent.id).await;
+
+    // 036: 삭제는 "이 Worker는 없다"는 운영자의 선언이다. 관측이 남으면 그
+    // Agent는 어느 Worker로도 옮길 수 없게 된다.
+    store.delete_worker(owner.id).await.unwrap();
+
+    let fetched = store.get_agent(agent.id).await.unwrap().expect("agent row");
+    assert!(fetched.worker_id.is_none(), "ON DELETE SET NULL");
+    assert!(fetched.assigned_at.is_none(), "030 트리거의 몫");
+    assert_eq!(fetched.observed_status, None, "036 트리거의 몫");
+    assert_eq!(fetched.observed_at, None);
+    assert_eq!(fetched.observed_reason, None);
+
+    assert_eq!(
+        store
+            .assign_agent_worker(agent.id, other.id, None)
+            .await
+            .unwrap(),
+        SlotClaim::Claimed
+    );
+}

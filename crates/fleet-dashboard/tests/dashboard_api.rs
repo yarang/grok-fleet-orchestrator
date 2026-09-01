@@ -4458,6 +4458,63 @@ async fn place_agent_recovers_an_unplaced_agent_and_audits_the_move() {
     );
 }
 
+/// **회수된(`stopped`) Agent도 배정된다 — 예전에는 400이었다.**
+///
+/// 옛 가드의 근거는 "원장이 `stopped`를 세지 않으니 아무도 읽지 않을 값을
+/// 쓰는 셈"이었는데, 그 근거는 틀렸다. `list_agent_commands`는
+/// `status <> 'stopped' OR last_acked_generation < command_generation`으로
+/// 고르므로 미ack 상태의 `stopped` 행을 **싣는다**.
+///
+/// 가드를 없애야 했던 이유는 게이트 ②(`#67`)가 이동 경로를 전부 닫아
+/// 버렸기 때문이다: `running`으로 보고된 Agent는 술어가 막고, 회수된
+/// Agent를 이 가드가 막으면 남는 것이 최초 배치뿐이 된다. MCP의
+/// `fleet_place_agent`에도 같은 변경이 있고 그쪽 테스트는
+/// `place_agent_accepts_a_stopped_agent`다 — 두 공개 API의 계약이 함께
+/// 바뀌었으므로 테스트도 양쪽에 있어야 한다.
+#[tokio::test]
+async fn place_agent_accepts_a_stopped_agent() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "recalled").await;
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "retired"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id: fleet_core::AgentId = created["id"].as_str().unwrap().parse().unwrap();
+    store
+        .update_agent_status(agent_id, fleet_core::AgentStatus::Stopped)
+        .await
+        .unwrap();
+    let worker = Worker::new("late", "wss://late.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/place", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["worker_id"], worker.id.to_string());
+    // 배정은 배치를 정하는 일이지 회수를 되돌리는 일이 아니다. 다시 돌릴지는
+    // desired state가 따로 말한다.
+    assert_eq!(body["status"], "stopped");
+}
+
 #[tokio::test]
 async fn place_agent_returns_409_when_no_worker_qualifies() {
     // "배정할 Worker가 없다"는 서버 결함이 아니라 지금 fleet의 상태다.

@@ -946,3 +946,94 @@ Agent를 같은 Worker로 다시 배정하는 것은 슬롯을 **추가로 쓰�
 | ~~`worker_execution_lease` 테이블~~ | 슬롯 상한에 필요 없다는 판단은 그대로이고, ①-B에도 필요 없는 것으로 **확정됐다** — 11필드 중 오늘 채울 주체가 있는 것은 `control_epoch` 하나뿐이었고, 그것은 테이블이 아니라 `agents` 컬럼 하나로 충분하다 | **만들지 않기로 확정 (2026-09-01)** — [권한과 장애 전환](../control-plane-authority-and-failover.md) §범위 정정이 정본 |
 | 상한 변경의 하트비트 반영 | 설정값이므로 계기가 재시작뿐이고, 재시작은 register가 덮는다 | 계기가 생기면 |
 | 상한 초과 시의 대기열 | 배정 실패는 이미 `worker_id = NULL`이라는 정상 상태로 표현된다(§"구현 상태 (`#67` 4a)"). 대기열은 그 상태를 소비할 재배정 루프를 전제하는데, 4a가 루프를 만들지 않기로 한 근거가 그대로 유효하다 | 재배정 루프가 생기면 |
+
+## 재배정 관측 술어 (`#67` 구현 게이트 ②)
+
+슬롯 상한(①-A)이 세는 것은 **배정된 `agents` 행**이고, 게이트 ②가 보는 것은 **워커가 보고한
+프로세스**다. 둘은 축이 다르므로 상한을 아무리 정확히 지켜도 이 창은 닫히지 않는다: 상한 1인
+Worker에 앉은 Agent를 다른 Worker로 옮기면 원장 위의 수는 여전히 1이지만, 옛 Worker가 제어면과
+단절된 채 프로세스를 계속 돌리고 있으면 실제 프로세스는 2가 된다.
+
+술어는 `assign_agent_worker`의 UPDATE **안**에 있다.
+
+```sql
+WHERE id = $1
+  AND (worker_id = $2 OR observed_status IS NULL OR observed_status = 'failed')
+```
+
+미리 SELECT해서 판정하면 안 되는 이유는 ①-B와 같다 — NULL을 본 뒤 heartbeat이 `running`을 쓰고
+그다음 우리 UPDATE가 나가는 순서가 정확히 막으려던 중복이다.
+
+| 갈래 | 뜻 | 왜 안전한가 |
+| --- | --- | --- |
+| `worker_id = $2` | 같은 Worker로의 재배정 | 프로세스가 움직이지 않으므로 중복이 생길 여지가 없다. 상한 계산이 자기 자신을 빼는 것과 같은 근거다 |
+| `observed_status IS NULL` | 한 번도 running을 보고한 적 없음 | 분할 중에는 새 프로세스가 생길 수 없다 — 명령은 heartbeat **응답**으로만 전달된다 |
+| `= 'failed'` | 워커가 띄우려다 실패했다고 보고 | 세 사유(`cap_reached`·`no_free_port`·`spawn_failed`) 모두 프로세스가 생기지 않았다는 뜻이다 |
+| `= 'running'` | 다른 Worker가 돌리고 있다고 보고 | **거절한다** — `SlotClaim::ObservedRunning`(Dashboard 409, MCP `-32602`) |
+
+`running`을 거절하는 것은 분할 중에도 그 값이 **지워지지 않기** 때문에 성립한다. 관측을 신선도로
+무효화하면(예: "N주기 이상 오래된 관측은 없는 것으로 본다") 분할된 Worker의 `running`이 곧바로
+무시 가능해져 술어 자체가 무너진다. 그래서 남는 창 — 프로세스 기동과 그것을 보고하는 다음 beat
+사이의 한 주기 — 은 여기서 닫지 않는다. 닫는 것은 게이트 ③(process inventory)의 몫이다.
+
+### 회수 가능성은 마이그레이션 036이 산다
+
+술어만 넣으면 이동이 안전해지는 것이 아니라 **없어진다**. 살아 있는 Agent는 술어가 막고, 회수된
+Agent는 옛 400 가드가 막아 남는 교집합이 최초 배정뿐이 되기 때문이다. 그래서 036이 두 가지를
+함께 한다.
+
+- 트리거가 `worker_id`의 변화에 반응한다. 조건이 **둘이고 서로 다르다.**
+  - 세 관측 컬럼은 `worker_id`가 **바뀌면**(`IS DISTINCT FROM`) 비운다. 관측은 "어떤 Worker가 이
+    프로세스에 대해 한 말"이지 Agent의 속성이 아니므로, 배치가 옮겨가는 순간 그 말은 새 자리에
+    대해 거짓이 된다. 세 컬럼이 **함께** 비워져야 하는 것은 032의 `agents_observation_complete`가
+    "셋 다 NULL 또는 셋 다 non-NULL"만 허용하기 때문이다.
+  - `assigned_at`은 NULL이 될 때만 비운다. 030의 조건 그대로다. `assign_agent_worker`가 같은
+    UPDATE에서 `assigned_at = now()`를 쓰므로, 이쪽까지 "바뀌면"으로 옮기면 방금 찍은 배치 시각을
+    트리거가 도로 지운다.
+  - 030의 `agents_clear_assigned_at`을 확장하지 않고 이름을 바꾼 것은, 확장하면 그 이름이 거짓이
+    되기 때문이다.
+- **같은 Worker로의 재배정에서는 관측이 살아남는다.** `IS DISTINCT FROM`이 거짓이 되어 자동으로
+  그렇게 되지만, 이것은 우연히 맞는 것이 아니라 게이트 ②가 성립하기 위한 조건이다. 여기서
+  지우면 술어의 `worker_id = $2` 갈래가 그대로 게이트를 통과하는 문이 된다 — 같은 Worker로 한 번
+  재배정해 관측을 없앤 뒤 아무 데로나 옮기는 2단계 우회다. 양쪽 저장소의
+  `same_worker_reassignment_is_allowed_while_running`이 "관측이 남아 있고, 그 뒤에도 다른
+  Worker로는 못 간다"까지 단정한다.
+- 술어와 트리거는 서로를 방해하지 않는다. UPDATE의 WHERE는 **갱신 전 행**에 대해 평가되고 BEFORE
+  ROW 트리거는 그 행이 선택된 **뒤**에 발화하므로, 트리거가 `observed_status`를 NULL로 만드는 것이
+  그 행을 통과시킨 술어의 판정을 되돌리지 않는다.
+- `agents_observation_requires_placement` CHECK가 "배정 없이 관측 없음"을 DB의 사실로 굳히고,
+  백필이 기존 행을 정리한다. 트리거만으로는 **앞으로의** 전이만 옳다.
+
+트리거인 이유는 Worker 삭제가 애플리케이션을 거치지 않고도 일어나기 때문이다 — 운영자의 직접
+`DELETE FROM workers`, 또는 다른 인스턴스. `PgStore::delete_worker`에만 두면 그 경로가 stale한
+`running`을 남겨 해당 Agent를 영구히 묶는다. 이 결정이 없애려는 바로 그 상태다.
+
+**대가는 정직하게 적는다.** Worker 삭제를 "이 Worker는 없다"는 운영자의 선언으로 취급하는 것이므로,
+운영자가 틀렸다면(실은 살아 있고 제어면과만 단절) 중복 실행이 그대로 발생한다. 판단의 주체를
+사람으로 옮긴 것이지 위험을 없앤 것이 아니다.
+
+### 두 저장소의 판정 **순서**를 고정한다
+
+PgStore는 상한을 선행 검사로, 관측을 UPDATE 안의 술어로 본다. 그래서 둘 다 실패할 상황의 답은
+`CapReached`다. MemStore도 관측 검사를 상한 계산 **뒤에** 두어 같은 답을 낸다. 순서가 갈리면 그
+차이는 저장소를 바꿔 끼우는 호출부 테스트에서만, 그것도 어느 쪽을 골랐느냐에 따라서만 드러난다 —
+`cap_is_decided_before_the_observation`(양쪽)이 이것을 고정한다.
+
+### 회수된 Agent의 400 가드를 걷었다
+
+두 공개 표면(`POST /api/agents/{id}/place`, `fleet_place_agent`)이 `status = 'stopped'`인 Agent의
+배정을 400으로 막고 있었다. 근거는 "원장이 `stopped`를 세지 않으니 아무도 읽지 않는 값을 쓰는
+것이 된다"였고, 그 근거는 두 겹으로 무너졌다.
+
+1. 게이트 ② 아래에서 살아 있는 Agent를 옮기는 유일한 안전한 순서가 "회수 → 프로세스가 죽고
+   관측이 비워짐 → 이동 → 재기동"인데, 그 두 번째 걸음에서 `status`가 `stopped`다.
+2. 배정된 값은 실제로 읽힌다. `list_agent_commands`의 술어는
+   `worker_id = $1 AND (status <> 'stopped' OR last_acked_generation < command_generation)`이라
+   미확인인 동안 `stopped` 행도 싣는다(§"회수 명령은 확인될 때까지 실린다").
+
+상한을 우회하지도 않는다. `stopped`는 원장에 세지 않으므로 배정 시점의 계산을 지나가지만, 실제
+기동은 Worker가 자기 상한으로 막고 `failed`/`cap_reached` 관측으로 되돌려 준다 — 진짜 경계는
+그쪽이고, 4c-B가 두 수를 나눠 둔 이유가 여기서 쓰인다.
+
+**이것은 계약 변경이다** — 전에 400으로 거절하던 요청이 이제 성공한다. 표면 계약의 정본은
+[Dashboard API](../../contracts/dashboard-api.md)와 [Agent 관리](../../contracts/agent-management.md)다.

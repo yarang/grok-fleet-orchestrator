@@ -88,7 +88,7 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 | `fleet_list_agents` | 선택 `project_id`, limit, offset | Agent 목록 |
 | `fleet_start_agent` | `agent_id` | start 결과(`desired_status: running`과 그 `generation`) |
 | `fleet_stop_agent` | `agent_id` | 회수 결과(`stopped`) |
-| `fleet_place_agent` | `agent_id`, 선택 `worker_id` | 배정 결과(선택된 Worker) |
+| `fleet_place_agent` | `agent_id`, 선택 `worker_id` | 배정 결과(선택된 Worker). 상한 도달·다른 Worker가 `running`으로 보고한 Agent의 이동은 `-32602`. 회수된 Agent 배정은 2026-09-01부터 거절하지 않는다 — [Dashboard 계약](dashboard-api.md)의 같은 표가 정본이다 |
 | `fleet_list_issues` | 선택 `project_id`, `status`, `open_only` | Issue 목록 |
 | `fleet_create_issue` | `project_id`, `title`, 선택 `body`, `severity`, labels | 생성된 Issue |
 | `fleet_transition_issue` | `issue_id`, `status`, 선택 `close_reason` | 전이 결과 |

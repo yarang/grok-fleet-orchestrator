@@ -1719,14 +1719,23 @@ pub async fn place_agent_api(
         .map_err(|e| ApiError::Store(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id}")))?;
 
-    // 회수된 Agent는 배정하지 않는다. 원장(`count_agents_by_worker`)이
-    // `stopped`를 세지 않으므로 배정해도 부하에 잡히지 않고, 4b의 desired
-    // state도 실릴 일이 없다 — 아무도 읽지 않는 값을 쓰는 것이 된다.
-    if agent.status == fleet_core::AgentStatus::Stopped {
-        return Err(ApiError::BadRequest(format!(
-            "agent {agent_id} is stopped and cannot be placed"
-        )));
-    }
+    // **회수된 Agent도 배정한다.** 게이트 ②가 생기기 전에는 여기서 400을
+    // 돌려줬고, 근거는 "원장이 `stopped`를 세지 않으니 아무도 읽지 않는 값을
+    // 쓰는 것이 된다"였다. 그 근거가 게이트 ②와 함께 무너졌다.
+    //
+    // 게이트 ②는 다른 Worker가 돌리고 있다고 **보고한** Agent의 이동을 거절한다.
+    // 그러면 살아 있는 Agent를 옮기는 유일한 안전한 순서가 "회수 → 프로세스가
+    // 죽고 관측이 비워짐 → 이동 → 재기동"이 되는데, 그 두 번째 걸음에서
+    // `status`가 `stopped`다. 가드를 남기면 어떤 순서로도 이동이 불가능해진다.
+    //
+    // 그리고 배정된 값은 실제로 읽힌다 — `list_agent_commands`는 미확인
+    // (`last_acked_generation < command_generation`)인 동안 `stopped` 행도
+    // 싣는다. 새 Worker는 그 회수 명령을 받아 (띄운 적 없는 프로세스에 대해)
+    // 확인하고 조용해진다.
+    //
+    // cap을 우회하는 것도 아니다. `stopped`는 원장에 세지 않으므로 배정
+    // 시점의 cap 계산을 지나가지만, 실제 기동은 Worker가 자기 cap으로 막고
+    // `failed`/`cap_reached` 관측으로 되돌려 준다 — 진짜 경계는 그쪽이다.
 
     let worker_id = match body.worker_id.as_deref() {
         Some(raw) => parse_worker_id(raw)?,
@@ -1780,6 +1789,15 @@ pub async fn place_agent_api(
         // 요청의 결함이 아니라 이 인스턴스가 더 이상 제어 기관이 아니라는
         // 뜻이므로 4xx가 아니다. 503은 "다시 시도할 가치가 있다"를 말하는데,
         // 여기서는 사실이다 — 새 보유자에게 가면 같은 요청이 성립한다.
+        // 409다. 요청 자체는 올바르고, 지금의 fleet 상태가 거절한 것이다 —
+        // 프로세스를 회수해 관측이 비면 같은 요청이 성공한다. `CapReached`와
+        // 같은 성질이라 같은 코드를 준다.
+        fleet_store::SlotClaim::ObservedRunning => {
+            return Err(ApiError::Conflict(format!(
+                "agent {agent_id} is reported running on its current worker; \
+                 stop it before moving it to another worker"
+            )))
+        }
         fleet_store::SlotClaim::Fenced => {
             return Err(ApiError::Unavailable(
                 "this instance is no longer the control-plane leader".into(),
