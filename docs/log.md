@@ -6083,3 +6083,51 @@ Dashboard는 같은 이름의 통합 테스트다. **계약을 두 표면에서 
 030의 조건을 유지하는지, 같은 Worker 재배정에서 관측을 남기는 것이 왜 게이트 ②의 전제인지)를
 넣고 테스트 개수를 12건에서 13건으로 고쳤다(대시보드 통합 테스트가 빠져 있었다). 권한과 장애
 전환 문서에는 트리거 발동 조건의 정정을 한 문단으로 덧붙였다.
+
+## 2026-09-02 — `#69`의 완료 게이트 넷 중 셋은 이름만 있고 대상이 없었다
+
+`#49` 2단계가 어제 닫혀서 `#69`의 선행이 풀렸다고 보고 착수했는데, 설계 정본을 읽는 단계에서
+멈췄다. **로드맵이 완료 게이트로 지목한 "secret scan"이 `docs/` 전체에서 그 행 말고는 한 번도
+나오지 않는다.** `grep -rn 'secret scan\|시크릿 스캔' docs/`가 로드맵 행 자신만 잡는다.
+"checkpoint"는 다섯 문서에 나오지만 전부 스쳐 지나가는 언급이고 소유 절이 없다. 게이트 넷 중
+worktree isolation 하나만 정본에 대상이 있었다.
+
+이것은 2026-09-01에 `#49` 2단계가 겪은 것과 **같은 모양**이다 — 그때 프로비저닝 문서가
+"지목이 넷인데 대상이 비어 있으면 지목마다 다른 것을 상상하게 되고"라고 적으며 범위 절을
+새로 쓴 그 결함이다. 다른 점은 발견 시점뿐이다: 그때는 구현 도중이었고 이번에는 착수 직전이다.
+
+**선행에 대한 서술도 틀려 있었다.** 로드맵 행은 "넷 다 'Agent별 worktree'를 전제하고, 그
+바인딩은 `#49` 2단계에 있다"고 적어 뒀는데, 그건 첫 번째에만 참이다. checkpoint push/restore는
+push credential을 발급하는 주체에 걸리고, secret scan은 push가 존재하는 것에, 이동 복구 E2E는
+그 둘에 걸린다. `#49` 2단계가 닫혔다는 사실만 보고 "`#69`가 열렸다"로 읽었다면 셋을 착수한
+뒤에 막힘을 재발견했을 것이다. 어제 로그가 "코드는 고쳤는데 정본이 옛 조건을 말하고 있었다"로
+적은 것과 방향이 같다 — 선행이 바뀌었는데 그것을 기술한 칸은 그대로였다.
+
+**push credential이 없다는 것이 결정적이다.** 실행 격리 정본은 Git push credential을 "Security
+Manager가 실행 구간에 묶어 발급한 credential으로만" 제공하고 user global credential store·SSH
+agent forwarding·repository config의 embedded token을 **모두** 금지한다. 그 Security Manager를
+소유하는 로드맵 항목이 없다. 즉 push할 수단 자체가 존재하지 않으므로 게이트 2·3·4는 1단계에서
+원리적으로 닫을 수 없다. 로컬 커밋까지는 가능하지만 그것은 checkpoint가 아니다 — Worker 이동은
+디스크를 바꾸므로 로컬 커밋은 따라가지 않는다.
+
+**새로 정의한 것**: 실행 격리 정본에 "`#69` 1단계의 범위" 절을 만들어 Project Git repository,
+worktree, checkpoint, secret scan 넷의 대상을 정의하고, 게이트별 실제 선행과 1단계가 아닌 것을
+표로 적었다. secret scan은 독립 기능이 아니라 push의 전제 조건으로 정의했다 — 최소 대상이
+**Fleet 자신이 그 worktree에 넣은 credential**이기 때문이다. 실행 구간에 묶어 발급한 credential이
+`.git/config`의 embedded token이나 helper가 쓴 파일로 worktree에 남으면 다음 checkpoint가 그것을
+원격으로 실어 나른다. 사용자 secret 탐지는 그 위에 얹는 것이지 그 반대가 아니다.
+
+**결정한 것 — Worker는 repository를 어떻게 아는가**. worktree를 만들려면 Worker가 Agent의
+Project와 그 repository를 알아야 하는데 지금은 둘 다 모른다. heartbeat 응답의 `AgentCommand`는
+`(agent_id, desired_status, generation)` 셋뿐이고 그 키 집합은 `schema.rs`의 테스트가 잠그고
+있다(`assert_eq!(keys, ["agent_id", "desired_status", "generation"])`). 4c-A는 port·secret·cwd를
+워커 로컬 파생으로 해결해 이 봉투를 좁게 유지했지만 repository URL은 로컬로 파생할 수 없다.
+봉투를 넓히는 쪽으로 가면 `HeartbeatResponse` 주석이 경고한 것이 그대로 실현된다 — repository
+URL은 `https://user:token@host/...` 형태를 가질 수 있으므로 응답이 통째로 로깅해도 안전한 값이
+아니게 된다. **별도 인증 호출로 간다.** 근거는 취향이 아니라 비대칭이다: 응답의 로깅 안전성은
+한 번 깨지면 그 뒤의 모든 코드가 그 전제로 쓰이므로 되돌릴 수 없고, 반대쪽 비용은 엔드포인트
+하나다.
+
+**검증 한계**: 이 커밋은 문서만 바꾼다. 정의한 대상 중 코드에 존재하는 것은 아직 없고,
+`projects` 테이블에는 repository 컬럼이 없으며 워크스페이스에 Git 라이브러리 의존성도 없다
+(`git2`/`gix` 모두 없음). 1단계 구현은 다음 커밋이다.

@@ -4,7 +4,7 @@ authority: canonical
 implementation: proposed
 verification: design-reviewed
 source: "docs/architecture/agents/execution-isolation.md"
-last_verified: "2026-08-28"
+last_verified: "2026-09-02"
 last_verified_commit: "working-tree"
 ---
 
@@ -79,6 +79,80 @@ root 아래인가)는 판정하지 못한다 — 오케스트레이터의 `canon
 워커의 경로에 대해 아무것도 말하지 않고, symlink 해석은 그 경로가 존재하는 쪽에서만 가능하다.
 따라서 워커측 relay나 `#64`의 container mount 경계 중 하나가 선행이며, **지금 상태는 "경계가
 있다"가 아니라 "지어낸 루트는 더 이상 쓰지 않는다"까지다.**
+
+### `#69` 1단계의 범위 (2026-09-02 확정)
+
+로드맵 `#69`의 완료 게이트는 넷(Agent worktree isolation, checkpoint push/restore, secret scan,
+Worker 이동 복구 E2E)인데, 착수 시점에 **셋은 정본에 대상이 없었다.** "secret scan"은 `docs/`
+전체에서 로드맵 행 자신 말고는 한 번도 나오지 않고, "checkpoint"는 다섯 문서에 스쳐 지나갈 뿐
+소유 절이 없다. 지목이 넷인데 대상이 비어 있으면 지목마다 다른 것을 상상하게 되므로, 여기서
+정의한다. 이것은 [프로비저닝](provisioning.md)의 "`#49` 2단계의 범위"가 같은 이유로 한 일이다.
+
+#### 대상의 정의
+
+- **Project Git repository**: Project가 갖는 remote repository 하나와 그 default branch. Project는
+  repository를 **갖지 않을 수 있고**, 그때는 지금과 똑같이 동작한다(worktree 없음, `Task.cwd`만).
+  이 NULL은 자리표시자가 아니라 "이 Project는 Git을 쓰지 않는다"는 도달 가능한 상태다 — `#67`
+  4a가 `agents.worker_id`의 NULL을 다룬 방식과 같다.
+- **worktree**: Worker가 `agent_workspace_root/<agent_id>`에 만드는 **checkout**. 지금 그 경로는
+  프로세스의 cwd일 뿐이며([프로비저닝](provisioning.md)의 유예 표), 1단계가 그 디렉터리의 규약을
+  바꾼다. 유예 표가 "지금 둘을 합치면 `#69`가 자기 설계를 4c-A의 디렉터리 규약에 맞춰야 한다"고
+  적어 미뤄 둔 합침을, 여기서 `#69` 쪽 규약으로 한다.
+- **checkpoint**: worktree의 작업을 Project repository의 **원격 ref로 올린 것**. 로컬 커밋만으로는
+  checkpoint가 아니다 — Worker 이동은 디스크를 바꾸므로 로컬 커밋은 따라가지 않는다. 이 정의가
+  아래 표에서 게이트 2·4를 push credential에 묶는다.
+- **secret scan**: checkpoint push **직전에** 올라갈 tree/diff를 검사해 credential이 원격으로 나가는
+  것을 막는 검사이며, 독립 기능이 아니라 push의 전제 조건이다. 최소 대상은 **Fleet 자신이 그
+  worktree에 넣은 credential**이다: 위 결정이 push credential을 "실행 구간에 묶어 발급"한다고
+  정했는데, 그 credential이 `.git/config`의 embedded token이나 helper가 쓴 파일로 worktree에 남으면
+  다음 checkpoint가 그것을 실어 나른다. 일반적인 사용자 secret 탐지는 그 위에 얹는 것이지 그
+  반대가 아니다.
+
+#### 게이트의 실제 선행
+
+로드맵 행은 네 게이트가 **모두** `#49` 2단계(dispatch에 `agent_id`를 싣는 것)에 걸린다고 적었다.
+그 2단계는 2026-09-01에 닫혔지만, **선행이 하나였다는 서술은 첫 번째에만 참이다.**
+
+| 게이트 | 실제 선행 | 1단계 |
+| --- | --- | --- |
+| Agent worktree isolation | `#49` 2단계(닫힘) + Project repository 바인딩 | 닫는다 |
+| checkpoint push/restore | push credential을 발급하는 주체 | 아니다 |
+| secret scan | checkpoint push가 존재할 것 | 아니다 |
+| Worker 이동 복구 E2E | 위 둘 | 아니다 |
+
+"`#49` 2단계가 닫혔으니 `#69`가 열렸다"고 읽으면 나머지 셋을 착수한 뒤에 막힘을 재발견한다.
+
+#### 1단계가 아닌 것
+
+| 미룬 것 | 왜 | 어디로 |
+| --- | --- | --- |
+| checkpoint push/restore | Git push credential을 발급하는 Security Manager가 없다. 위 결정은 user global credential store·SSH agent forwarding·repository config의 embedded token을 **모두** 금지하므로, 발급자가 없으면 push할 수단 자체가 없다 | 미정(Security Manager를 소유하는 로드맵 항목이 아직 없다) |
+| secret scan | 위가 없으면 검사 대상(push될 tree)이 생기지 않는다 | checkpoint push 이후 |
+| Worker 이동 복구 E2E | 이동은 디스크를 바꾸므로 원격 ref 없이는 복구할 것이 없다 | 위 둘 이후 |
+| worktree containment 판정 | 위 "현재 구현"이 적은 그대로다 — 오케스트레이터의 `canonicalize`는 워커의 파일시스템을 보지 못한다. worktree를 **워커가** 만들면 그 경로는 워커가 정한 것이므로 클라이언트 입력보다 낫지만, 그것은 검증이 아니라 출처의 차이다 | 워커측 relay 또는 `#64` |
+| execution snapshot의 remote/ref 고정 | snapshot 필드는 아래 "실행 snapshot과 cleanup"이 소유하고, 그 고정은 dispatcher capability 검증(게이트 1)과 함께 간다 | 게이트 1 |
+| Project 하나에 repository 여럿 | 복수는 worktree 배치 규약을 바꾸므로 checkpoint 정의가 굳기 전에 정하면 두 번 바꾸게 된다 | 미정 |
+
+#### Worker는 repository를 어떻게 아는가
+
+worktree를 만들려면 Worker가 Agent의 Project와 그 repository를 알아야 하는데, **지금은 둘 다
+모른다.** heartbeat 응답의 `AgentCommand`는 `(agent_id, desired_status, generation)` 셋뿐이고, 그
+키 집합은 스키마 테스트가 잠그고 있다. 4c-A는 port·secret·cwd를 **워커 로컬 파생**으로 해결해
+이 봉투를 좁게 유지했지만, repository URL은 로컬로 파생할 수 없다.
+
+두 갈래가 있고, 결과가 다르다.
+
+- **봉투를 넓힌다** — `AgentCommand`에 repository를 싣는다. 구현은 가장 짧지만, `HeartbeatResponse`
+  주석이 경고한 것이 그대로 실현된다: repository URL은 `https://user:token@host/...` 형태를 가질 수
+  있으므로 heartbeat 응답이 **통째로 로깅해도 안전한 값이 아니게 된다.** 그 안전 속성은 지금
+  `Worker::endpoint`가 `mask_server_key`를 거치는 이유와 같은 종류이고, 한 번 잃으면 응답을 만지는
+  모든 곳이 마스킹 대상이 된다.
+- **별도 인증 호출을 만든다** — Worker가 자신에게 배정된 Agent의 workspace 기술을 별도
+  엔드포인트로 가져온다. 엔드포인트와 권한 매핑이 늘지만 봉투의 속성이 유지되고, 응답에 secret이
+  섞이는 표면이 **한 곳으로 국한된다.**
+
+**후자로 간다.** 근거는 취향이 아니라 비대칭이다 — 전자의 비용은 되돌릴 수 없고(응답의 로깅
+안전성은 한 번 깨지면 그 뒤의 모든 코드가 그 전제로 쓰인다), 후자의 비용은 엔드포인트 하나다.
 
 ## sudo와 privileged operation
 
