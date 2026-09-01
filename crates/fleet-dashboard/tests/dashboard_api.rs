@@ -1048,6 +1048,186 @@ async fn submit_task_rejects_unknown_parent_task_id() {
 
     assert_eq!(resp.status(), 400);
 }
+// ── Agent 지목 (로드맵 #49 2단계) ────────────────────────────────────────
+//
+// 여기서 보는 것은 `apply_agent_pin`의 규칙 자체가 아니라(그건
+// `fleet-store`의 단위 테스트가 본다) **HTTP 핸들러가 그 규칙을 실제로
+// 부르는가**다 — 폼의 문자열을 `AgentId`로 파싱하고, 거절을 400으로 옮기고,
+// 상속된 `project_id`를 응답으로 되읽을 수 있는가.
+
+/// Project 하나와 그 안의 Agent 하나를 미리 넣은 `MemStore`를 만든다.
+///
+/// `spawn_server_with_dispatcher`는 store를 **소비**하고 핸들을 돌려주지
+/// 않으므로, 시딩은 서버를 띄우기 전에 끝나야 한다.
+async fn store_with_agent(
+    project_name: &str,
+) -> (MemStore, fleet_core::Project, fleet_core::Agent) {
+    let store = MemStore::new();
+    let project = fleet_core::Project::new(project_name);
+    store.create_project(&project).await.unwrap();
+    let agent = fleet_core::Agent::new(project.id, "planner");
+    store.create_agent(&agent).await.unwrap();
+    (store, project, agent)
+}
+
+#[tokio::test]
+async fn submit_task_rejects_unknown_agent_id() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie) = spawn_server_with_dispatcher(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let bogus = fleet_core::AgentId::new().to_string();
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "해줘"),
+            ("agent_id", &bogus),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_a_malformed_agent_id() {
+    // 파싱 실패와 "그런 Agent 없음"은 다른 분기다 — 전자는 Store를 건드리지도
+    // 않는다. 둘 다 400이지만 같은 코드가 내는 400이 아니므로 따로 본다.
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (server, cookie) = spawn_server_with_dispatcher(MemStore::new(), worker).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "해줘"),
+            ("agent_id", "not-a-uuid"),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_agent_id_together_with_server_hint() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (store, _project, agent) = store_with_agent("pin-conflict").await;
+    let (server, cookie) = spawn_server_with_dispatcher(store, worker).await;
+    let client = reqwest::Client::new();
+
+    let agent_id = agent.id.to_string();
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "해줘"),
+            ("agent_id", &agent_id),
+            ("server_hint", "w1"),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    // Agent가 **실재하는데도** 거절돼야 한다 — 존재 여부가 아니라 두 핀이
+    // 함께 온 것이 이유이기 때문이다.
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_rejects_an_agent_from_another_project() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (store, _project, agent) = store_with_agent("pin-mismatch").await;
+    let other = fleet_core::Project::new("pin-mismatch-other");
+    store.create_project(&other).await.unwrap();
+    let (server, cookie) = spawn_server_with_dispatcher(store, worker).await;
+    let client = reqwest::Client::new();
+
+    let agent_id = agent.id.to_string();
+    let other_id = other.id.to_string();
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "해줘"),
+            ("agent_id", &agent_id),
+            ("project_id", &other_id),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn submit_task_keeps_the_agent_pin_and_inherits_its_project() {
+    let worker = sample_worker("w1", WorkerStatus::Online);
+    let (store, project, agent) = store_with_agent("pin-inherit").await;
+    let (server, cookie) = spawn_server_with_dispatcher(store, worker).await;
+    let client = reqwest::Client::new();
+
+    let agent_id = agent.id.to_string();
+    let resp = authed_post_form(
+        &client,
+        &format!("http://{}/api/tasks", server.addr),
+        &cookie,
+        &[
+            ("prompt", "해줘"),
+            ("cwd", "/srv/fleet/workspaces/test"),
+            ("agent_id", &agent_id),
+            ("csrf_token", TEST_CSRF),
+        ],
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+
+    // **디스패치되지 않은 것이 요점이다.** 온라인 워커 `w1`이 있으므로 지목이
+    // 무시됐다면 이 제출은 그냥 성공했을 것이다. 지목된 Agent는 아직 돌고
+    // 있지 않으므로(`Ready`/`Stopped`) selector가 거절하고, 그 거절이 곧
+    // "dispatch가 지목을 지켰다"는 증거다.
+    assert_eq!(
+        body["dispatched"], false,
+        "지목된 Agent가 안 돌고 있으면 일반 풀로 흘러가지 않는다: {body}"
+    );
+
+    let task_id = body["task_id"].as_str().unwrap().to_string();
+    let detail: serde_json::Value = authed_get(
+        &client,
+        &format!("http://{}/api/tasks/{task_id}", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+
+    // 입력으로만 받고 되읽을 수 없으면 제출자는 자기 지목이 붙었는지 확인할
+    // 방법이 없다 — 그래서 `TaskSummary`가 둘 다 싣는다.
+    assert_eq!(detail["task"]["agent_id"], agent.id.to_string());
+    assert_eq!(detail["task"]["project_id"], project.id.to_string());
+}
 
 /// FLEET (2026-08-12): 대시보드 "Reply" 기능의 HTTP 레벨 통합 테스트.
 ///

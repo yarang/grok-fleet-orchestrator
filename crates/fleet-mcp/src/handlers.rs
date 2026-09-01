@@ -16,8 +16,8 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use fleet_core::{
-    CircuitState, FleetEvent, Host, IssueId, ProjectId, Task, TaskFilter, TaskId, TaskRequest,
-    TaskStatusFilter, WorkerFilter, WorkerId, WorkerStatus,
+    AgentId, CircuitState, FleetEvent, Host, IssueId, ProjectId, Task, TaskFilter, TaskId,
+    TaskRequest, TaskStatusFilter, WorkerFilter, WorkerId, WorkerStatus,
 };
 use fleet_scheduler::{BreakerState, Dispatcher, FleetState};
 use tracing::debug;
@@ -183,6 +183,32 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         }
         None => None,
     };
+    // 로드맵 #49 2단계 — Agent 지목. 존재 검증·핀 충돌·Project 경계는
+    // Dashboard `POST /api/tasks`와 규칙을 공유한다
+    // (`fleet_store::apply_agent_pin`). 가용성은 여기서 보지 않는다 —
+    // 제출 시점에 참이어도 dispatch 시점에 거짓일 수 있어서, 그쪽은
+    // selector의 `Agent*` 계열 `SelectionError`가 판정한다.
+    req.agent_id = match args.get("agent_id") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| JsonRpcError::invalid_params("agent_id must be a UUID string"))?
+                .parse::<AgentId>()
+                .map_err(|_| JsonRpcError::invalid_params("agent_id must be a UUID"))?,
+        ),
+        None => None,
+    };
+    fleet_store::apply_agent_pin(ctx.state.store.as_ref(), &mut req)
+        .await
+        .map_err(|e| match e {
+            fleet_store::TaskPinError::Store(inner) => {
+                JsonRpcError::internal(format!("failed to look up agent: {inner}"))
+            }
+            fleet_store::TaskPinError::Project(fleet_store::ProjectAdmissionError::Store(
+                inner,
+            )) => JsonRpcError::internal(format!("failed to look up project: {inner}")),
+            other => JsonRpcError::invalid_params(other.to_string()),
+        })?;
     req.skills_required = args
         .get("skills_required")
         .and_then(|v| v.as_array())
@@ -3053,6 +3079,127 @@ mod tests {
         assert!(
             result.is_err(),
             "dispatching against an archived project must be rejected"
+        );
+    }
+
+    // ── Agent 지목 (로드맵 #49 2단계) ────────────────────────────────────
+
+    /// Project 하나와 그 안의 Agent 하나를 심는다.
+    ///
+    /// MCP에는 Agent를 만드는 도구가 없다(생성은 Dashboard 표면의 일이다).
+    /// 그래서 도구를 거치지 않고 Store에 직접 넣는다 — 여기서 시험하는 것은
+    /// 생성 경로가 아니라 **제출이 지목을 어떻게 판정하는가**다.
+    async fn seed_agent(ctx: &ToolContext, project_name: &str) -> (fleet_core::Project, AgentId) {
+        let project = fleet_core::Project::new(project_name);
+        ctx.state.store.create_project(&project).await.unwrap();
+        let agent = fleet_core::Agent::new(project.id, "planner");
+        ctx.state.store.create_agent(&agent).await.unwrap();
+        (project, agent.id)
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_unknown_agent_id() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "test", "agent_id": AgentId::new().to_string()}),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "pinning a nonexistent agent must be rejected at submission, not at dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_a_malformed_agent_id() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "test", "agent_id": "not-a-uuid"}),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    /// `agent_id`와 `server_hint`는 같은 결정에 대한 두 개의 핀이다.
+    #[tokio::test]
+    async fn dispatch_task_rejects_agent_id_together_with_server_hint() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (_project, agent_id) = seed_agent(&ctx, "pins").await;
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({
+                "prompt": "test",
+                "agent_id": agent_id.to_string(),
+                "server_hint": "w1",
+            }),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "two pins for one decision must be rejected rather than silently ranked"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_task_rejects_an_agent_from_another_project() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (_project, agent_id) = seed_agent(&ctx, "owner").await;
+        let other = fleet_core::Project::new("bystander");
+        ctx.state.store.create_project(&other).await.unwrap();
+
+        let result = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({
+                "prompt": "test",
+                "agent_id": agent_id.to_string(),
+                "project_id": other.id.to_string(),
+            }),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a task must not cross the project boundary of the agent it pins"
+        );
+    }
+
+    /// `project_id`를 비우면 Agent의 것을 물려받는다 — 그리고 지목 자체가
+    /// Task에 남아 dispatch까지 전달된다.
+    #[tokio::test]
+    async fn dispatch_task_inherits_the_agents_project_and_keeps_the_pin() {
+        let ctx = test_ctx(fleet_store::mem::MemStore::new());
+        let (project, agent_id) = seed_agent(&ctx, "inheritance").await;
+
+        // 이 fleet에는 Worker가 없으므로 dispatch 자체는 실패한다 — 그리고
+        // 그것이 이 테스트가 보려는 것과 무관하다는 점이 요점이다. 지목의
+        // **검증과 상속**은 제출 시점에 끝나고, 워커가 있느냐는 그 뒤의
+        // 별개 판정이다. 그래서 도구의 반환값이 아니라 저장된 행을 본다.
+        let _ = dispatch_tool(
+            &ctx,
+            TOOL_DISPATCH_TASK,
+            &json!({"prompt": "test", "cwd": "/tmp/work", "agent_id": agent_id.to_string()}),
+        )
+        .await
+        .unwrap();
+
+        let tasks = ctx
+            .state
+            .store
+            .list_tasks(&fleet_core::TaskFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "제출은 Task를 남긴다");
+        let task = &tasks[0];
+        assert_eq!(task.agent_id, Some(agent_id), "지목이 Task에 남아야 한다");
+        assert_eq!(
+            task.project_id,
+            Some(project.id),
+            "Agent를 지목한 Task는 일반 풀로 떨어지지 않는다"
         );
     }
 }

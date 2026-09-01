@@ -85,7 +85,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use fleet_core::{Task, WorkerId, WorkerLivenessMode, WorkerStatus};
+use fleet_core::{
+    Agent, AgentDesiredStatus, AgentObservedStatus, Task, WorkerId, WorkerLivenessMode,
+    WorkerStatus,
+};
 use fleet_store::Store;
 
 use crate::breaker::{BreakerRegistry, BreakerState};
@@ -139,6 +142,60 @@ pub enum SelectionError {
     /// `max_concurrent`를 올리는 것이다.
     #[error("hinted worker '{0}' is at its concurrency limit (not falling back, per user intent)")]
     HintedAtCapacity(String),
+
+    /// `tasks.agent_id`가 지목한 Agent 행이 없다 (로드맵 #49 2단계).
+    ///
+    /// 없는 Agent는 **제출에서** 거절되므로 정상 경로로는 도달하지 않는다
+    /// (현재 코드베이스에 `DELETE FROM agents`가 없어 제출 후 사라지지도
+    /// 않는다). 그래도 분기를 두는 것은 selector의 계약이 "제출 검증을
+    /// 통과한 입력"에만 성립하게 두지 않기 위해서다 — 조회 실패와 달리 이쪽은
+    /// 진짜로 행이 없다는 뜻이므로 둘을 같은 이름으로 보고하면 안 된다.
+    #[error("task's agent '{0}' no longer exists")]
+    AgentNotFound(String),
+
+    /// Agent가 아직 어떤 Worker에도 놓이지 않았다 (`worker_id IS NULL`).
+    ///
+    /// `7009e4b` 이후 이것은 **회복 가능한 정상 상태**이지 손상이 아니다.
+    /// 그래서 운영자가 할 일은 Agent를 고치는 것이 아니라 배정 회복을
+    /// 기다리는 것이며, 이 구분이 `AgentNotFound`와 나누는 이유다.
+    #[error("task's agent '{0}' is not placed on any worker yet")]
+    AgentUnplaced(String),
+
+    /// Agent가 돌 의도가 없거나(`desired = Stopped`) 못 떴다(`observed = Failed`).
+    ///
+    /// 둘을 한 이름으로 묶은 것은 운영자의 다음 동작이 같기 때문이다 — 그
+    /// Agent를 다시 Running으로 만드는 것. 어느 쪽이었는지는 Agent 화면이
+    /// `observed_reason`과 함께 보여 준다.
+    #[error("task's agent '{0}' is not running")]
+    AgentNotRunning(String),
+
+    /// 시작을 지시했지만 Worker가 아직 아무것도 보고하지 않았다
+    /// (`Agent::start_pending`).
+    ///
+    /// `AllUnprobed`와 같은 계열이다 — **확인되지 않은 것은 배정 대상이
+    /// 아니다**. `AgentNotRunning`과 나누는 이유는 운영자가 할 일이 다르기
+    /// 때문이다: 저쪽은 Agent를 다시 띄우는 것이고, 이쪽은 ACK가 오기를
+    /// 기다리는 것(또는 Worker가 명령을 집어가지 못하는 이유를 보는 것)이다.
+    #[error("task's agent '{0}' has been told to start but has not reported yet")]
+    AgentNotObserved(String),
+
+    /// Agent가 놓인 Worker가 필터를 통과하지 못했다 (오프라인·차단·라벨 불일치 등).
+    ///
+    /// 폴백하지 않는 이유는 `HintedUnavailable`과 같다 — 지목은 폴백을 막을 뿐
+    /// 필터를 무시하는 권한이 아니고, 다른 Worker로 보내면 그 Agent가 없는
+    /// 곳으로 Task를 보내는 것이 된다.
+    #[error(
+        "the worker hosting agent '{0}' is not dispatchable (not falling back, per user intent)"
+    )]
+    AgentWorkerUnavailable(String),
+
+    /// Agent가 놓인 Worker가 동시 상한에 도달했다.
+    ///
+    /// `AgentWorkerUnavailable`과 나누는 이유는 `HintedAtCapacity`가
+    /// `HintedUnavailable`과 나뉘는 이유와 같다 — 저쪽은 Worker를 살리는
+    /// 것이고, 이쪽은 기다리거나 `max_concurrent`를 올리는 것이다.
+    #[error("the worker hosting agent '{0}' is at its concurrency limit (not falling back, per user intent)")]
+    AgentWorkerAtCapacity(String),
 }
 
 /// 워커 선택기.
@@ -264,16 +321,55 @@ impl WorkerSelector {
             })?;
 
         let mut at_capacity: Vec<String> = Vec::new();
+        let mut at_capacity_ids: Vec<WorkerId> = Vec::new();
         candidates.retain(|w| {
             if load.get(&w.id).copied().unwrap_or(0) < w.max_concurrent {
                 true
             } else {
                 at_capacity.push(w.name.clone());
+                at_capacity_ids.push(w.id);
                 false
             }
         });
 
-        // 4. server_hint 처리 (폴백 없음)
+        // 4. agent_id 라우팅 (폴백 없음, 로드맵 #49 2단계).
+        //
+        // `server_hint`와 **같은 자리·같은 의미**다: 필터를 전부 통과한 뒤에
+        // 좁히고, 좁힌 결과가 비면 폴백하지 않는다. 지목이 필터를 무시하는
+        // 권한이 되면 오프라인·포화·차단된 Worker로 Task를 보내게 된다
+        // (`on_demand_worker_cannot_be_forced_by_server_hint` 참조).
+        //
+        // 둘을 동시에 준 요청은 제출에서 거절되므로 여기서 순서는 무의미하다.
+        if let Some(agent_id) = task.agent_id {
+            let agent = match self.store.get_agent(agent_id).await {
+                Ok(Some(a)) => a,
+                Ok(None) => return Err(SelectionError::AgentNotFound(agent_id.to_string())),
+                Err(e) => {
+                    // fail-open하지 않는다(`count_dispatched_tasks_by_worker`와
+                    // 같은 관례). 조회 실패를 "그런 Agent 없음"으로 보고하면
+                    // 운영자가 있지도 않은 삭제를 쫓는다.
+                    tracing::error!(
+                        target: "fleet::selector",
+                        error = %e, agent = %agent_id,
+                        "store error loading the task's agent — refusing to dispatch"
+                    );
+                    return Err(SelectionError::AllOffline);
+                }
+            };
+            agent_dispatchable(&agent)?;
+            let Some(worker_id) = agent.worker_id else {
+                return Err(SelectionError::AgentUnplaced(agent.name));
+            };
+            return match candidates.iter().find(|w| w.id == worker_id) {
+                Some(w) => Ok(w.id),
+                None if at_capacity_ids.contains(&worker_id) => {
+                    Err(SelectionError::AgentWorkerAtCapacity(agent.name))
+                }
+                None => Err(SelectionError::AgentWorkerUnavailable(agent.name)),
+            };
+        }
+
+        // 4.2. server_hint 처리 (폴백 없음)
         if let Some(hint) = &task.server_hint {
             let hinted = candidates.iter().find(|w| &w.name == hint);
             return match hinted {
@@ -329,6 +425,31 @@ impl BreakerState {
     }
 }
 
+/// 지목된 Agent가 지금 Task를 받을 수 있는 상태인가 (로드맵 `#49` 2단계).
+///
+/// **관측되지 않은 Agent는 배정 대상이 아니다.** 이것은 이 파일이 `AllUnprobed`
+/// 에서 이미 택한 방향이다 — liveness가 확인되지 않은 `on_demand` 워커를
+/// "아마 살아 있을 것"으로 두지 않고 후보에서 뺀다. Agent도 같다:
+/// `start_pending()`은 "명령은 냈고 답이 없다"는 뜻이지 "떴다"가 아니며
+/// (`fleet_core::Agent::start_pending`의 doc), 뜨지 않은 프로세스로 Task를
+/// 보내면 실패가 dispatch 뒤로 밀려 원인이 흐려진다.
+///
+/// 반대 방향(관측 없음을 통과시키기)의 값은 ACK 경로가 지연되거나 아직
+/// 배포되지 않은 환경에서도 Task가 흐른다는 것이다. 그 값을 택하지 않은 것은
+/// 위 선례 때문이며, 바꾸려면 이 함수의 `start_pending` 분기 하나만 지우면
+/// 된다 — 판정을 여기 한 곳에 모아 둔 이유가 그것이다.
+fn agent_dispatchable(agent: &Agent) -> Result<(), SelectionError> {
+    if agent.desired_status == AgentDesiredStatus::Stopped
+        || agent.observed_status == Some(AgentObservedStatus::Failed)
+    {
+        return Err(SelectionError::AgentNotRunning(agent.name.clone()));
+    }
+    if agent.start_pending() {
+        return Err(SelectionError::AgentNotObserved(agent.name.clone()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // 명시적 임포트 — fleet_core의 SelectionError를 제외하고 가져옴
@@ -338,7 +459,8 @@ mod tests {
     use crate::selector::{SelectionError, WorkerSelector};
     use async_trait::async_trait;
     use fleet_core::{
-        BootstrapToken, CircuitBreakerConfig, EventEntry, FleetEvent, Task, TaskFilter, TaskId,
+        Agent, AgentDesiredStatus, AgentId, AgentObservedStatus, BootstrapToken,
+        CircuitBreakerConfig, EventEntry, FleetEvent, ProjectId, Task, TaskFilter, TaskId,
         TaskOutput, TaskPhase, TaskRequest, TaskStatus, TransitionOutcome, Worker, WorkerFilter,
         WorkerHeartbeat, WorkerId, WorkerLivenessMode, WorkerStatus,
     };
@@ -359,6 +481,11 @@ mod tests {
         /// 검증되지 않는다. `Worker::active_tasks`와 **따로** 세팅할 수
         /// 있게 해서 selector가 어느 쪽을 읽는지 테스트가 가릴 수 있게 한다.
         dispatched: std::sync::Mutex<std::collections::HashMap<WorkerId, u32>>,
+        /// Agent 지목 fixture (로드맵 #49 2단계).
+        agents: std::sync::Mutex<Vec<Agent>>,
+        /// `true`면 `get_agent`가 조회 자체에 실패한다 — "행이 없다"와
+        /// "물어보지 못했다"를 selector가 구분하는지 시험하기 위한 스위치다.
+        agent_lookup_fails: std::sync::atomic::AtomicBool,
     }
 
     impl MockStore {
@@ -367,7 +494,22 @@ mod tests {
                 workers: std::sync::Mutex::new(workers),
                 credentials: std::sync::Mutex::new(std::collections::HashSet::new()),
                 dispatched: std::sync::Mutex::new(std::collections::HashMap::new()),
+                agents: std::sync::Mutex::new(Vec::new()),
+                agent_lookup_fails: std::sync::atomic::AtomicBool::new(false),
             }
+        }
+
+        /// 빌더 헬퍼 — Agent fixture를 추가한다 (로드맵 #49 2단계).
+        fn with_agent(self, agent: Agent) -> Self {
+            self.agents.lock().unwrap().push(agent);
+            self
+        }
+
+        /// 빌더 헬퍼 — `get_agent` 조회를 실패시킨다.
+        fn with_failing_agent_lookup(self) -> Self {
+            self.agent_lookup_fails
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self
         }
 
         /// 빌더 헬퍼 — 이름으로 지목한 워커의 store 파생 `Dispatched` 건수를 세팅.
@@ -430,6 +572,21 @@ mod tests {
             &self,
         ) -> Result<std::collections::HashMap<WorkerId, u32>, StoreError> {
             Ok(self.dispatched.lock().unwrap().clone())
+        }
+        async fn get_agent(&self, id: AgentId) -> Result<Option<Agent>, StoreError> {
+            if self
+                .agent_lookup_fails
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreError::Connection("agent lookup exploded".into()));
+            }
+            Ok(self
+                .agents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.id == id)
+                .cloned())
         }
         async fn increment_task_retry_count(&self, _: TaskId) -> Result<u32, StoreError> {
             unimplemented!()
@@ -1022,6 +1179,226 @@ mod tests {
         match selector.select(&task).await {
             Err(SelectionError::AllUnprobed) => {}
             other => panic!("expected AllUnprobed, not a label error, got {:?}", other),
+        }
+    }
+
+    // ── 로드맵 #49 2단계 — `tasks.agent_id` 라우팅 ──────────────────────────
+    //
+    // 이 블록이 지키는 계약은 두 가지다: (a) 지목은 필터를 **통과한 뒤에만**
+    // 좁힌다(무시하는 권한이 아니다), (b) 실패는 운영자가 할 일이 다른 만큼
+    // 서로 다른 이름으로 보고된다. 후자는 컴파일러가 지켜 주지 않으므로 —
+    // 여섯 갈래가 전부 `AllOffline` 하나로 접혀도 스위트는 초록이다 —
+    // 갈래마다 단정을 남긴다.
+
+    /// 배정된 Worker 위에서 실제로 돌고 있는 Agent fixture.
+    fn make_running_agent(name: &str, worker_id: Option<WorkerId>) -> Agent {
+        let mut a = Agent::new(ProjectId::new(), name);
+        a.worker_id = worker_id;
+        a.assigned_at = worker_id.map(|_| chrono::Utc::now());
+        a.desired_status = AgentDesiredStatus::Running;
+        a.observed_status = Some(AgentObservedStatus::Running);
+        a
+    }
+
+    fn make_agent_task(agent_id: AgentId) -> Task {
+        let mut task = make_task("agent work", None, &[]);
+        task.agent_id = Some(agent_id);
+        task
+    }
+
+    #[tokio::test]
+    async fn agent_pin_routes_to_the_agents_worker() {
+        // 부하로는 `idle`이 뽑혀야 하는 상황에서 Agent가 `hosting` 위에 있다.
+        // 지목이 least-loaded 정렬을 실제로 덮어쓰는지 확인한다 — 두 워커의
+        // 부하를 같게 두면 이 테스트는 우연히 통과할 수 있다.
+        let workers = vec![make_worker("hosting", 0, &[]), make_worker("idle", 0, &[])];
+        let store = Arc::new(MockStore::new(workers).with_load("hosting", 3));
+        // `Worker::new`가 id를 새로 뽑으므로 Agent의 배정은 **store 안의**
+        // 워커에서 가져와야 한다 — 밖에서 만든 fixture의 id를 쓰면 지목이
+        // 아무 워커도 가리키지 않는 채로 테스트가 통과할 수 있다.
+        let hosting = store.get_worker_by_name("hosting").await.unwrap().unwrap();
+        let agent = make_running_agent("planner", Some(hosting.id));
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store.clone(), breakers);
+
+        let selected = selector.select(&make_agent_task(agent_id)).await.unwrap();
+        assert_eq!(
+            selected, hosting.id,
+            "지목한 Agent가 놓인 워커로 가야 한다 — 더 한가한 워커가 있어도"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_pin_rejects_unknown_agent() {
+        let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(AgentId::new())).await {
+            Err(SelectionError::AgentNotFound(_)) => {}
+            other => panic!("expected AgentNotFound, got {:?}", other),
+        }
+    }
+
+    /// 조회 **실패**는 "행이 없다"가 아니다.
+    ///
+    /// 둘을 같은 이름으로 접으면 운영자가 일어나지도 않은 삭제를 쫓는다.
+    /// `count_dispatched_tasks_by_worker`가 세운 fail-safe 관례와 같은 갈래다.
+    #[tokio::test]
+    async fn agent_lookup_failure_is_not_reported_as_a_missing_agent() {
+        let store =
+            Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]).with_failing_agent_lookup());
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(AgentId::new())).await {
+            Err(SelectionError::AgentNotFound(_)) => {
+                panic!("조회 실패를 'Agent 없음'으로 보고하면 안 된다")
+            }
+            Err(SelectionError::AllOffline) => {}
+            other => panic!("expected AllOffline, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_pin_rejects_stopped_agent() {
+        let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]));
+        let w1 = store.get_worker_by_name("w1").await.unwrap().unwrap();
+        let mut agent = make_running_agent("planner", Some(w1.id));
+        agent.desired_status = AgentDesiredStatus::Stopped;
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Err(SelectionError::AgentNotRunning(name)) => assert_eq!(name, "planner"),
+            other => panic!("expected AgentNotRunning, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_pin_rejects_failed_agent() {
+        let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]));
+        let w1 = store.get_worker_by_name("w1").await.unwrap().unwrap();
+        let mut agent = make_running_agent("planner", Some(w1.id));
+        agent.observed_status = Some(AgentObservedStatus::Failed);
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Err(SelectionError::AgentNotRunning(_)) => {}
+            other => panic!("expected AgentNotRunning, got {:?}", other),
+        }
+    }
+
+    /// `start_pending()` — 시작 명령은 냈는데 아직 아무 보고도 없는 Agent.
+    ///
+    /// **이 단정이 이 설계의 값 선택 그 자체다.** 여기서 `Ok`를 받게 바꾸는
+    /// 것(= `agent_dispatchable`의 `start_pending` 분기를 지우는 것)도 방어
+    /// 가능한 선택이지만, 그렇게 하면 아직 존재가 확인되지 않은 프로세스로
+    /// Task를 보내게 된다 — `AllUnprobed`가 이미 반대쪽을 택했다.
+    #[tokio::test]
+    async fn agent_pin_rejects_agent_that_has_not_reported_yet() {
+        let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]));
+        let w1 = store.get_worker_by_name("w1").await.unwrap().unwrap();
+        let mut agent = make_running_agent("planner", Some(w1.id));
+        agent.observed_status = None; // 명령은 냈고(desired=Running) 답이 없다.
+        assert!(agent.start_pending(), "fixture가 start_pending이어야 한다");
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Err(SelectionError::AgentNotObserved(name)) => assert_eq!(name, "planner"),
+            other => panic!("expected AgentNotObserved, got {:?}", other),
+        }
+    }
+
+    /// 배정되지 않은 Agent는 손상이 아니라 회복 가능한 정상 상태다(`7009e4b`).
+    #[tokio::test]
+    async fn agent_pin_rejects_unplaced_agent_distinctly() {
+        let agent = make_running_agent("planner", None);
+        let agent_id = agent.id;
+        let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]).with_agent(agent));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Err(SelectionError::AgentUnplaced(name)) => assert_eq!(name, "planner"),
+            other => panic!("expected AgentUnplaced, got {:?}", other),
+        }
+    }
+
+    /// 지목은 폴백을 막을 뿐 필터를 무시하는 권한이 아니다.
+    ///
+    /// `server_hint`의 `on_demand_worker_cannot_be_forced_by_server_hint`와
+    /// 같은 계약을 Agent 지목에 대해 다시 세운다. 멀쩡한 워커를 하나 남겨
+    /// 두는 것이 핵심이다 — 그게 없으면 후보가 비어 `AllUnprobed`로 빠져
+    /// 이 갈래를 밟지 못한다.
+    #[tokio::test]
+    async fn agent_pin_does_not_fall_back_to_another_worker() {
+        let mut on_demand = make_worker("agent-host", 0, &[]);
+        on_demand.liveness_mode = WorkerLivenessMode::OnDemand;
+        let store = Arc::new(MockStore::new(vec![
+            on_demand,
+            make_worker("healthy", 0, &[]),
+        ]));
+        let host = store
+            .get_worker_by_name("agent-host")
+            .await
+            .unwrap()
+            .unwrap();
+        let agent = make_running_agent("planner", Some(host.id));
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Ok(w) => panic!("멀쩡한 워커로 폴백하면 안 된다 (selected {w})"),
+            Err(SelectionError::AgentWorkerUnavailable(name)) => assert_eq!(name, "planner"),
+            other => panic!("expected AgentWorkerUnavailable, got {:?}", other),
+        }
+    }
+
+    /// 포화는 오프라인과 다른 이름으로 보고된다 — 운영자가 할 일이 다르다.
+    ///
+    /// `HintedAtCapacity`/`HintedUnavailable`이 나뉜 이유와 같으며, 이
+    /// 갈래는 `AllAtCapacity` 검사보다 **앞**에서 판정돼야 한다(뒤에 두면
+    /// 모든 후보가 포화일 때 Agent 이름이 사라진 일반 오류가 나간다).
+    #[tokio::test]
+    async fn agent_pin_reports_hosting_worker_capacity_distinctly() {
+        let host = make_worker("agent-host", 0, &[]);
+        let cap = host.max_concurrent;
+        let store = Arc::new(MockStore::new(vec![host, make_worker("healthy", 0, &[])]));
+        let host_id = store
+            .get_worker_by_name("agent-host")
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        store.dispatched.lock().unwrap().insert(host_id, cap);
+        let agent = make_running_agent("planner", Some(host_id));
+        let agent_id = agent.id;
+        store.agents.lock().unwrap().push(agent);
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = WorkerSelector::new(store, breakers);
+
+        match selector.select(&make_agent_task(agent_id)).await {
+            Err(SelectionError::AgentWorkerAtCapacity(name)) => assert_eq!(name, "planner"),
+            other => panic!("expected AgentWorkerAtCapacity, got {:?}", other),
         }
     }
 }

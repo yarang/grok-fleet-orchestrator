@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/mcp-tools.md"
-last_verified: "2026-08-30"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 owners: ["fleet-mcp"]
 ---
@@ -69,7 +69,7 @@ HTTP `/v1`이나 Dashboard `/api/*`는 이 문서의 범위 밖이다. 이전 MC
 
 | 도구 | 주요 입력 | 결과 범주 |
 |---|---|---|
-| `fleet_dispatch_task` | `prompt`, **필수** `cwd`, 선택 `model`, `server_hint`, labels, turn·timeout | 비동기 `task_id` |
+| `fleet_dispatch_task` | `prompt`, **필수** `cwd`, 선택 `model`, `server_hint`, `agent_id`, labels, turn·timeout | 비동기 `task_id` |
 | `fleet_get_task_status` | `task_id` | Task 상태·결과 |
 | `fleet_list_tasks` | 선택 status, limit, offset | Task 목록 |
 | `fleet_cancel_task` | `task_id`, 선택 reason | 취소 결과 |
@@ -116,6 +116,24 @@ AgentTemplate 관리 도구는 아직 제안 계약일 뿐 구현돼 있지 않�
 경로가 실제로 워커의 workspace 안인지(canonical containment)는 **검사하지 않는다**: 그 판정은
 워커의 파일시스템에서만 가능하다. 정본 규칙은 `fleet-core`의 `validate_workspace_cwd`이며
 Dashboard `POST /api/tasks`와 `fleet tasks submit`도 같은 규칙을 쓴다.
+
+`fleet_dispatch_task`의 `agent_id`는 **2026-09-01(로드맵 `#49` 2단계)부터 선택 인자다** — 이
+Task를 특정 Agent가 처리하게 지목한다. 제출 시점에 검증하는 것은 셋이다: (1) 그 Agent가
+실재하는가, (2) `server_hint`와 함께 오지 않았는가, (3) 명시된 `project_id`가 Agent의 Project와
+같은가. 셋 다 `-32602 invalid_params`로 거절되며, **Task 행은 만들어지지 않는다** — 존재하지
+않는 Agent를 지목한 요청은 그 자체로 틀렸고, dispatch까지 미루면 요청자가 이미 `task_id`를
+받고 떠난 뒤에 실패하기 때문이다. `project_id`를 생략하면 Agent의 Project를 **물려받는다**
+(`Agent::project_id`는 항상 값이 있으므로 지목한 순간 이미 정해진 것이나 다름없다). 물려받은
+Project도 `Draining`/`Archived`면 거절된다 — 그러지 않으면 보관된 Project의 Agent를 지목하는
+것만으로 새 Task를 밀어 넣는 우회로가 된다. `server_hint`와의 동시 사용을 일치 검사로
+통과시키지 않고 항상 거절하는 이유는, Agent가 아직 배정되지 않았으면(`worker_id IS NULL`,
+회복 가능한 정상 상태) 일치를 판정할 수 없어 같은 요청이 Agent의 배정 상태에 따라 통과했다
+거절됐다 하기 때문이다.
+
+반대로 **가용성**(Agent가 지금 돌고 있는가, 그 Worker가 살아 있는가)은 제출 시점에 검사하지
+않는다 — 그때 참이어도 dispatch 시점에 거짓일 수 있다. 그 판정은 dispatch가 하고, 실패하면
+Task는 만들어진 채 `Failed`가 된다. 규칙 정본은 `fleet-store`의 `apply_agent_pin`이며
+Dashboard `POST /api/tasks`도 같은 함수를 쓴다.
 
 ## 보안 상태
 

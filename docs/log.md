@@ -5685,3 +5685,86 @@ Agent를 고르지 않는다"라서 미뤘고, ACK의 endpoint·secret은 "Task�
 **규격은 표 블록마다 헤더에서 뽑아야** 한다. 고친 검사기로 두 파일 19개 블록 전부 위반 0건이다.
 그리고 오늘 확정한 것은 **범위이지 설계가 아니다**: `tasks.agent_id`를 어떻게 채우는지(제출 시점인지
 dispatch 시점인지), 고를 Agent가 없을 때 무엇을 하는지는 아직 아무것도 정하지 않았다.
+
+## 2026-09-01 — `#49` 2단계 구현: 지목은 제출이 검증하고 dispatch는 지킬 뿐이다
+
+같은 날 오전에 범위만 확정하고 "설계는 아직 아무것도 정하지 않았다"로 닫았던 그 항목을
+구현했다. migration `034`가 `tasks.agent_id`(`agents(id)` FK + `WHERE agent_id IS NOT NULL`
+부분 인덱스)를 만들고, 제출 표면 둘(Dashboard `POST /api/tasks`, MCP `fleet_dispatch_task`)이
+`fleet_store::apply_agent_pin` 하나를 공유해 지목을 검증하며, selector는 지목이 있으면 후보를
+그 Agent의 `worker_id` 하나로 좁힌다.
+
+### 판정을 제출과 dispatch로 가른 선
+
+검증을 제출에 둘 것인가 dispatch에 둘 것인가는 항목마다 답이 다르고, 가르는 기준은 **그 사실이
+시간에 따라 변하는가**다.
+
+- **제출에서 거절**: 그런 Agent가 없음, `server_hint`와 동시 지정, 명시한 `project_id`가 Agent의
+  Project와 불일치. 셋 다 요청 자체가 틀린 것이고 시간이 지나도 옳아지지 않는다. dispatch까지
+  미루면 요청자는 이미 `task_id`를 받고 떠난 뒤에 실패한다. 이 저장소는 `project_id`에 대해
+  이미 같은 판단을 했다(`ensure_project_accepts_new_tasks`).
+- **dispatch에서 거절**: Agent가 지금 돌고 있는가, 배정된 Worker가 살아 있는가. 제출 시점에
+  참이어도 dispatch 시점에 거짓일 수 있으므로 제출에서 검사하면 **거짓 안심**만 준다.
+
+### 상속 검증을 호출부가 아니라 `apply_agent_pin` 안에 둔 이유
+
+`project_id`를 생략하면 Agent에서 물려받는다. 두 호출부는 이미 각자 `project_id`를 검증하지만
+그것은 **명시된** 값에 대한 검증이고, 물려받은 값은 그 검사를 건너뛴다. 그대로 두면 보관된
+Project의 Agent를 지목하는 것만으로 새 Task를 밀어 넣는 우회로가 된다 — `Draining`/`Archived`
+Project에 Task가 들어가지 못하게 한 게이트를 지목 하나로 우회하는 것이다. 검증을 함수 안으로
+넣으면 두 표면이 각자 기억해야 하는 규칙이 하나 줄고, 단위 테스트
+(`inherited_project_must_still_accept_new_tasks`)가 그 우회로를 직접 겨눈다.
+
+### 핀 둘을 일치 검사로 통과시키지 않은 이유
+
+`agent_id`와 `server_hint`가 함께 오면 일치할 때만 통과시키는 방안이 자연스러워 보인다. 택하지
+않았다. Agent가 아직 배정되지 않았으면(`worker_id IS NULL` — `#67` 4a가 회복 가능한 정상
+상태로 정의했다) 일치를 판정할 **대상이 없다**. 그러면 같은 요청이 Agent의 배정 상태에 따라
+통과했다 거절됐다 한다. 요청자가 예측할 수 없는 규칙보다 항상 거절하는 편이 낫다.
+
+### 좁힌 문장 — 승인 없이 내 판단으로 한 것
+
+`b7a2d06`이 커밋한 정본 문장은 "**2단계 = dispatch가 Agent를 고른다**"였다. 구현한 것은
+"**`tasks.agent_id`가 실재하고 dispatch가 그것을 지킨다**"이며, 자동 선택은 3단계로 뺐다.
+근거는 소비자다 — 남은 지목 셋(`tasks.agent_id` 유예 행, `#67` 게이트 ①-B·②)이 **셋 다**
+dispatch가 고를 것을 요구하지 않고 "컬럼이 존재하고 채워지고 dispatch가 따른다"로 충족된다.
+지금 선택기를 만들면 읽는 소비자가 없는 정책을 만드는 것이고, 어떤 Agent가 어떤 Task에 맞는지
+판정할 근거(harness 구성 `#51`, AgentTemplate `#86`)도 없다.
+
+**이 좁힘은 누구의 승인도 받지 않았다.** 근거는 `provisioning.md`의 "`#49` 2단계의 설계"
+절에 남겼고 로드맵 행에도 정정으로 적었으므로, 되돌리려면 그 두 곳과 selector의 좁히기
+블록만 보면 된다. 좁힌 것은 문장이지 선행 관계가 아니다 — `#67` 게이트 ①-B·②는 지목이
+실재하는 것만으로 풀린다.
+
+### 되읽을 수 없던 입력 하나
+
+테스트를 쓰다가 알았다. Dashboard는 `agent_id`를 폼으로 받았지만 `TaskSummary`에는 그 필드가
+없어서, 제출자가 **자기 지목이 실제로 붙었는지 확인할 방법이 없었다**. 입력으로만 받고
+되읽히지 않는 값은 반쪽 구현이다. `project_id`와 같은 자리에 함께 싣도록 고쳤다.
+
+### 테스트를 쓰면서 실측으로 배운 것 셋
+
+1. **`Worker::new`는 id를 새로 뽑는다.** selector 테스트에서 `MockStore` 밖에 워커를 만들고
+   그 id를 Agent의 배정으로 쓰면, 지목이 아무 워커도 가리키지 않는 채로 테스트가 통과한다.
+   배정은 **store 안의** 워커에서 가져와야 한다.
+2. **`handle_dispatch_task`의 실패 반환은 JSON이 아니다.** 성공은 `tool_json`이지만 실패는
+   `tool_error(...)`라 평문이고, `parse_tool_json`이 `expected value, line 1 column 1`로
+   panic한다. 워커가 없는 fleet에서 제출 시점 동작만 보려면 도구 반환값이 아니라 **저장된 행**을
+   읽어야 한다 — 그리고 그게 옳다: 지목의 검증과 상속은 제출에서 끝나고 워커 유무는 그 뒤의
+   별개 판정이다.
+3. **`--no-fail-fast`는 `--` 앞이다.** cargo 플래그이고 `--test-threads=1`은 libtest 플래그다.
+   뒤에 붙이면 `error: Unrecognized option: 'no-fail-fast'`로 테스트 바이너리가 **한 건도
+   실행되지 않는다**. §4.3이 경고해 온 "판정처럼 보이는 것이 판정이 아닌" 형태의 하나다.
+
+Dashboard 통합 테스트의 긍정 경로에서 단정하는 값은 `dispatched: false`다. 온라인 워커가 하나
+있으므로 지목이 무시됐다면 그 제출은 그냥 성공했을 것이고, 지목된 Agent가 아직 `Ready`라서
+selector가 거절하는 것이 곧 "dispatch가 지목을 지켰다"는 증거다 — 성공 단정보다 강하다.
+
+### 검증 한계
+
+Agent가 실제로 `Running`이고 그 Worker로 Task가 흘러가는 **성공** 경로는 단위 테스트
+(`agent_pin_routes_to_the_agents_worker`, `MockStore`)로만 확인했다. 실제 워커 프로세스가
+Agent를 들고 있는 E2E는 `#67` 4단계의 명령/ACK가 `observed_status`를 채워야 성립하므로
+아직 없다. 즉 **지목의 거절 경로는 네 층(단위·Postgres 왕복·MCP·Dashboard HTTP)에서
+확인했고, 지목의 성공 경로는 한 층에서만 확인했다.** migration `034`는 이 세션의
+`fleet-store` 통합 테스트 실행에서 처음 적용됐다.

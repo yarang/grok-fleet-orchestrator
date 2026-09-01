@@ -547,6 +547,12 @@ pub struct TaskSummary {
     /// 이 태스크가 묶인 Project (로드맵 #48 2단계). 일반 풀 Task면 없음.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// 제출자가 지목한 Agent (로드맵 #49 2단계). 지목 없이 제출됐으면 없음.
+    ///
+    /// 입력으로만 받고 되읽을 수 없으면 제출자는 자기 지목이 실제로 붙었는지
+    /// 확인할 방법이 없다 — 그래서 `project_id`와 같은 자리에 함께 싣는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -294,9 +294,9 @@ impl PgStore {
                  max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                  thread_id, parent_task_id, project_id, dependency_ids, checkpoint_branch, skills_required,
                  requested_profile, resolved_model, token_budget, partial_output,
-                 idempotency_key, idempotency_payload_hash)
+                 idempotency_key, idempotency_payload_hash, agent_id)
             VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
             {on_conflict}
             "#,
         );
@@ -326,6 +326,7 @@ impl PgStore {
             .bind(task.partial_output.as_deref())
             .bind(task.idempotency_key.as_deref())
             .bind(task.idempotency_payload_hash.as_deref())
+            .bind(task.agent_id.map(|id| id.as_uuid()))
             .execute(&self.pool)
             .await?;
 
@@ -376,7 +377,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
                FROM tasks WHERE created_by = $1 AND idempotency_key = $2"#,
         )
         .bind(&task.created_by)
@@ -410,7 +411,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -426,7 +427,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -715,7 +716,7 @@ impl Store for PgStore {
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                           requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
                    FROM tasks"#;
 
         // 자리 번호는 상수에 넣지 않는다. 예전에는 `$1`이 상수 안에 박혀 있었고,
@@ -3824,6 +3825,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let cwd: Option<String> = row.try_get("cwd")?;
     let model: Option<String> = row.try_get("model")?;
     let server_hint: Option<String> = row.try_get("server_hint")?;
+    let agent_id: Option<Uuid> = row.try_get("agent_id")?;
     let labels_json: serde_json::Value = row.try_get("required_labels")?;
     let max_turns: Option<i32> = row.try_get("max_turns")?;
     let timeout_secs: Option<i64> = row.try_get("timeout_secs")?;
@@ -3859,6 +3861,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         cwd,
         model,
         server_hint,
+        agent_id: agent_id.map(fleet_core::AgentId::from),
         required_labels,
         max_turns: max_turns.map(|v| v as u32),
         timeout_secs: timeout_secs.map(|v| v as u64),

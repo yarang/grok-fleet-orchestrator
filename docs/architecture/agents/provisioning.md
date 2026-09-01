@@ -180,9 +180,9 @@ Agent 행이 죽은 데이터가 아님을 보장하는 판독자 셋:
 | `Draining` | 위 실행 상태들이 없으면 drain할 대상이 없다. 4b에서도 만들지 않는다 — Worker의 `Draining`이 operator 개입 없이는 되돌아오지 않는 일방향 문(`fleet-api/src/handlers.rs`)이며, 그 모양을 Agent가 물려받을 이유가 없다 | `#67` 4c 이후 |
 | `fencing_token` | 위 둘과 달리 **생산자 자체가 없다** — `worker_execution_lease` 테이블이 존재하지 않는다(migration 018~029에 없고, `021_control_plane_lease.sql`은 오케스트레이터 리더 선출용의 다른 테이블이다). 그래서 봉투는 9-필드가 아니라 8-필드로 만든다 | `#67` 구현 게이트 ①-B |
 | 재조정과 `OutcomeUnknown` | 비교할 process inventory가 없다 | `#67` 4c 후속 |
-| `tasks.agent_id` | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | `#49` 2단계 |
+| ~~`tasks.agent_id`~~ | 지금 채우면 항상 NULL인 컬럼이 된다 — dispatch가 Agent를 고르지 않는다. 이것은 transport 사실이 아니라 **스케줄러 사실**이다 | **`#49` 2단계 해소** (`034_task_agent_id.sql`). 단 사유의 부정이 그대로 구현된 것은 아니다 — 채우는 주체는 dispatch가 아니라 **제출자**이고 dispatch는 지킬 뿐이다(아래 §"`#49` 2단계의 설계") |
 | `agent:attach` capability | 붙을 터미널 세션도 grant 발급자도 없다 | `#50` |
-| ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | `#49` 2단계 |
+| ACK가 Agent process의 endpoint·secret을 돌려주는 것 | 소비자가 없다 — Task를 Agent로 라우팅하는 것은 `#49` 2단계이고, 지금 넣으면 secret을 한 번도 나른 적 없는 경로에 secret을 새로 얹게 된다 | **`#49` 2단계로는 열리지 않는다.** 2단계는 Task를 Agent가 놓인 *Worker*로 보낼 뿐 Agent 프로세스에 직접 닿지 않으므로 endpoint·secret의 소비자는 여전히 없다. 이 행이 기다리는 것은 singleton `grok agent serve`를 Agent별 프로세스로 쪼개는 결정이며 그것은 2단계의 하류다(아래 §"매니저는 `GrokRunner`를 대체하지 않고 옆에 선다") · 미정 |
 | 명령 payload의 포트·secret·cwd | 4b의 명령은 `(agent_id, desired_status, generation)` **뿐**이다. 이 셋이 들어오는 순간 heartbeat 응답은 통째로 로깅해도 안전한 값이 아니게 되므로, 4c가 무심코 얹지 않도록 지금 적어 둔다 | `#67` 4c-A(해소: 워커 로컬 파생) |
 | ~~ACK가 관측 상태를 싣는 것~~ | 볼 프로세스가 없다. 4b의 ACK는 generation만 돌려주며 그것이 정직한 최대치다 | **4c-B 해소**. 단 ACK에 얹지 **않았다** — heartbeat 요청의 형제 필드 `agent_observations`로 분리했다. ACK는 명령당 부기이고 관측은 명령 없이도 생기기 때문이다(프로세스는 아무 명령 없이 죽는다) |
 | ~~Worker가 신고하는 `max_agent_processes`~~ | 4c-B 시점의 유예 사유는 "읽을 소비자가 없다"였고, 그 소비자(배정 시점의 하드 상한)는 게이트 ①에 묶여 있었다. **게이트 ①-A-1이 그 소비자를 만들면서 사유가 만료됐다** — 아래 §"배정 슬롯 상한"이 정본이다. 4c-B의 `observed_reason = 'cap_reached'`는 대체되지 않고 남는다: 두 수가 세는 것이 다르기 때문이다(오케스트레이터는 배정된 `agents` 행, Worker는 살아 있는 프로세스) | **①-A-1 해소** |
@@ -222,6 +222,100 @@ Agent에 닿는 경로를 기다리는데(로드맵 `#49` 1단계 서술: "2번�
 별개**다: 조건 2는 고르는 것이 아니라 만드는 것을 시험할 수 있고, 조건 3은 lease를 따로 기다린다.
 확실한 것은 `#48`을 2단계의 선행으로 읽으면 의존이 순환한다는 것이며, 이는 위 2026-08-30 귀속
 정정이 `#67`↔`#89`에서 닫은 것과 같은 모양이다.
+
+> **2026-09-01 범위 정정 (같은 날, 구현 착수 직전).** 위 §의 두 문장이 각각 과했다.
+>
+> 1. **"그것이 끝나는 순간 위 네 지목이 함께 열린다"** — 넷이 아니라 **셋**이다. "ACK가 Agent
+>    process의 endpoint·secret을 돌려주는 것"은 열리지 않는다. 그 행이 기다리는 것은 singleton
+>    `grok agent serve`를 Agent별 프로세스로 쪼개는 일인데, 아래 §"매니저는 `GrokRunner`를
+>    대체하지 않고 옆에 선다"가 그것을
+>    "**둘을 합치는 것은 dispatch가 Agent를 고르게 된 뒤의 결정**"이라고 적는다 — 즉 그 행은
+>    2단계와 **함께** 열리는 것이 아니라 2단계의 **하류**다. 넷을 한 문장에 묶은 것은 지목의
+>    개수를 세다가 방향을 잃은 것이다.
+> 2. **"2단계 = dispatch가 Agent를 고른다"** — 로드맵의 유예 사유("dispatch가 Agent를 고르지
+>    않는다")를 그대로 뒤집어 쓴 문장인데, 그 사유의 부정은 "dispatch가 **고른다**"가 아니라
+>    "그 컬럼이 **항상 NULL이 아니게 된다**"이다. 아래 §가 정의를 좁힌다.
+
+### `#49` 2단계의 설계 (2026-09-01 확정)
+
+**2단계 = `tasks.agent_id`가 실재하고 dispatch가 그것을 지킨다.** 채우는 주체는 **제출자**이고,
+dispatch는 지목된 Agent를 **지킬 뿐 고르지 않는다**. 자동 선택 정책은 2단계 밖이다.
+
+좁힌 근거는 소비자다. 위 정정 뒤 남는 지목 셋 — `tasks.agent_id` 유예 행, `#67` 게이트 ①-B(lease
+레코드가 `task_id`를 싣는다), 게이트 ② — 은 **셋 다 dispatch가 고를 것을 요구하지 않는다**. 셋 다
+"컬럼이 존재하고, 채워지고, dispatch가 그것을 따른다"로 충족된다. 지금 선택기를 만들면 읽는
+소비자가 하나도 없는 정책을 만드는 것이고, 이는 이 저장소가 컬럼에 대해 지켜 온 "채울 방법이 없는
+것은 미리 만들지 않는다"를 한 층 위(정책)에 적용하지 않는 것뿐이다. 게다가 그 정책에는 이미 주인이
+있다 — "고를 Agent가 하나도 없으면 만든다"는 `#48` 조건 2가 기다리는 *자동* provisioning이고,
+여기서 만들면 위 §이 "별개"라고 남겨 둔 질문에 **우연히** 답해 버린다.
+
+#### 결정 1 — 라우팅은 `server_hint`와 같은 자리·같은 의미다
+
+`agent_id`는 `Selector::select`의 필터 사슬을 **통과한 뒤** 좁히며, 폴백하지 않는다. 이는
+`server_hint`가 이미 확립한 모양이다(`crates/fleet-scheduler/src/selector.rs`, 테스트
+`on_demand_worker_cannot_be_forced_by_server_hint`의 주석: "server_hint는 폴백을 막을 뿐 필터를
+무시하는 권한이 아니다"). Agent의 Worker가 오프라인·용량초과·차단 상태면 그 Task는 배정되지
+않는다 — 지목이 필터를 무시하는 권한이 되면 죽은 Worker로 Task를 보내게 된다.
+
+**`agent_id`와 `server_hint`를 함께 준 요청은 제출에서 거절한다.** 같은 결정에 핀이 둘이고,
+`agent_id`가 Worker를 이미 함축한다. 둘이 일치하는지 검사해서 통과시키는 방안은 택하지 않았다 —
+Agent가 아직 배정되지 않았으면(`worker_id IS NULL`, `7009e4b` 기준 **회복 가능한 정상 상태**)
+일치 여부를 알 수 없어, 검사가 언제 작동할지 요청자가 예측할 수 없게 된다.
+
+#### 결정 2 — 존재 검증은 제출, 가용성 판정은 dispatch
+
+없는 `agent_id`는 **제출에서 거절**한다. 이 저장소가 `project_id`에 대해 이미 그렇게 한다
+(`fleet_dispatch_task`의 `dispatch_task_rejects_unknown_project_id`·`_archived_project_id`).
+그 결과 dispatch가 보는 실패는 **일시적인 것들만** 남는다:
+
+| dispatch 시점 실패 | `SelectionError` | 운영자가 할 일 |
+|---|---|---|
+| Agent 행이 사라짐 | `AgentNotFound` | 다른 Agent로 재제출 (현재 hard delete 경로가 없어 실제로는 도달 불가. 방어적 분기) |
+| `desired=Stopped` 또는 `observed=Failed` | `AgentNotRunning` | Agent를 다시 Running으로 두거나 실패 원인 조사 |
+| `start_pending()` — 시작 명령은 냈고 보고가 없음 | `AgentNotObserved` | ACK가 도착할 때까지 기다린다 |
+| `worker_id IS NULL` | `AgentUnplaced` | 배정 회복을 기다린다 (`7009e4b`) |
+| Worker가 필터에서 탈락 | `AgentWorkerUnavailable` | 그 Worker를 살린다 |
+| Worker가 용량 초과 | `AgentWorkerAtCapacity` | 기다리거나 상한을 올린다 |
+
+variant를 여섯으로 나눈 이유는 `AllAtCapacity`·`AllUnprobed`의 doc이 적어 둔 것과 같다 — 잘못된
+variant는 운영자에게 **잘못된 대응**을 시킨다. 반대로 `FailureKind`는 **늘리지 않는다**:
+`dispatch_existing`의 매핑은 `NoWorkerForCredential`만 특별 취급하고 나머지를
+`WorkerUnavailable`로 모으며, 정확한 원인은 `e.to_string()`이 `TaskFailure::error`로 실어 나른다.
+위 여섯은 전부 "지금은 못 간다, 나중엔 갈 수 있다"라 그 분류가 맞다.
+
+**세 번째 행이 이 설계에서 유일하게 값이 갈리는 자리다.** `start_pending()`
+(`crates/fleet-core/src/agent.rs`, "명령은 냈고 답이 없다")인 Agent를 배정 대상으로 볼 것인지에
+대해 여기서는 **닫는 쪽**을 택했다 — `AllUnprobed`가 "probe가 구현될 때까지 이 워커는 배정
+대상이 아니다"로 이미 같은 선택을 했기 때문이다. 반대 값도 방어할 수 있다(ACK 경로가 늦어도
+Task는 흐르게 한다). 뒤집는 비용을 한 줄로 만들어 두려고 판정을 `agent_dispatchable` 한 곳에
+모았다 — 뒤집는 것은 그 함수에서 `start_pending` 분기를 지우는 것이다.
+
+**Store 조회가 실패하면 fail-open하지 않는다.** `count_dispatched_tasks_by_worker`가 이미 쓰는
+관례대로 `tracing::error!` 후 일반 실패로 접는다 — 조회 실패를 "그런 Agent 없음"으로 보고하면
+운영자가 있지도 않은 삭제를 쫓는다.
+
+#### 결정 3 — `project_id`가 비면 Agent에서 물려받는다
+
+`task.project_id`가 `None`이면 **지목된 Agent의 것을 물려받는다**. `Agent::project_id`는
+`Option`이 아니라 `ProjectId`이므로(`crates/fleet-core/src/agent.rs`) 물려받을 값은 **항상
+있다** — 즉 Agent를 지목한 Task는 절대 일반 풀로 떨어지지 않는다. 둘 다 있는데 다르면
+거절한다(교차 project 금지, `link_issue_task`와 같은 계열). 물려받는 쪽을
+택한 이유는 경계 불변식(`#58`)이 참으로 유지되기 때문이다 — 거절하면 오케스트레이터가 이미
+아는 사실을 제출자가 매번 반복해야 하고, 생략을 오류로 만들면서 답은 하나뿐인 상황이 된다.
+
+**물려받은 `project_id`도 명시 입력과 똑같이 입장 검증을 받는다.** 두 표면(MCP·Dashboard)은
+`ensure_project_accepts_new_tasks`를 **명시 입력에만** 걸고 있었으므로, 상속 경로를 그대로 두면
+`Draining`/`Archived` Project의 Agent를 지목하는 것이 그 Project에 새 Task를 넣는 우회로가
+된다. 그래서 검증을 호출부가 아니라 `apply_agent_pin` **안**에 두었다 — 두 표면이 규칙을 각자
+기억하지 않아도 되게. `inherit_from_parent`가 상속한 `project_id`를 호출부가 다시 검증해야 했던
+것(`#48` 2단계)과 같은 함정이고, 같은 답이다.
+
+#### 지목은 이어가기로 전파되지 않는다
+
+`Task::inherit_from_parent`는 `server_hint`·`cwd`·`model`·`project_id`를 물려주지만 `agent_id`는
+**물려주지 않는다**. 지목의 유효성은 제출 시점 존재 검증에 의존하는데(위 결정 2), 상속은 그
+검증보다 뒤에 일어나므로 물려주면 이미 사라진 Agent를 검증 없이 다시 지목하게 된다. 같은
+Agent로 이어가려면 제출자가 다시 지목한다.
 
 
 ## 구현 상태 (`#67` 4a — 배정)

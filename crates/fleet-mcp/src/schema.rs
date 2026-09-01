@@ -275,6 +275,11 @@ pub fn all_tools() -> Vec<ToolInfo> {
                         "type": "string",
                         "description": "Pin this task to a specific worker by name. If the hinted worker is offline or circuit-open, the task fails (no fallback)."
                     },
+                    "agent_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Pin this task to a specific Agent by id. The task runs on the worker that Agent is placed on; the scheduler honours the pin and never picks an Agent on its own. Rejected at submission if the Agent does not exist, if 'server_hint' is also given (the two pins cannot be reconciled before the Agent is placed), or if 'project_id' is given and differs from the Agent's project. When 'project_id' is omitted it is inherited from the Agent. At dispatch the task fails (no fallback) if the Agent is stopped, failed, not yet placed, not yet observed running, or its worker is unavailable or at capacity."
+                    },
                     "required_labels": {
                         "type": "array",
                         "items": { "type": "string" },

@@ -381,6 +381,7 @@ fn task_to_summary(t: &fleet_core::Task) -> TaskSummary {
         thread_id: t.thread_id.to_string(),
         parent_task_id: t.parent_task_id.map(|id| id.to_string()),
         project_id: t.project_id.map(|id| id.to_string()),
+        agent_id: t.agent_id.map(|id| id.to_string()),
     }
 }
 
@@ -495,6 +496,14 @@ pub struct SubmitTaskForm {
     /// 상속한다.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// 이 태스크를 실행할 Agent (문자열 UUID). 로드맵 #49 2단계 — MCP
+    /// `fleet_dispatch_task`의 `agent_id`와 동일한 규칙을 쓴다
+    /// (`fleet_store::apply_agent_pin`): 존재하지 않는 Agent, `server_hint`와의
+    /// 동시 지정, `project_id` 불일치는 제출 시점에 400으로 거절하고,
+    /// `project_id`를 비우면 Agent의 Project를 상속한다. 가용성(정지·미배치·
+    /// 워커 포화)은 여기서 보지 않고 dispatch 시점에 판정한다.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     /// 제출 멱등성 키 (로드맵 #62 2단계). 같은 사용자가 같은 키로 같은
     /// 페이로드를 다시 보내면 새 Task를 만들지 않고 기존 Task를 돌려준다.
     /// 같은 키에 다른 페이로드가 오면 409로 거절한다. 비우면 멱등성 검사
@@ -591,7 +600,17 @@ pub async fn submit_task_api(
         None => None,
     };
 
-    let mut task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+    // 로드맵 #49 2단계 — Agent 지목. 파싱만 여기서 하고, 존재·핀 충돌·Project
+    // 경계 검증은 MCP와 공유하는 `apply_agent_pin`이 아래에서 한다.
+    let explicit_agent_id = match form.agent_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(raw) => Some(
+            raw.parse::<fleet_core::AgentId>()
+                .map_err(|_| ApiError::BadRequest("invalid agent_id".into()))?,
+        ),
+        None => None,
+    };
+
+    let mut req = fleet_core::TaskRequest {
         prompt: full_prompt,
         cwd: form.cwd.filter(|s| !s.is_empty()),
         model: form.model.filter(|s| !s.is_empty()),
@@ -603,6 +622,7 @@ pub async fn submit_task_api(
         created_by: principal.user.username.clone(),
         parent_task_id: None, // inherit_from_parent가 아래서 채운다.
         project_id: explicit_project_id,
+        agent_id: explicit_agent_id,
         // 빈 문자열은 키가 아니다 — HTML 폼은 비어 있는 입력도 `""`로
         // 보내므로, 접지 않으면 키를 쓰지 않는 모든 제출이 `""` 하나를
         // 공유해 서로를 중복으로 판정한다.
@@ -613,7 +633,23 @@ pub async fn submit_task_api(
             .filter(|s| !s.is_empty())
             .map(String::from),
         ..Default::default()
-    });
+    };
+
+    // Agent 지목의 검증은 `Task`를 만들기 **전에** 한다 — 거절될 제출이
+    // Store에 행을 남기지 않게 하려는 것이고, `project_id` 상속 결과가
+    // 페이로드 해시에 반영되게 하려는 것이기도 하다(같은 폼은 같은 Agent를
+    // 거쳐 같은 Project로 귀결되므로 해시는 여전히 결정적이다).
+    fleet_store::apply_agent_pin(state.store.as_ref(), &mut req)
+        .await
+        .map_err(|e| match e {
+            fleet_store::TaskPinError::Store(inner) => ApiError::Store(inner.to_string()),
+            fleet_store::TaskPinError::Project(fleet_store::ProjectAdmissionError::Store(
+                inner,
+            )) => ApiError::Store(inner.to_string()),
+            other => ApiError::BadRequest(other.to_string()),
+        })?;
+
+    let mut task = fleet_core::Task::from_request(req);
     // 주의: 페이로드 해시는 `from_request` 시점, 즉 아래 `inherit_from_parent`
     // **이전**의 요청 값으로 계산된다. 이것이 옳다 — 해시가 식별하는 것은
     // "클라이언트가 보낸 제출"이고, 상속은 그 제출과 부모로부터 결정되는

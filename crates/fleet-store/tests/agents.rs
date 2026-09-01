@@ -36,7 +36,8 @@
 
 use fleet_core::{
     Agent, AgentDesiredStatus, AgentFilter, AgentObservation, AgentObservationReason,
-    AgentObservedStatus, AgentStatus, Project, ProjectStatus, Worker,
+    AgentObservedStatus, AgentStatus, Project, ProjectStatus, Task, TaskFilter, TaskRequest,
+    Worker,
 };
 use fleet_store::{PgStore, SlotClaim, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
@@ -1333,5 +1334,94 @@ async fn replacing_onto_the_same_full_worker_is_not_capped() {
             .unwrap(),
         SlotClaim::Claimed,
         "이미 그 Worker에 있는 Agent의 재배정은 슬롯을 더 쓰지 않는다"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  tasks.agent_id — 지목의 왕복 (로드맵 #49 2단계, 034_task_agent_id.sql)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 지목한 Agent가 INSERT → `get_task` → `list_tasks` 세 경로 모두에서
+/// 살아 돌아오는지.
+///
+/// **세 경로를 다 보는 이유.** `PgStore`는 `tasks`의 컬럼 목록을 네 곳에
+/// 손으로 나열한다(`get_task`·`list_tasks`·나머지 둘). 새 컬럼을 INSERT에만
+/// 넣고 SELECT 하나를 빠뜨리면, 저장은 되는데 그 경로로만 `None`이 돌아오는
+/// 조용한 반쪽 구현이 된다 — 그 경로가 하필 dispatch가 쓰는 쪽이면 지목이
+/// 아무 효과 없이 사라진다.
+#[tokio::test]
+async fn a_task_remembers_the_agent_it_was_pinned_to() {
+    require_db!(store);
+    let project = seed_project(&store, "task-pin").await;
+    let agent = Agent::new(project.id, "planner");
+    store.create_agent(&agent).await.unwrap();
+
+    let created_by = format!("pin-{}", uuid::Uuid::new_v4());
+    let task = Task::from_request(TaskRequest {
+        prompt: "pinned".into(),
+        created_by: created_by.clone(),
+        project_id: Some(project.id),
+        agent_id: Some(agent.id),
+        ..Default::default()
+    });
+    store.insert_task(&task).await.unwrap();
+
+    let fetched = store.get_task(task.id).await.unwrap().expect("task exists");
+    assert_eq!(
+        fetched.agent_id,
+        Some(agent.id),
+        "get_task가 지목을 잃으면 dispatch는 지킬 대상을 모른다"
+    );
+
+    let listed = store
+        .list_tasks(&TaskFilter {
+            created_by: Some(created_by),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].agent_id, Some(agent.id));
+}
+
+/// 지목이 없는 Task는 `NULL`로 남는다 — 새 컬럼이 기존 경로를 바꾸지 않는다.
+#[tokio::test]
+async fn an_unpinned_task_stores_a_null_agent() {
+    require_db!(store);
+    let task = Task::from_request(TaskRequest {
+        prompt: "unpinned".into(),
+        created_by: format!("nopin-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    });
+    store.insert_task(&task).await.unwrap();
+
+    let fetched = store.get_task(task.id).await.unwrap().expect("task exists");
+    assert_eq!(fetched.agent_id, None);
+}
+
+/// 없는 Agent를 가리키는 Task는 FK가 막는다.
+///
+/// 이 방어는 **마지막 겹**이지 첫 겹이 아니다. 요청자에게 쓸모 있는 거절은
+/// `fleet_store::apply_agent_pin`이 제출 시점에 내리는 것이고(`AgentNotFound`),
+/// 여기까지 온 것은 그 검증을 우회한 코드 경로뿐이다. 그런 경로가 생겨도
+/// 존재하지 않는 Agent를 가리키는 행이 남지 않는다는 것을 못 박는다.
+#[tokio::test]
+async fn a_task_cannot_point_at_an_agent_that_does_not_exist() {
+    require_db!(store);
+    let mut task = Task::from_request(TaskRequest {
+        prompt: "dangling".into(),
+        created_by: format!("dangle-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    });
+    task.agent_id = Some(fleet_core::AgentId::new());
+
+    let err = store
+        .insert_task(&task)
+        .await
+        .expect_err("FK must reject a dangling agent reference");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("foreign key") || msg.contains("agent_id"),
+        "FK 위반이어야 한다, got: {msg}"
     );
 }

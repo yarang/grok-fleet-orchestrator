@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/dashboard-api.md"
-last_verified: "2026-08-28"
+last_verified: "2026-09-01"
 last_verified_commit: "working-tree"
 owners: ["fleet-dashboard"]
 ---
@@ -88,6 +88,20 @@ revoke가 끼어들 수 있다.
 Task가 0건인 Project에 "tasks still running"이라고 표시했다. 같은 어휘를 MCP
 `fleet_delete_project`도 싣는다([MCP 도구 계약](mcp-tools.md)) — 사유를 만드는 곳은 게이트를
 평가하는 `fleet_store::ArchiveBlockers` 한 곳이다.
+
+`POST /api/tasks`는 로드맵 `#49` 2단계부터 선택 폼 필드 `agent_id`를 받는다 — 이 Task를 특정
+Agent가 처리하게 지목한다. 거절 사유는 셋이고 전부 `400 bad_request`이며, **Task 행은 만들어지지
+않는다**: 값이 `AgentId`로 파싱되지 않음, 그런 Agent가 없음, `server_hint`와 함께 옴, 그리고
+명시한 `project_id`가 Agent의 Project와 다름. `project_id`를 생략하면 Agent의 Project를
+물려받으며, 물려받은 Project가 `Draining`/`Archived`면 명시했을 때와 똑같이 거절된다 — 그러지
+않으면 보관된 Project의 Agent를 지목하는 것만으로 새 Task를 밀어 넣는 우회로가 된다. 검증 규칙은
+MCP `fleet_dispatch_task`와 공유한다(`fleet_store::apply_agent_pin`, [MCP 도구 계약](mcp-tools.md)).
+
+지목된 Agent가 지금 돌고 있는지는 **제출 시점에 검사하지 않는다**. 그 판정은 dispatch가 하며,
+거절되면 응답은 `200` + `dispatched: false` + `warning`이다(Task 행은 이미 존재한다) — 다른
+dispatch 실패와 같은 모양이다. 지목은 `GET /api/tasks/{id}`의 `task.agent_id`로 되읽을 수 있다.
+입력으로만 받고 되읽을 수 없으면 제출자가 자기 지목이 실제로 붙었는지 확인할 방법이 없으므로,
+`TaskSummary`가 `project_id`와 같은 자리에 함께 싣는다(지목 없이 제출됐으면 필드가 생략된다).
 
 ## 계획된 표면 — Task 삭제와 스레드 목록 (`#96`)
 

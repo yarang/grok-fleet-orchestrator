@@ -24,6 +24,7 @@ pub mod mem;
 pub mod postgres;
 pub mod project_rules;
 pub mod rbac;
+pub mod task_pins;
 
 pub use error::StoreError;
 pub use listener::listen_events;
@@ -36,6 +37,7 @@ pub use rbac::{
     consume_bootstrap_and_create_admin, issue_admin_bootstrap_token, seed_builtin_roles,
     seed_permissions, seed_rbac_and_maybe_issue_bootstrap, BootstrapAdminError,
 };
+pub use task_pins::{apply_agent_pin, TaskPinError};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

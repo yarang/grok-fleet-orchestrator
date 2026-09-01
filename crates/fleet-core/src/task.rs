@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ids::{ProjectId, TaskId, WorkerId};
+use crate::ids::{AgentId, ProjectId, TaskId, WorkerId};
 
 /// 작업 우선순위. 스케줄러 큐 정렬에 사용.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,6 +41,17 @@ pub struct TaskRequest {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_hint: Option<String>,
+    /// 이 Task를 처리할 Agent 지목 (로드맵 `#49` 2단계).
+    ///
+    /// dispatch는 이 값을 **지킬 뿐 고르지 않는다** — 비어 있으면 기존대로
+    /// Worker만 선택한다. 없는 Agent를 지목한 요청은 제출에서 거절되므로,
+    /// 여기까지 온 값은 제출 시점에 존재했던 Agent다.
+    ///
+    /// `server_hint`와 동시에 줄 수 없다: 같은 결정에 핀이 둘이고 이쪽이
+    /// Worker를 이미 함축한다. 근거는 정본
+    /// `docs/architecture/agents/provisioning.md`의 §"`#49` 2단계의 설계".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,7 +97,7 @@ pub struct TaskRequest {
 /// 버전으로 저장된 해시와 절대 같아질 수 없으므로, "포맷이 바뀌었는데 우연히
 /// 같은 해시가 나와 다른 요청을 중복으로 판정"하는 경로가 사라진다. 대신 배포
 /// 경계에서 같은 키의 재요청이 409로 거절될 수 있다(의도된 안전한 실패).
-const PAYLOAD_HASH_VERSION: &str = "fleet.task.payload.v1";
+const PAYLOAD_HASH_VERSION: &str = "fleet.task.payload.v2";
 
 impl TaskRequest {
     /// 제출 페이로드의 안정된 SHA-256 해시(hex).
@@ -152,6 +163,13 @@ impl TaskRequest {
         feed(
             &mut hasher,
             self.server_hint.as_deref().unwrap_or_default().as_bytes(),
+        );
+        feed(
+            &mut hasher,
+            self.agent_id
+                .map(|id| id.to_string())
+                .unwrap_or_default()
+                .as_bytes(),
         );
         feed(
             &mut hasher,
@@ -234,6 +252,13 @@ pub struct Task {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_hint: Option<String>,
+    /// 이 Task가 속한 Agent (로드맵 `#49` 2단계). `None`은 "특정 Agent에 묶이지
+    /// 않았다"는 정상 상태이며, 이 필드가 도입되기 전의 모든 Task가 그렇다.
+    ///
+    /// 값이 있으면 `Selector::select`가 그 Agent가 놓인 Worker로 좁힌다 —
+    /// 좁히기만 하고 필터를 무시하지는 않는다(`server_hint`와 같은 의미).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -343,6 +368,7 @@ impl Task {
             cwd: req.cwd,
             model: req.model,
             server_hint: req.server_hint,
+            agent_id: req.agent_id,
             required_labels: req.required_labels,
             max_turns: req.max_turns,
             timeout_secs: req.timeout_secs,
@@ -396,6 +422,11 @@ impl Task {
         if self.project_id.is_none() {
             self.project_id = parent.project_id;
         }
+        // 로드맵 #49 2단계 — `agent_id`는 **의도적으로 상속하지 않는다**.
+        // `server_hint`와 달리 Agent 지목은 제출 시점에 존재를 검증한 뒤에만
+        // 유효한데(`fleet_store::apply_agent_pin`), 상속은 그 검증보다 뒤에
+        // 일어나므로 부모의 값을 물려받으면 이미 삭제된 Agent를 검증 없이
+        // 다시 지목하게 된다. 같은 Agent로 이어가려면 제출자가 다시 지목한다.
     }
 
     /// 작업이 종료 상태(Completed/Failed/Cancelled)인지 여부.
@@ -1317,6 +1348,33 @@ mod tests {
         assert_eq!(reply.project_id, None);
     }
 
+    /// 로드맵 `#49` 2단계 — Agent 지목은 **이어가기로 전파되지 않는다**.
+    ///
+    /// `server_hint`와 달리 `agent_id`는 제출 시점에 존재가 검증돼야 유효한데
+    /// (`fleet_store::apply_agent_pin`), 상속은 그 검증보다 **뒤에** 일어난다.
+    /// 물려받게 두면 이미 삭제된 Agent를 검증 없이 다시 지목하게 된다.
+    #[test]
+    fn inherit_from_parent_does_not_propagate_agent_id() {
+        let mut parent = Task::from_request(TaskRequest {
+            prompt: "parent".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        parent.agent_id = Some(AgentId::new());
+
+        let mut reply = Task::from_request(TaskRequest {
+            prompt: "이어서".into(),
+            created_by: "admin@org".into(),
+            ..Default::default()
+        });
+        reply.inherit_from_parent(&parent);
+
+        assert_eq!(
+            reply.agent_id, None,
+            "이어가려면 제출자가 Agent를 다시 지목해야 한다"
+        );
+    }
+
     #[test]
     fn failure_kind_snake_case() {
         let json = serde_json::to_string(&FailureKind::CircuitOpen).unwrap();
@@ -1520,6 +1578,32 @@ mod tests {
         let one = hashed(|r| r.required_labels = vec!["gpu".into()]);
         let two = hashed(|r| r.required_labels = vec!["gpu".into(), "linux".into()]);
         assert_ne!(one, two);
+    }
+
+    /// 로드맵 `#49` 2단계 — Agent 지목은 **요청자의 의도**이므로 해시에 든다.
+    /// 빠뜨리면 같은 idempotency key로 Agent만 바꿔 낸 두 제출이 중복으로
+    /// 판정되어, 두 번째가 조용히 첫 번째의 Agent로 실행된다.
+    #[test]
+    fn payload_hash_reflects_agent_pin() {
+        let bare = hashed(|_| {});
+        let pinned = hashed(|r| r.agent_id = Some(AgentId::new()));
+        assert_ne!(bare, pinned);
+
+        let a = AgentId::new();
+        let b = AgentId::new();
+        assert_ne!(
+            hashed(|r| r.agent_id = Some(a)),
+            hashed(|r| r.agent_id = Some(b)),
+            "서로 다른 Agent를 지목한 두 제출은 다른 제출이다"
+        );
+    }
+
+    /// 해시에 든 필드 집합이 바뀌면 버전을 올린다는 계약(위 상수의 주석)이
+    /// 실제로 지켜졌는지 못 박는다. `agent_id`가 들어가면서 `v1` → `v2`가
+    /// 됐고, 그래서 이전 버전이 저장한 해시와는 절대 같아질 수 없다.
+    #[test]
+    fn payload_hash_version_was_bumped_for_the_agent_pin() {
+        assert_eq!(PAYLOAD_HASH_VERSION, "fleet.task.payload.v2");
     }
 
     /// 라우터가 채우는 필드는 클라이언트 의도가 아니다. 여기에 반응하면 같은
