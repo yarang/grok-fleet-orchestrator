@@ -233,6 +233,35 @@ impl AgentProcessManager {
             .collect();
         terminate_all(doomed).await;
 
+        // 2.5. 회수가 **명시된** Agent의 디렉터리를 지운다. 위 2단계가 부재와
+        //      `stopped`를 같이 취급한 것과 달리 여기서는 **명시적 `stopped`만**
+        //      본다 — 종료는 잘못해도 다시 띄우면 되지만 삭제는 되돌릴 수 없다.
+        //      근거는 `remove_workspace`의 독스트링에 있다.
+        //
+        //      최악의 경우 창은 한 beat이다: `registration.rs`가 응답을 파싱하는
+        //      시점에 ack를 버퍼에 넣고 그것이 다음 beat의 요청에 실리는데,
+        //      오케스트레이터의 heartbeat 핸들러는 `ack_agent_commands`를
+        //      `list_agent_commands`보다 **먼저** 부르므로 그 응답에는 이미 이
+        //      명령이 없다. (회수가 `status`까지 내리지 않은 경우에는 첫 disjunct
+        //      가 살아 있어 더 오래 실려 오지만, 짧은 쪽에 맞춰 설계한다.)
+        //
+        //      그래서 실패는 전파하지 않고 경고만 남긴다 — 남은 디렉터리는
+        //      누수이고, 되돌릴 수 없는 쪽으로 틀리는 것보다 낫다.
+        for cmd in commands
+            .iter()
+            .filter(|c| c.desired_status == AgentDesiredStatus::Stopped)
+        {
+            match self.remove_workspace(cmd.agent_id).await {
+                Ok(true) => info!(agent_id = %cmd.agent_id, "agent workspace removed"),
+                Ok(false) => {}
+                Err(e) => warn!(
+                    agent_id = %cmd.agent_id,
+                    error = %e,
+                    "failed to remove agent workspace — it will leak"
+                ),
+            }
+        }
+
         // 3. 있어야 하는데 없는 것을 띄우고, 그 결과를 그대로 관측으로 적는다.
         //    관측을 여기서 만드는 이유는 이 루프가 desired=running인 Agent를
         //    **정확히 한 번씩** 지나가기 때문이다 — 뒤에서 다시 훑으면 0단계가
@@ -344,8 +373,7 @@ impl AgentProcessManager {
     /// 여는 열쇠이기 때문이다 — 같은 값을 주면 Agent 하나가 샜을 때 Worker
     /// 종단까지 열린다.
     async fn spawn(&self, agent_id: AgentId, port: u16) -> Result<Child, std::io::Error> {
-        let workspace = self.workspace_root.join(agent_id.to_string());
-        tokio::fs::create_dir_all(&workspace).await?;
+        let workspace = self.ensure_workspace(agent_id).await?;
 
         let secret = hex::encode(rand::random::<[u8; 32]>());
         let bind = format!("{}:{}", self.host, port);
@@ -361,6 +389,73 @@ impl AgentProcessManager {
             .kill_on_drop(true);
         apply_llm_proxy_envs(&mut cmd, &self.config.llm_proxy);
         cmd.spawn()
+    }
+
+    /// Agent 디렉터리를 만들고 **root 아래로 해석되는지 확인한** 경로를 준다
+    /// (로드맵 `#69` 1단계).
+    ///
+    /// 여기서 값어치를 하는 검사는 `..` 거절이 아니다 — `agent_id`는 UUID라
+    /// 경로 조각에 구분자도 `..`도 섞일 수 없다. 실제로 막는 것은 **symlink**다:
+    /// `workspace_root/<agent_id>`가 이미 링크로 존재하면 `create_dir_all`은
+    /// 조용히 성공하고, 그 뒤의 모든 쓰기는 링크가 가리키는 곳으로 간다.
+    ///
+    /// root **자신이** 링크인 경우는 위반이 아니다. 양쪽을 다 정규화하므로
+    /// root가 가리키는 실제 경로 아래에 자식이 놓이고 `starts_with`가 성립한다 —
+    /// 운영자가 workspace를 다른 볼륨에 두는 것은 정상 구성이다. 한쪽만
+    /// 정규화하면 이 정상 구성이 위반으로 보고된다.
+    ///
+    /// 이 검사가 [`Task.cwd`]의 containment와 다른 이유는 **경로를 정한 쪽과
+    /// 확인하는 쪽이 같은 호스트**이기 때문이다. 거기서 막힌 것은 오케스트레이터가
+    /// 남의 파일시스템을 `canonicalize`할 수 없다는 사실이었지 검사 자체가 아니다.
+    ///
+    /// [`Task.cwd`]: fleet_core::validate_workspace_cwd
+    async fn ensure_workspace(&self, agent_id: AgentId) -> Result<PathBuf, std::io::Error> {
+        tokio::fs::create_dir_all(&self.workspace_root).await?;
+        let path = self.workspace_root.join(agent_id.to_string());
+        tokio::fs::create_dir_all(&path).await?;
+        self.contained(&path).await
+    }
+
+    /// `path`를 정규화하고 workspace root 아래인지 확인한다. 존재해야 한다.
+    async fn contained(&self, path: &std::path::Path) -> Result<PathBuf, std::io::Error> {
+        let root = tokio::fs::canonicalize(&self.workspace_root).await?;
+        let canon = tokio::fs::canonicalize(path).await?;
+        if !canon.starts_with(&root) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "agent workspace {} resolves outside {}",
+                    canon.display(),
+                    root.display()
+                ),
+            ));
+        }
+        Ok(canon)
+    }
+
+    /// 회수된 Agent의 디렉터리를 지운다. 지울 것이 없었으면 `Ok(false)`
+    /// (로드맵 `#69` 1단계).
+    ///
+    /// **호출 조건이 이 함수의 안전성 전부다.** 부르는 쪽은 명령 목록에
+    /// `desired_status = stopped`가 **명시적으로 실려 있을 때만** 부른다. 목록에서
+    /// 사라진 것을 근거로 부르면 안 된다 — `list_agent_commands`의 술어상 다른
+    /// Worker로 이동, 미배치(`worker_id = NULL`), 회수 확인 완료가 모두 "부재"로
+    /// 뭉쳐지고, 그중 앞의 둘에서 지우면 아직 살아 있는 Agent의 작업물이
+    /// 사라진다. checkpoint push가 없는 지금 그 소실에는 복구 경로가 없다.
+    ///
+    /// 삭제 전에 [`contained`](Self::contained)를 다시 통과시킨다. 만든 시점과
+    /// 지우는 시점 사이에 링크가 끼어들 수 있고, 재귀 삭제는 되돌릴 수 없으므로
+    /// 여기서의 한 번 더가 생성 시의 검사보다 값이 크다.
+    async fn remove_workspace(&self, agent_id: AgentId) -> Result<bool, std::io::Error> {
+        let path = self.workspace_root.join(agent_id.to_string());
+        let canon = match self.contained(&path).await {
+            Ok(c) => c,
+            // 애초에 없으면 지울 것도 없다 — 매 beat 반복되는 정상 경로다.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        tokio::fs::remove_dir_all(&canon).await?;
+        Ok(true)
     }
 }
 
@@ -699,5 +794,144 @@ mod tests {
             "got: {:?}",
             m.workspace_root
         );
+    }
+    // ── Agent 디렉터리의 경계와 생명주기 (로드맵 `#69` 1단계) ─────────────
+
+    #[tokio::test]
+    async fn spawning_creates_the_agent_directory_under_the_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39220-39239", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+
+        assert!(dir.path().join(a.to_string()).is_dir());
+        m.shutdown_all().await;
+    }
+
+    /// 이 테스트가 이 변경의 핵심 단정이다. 목록에서 사라진 것은 다른 Worker로
+    /// 이동했을 수도, 미배치가 됐을 수도, 회수 확인이 끝났을 수도 있다 —
+    /// `list_agent_commands`의 술어가 셋을 하나로 뭉친다. 그중 앞의 둘에서
+    /// 지우면 살아 있는 Agent의 작업물이 복구 경로 없이 사라진다.
+    #[tokio::test]
+    async fn absence_from_the_command_list_stops_the_process_but_keeps_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39240-39259", 4);
+        let a = AgentId::new();
+        let workspace = dir.path().join(a.to_string());
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        std::fs::write(workspace.join("work.txt"), b"unpushed").unwrap();
+
+        // 다음 beat: 권위 있는 목록이 왔는데 이 Agent가 없다.
+        let _ = m.reconcile(Some(&[])).await;
+
+        assert!(
+            m.running_agents().await.is_empty(),
+            "부재는 프로세스를 정리하는 근거는 된다"
+        );
+        assert!(
+            workspace.join("work.txt").is_file(),
+            "부재는 디렉터리를 지우는 근거가 되지 않는다"
+        );
+        m.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn an_explicit_stopped_command_removes_the_agent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39260-39279", 4);
+        let a = AgentId::new();
+        let workspace = dir.path().join(a.to_string());
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        assert!(workspace.is_dir());
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Stopped)]))
+            .await;
+
+        assert!(!workspace.exists(), "명시적 회수는 지우는 근거가 된다");
+        m.shutdown_all().await;
+    }
+
+    /// 회수 명령은 확인이 올 때까지 매 beat 다시 온다. 이미 지운 뒤의 반복이
+    /// 오류가 되면 그 beat의 로그가 매번 경고로 더럽혀진다.
+    #[tokio::test]
+    async fn removing_an_already_removed_directory_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39280-39299", 4);
+        let a = AgentId::new();
+
+        assert!(!m.remove_workspace(a).await.unwrap());
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        assert!(m.remove_workspace(a).await.unwrap());
+        assert!(!m.remove_workspace(a).await.unwrap());
+        m.shutdown_all().await;
+    }
+
+    /// `agent_id`는 UUID라 `..`가 섞일 수 없으므로, 이 경계에서 실제로 막는
+    /// 것은 symlink다. 검사가 없으면 `create_dir_all`이 조용히 성공하고 이후의
+    /// 모든 쓰기가 링크 대상으로 나간다.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_directory_that_is_a_symlink_out_of_the_root_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let m = manager(&root, fake_grok(root.path()), "39300-39319", 4);
+        let a = AgentId::new();
+
+        std::os::unix::fs::symlink(outside.path(), root.path().join(a.to_string())).unwrap();
+
+        let err = m.ensure_workspace(a).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "got: {err}");
+
+        // 거절이 관측으로 도달하고, 링크 대상은 건드려지지 않는다.
+        let observed = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            observed.as_slice(),
+            [AgentObservation::Failed { agent_id, .. }] if *agent_id == a
+        ));
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        m.shutdown_all().await;
+    }
+
+    /// 반대 방향의 단정 — root **자신이** 링크인 것은 정상 구성이다. 한쪽만
+    /// 정규화하면 workspace를 다른 볼륨에 둔 배치가 위반으로 보고된다.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_workspace_root_is_not_a_violation() {
+        let real = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("agents-link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        let config = WorkerConfig::for_test()
+            .grok_bin(fake_grok(holder.path()))
+            .bind_addr("127.0.0.1:2419")
+            .agent_port_range("39320-39339")
+            .agent_workspace_root(link.to_string_lossy().into_owned())
+            .max_agent_processes(4)
+            .build();
+        let m = AgentProcessManager::new(Arc::new(config)).unwrap();
+        let a = AgentId::new();
+
+        let ws = m.ensure_workspace(a).await.unwrap();
+        assert!(
+            ws.starts_with(real.path().canonicalize().unwrap()),
+            "got: {ws:?}"
+        );
+        assert!(real.path().join(a.to_string()).is_dir());
     }
 }
