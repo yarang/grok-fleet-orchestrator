@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/provisioning.md"
-last_verified: "2026-09-01"
+last_verified: "2026-09-02"
 last_verified_commit: "working-tree"
 ---
 
@@ -1037,3 +1037,63 @@ PgStore는 상한을 선행 검사로, 관측을 UPDATE 안의 술어로 본다.
 
 **이것은 계약 변경이다** — 전에 400으로 거절하던 요청이 이제 성공한다. 표면 계약의 정본은
 [Dashboard API](../../contracts/dashboard-api.md)와 [Agent 관리](../../contracts/agent-management.md)다.
+
+## 명령 감사 추적 (`#67` 구현 게이트 ④)
+
+게이트 ④는 "명령·ACK·actor·generation의 감사 추적"이다. 감사 로그가 **누가 무엇을 명령했는가**
+까지만 말하면 절반이고, **그 명령이 Worker에 닿았는가**까지 말해야 추적이 완결된다. 뒤의 답은
+`agents.last_acked_generation`과 맞대어야만 나오므로, 감사 줄에 세대가 실려 있어야 한다.
+
+### 세 경로 중 하나만 세대를 남기고 있었다
+
+명령을 발행하는 — 즉 `command_generation`을 올리는 — 경로는 셋이다.
+
+| 감사 이벤트 | 세대를 올리는가 | `detail.generation` |
+|---|---|---|
+| `agent.create` | 아니오. 기본값 0 (`031_agent_desired_state.sql`) | **없다(정당)** |
+| `agent.assign` | **언제나** +1 (`assign_agent_worker`) | 있다 |
+| `agent.start` | `desired_status`가 바뀔 때 +1 | 있다 |
+| `agent.stop` | `desired_status <> 'stopped'`일 때만 +1 | 조건부로 있다 |
+
+`agent.start`만 세대를 싣고 있었다. `assign`과 `stop`이 비어 있으면 감사 로그만으로는 "이 재배정이
+새 Worker에 도달했는가", "이 회수가 프로세스를 실제로 멈추라고 나갔는가"를 답할 수 없고, 배정·회수
+시각만 남아 **명령의 발행과 전달이 구분되지 않는다**.
+
+`agent.create`에 세대를 싣지 않는 것은 누락이 아니다. 생성은 명령이 아니라 정의이고 세대는 0에
+머문다 — 여기에 0을 실으면 "0세대 명령을 발행했다"로 읽히는 값이 생긴다. 채울 방법이 없는 칸은
+만들지 않는다.
+
+### `agent.stop`의 세대는 조건부여야 한다
+
+한 번도 start되지 않은 Agent를 회수하면 `desired_status`가 이미 `stopped`라 저장소가 세대를 올리지
+않는다. 회수는 일어났지만 **Worker로 나가는 명령은 없다**. 이 자리에 세대를 무조건 실으면 나가지도
+않은 명령을 실었다고 주장하게 된다.
+
+값을 얻는 방법은 하나뿐이다 — 쓰기 **전후**의 `command_generation`을 비교하는 것. 저장소가 "명령을
+발행했는가"를 반환하지 않기 때문이다(`update_agent_status`의 반환은 `bool`이고 그 뜻은 "행이
+있었는가"다). 오른 경우에만 값을 싣고, 아니면 `null`이다.
+
+`null`과 `0`은 다르다. `last_acked_generation`의 기본값도 0이라 0을 실으면 대조가 **언제나 전달됨**
+으로 나온다 — 거짓을 참으로 만드는 값이다. `null`만이 "맞대어 볼 명령이 없다"를 말한다. 회수
+이벤트 자체는 언제나 기록되므로 `null`이 이벤트의 부재와 혼동되지도 않는다.
+
+### 검증
+
+[`crates/fleet-dashboard/tests/dashboard_api.rs`](../../../crates/fleet-dashboard/tests/dashboard_api.rs)의
+세 테스트가 세 경로를 끝까지 닫는다. 각 테스트는 감사 줄에서 읽은 세대를 **그대로**
+`ack_agent_commands`에 넣어 `command_delivered()`가 뒤집히는지를 본다 — 세대를 싣는 이유가 그
+대조이므로, 대조가 성립하는 것까지 봐야 값이 쓸모 있다는 것이 증명된다.
+
+- `placing_an_agent_audits_the_generation_and_the_ack_closes_the_trail` — actor가 실렸는지도 함께
+  본다. 세대가 있어도 actor가 비면 "누가"가 빠져 추적이 완결되지 않는다.
+- `stopping_a_started_agent_audits_the_generation_it_issued`
+- `stopping_a_never_started_agent_records_no_generation` — `null`을 단정한다.
+
+### MCP 표면은 이번 범위 밖이다
+
+`fleet_stop_agent`를 비롯한 MCP tool은 감사 이벤트를 **하나도** 쓰지 않는다. 세대를 실을 자리가
+없어서가 아니라 **actor가 없어서**다 — `ToolContext`는 `state`/`dispatcher`/`capabilities`만 들고
+있고 principal이 없다. 그 인증 설계(짧은 session assertion 또는 local peer identity)는
+[인가와 감사](../../security/authorization-and-audit.md)가 정본으로 들고 있으며 아직 착수 전이다.
+actor 없이 감사 줄만 만들면 `actor_label`이 비거나 상수가 되어, 추적이 완결된 것처럼 보이는 줄이
+쌓인다.

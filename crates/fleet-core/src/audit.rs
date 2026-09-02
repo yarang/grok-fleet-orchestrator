@@ -107,7 +107,15 @@ pub mod action {
     /// 들어간다 — Agent는 옮길 수 없으므로 이 한 줄이 그 Agent가 어느 경계
     /// 안에서 만들어졌는지에 대한 영구 기록이다.
     pub const AGENT_CREATE: &str = "agent.create";
-    /// Agent 회수(`Ready → Stopped`) (로드맵 #49).
+    /// Agent 회수(`Ready → Stopped`) (로드맵 #49). `detail.worker_id`와
+    /// `detail.generation`이 들어간다.
+    ///
+    /// **`generation`은 조건부다** (로드맵 #67 구현 게이트 ④). 저장소는
+    /// `desired_status`가 아직 `stopped`가 아닐 때만 세대를 올리므로, 한 번도
+    /// start된 적 없는 Agent를 회수하면 Worker로 나가는 명령이 없다. 그 경우
+    /// 값은 `null`이며, 이것은 "세대를 모른다"가 아니라 **"맞대어 볼 ACK가
+    /// 없다"**는 단정이다. 회수 자체는 언제나 기록되므로 `null`이 이벤트의
+    /// 부재와 혼동되지 않는다.
     pub const AGENT_STOP: &str = "agent.stop";
     /// Agent의 desired state를 `running`으로 (로드맵 #67 4b).
     /// `detail.generation`에 이 start가 발행한 명령 세대가 들어간다 — 그것이
@@ -121,6 +129,12 @@ pub mod action {
     /// Agent를 Worker에 (재)배정 (로드맵 #67 4a). `detail.worker_id`와
     /// `detail.previous_worker_id`가 들어간다 — 후자가 있으면 옮긴 것이고
     /// 없으면 처음 배정한 것이다.
+    ///
+    /// `detail.generation`도 들어가며, `agent.stop`과 달리 **무조건** 값이
+    /// 있다 — 배정은 값이 같아도 세대를 올리기 때문이다. 새 Worker가 그
+    /// 세대를 ACK해야 배정이 실제로 전달된 것이므로, 이 값이 없으면 감사
+    /// 로그는 "누가 언제 옮기라고 했는가"까지만 말하고 "옮겨졌는가"는 말하지
+    /// 못한다 (로드맵 #67 구현 게이트 ④).
     ///
     /// 생성 시점의 자동 배정은 이 이벤트를 내지 않는다. 그 배정은
     /// `agent.create`의 `detail.worker_id`에 이미 기록되며, 한 번의 조작을

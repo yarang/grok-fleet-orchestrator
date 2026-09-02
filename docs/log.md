@@ -6254,3 +6254,71 @@ worktree에 파일을 쓰는 동안의 삭제는 시험하지 않았다. 한 bea
 111만 항목 문제와 같은 원인이며, 거기서 A/B로 확정한 978배 페널티가 컴파일 자체에도 걸린다는
 관측이다. 그 기록은 테스트 **런타임**에 대한 것이었고 이것은 **빌드**다. 대응(target 정리)은
 같지만 여기서는 실행하지 않았다.
+
+## 2026-09-02 — 명령을 기록하는 것과 전달을 기록하는 것은 다르다
+
+`#67` 구현 게이트 ④("명령·ACK·actor·generation의 감사 추적")를 닫았다. 시작은 표를 하나 그린
+것이었다 — `command_generation`을 올리는 경로와 그것을 감사에 남기는 경로를 나란히 놓자 셋 중
+하나만 남기고 있었다는 것이 드러났다.
+
+| 감사 이벤트 | 세대를 올리는가 | 그때까지의 `detail.generation` |
+|---|---|---|
+| `agent.create` | 아니오 (기본값 0) | 없음 |
+| `agent.assign` | 언제나 +1 | **없음** |
+| `agent.start` | `desired_status`가 바뀔 때 +1 | 있음 |
+| `agent.stop` | `desired_status <> 'stopped'`일 때만 +1 | **없음** |
+
+`AGENT_START`의 docstring이 이미 이유를 적어 두고 있었다 — "그것이 있어야 나중에 Worker의
+ACK(`last_acked_generation`)와 이 이벤트를 맞대어 '그 명령이 실제로 전달됐는가'를 감사 로그만으로
+답할 수 있다." 그 이유는 `assign`과 `stop`에도 **그대로** 성립하는데 값만 없었다. 근거가 특정
+경로에 붙어 적히면, 같은 근거가 걸리는 다른 경로는 아무도 다시 읽지 않는다.
+
+**세대 없는 감사 줄이 말하지 못하는 것은 "언제"가 아니라 "닿았는가"다.** `agent.assign`이 시각과
+출발지·도착지를 남겨도, 그 재배정이 새 Worker에 도달했는지는 알 수 없다. 배정과 전달이 한 줄
+안에서 구분되지 않기 때문이다. 이것은 정보가 부족한 것이 아니라 **발행을 전달로 읽게 만드는**
+종류의 부재다.
+
+### `stop`만 조건부인 이유
+
+`assign`은 무조건 싣는다. `assign_agent_worker`가 값이 같아도 세대를 올리기 때문이다 — 새 Worker는
+이전 Worker가 받은 명령을 본 적이 없으므로 그것이 옳다.
+
+`stop`은 다르다. 한 번도 start되지 않은 Agent를 회수하면 `desired_status`가 이미 `stopped`라
+저장소가 세대를 올리지 않고, Worker로 나가는 명령도 없다. 그런데 저장소는 "명령을 발행했는가"를
+돌려주지 않는다 — `update_agent_status`의 반환은 `bool`이고 그 뜻은 "행이 있었는가"다. 그래서
+호출부가 쓰기 **전후**의 `command_generation`을 직접 비교하는 것 말고는 알 방법이 없다.
+
+**여기서 `null`과 `0`의 차이가 안전 문제가 된다.** `last_acked_generation`의 기본값도 0이므로,
+명령이 없었던 자리에 0을 실으면 `last_acked_generation >= 0`이 언제나 참이다 — 대조가 늘
+"전달됨"으로 나온다. 즉 0은 값이 약한 것이 아니라 **거짓을 참으로 만든다**. `null`만이 "맞대어 볼
+명령이 없다"를 말하고, 회수 이벤트 자체는 언제나 기록되므로 `null`이 이벤트의 부재와 혼동되지도
+않는다.
+
+`agent.create`에 세대를 싣지 않은 것은 같은 판단의 반대편이다. 생성은 명령이 아니라 정의이고
+세대는 0에 머문다 — 여기에 0을 실으면 위와 똑같은 거짓 대조가 하나 더 생긴다. 채울 방법이 없는
+칸은 만들지 않는다.
+
+### 테스트가 감사 줄에서 세대를 **읽어서** ACK에 넣는다
+
+세 테스트(`placing_an_agent_audits_the_generation_and_the_ack_closes_the_trail`,
+`stopping_a_started_agent_audits_the_generation_it_issued`,
+`stopping_a_never_started_agent_records_no_generation`)는 detail의 세대를 상수로 다시 적지 않고
+**감사 줄에서 읽어** `ack_agent_commands`에 넣은 뒤 `command_delivered()`가 뒤집히는지를 본다.
+세대를 싣는 이유가 그 대조이므로, 값이 있다는 것만 보면 값이 **쓸모 있다**는 것은 보지 않은
+것이다. 배정 테스트는 `actor_user_id`도 함께 단정한다 — 세대가 있어도 actor가 비면 "누가"가 빠져
+추적이 완결되지 않고, 게이트 ④의 이름에 actor가 들어 있는 이유가 그것이다.
+
+`GET /api/agents/{id}` 라우트는 없다(목록만 있다). 전달 표시는 저장소를 직접 읽어 확인했다.
+
+### 검증 한계
+
+MCP 표면은 손대지 않았다. `fleet_stop_agent`를 비롯한 tool은 감사 이벤트를 **하나도** 쓰지 않는데,
+세대를 실을 자리가 없어서가 아니라 `ToolContext`가 `state`/`dispatcher`/`capabilities`만 들고 있어
+**actor를 채울 수 없어서**다. actor 없이 줄만 만들면 `actor_label`이 비거나 상수가 되어, 추적이
+완결된 것처럼 보이는 줄이 쌓인다 — 없는 것보다 나쁘다. 그 인증 설계(짧은 session assertion 또는
+local peer identity)는 [인가와 감사](security/authorization-and-audit.md)가 정본으로 들고 있고
+"MCP tool별 감사도 착수 전"으로 이미 기록해 둔 항목이라 이번 범위 밖에 둔다.
+
+또 하나: 이 게이트가 증명하는 것은 **감사 로그로 대조가 성립한다**는 것까지다. 실제 Worker가
+ACK를 보내는 경로(heartbeat)는 별개로 이미 있지만, 이 테스트들은 `ack_agent_commands`를 직접
+호출하므로 heartbeat 왕복 자체를 다시 시험하지는 않는다.

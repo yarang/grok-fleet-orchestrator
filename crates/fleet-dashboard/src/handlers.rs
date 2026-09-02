@@ -1828,6 +1828,12 @@ pub async fn place_agent_api(
             // 갔는가"만 말하고 "어디에서 왔는가"는 앞 이벤트를 거슬러
             // 올라가야 알 수 있다. 최초 배정이면 `null`이다.
             "previous_worker_id": previous_worker_id.map(|w| w.to_string()),
+            // 재배정도 명령이다(`assign_agent_worker`가 세대를 항상 올린다).
+            // `agent.start`가 세대를 싣는 것과 같은 이유로 여기에도 싣는다 —
+            // 없으면 "이 재배정이 새 Worker에 도달했는가"를 감사 로그로 답할
+            // 수 없고, 배정 시각만 남아 전달 여부와 구분되지 않는다
+            // (로드맵 #67 구현 게이트 ④).
+            "generation": placed.command_generation,
         })),
     )
     .await;
@@ -1964,6 +1970,12 @@ pub async fn stop_agent_api(
         .ok_or_else(|| ApiError::NotFound(format!("agent {id}")))?;
 
     if agent.status != fleet_core::AgentStatus::Stopped {
+        // 회수가 **명령을 발행했는지**는 쓰기 전후를 비교해야만 알 수 있다.
+        // `update_agent_status`는 `desired_status <> 'stopped'`일 때만 세대를
+        // 올리므로(migration 031), 한 번도 start되지 않은 Agent를 회수하면
+        // 세대가 그대로다 — 그 경우 감사에 세대를 실으면 나가지도 않은
+        // 명령을 실었다고 주장하는 셈이 된다(로드맵 #67 구현 게이트 ④).
+        let generation_before = agent.command_generation;
         state
             .store
             .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
@@ -1987,7 +1999,16 @@ pub async fn stop_agent_api(
             )
             .actor(principal.user.id)
             .target("agent", agent.id.to_string())
-            .detail(serde_json::json!({ "project_id": agent.project_id.to_string() })),
+            .detail(serde_json::json!({
+                "project_id": agent.project_id.to_string(),
+                // 세대가 올랐을 때만 값이 있다. `null`은 "회수는 기록됐지만
+                // Worker로 나간 명령은 없다"를 뜻하며, 0이나 이전 세대를
+                // 싣는 것과 달리 ACK와 맞대어 볼 대상이 없음을 분명히 한다.
+                "generation": (agent.command_generation > generation_before)
+                    .then_some(agent.command_generation),
+                // 미배정이면 `null`이다 — `agent.start`와 같은 규약.
+                "worker_id": agent.worker_id.map(|w| w.to_string()),
+            })),
         )
         .await;
     }

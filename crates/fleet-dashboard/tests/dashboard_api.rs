@@ -4927,3 +4927,234 @@ async fn list_agents_filters_by_worker() {
     .unwrap();
     assert!(none.is_empty());
 }
+
+// ── 명령·ACK·actor·generation 감사 추적 (로드맵 #67 구현 게이트 ④) ────
+//
+// 명령을 발행하는 경로는 셋(place·start·stop)인데 세대를 감사에 남기는 것은
+// 오래도록 `start` 하나뿐이었다. 세대가 없으면 감사 로그는 "누가 언제 명령
+// 했는가"까지만 말하고 "그 명령이 Worker에 닿았는가"는 말하지 못한다 — 그
+// 답은 `last_acked_generation`과 맞대어야만 나오고, 맞대려면 감사 줄에 세대가
+// 있어야 한다. 아래 셋은 세 경로 각각에서 그 대조가 실제로 성립하는지를 본다.
+
+#[tokio::test]
+async fn placing_an_agent_audits_the_generation_and_the_ack_closes_the_trail() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "assign-trail").await;
+
+    // Worker 없이 만든다 → 미배정, 세대는 기본값 0(생성은 명령이 아니다).
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "traveller"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["command_generation"], 0);
+
+    let worker = Worker::new("trail", "wss://trail.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let placed: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/place", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({"worker_id": worker.id.to_string()}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    // 배정은 값이 같아도 세대를 올린다 — 새 Worker는 이전 Worker가 받은
+    // 명령을 본 적이 없기 때문이다. 그래서 `start`와 달리 조건이 없다.
+    assert_eq!(placed["command_generation"], 1);
+    assert_eq!(placed["command_delivered"], false);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_ASSIGN.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].detail["generation"], 1, "{:?}", events[0].detail);
+    // actor가 없으면 세대가 있어도 "누가"가 비므로 추적이 완결되지 않는다.
+    assert!(events[0].actor_user_id.is_some(), "{:?}", events[0]);
+
+    // 감사 줄의 세대를 그대로 ACK에 넣어 대조가 성립함을 보인다 — 이것이
+    // 세대를 싣는 이유의 전부다.
+    let acked = store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent_id.parse().unwrap(),
+                generation: events[0].detail["generation"].as_i64().unwrap(),
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(acked, 1);
+
+    // `GET /api/agents/{id}` 라우트는 없다(목록만 있다) — 저장소를 직접 읽어
+    // ACK가 전달 표시까지 옮겼는지를 본다.
+    let after = store
+        .get_agent(agent_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after.command_delivered());
+}
+
+#[tokio::test]
+async fn stopping_a_started_agent_audits_the_generation_it_issued() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let worker = Worker::new("stopper", "wss://stopper.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "stop-trail").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "shortlived"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id = created["id"].as_str().unwrap().to_string();
+
+    authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents/{}/start", server.addr, agent_id),
+        &cookie,
+    )
+    .json(&serde_json::json!({}))
+    .send()
+    .await
+    .unwrap();
+
+    let stopped: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/agents/{}", server.addr, agent_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    // start가 1, stop이 2 — 회수도 Worker로 나가는 명령이다.
+    assert_eq!(stopped["command_generation"], 2);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_STOP.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].detail["generation"], 2, "{:?}", events[0].detail);
+    assert_eq!(
+        events[0].detail["worker_id"],
+        worker.id.to_string(),
+        "{:?}",
+        events[0].detail
+    );
+
+    let acked = store
+        .ack_agent_commands(
+            worker.id,
+            &[fleet_core::AgentAck {
+                agent_id: agent_id.parse().unwrap(),
+                generation: 2,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(acked, 1);
+    // `GET /api/agents/{id}` 라우트는 없다(목록만 있다) — 저장소를 직접 읽어
+    // ACK가 전달 표시까지 옮겼는지를 본다.
+    let after = store
+        .get_agent(agent_id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after.command_delivered());
+}
+
+#[tokio::test]
+async fn stopping_a_never_started_agent_records_no_generation() {
+    let (server, cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let worker = Worker::new("idle", "wss://idle.invalid/ws");
+    store.upsert_worker(&worker).await.unwrap();
+    let project_id = create_project_via_api(&client, server.addr, &cookie, "never-started").await;
+
+    let created: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/agents", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({"project_id": project_id, "name": "unused"}))
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let agent_id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["desired_status"], "stopped");
+
+    let stopped: serde_json::Value = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!("http://{}/api/agents/{}", server.addr, agent_id),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    // `desired_status`가 이미 `stopped`라 저장소가 세대를 올리지 않는다 —
+    // 회수는 일어났지만 Worker로 나간 명령은 없다.
+    assert_eq!(stopped["command_generation"], 0);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::AGENT_STOP.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1, "회수 자체는 언제나 기록된다: {events:?}");
+    // 여기서 0을 싣는 것과 `null`을 싣는 것은 다르다. 0은 "0세대 명령을
+    // 발행했다"로 읽히고, ACK 기본값도 0이라 대조하면 늘 전달된 것처럼
+    // 보인다. `null`만이 "맞대어 볼 명령이 없다"를 말한다.
+    assert!(
+        events[0].detail["generation"].is_null(),
+        "{:?}",
+        events[0].detail
+    );
+}
