@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use fleet_core::{
-    AgentAck, AgentCommand, AgentObservation, BootstrapToken, PermissionKind, WorkerLivenessMode,
-    WorkerStatus,
+    AgentAck, AgentCommand, AgentObservation, AgentOrphan, BootstrapToken, PermissionKind,
+    WorkerLivenessMode, WorkerStatus,
 };
 
 /// `POST /v1/workers/register` 요청 바디.
@@ -111,6 +111,20 @@ pub struct HeartbeatRequest {
     /// 대칭이다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_observations: Option<Vec<AgentObservation>>,
+    /// Worker가 종료한, 이 오케스트레이터가 배정하지 않은 Agent 프로세스들
+    /// (로드맵 `#70` 게이트 ③).
+    ///
+    /// `agent_observations`와 달리 **`Vec`이다.** 저쪽이 `Option`인 이유는 빈
+    /// 목록이 "전부 지워라"라는 주장이어서 "말할 것이 없음"과 구분해야 하기
+    /// 때문인데, 이쪽은 사건 목록이라 빈 목록이 지우는 것이 아무것도 없다 —
+    /// 두 상태의 처리가 같으므로 구분할 이유가 없다.
+    ///
+    /// **이 값은 Worker가 통제한다.** 여기 실린 `agent_id`는 이 Worker에
+    /// 배정된 적이 없는 것일 수 있고(그것이 orphan의 정의다), 존재하지 않는
+    /// 것일 수도 있다. 그래서 핸들러는 이 목록으로 `agents` 행을 고치지 않고
+    /// 감사 줄만 남기며, 한 beat에 받아들이는 개수에 상한을 둔다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_orphans: Vec<AgentOrphan>,
 }
 
 /// heartbeat 요청용 OS 정보.

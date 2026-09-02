@@ -212,6 +212,20 @@ pub async fn register_worker(
     }))
 }
 
+/// 한 beat이 감사에 남기는 고아 종료 사건의 상한 (로드맵 `#70` 게이트 ③).
+///
+/// **이 목록은 Worker가 통제한다.** heartbeat은 인증된 Worker만 부르지만,
+/// 인증됐다는 것과 그 Worker가 보내는 값이 정직하다는 것은 다르다 — 상한이
+/// 없으면 손상되거나 장악된 Worker 하나의 beat이 감사 테이블에 임의 개수의
+/// 줄을 쓴다. 감사는 다른 사건을 조회하는 자리이기도 하므로, 그 오염은 이
+/// 기능이 지키려는 것 자체를 무디게 만든다.
+///
+/// 값은 Worker의 프로세스 상한(`grok.max_agent_processes`, 기본 4)보다 넉넉히
+/// 크다. 정직한 Worker가 한 beat에 이 수를 넘길 수 있는 경로는 재기동 sweep과
+/// 재조정이 겹치는 경우뿐이고, 그것도 상한을 넘지 못한다. 넘으면 그 자체가
+/// 이상 신호이므로 조용히 자르지 않고 경고를 남긴다.
+const MAX_ORPHANS_PER_BEAT: usize = 32;
+
 /// `POST /v1/workers/heartbeat`.
 #[tracing::instrument(skip(state, req, headers), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
 pub async fn heartbeat(
@@ -395,6 +409,45 @@ pub async fn heartbeat(
                 tracing::warn!(%worker_id, error = %e, "failed to apply agent observations");
             }
         }
+    }
+    // 고아 종료 사건을 감사에 남긴다 (로드맵 #70 게이트 ③).
+    //
+    // **`agents` 행은 건드리지 않는다.** orphan은 정의상 이 Worker에 배정돼
+    // 있지 않고, `036`의 `agents_observation_requires_placement`가 그런 행에
+    // 관측을 적는 것을 이미 금지한다. 남길 자리는 감사 로그뿐이다.
+    //
+    // 실패가 치명적이지 않은 것은 위의 두 블록과 같지만, **잃는 것이 다르다.**
+    // 확인과 관측은 다음 beat이 복구하지만 이 사건은 이미 일어난 일회성이라
+    // 여기서 놓치면 복구할 원천이 없다. 그런데도 heartbeat을 실패시키지 않는
+    // 이유는, 그렇게 하면 감사 저장 장애 하나가 Worker를 `Offline`으로 떨어뜨려
+    // 훨씬 큰 것을 잃기 때문이다. 대신 `error!`로 남긴다 — 이 자리의 실패는
+    // `warn!`인 위의 둘과 달리 되돌릴 수 없다.
+    for orphan in req.agent_orphans.iter().take(MAX_ORPHANS_PER_BEAT) {
+        let event = AuditEvent::success(
+            format!("worker:{worker_id}"),
+            action::AGENT_ORPHAN_TERMINATED,
+        )
+        .target("agent", orphan.agent_id.to_string())
+        .detail(serde_json::json!({
+            "worker_id": worker_id.to_string(),
+            "reason": orphan.reason.as_str(),
+        }));
+        if let Err(e) = state.store.record_audit_event(&event).await {
+            tracing::error!(
+                %worker_id,
+                agent_id = %orphan.agent_id,
+                error = %e,
+                "failed to record an agent orphan termination — the event is lost"
+            );
+        }
+    }
+    if req.agent_orphans.len() > MAX_ORPHANS_PER_BEAT {
+        tracing::warn!(
+            %worker_id,
+            reported = req.agent_orphans.len(),
+            cap = MAX_ORPHANS_PER_BEAT,
+            "worker reported more orphans than one beat accepts — the rest are dropped"
+        );
     }
     // 같은 이유로 조회 실패도 치명적이지 않다. 다만 **빈 목록으로 대신하지
     // 않는다** — 4c의 Worker는 이 목록을 권위 있는 전체 집합으로 읽고 목록에

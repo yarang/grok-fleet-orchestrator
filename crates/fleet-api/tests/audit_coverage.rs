@@ -390,3 +390,109 @@ async fn capability_denial_audit_failure_does_not_change_the_403_response() {
         .unwrap();
     assert_eq!(resp.status(), 403);
 }
+
+// ── Agent 고아 종료 (로드맵 #70 게이트 ③) ─────────────────────────────────
+
+/// Worker가 배정받지 않은 Agent 프로세스를 죽였다는 사실이 감사에 도달한다.
+///
+/// **이 경로가 없으면 그 종료는 워커 로그 한 줄로만 남는다.** `#67` 게이트 ②의
+/// 술어와 `036`의 트리거는 같은 Agent가 두 Worker에서 도는 것을 막으려 하는데,
+/// 그 방어가 뚫렸는지를 관측할 방법이 그때까지 없었다.
+#[tokio::test]
+async fn agent_orphan_terminations_reported_by_a_worker_are_audited() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let state = AppState::new(store.clone());
+    let srv = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let reg: serde_json::Value = client
+        .post(format!("{}/v1/workers/register", srv.url))
+        .json(&json!({
+            "name": "orphan-reporter",
+            "agent_endpoint": "wss://10.0.9.9:2419/ws",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let worker_id = reg["worker_id"].as_str().unwrap().to_string();
+
+    // 이 Agent는 **이 Worker에 배정된 적이 없다** — 그것이 orphan의 정의다.
+    // 그래서 `agents` 행을 고칠 수 없고, 감사 줄만이 남길 수 있는 자리다.
+    let orphan_agent = uuid::Uuid::new_v4().to_string();
+    let hb = client
+        .post(format!("{}/v1/workers/heartbeat", srv.url))
+        .json(&json!({
+            "worker_id": worker_id,
+            "agent_orphans": [
+                {"agent_id": orphan_agent, "reason": "unplaced"}
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        hb.status(),
+        200,
+        "고아 보고가 heartbeat을 실패시키지 않는다"
+    );
+
+    let events = find_events(&store, fleet_core::audit::action::AGENT_ORPHAN_TERMINATED).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target_id.as_deref(), Some(orphan_agent.as_str()));
+    assert_eq!(events[0].detail["worker_id"], worker_id);
+    assert_eq!(events[0].detail["reason"], "unplaced");
+    // actor는 Worker이지 사람이 아니다. 여기에 사람이 들어가면 "누가 죽였나"에
+    // 없는 사람이 적힌다.
+    assert!(events[0].actor_user_id.is_none());
+    assert_eq!(events[0].actor_label, format!("worker:{worker_id}"));
+}
+
+/// 한 beat이 남기는 줄 수에 상한이 있다.
+///
+/// 이 목록은 **Worker가 통제한다.** 인증된 Worker라는 것과 그 Worker가 보내는
+/// 값이 정직하다는 것은 다르며, 상한이 없으면 장악된 Worker 하나의 beat이 감사
+/// 테이블에 임의 개수의 줄을 쓴다. 감사는 다른 사건을 조회하는 자리이기도
+/// 하므로 그 오염은 이 기능이 지키려는 것 자체를 무디게 만든다.
+#[tokio::test]
+async fn a_single_beat_cannot_write_unbounded_orphan_audit_rows() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let state = AppState::new(store.clone());
+    let srv = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let reg: serde_json::Value = client
+        .post(format!("{}/v1/workers/register", srv.url))
+        .json(&json!({"name": "noisy-worker", "agent_endpoint": "wss://10.0.9.9:2419/ws"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let worker_id = reg["worker_id"].as_str().unwrap().to_string();
+
+    let orphans: Vec<serde_json::Value> = (0..200)
+        .map(|_| json!({"agent_id": uuid::Uuid::new_v4().to_string(), "reason": "unplaced"}))
+        .collect();
+    let hb = client
+        .post(format!("{}/v1/workers/heartbeat", srv.url))
+        .json(&json!({"worker_id": worker_id, "agent_orphans": orphans}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        hb.status(),
+        200,
+        "상한 초과가 heartbeat을 실패시키지는 않는다"
+    );
+
+    let events = find_events(&store, fleet_core::audit::action::AGENT_ORPHAN_TERMINATED).await;
+    assert_eq!(
+        events.len(),
+        32,
+        "상한(MAX_ORPHANS_PER_BEAT)까지만 기록한다"
+    );
+}

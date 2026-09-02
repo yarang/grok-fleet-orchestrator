@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/observability-and-reconciliation.md"
-last_verified: "2026-09-01"
+last_verified: "2026-09-02"
 last_verified_commit: "working-tree"
 owners: ["operations", "scheduler", "security"]
 ---
@@ -129,17 +129,25 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 6. audit 상관관계 필드만으로 incident의 Project·Task·lease·effect 경로를 재구성하는 시험
 7. `CancelUnconfirmed` Task가 증거 기반으로 해소되기 전까지 Project archive가 진행되지 않는 시험
 
-## 구현 상태 (2026-08-28)
+## 구현 상태 (2026-09-02)
 
-게이트별 현황이다. **닫힌 게이트는 두 개뿐이고, 나머지 다섯은 이 문서가 전제하는 하부 구조가
+게이트별 현황이다. **하나가 닫혔고 둘이 부분이며, 나머지 넷은 이 문서가 전제하는 하부 구조가
 저장소에 존재하지 않아 시험을 작성할 수조차 없다.** 없는 것을 미리 만들지 않기 위해, 무엇이
 막고 있는지를 여기에 명시한다.
+
+게이트 3이 2026-09-02에 차단에서 부분으로 옮겨졌고, **그 이동 자체가 기록할 값어치가 있다.**
+그때까지의 판정은 "비교할 process inventory가 없어 orphan을 지목할 수 없다"였는데, 그 문장은
+inventory를 **오케스트레이터가 들고 대조하는 목록**으로 읽고 있었다. 실제로 필요했던 것은
+Worker 자신이 이미 쥐고 있던 두 근거였다 — 명령 목록에서의 부재와, 이전 incarnation이 디스크에
+남긴 기록이다. 즉 막고 있던 것은 없는 하부 구조가 아니라 **어디를 보아야 하는지에 대한 오해**
+였다. 차단으로 적힌 나머지 넷도 같은 종류의 오해를 품고 있을 수 있으므로, 선행이 도착하기를
+기다리기 전에 그 판정의 근거를 한 번 더 읽는 편이 낫다.
 
 | 게이트 | 상태 | 근거 / 막고 있는 것 |
 | --- | --- | --- |
 | 1. metric 노출 금지 | **닫힘** | `crates/fleet-api/src/metrics.rs`의 `metrics_body_never_exposes_ids_prompts_or_secrets`(fixture의 UUID·prompt·리포지터리 URL·`?server-key=` secret이 본문에 없음)와 `metrics_body_labels_stay_within_a_bounded_allow_list`(라벨 이름·값이 유한 허용 목록 안) |
 | 2. inventory-first recovery E2E | 차단 | control epoch·fencing token을 갖는 Reconciler가 없다. `crates/fleet-scheduler/src/reconcile.rs`는 `#62`의 stale `Pending`/`Dispatched` sweeper이며 이 문서의 Reconciler가 아니다. 선행 `#63`·`#67` |
-| 3. ACK 유실·orphan·grant expiry quarantine | 차단 | start/stop ACK는 `#67` 4b에서 왔고 `worker_incarnation`은 `workers.incarnation_started_at`(028)으로 있다. 남은 것은 **quarantine의 대상**이다 — 비교할 process inventory가 없어 orphan을 지목할 수 없다. lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) |
+| 3. ACK 유실·orphan·grant expiry quarantine | **부분** | **orphan 쪽이 닫혔다(2026-09-02)**: Worker가 배정받지 않은 Agent 프로세스를 종료하고 그 사실을 heartbeat의 `agent_orphans`로 보고하며, 오케스트레이터가 `agent.orphan_terminated`로 감사한다. 근거는 둘이고 서로 다른 실패를 덮는다 — 명령 목록에서의 **부재**(`unplaced`)와 이전 incarnation이 남긴 **디스크 기록**(`stale_incarnation`). 후자가 없으면 Worker가 SIGKILL로 죽은 뒤 살아남은 자식은 원리적으로 관측 불가능하다(`procs`는 메모리다). `agents` 행은 건드리지 않는다 — orphan은 정의상 미배치라 `036`의 `agents_observation_requires_placement`가 그 컬럼 쓰기를 금지하며, 그래서 감사 로그가 유일한 자리다. 남은 것: ACK 유실의 `OutcomeUnknown` 승격(Reconciler 선행)과 grant expiry quarantine. lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) |
 | 4. `Started` effect·archive hold 자동 redrive 금지 | 차단 | effect ledger가 코드에 존재하지 않는다(`EffectLedger`/`PartiallyApplied` grep 0건). archive hold 테이블은 `#91` |
 | 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**은 ACP probe가 없어 미구현(선행 `#67`). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 |
 | 6. audit 상관관계 필드로 경로 재구성 | 차단 | `lease_generation`·`fencing_token`·`control_epoch`와 effect 경로가 필드로 존재하지 않는다. `crates/fleet-core/src/audit.rs`는 actor·outcome 계열만 갖는다 |

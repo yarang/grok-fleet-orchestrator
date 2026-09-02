@@ -98,6 +98,18 @@ pub struct RegistrationClient {
     /// **지운다**. 빈 `Vec`을 `None`과 같이 취급해 필드를 빼면 마지막 Agent를
     /// 회수한 순간부터 그 관측을 지울 사람이 영영 없어진다.
     pending_observations: std::sync::Mutex<Option<Vec<fleet_core::AgentObservation>>>,
+    /// 다음 heartbeat에 실어 보낼 고아 종료 사건 (로드맵 #70 게이트 ③).
+    ///
+    /// `pending_observations`와 달리 바깥 `Option`이 **없다.** 관측은 권위 있는
+    /// 전체 집합이라 "빈 목록"과 "말할 것이 없음"을 구분해야 하지만, 이쪽은
+    /// 사건 목록이라 둘이 같은 뜻이다 — 어느 쪽이든 서버가 지울 것은 없다.
+    ///
+    /// 유실돼도 복구되지 않는다는 점에서 앞의 두 버퍼와 다르다. 관측은 다음
+    /// beat이 새로 만들고 확인은 서버가 명령을 다시 실어 주지만, 종료는 이미
+    /// 일어난 **일회성 사건**이라 다시 만들어 낼 원천이 없다. 그래서 이 목록의
+    /// 유실은 감사 로그에 줄 하나가 빠지는 것으로 끝나며, 그것이 프로세스
+    /// 상태를 틀리게 만들지는 않는다.
+    pending_orphans: std::sync::Mutex<Vec<fleet_core::AgentOrphan>>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -172,6 +184,15 @@ struct HeartbeatRequest {
     /// 그때 서버는 저장된 관측을 건드리지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_observations: Option<Vec<fleet_core::AgentObservation>>,
+    /// 이 Worker가 종료한, 오케스트레이터가 배정하지 않은 Agent 프로세스들
+    /// (로드맵 #70 게이트 ③).
+    ///
+    /// `agent_acks`와 같이 비면 아예 보내지 않는다. `agent_observations`와
+    /// 대비되는 자리다 — 저쪽의 빈 목록은 "전부 지워라"라는 주장이지만
+    /// 이쪽의 빈 목록은 "이번 beat에 그런 일이 없었다"일 뿐이라, 보내지 않는
+    /// 것과 뜻이 같다.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_orphans: Vec<fleet_core::AgentOrphan>,
 }
 
 /// heartbeat 요청용 OS 정보 (fleet-core::OsInfo와 동일 구조).
@@ -225,6 +246,7 @@ impl RegistrationClient {
             os_info: OnceLock::new(),
             pending_acks: std::sync::Mutex::new(Vec::new()),
             pending_observations: std::sync::Mutex::new(None),
+            pending_orphans: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -346,6 +368,7 @@ impl RegistrationClient {
             // 지난 beat에서 받은 명령들의 확인을 실어 보내고 버퍼를 비운다.
             agent_acks: std::mem::take(&mut *self.pending_acks.lock().unwrap()),
             agent_observations: self.pending_observations.lock().unwrap().take(),
+            agent_orphans: std::mem::take(&mut *self.pending_orphans.lock().unwrap()),
         };
 
         let url = format!(
@@ -411,6 +434,20 @@ impl RegistrationClient {
         let interval = Duration::from_secs(interval_secs.max(1) as u64);
         info!(interval_secs, "starting heartbeat loop");
 
+        // 첫 beat **전에** 이전 incarnation의 잔해를 걷는다 (로드맵 `#70`
+        // 게이트 ③). 순서가 이렇지 않으면 안 되는 이유가 있다: 첫 beat의
+        // `reconcile`이 desired=running인 Agent를 띄우려 할 때, 그 Agent의
+        // 옛 프로세스가 아직 살아 포트를 쥐고 있으면 `NoFreePort`로 거절되거나
+        // — 포트가 남아 있으면 — **같은 Agent의 두 번째 프로세스**가 뜬다.
+        // sweep을 먼저 돌리면 두 경우 모두 생기지 않는다.
+        //
+        // 결과를 버퍼에 넣기만 하고 여기서 보내지 않는다. 아직 등록 전일 수
+        // 있고, 어차피 바로 아래 첫 beat이 그것을 싣는다.
+        let orphans = agent_manager.sweep_stale_incarnation().await;
+        if !orphans.is_empty() {
+            self.pending_orphans.lock().unwrap().extend(orphans);
+        }
+
         loop {
             // shutdown 체크.
             if *shutdown_rx.borrow() {
@@ -433,12 +470,17 @@ impl RegistrationClient {
                     // 없음)의 구분은 여기서 그대로 넘긴다 — 이 자리에서
                     // `unwrap_or_default()`를 쓰면 조회 실패 한 번이 이 Worker의
                     // Agent를 전부 죽인다.
-                    let observed = agent_manager.reconcile(resp.agents.as_deref()).await;
+                    let outcome = agent_manager.reconcile(resp.agents.as_deref()).await;
                     // 관측이 `None`이면(= 권위 있는 목록이 없었으면) 버퍼를
                     // 덮어쓰지 않는다. `*slot = observed`로 쓰면 조회 실패
                     // 한 번이 직전 beat의 유효한 관측을 지운다.
-                    if let Some(observed) = observed {
-                        *self.pending_observations.lock().unwrap() = Some(observed);
+                    if let Some(outcome) = outcome {
+                        *self.pending_observations.lock().unwrap() = Some(outcome.observations);
+                        // 고아는 **덮어쓰지 않고 이어 붙인다.** 전송에 실패한
+                        // 직전 beat의 사건이 아직 버퍼에 남아 있을 수 있고,
+                        // 그것을 덮으면 일어난 일이 조용히 사라진다 — 관측과
+                        // 달리 다시 만들어 낼 원천이 없다.
+                        self.pending_orphans.lock().unwrap().extend(outcome.orphans);
                     }
                 }
                 Err(e) => {
@@ -1088,6 +1130,7 @@ mod tests {
             os_info: None,
             agent_acks: Vec::new(),
             agent_observations: None,
+            agent_orphans: Vec::new(),
         };
         let json = serde_json::to_value(&req).unwrap();
         let obj = json.as_object().unwrap();
@@ -1118,6 +1161,15 @@ mod tests {
         assert!(
             !obj.contains_key("agent_observations"),
             "agent_observations must be omitted when None — `[]` means something else"
+        );
+        // `agent_orphans`(로드맵 #70 게이트 ③)는 다시 `agent_acks` 쪽이다.
+        // 생략이 의미를 바꾸지 않는다 — 사건 목록이라 비었으면 서버가 할 일이
+        // 없고, 부재와 `[]`의 처리가 같다. **세 필드가 나란히 있는 이 테스트가
+        // 그 구분을 지킨다**: 셋을 같은 규칙으로 뭉치려는 다음 사람은 가운데
+        // 하나가 다른 이유로 다르다는 것을 여기서 보게 된다.
+        assert!(
+            !obj.contains_key("agent_orphans"),
+            "agent_orphans must be omitted when empty"
         );
     }
 

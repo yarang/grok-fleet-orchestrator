@@ -46,7 +46,9 @@ use tracing::{debug, info, warn};
 
 use fleet_core::{
     AgentCommand, AgentDesiredStatus, AgentId, AgentObservation, AgentObservationReason,
+    AgentOrphan, AgentOrphanReason,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::config::WorkerConfig;
 use crate::error::WorkerError;
@@ -56,6 +58,67 @@ use crate::grok_process::{apply_llm_proxy_envs, host_of, terminate_child};
 struct AgentProc {
     child: Child,
     port: u16,
+}
+
+/// 자식 하나가 자기 workspace에 남기는 디스크 기록의 파일 이름
+/// (로드맵 `#70` 게이트 ③).
+const SPAWN_RECORD: &str = ".fleet-agent.json";
+
+/// [`SPAWN_RECORD`]의 내용.
+///
+/// **이 파일이 존재하는 이유는 [`AgentProcessManager::procs`]가 메모리이기
+/// 때문이다.** Worker가 SIGKILL·전원 차단·패닉으로 죽으면 `kill_on_drop`의
+/// Drop이 돌지 않아 자식이 살아남는데, 새 incarnation의 `procs`는 비어 있어
+/// 그 자식을 **알 수 있는 방법이 아무것도 없다**. 재조정 루프는 자기가 띄운
+/// 것만 보므로 원리적으로 그것을 발견하지 못한다.
+///
+/// `port`를 함께 적는 이유는 진단이다 — 이 자식은 `agent_port_range`의 포트
+/// 하나를 계속 쥐고 있고, 그래서 새 incarnation의 `free_port`가 그 포트에서
+/// bind에 실패해 `NoFreePort`로 거절한다. 원인(우리가 남긴 고아)에서 아주 먼
+/// 자리에 증상이 나타나는 셈이라, 그 연결을 기록이 직접 이어 준다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpawnRecord {
+    agent_id: AgentId,
+    pid: u32,
+    port: u16,
+    /// 우리가 이 자식을 띄운 벽시계 시각 (epoch 초).
+    ///
+    /// **pid 재사용을 거르는 수단이다.** 기록을 남긴 뒤 Worker가 죽고 한참
+    /// 지나면 그 pid는 전혀 다른 프로그램의 것일 수 있다 — Linux의 기본
+    /// `pid_max`는 32768이라 바쁜 호스트에서 순환은 드문 일이 아니다. 대조가
+    /// 없으면 이 sweep은 **관계 없는 프로세스를 죽이는 코드**가 된다.
+    ///
+    /// 대조 대상으로 **프로세스 이름이 아니라 시작 시각을 고른 이유**가 있다.
+    /// 이름은 `exec`에 의해 바뀐다 — 셸 스크립트로 감싼 진입점이나 래퍼는
+    /// 기동 직후와 정착 후의 이름이 다르고, 그래서 이름 대조는 그 경계에서
+    /// 경합한다. 시작 시각은 `exec`이 프로세스를 **새로 만들지 않으므로**
+    /// 보존되며, 그 경합 자체가 없다.
+    started_at_unix: u64,
+}
+
+/// [`SpawnRecord::started_at_unix`]와 관측된 `start_time()`이 이만큼까지
+/// 어긋나는 것은 같은 프로세스로 본다.
+///
+/// 둘은 서로 다른 시계에서 온다 — 하나는 우리가 `spawn()` 직후에 읽은
+/// 벽시계이고 다른 하나는 커널이 프로세스 생성 시점에 기록한 값이라, 초
+/// 단위로 반올림되는 자리에서 1~2초는 정상적으로 벌어진다. 반대로 pid가
+/// 재사용될 만큼 시간이 흐른 경우는 이 창을 한참 벗어난다.
+const START_TIME_SLACK_SECS: u64 = 5;
+
+/// [`AgentProcessManager::reconcile`]이 이번 beat에 만든 것 (로드맵 `#70` 게이트 ③).
+///
+/// 두 목록을 **한 구조체로 함께** 돌려주는 이유는 둘 다 같은 한 번의 순회에서
+/// 나오기 때문이다. 따로 돌면 그 사이에 프로세스 표가 바뀔 수 있고, 그러면
+/// "관측에도 없고 고아에도 없는" 프로세스가 생긴다.
+///
+/// 두 목록의 **의미는 대칭이 아니다**. `observations`는 권위 있는 전체 집합이라
+/// 빈 목록이 "돌고 있는 것이 하나도 없다"는 주장이고, `orphans`는 사건 목록이라
+/// 빈 목록이 "이번 beat에 그런 일이 없었다"일 뿐이다. 이 차이가
+/// `HeartbeatRequest`에서 `Option<Vec<_>>`와 `Vec<_>`의 차이로 그대로 이어진다.
+#[derive(Debug, Default)]
+pub struct ReconcileOutcome {
+    pub observations: Vec<AgentObservation>,
+    pub orphans: Vec<AgentOrphan>,
 }
 
 /// Agent를 이번 beat에 띄우지 못한 이유.
@@ -163,6 +226,134 @@ impl AgentProcessManager {
         self.procs.lock().await.keys().copied().collect()
     }
 
+    /// 이전 incarnation이 남긴 Agent 프로세스를 찾아 종료하고, 그것을 사건으로
+    /// 돌려준다 (로드맵 `#70` 게이트 ③).
+    ///
+    /// **재조정 루프로는 원리적으로 찾을 수 없는 고아를 다룬다.**
+    /// [`reconcile`](Self::reconcile)은 자기 [`procs`](Self::procs)에 있는 것만
+    /// 보는데, Worker가 SIGKILL·전원 차단·패닉으로 죽으면 그 표는 사라지고
+    /// 자식은 남는다(`kill_on_drop`은 Drop이 돌 때만 유효하다). 새
+    /// incarnation에게 그 자식은 존재하지 않는 것과 같고, 유일한 흔적은
+    /// **엉뚱한 자리에 나타나는 증상** 하나다 — 그 자식이 계속 쥐고 있는 포트
+    /// 때문에 [`free_port`](Self::free_port)의 bind가 실패해 새 Agent가
+    /// `NoFreePort`로 거절된다. 원인과 증상이 이만큼 떨어져 있으면 운영자는
+    /// 포트 범위를 넓히는 잘못된 처방을 찾게 된다.
+    ///
+    /// 그래서 근거를 메모리가 아니라 **디스크**에서 가져온다. 자식마다
+    /// [`SPAWN_RECORD`]가 workspace에 남아 있고, 이 함수는 그것을 읽어 pid의
+    /// 생사를 확인한다.
+    ///
+    /// ## 죽이는 것 말고 다른 선택지가 없다
+    ///
+    /// 살아 있는 자식을 **입양할 수는 없다.** [`Child`] 핸들은 그것을 만든
+    /// 프로세스에만 있고 새 incarnation에는 pid밖에 없어, `try_wait()`으로
+    /// 생사를 볼 수단이 없다 — 0단계가 성립하지 않는다. 그대로 두면
+    /// 오케스트레이터가 같은 Agent를 다시 배정할 때 `reconcile`이 **두 번째**
+    /// 프로세스를 띄우고, 포트가 다르니 아무것도 그것을 막지 않는다. 그러므로
+    /// 종료가 유일하게 일관된 처리다. 대가는 정직하게 적는다 — 멀쩡히 돌던
+    /// Agent가 Worker 재기동 뒤 한 번 죽는다.
+    ///
+    /// ## 언제 부르는가
+    ///
+    /// **기동 시점에 한 번만** 부른다. 근거가 "이전 incarnation이 남긴 것"이라
+    /// 매 beat 다시 물어볼 대상이 아니고, 프로세스 표를 새로고침하는 비용을
+    /// beat 타이머 안에 넣을 이유도 없다. 그 비용은
+    /// [`ProcessesToUpdate::Some`](sysinfo::ProcessesToUpdate::Some)으로
+    /// 기록에 적힌 pid만 새로고침해 한 번 더 줄인다 — 전체 열거를 부르지 않는
+    /// 것은 agent.md §3.3 기록 2가 `sysinfo`의 다른 API에서 겪은 종류의 비용을
+    /// 이 경로에 들이지 않기 위해서다.
+    pub async fn sweep_stale_incarnation(&self) -> Vec<AgentOrphan> {
+        let records = self.read_spawn_records().await;
+        if records.is_empty() {
+            return Vec::new();
+        }
+
+        let pids: Vec<sysinfo::Pid> = records
+            .iter()
+            .map(|r| sysinfo::Pid::from_u32(r.pid))
+            .collect();
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
+
+        let mut orphans = Vec::new();
+        for record in records {
+            if let Some(proc) = sys.process(sysinfo::Pid::from_u32(record.pid)) {
+                let observed = proc.start_time();
+                if observed.abs_diff(record.started_at_unix) <= START_TIME_SLACK_SECS {
+                    // 죽이는 것과 신고하는 것을 **묶지 않는다.** kill이 실패해도
+                    // (권한 부족 등) 고아는 거기 있고 포트를 쥐고 있으므로,
+                    // 운영자가 알아야 할 사실은 달라지지 않는다.
+                    let killed = proc.kill();
+                    warn!(
+                        agent_id = %record.agent_id,
+                        pid = record.pid,
+                        port = record.port,
+                        killed,
+                        "terminating an agent process left by a previous worker incarnation"
+                    );
+                    orphans.push(AgentOrphan {
+                        agent_id: record.agent_id,
+                        reason: AgentOrphanReason::StaleIncarnation,
+                    });
+                } else {
+                    // pid가 재사용됐다. **아무것도 하지 않는다** — 이 자리에서
+                    // 틀리면 남의 프로세스를 죽인다.
+                    debug!(
+                        agent_id = %record.agent_id,
+                        pid = record.pid,
+                        recorded = record.started_at_unix,
+                        observed,
+                        "pid was reused by an unrelated process — leaving it alone"
+                    );
+                }
+            }
+            // 판정이 어느 쪽이든 기록은 지운다. 남기면 다음 기동이 같은 판정을
+            // 다시 하는데, 그때는 시간이 더 흘러 pid 재사용 가능성만 커진다.
+            self.remove_spawn_record(record.agent_id).await;
+        }
+        orphans
+    }
+
+    /// workspace 루트 아래의 모든 [`SPAWN_RECORD`]를 읽는다.
+    ///
+    /// 읽을 수 없는 파일은 **지우고 넘어간다.** 이 파일을 쓰는 것은 우리뿐이라
+    /// 깨진 내용은 부분 쓰기의 흔적이고, 남겨 두면 매 기동마다 같은 경고가
+    /// 나오면서 아무 판정도 만들지 못한다.
+    async fn read_spawn_records(&self) -> Vec<SpawnRecord> {
+        let mut out = Vec::new();
+        let mut dir = match tokio::fs::read_dir(&self.workspace_root).await {
+            Ok(d) => d,
+            // 아직 Agent를 한 번도 띄우지 않은 Worker의 정상 경로다.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+            Err(e) => {
+                warn!(
+                    root = %self.workspace_root.display(),
+                    error = %e,
+                    "cannot scan the agent workspace root for spawn records"
+                );
+                return out;
+            }
+        };
+        while let Ok(Some(entry)) = dir.next_entry().await {
+            let path = entry.path().join(SPAWN_RECORD);
+            let Ok(body) = tokio::fs::read(&path).await else {
+                continue;
+            };
+            match serde_json::from_slice::<SpawnRecord>(&body) {
+                Ok(r) => out.push(r),
+                Err(e) => {
+                    warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "discarding an unreadable agent spawn record"
+                    );
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+            }
+        }
+        out
+    }
+
     /// heartbeat 응답의 명령 목록에 프로세스 집합을 수렴시키고, **본 것**을
     /// 돌려준다 (관측은 로드맵 `#67` 4c-B).
     ///
@@ -175,13 +366,18 @@ impl AgentProcessManager {
     /// 없다"다. `Some(vec![])`은 "이 Worker에 관측할 것이 하나도 없다"이며 그
     /// 구분은 명령 목록의 그것과 정확히 대칭이다.
     ///
-    /// 목록은 **desired가 `running`인 Agent만** 담는다. 정리한 Agent를 담지 않는
-    /// 이유는 관측 어휘에 "없음"에 해당하는 값이 없어서이고, 그것으로 충분하다 —
-    /// 오케스트레이터는 목록에 없는 것의 관측을 지운다.
-    pub async fn reconcile(
-        &self,
-        commands: Option<&[AgentCommand]>,
-    ) -> Option<Vec<AgentObservation>> {
+    /// 관측 목록은 **desired가 `running`인 Agent만** 담는다. 정리한 Agent를 담지
+    /// 않는 이유는 관측 어휘에 "없음"에 해당하는 값이 없어서이고, 그것으로
+    /// 충분하다 — 오케스트레이터는 목록에 없는 것의 관측을 지운다.
+    ///
+    /// 그런데 그 "지운다"가 닿지 못하는 경우가 하나 있고, 그것이
+    /// [`ReconcileOutcome::orphans`]가 있는 이유다 (로드맵 `#70` 게이트 ③).
+    /// 명령 목록에서 **사라진** Agent의 프로세스를 아래 2단계가 종료하는데,
+    /// 그 Agent는 이미 다른 Worker에 배정됐을 수 있어 관측을 적을 자리가
+    /// 이 Worker에는 없다(`036`의 CHECK). 그래서 종료 사실이 지금까지
+    /// **워커 로그 한 줄로만** 남았다 — 4c-A의 거절이 그랬던 것과 같은 모양의
+    /// 조용한 실패 모드이며, 여기서 그것을 사건으로 만들어 올려 보낸다.
+    pub async fn reconcile(&self, commands: Option<&[AgentCommand]>) -> Option<ReconcileOutcome> {
         let Some(commands) = commands else {
             debug!("no authoritative agent list this beat — leaving processes untouched");
             return None;
@@ -209,6 +405,10 @@ impl AgentProcessManager {
         }
         for id in dead {
             procs.remove(&id);
+            // 죽은 자식의 기록을 남겨 두면 다음 재기동의 sweep이 그것을 고아로
+            // 신고한다. 그때 pid는 이미 남의 것일 수 있고, 이름 대조가 그것을
+            // 걸러 주더라도 없는 사건을 매번 다시 판정하는 비용이 남는다.
+            self.remove_spawn_record(id).await;
         }
 
         // 1. 살려 둘 집합 = 목록에 있고 desired가 running인 것.
@@ -227,10 +427,36 @@ impl AgentProcessManager {
             .copied()
             .filter(|id| !keep.contains(id))
             .collect();
+
+        // 2-a. 부재와 명시적 `stopped`를 **여기서 처음으로 구분한다.** 종료
+        //      자체는 같지만 보고가 다르다 — 명시적 회수는 오케스트레이터가
+        //      시킨 일이라 새로 알려 줄 것이 없고, 부재는 그쪽이 모르는
+        //      사건이다. `mentioned`가 `keep`이 아니라 **전체 명령 목록**에서
+        //      나오는 것이 이 구분의 전부다.
+        let mentioned: HashSet<AgentId> = commands.iter().map(|c| c.agent_id).collect();
+        let orphans: Vec<AgentOrphan> = to_stop
+            .iter()
+            .filter(|id| !mentioned.contains(id))
+            .map(|id| {
+                warn!(
+                    agent_id = %id,
+                    reason = AgentOrphanReason::Unplaced.as_str(),
+                    "terminating an agent process the orchestrator no longer places here"
+                );
+                AgentOrphan {
+                    agent_id: *id,
+                    reason: AgentOrphanReason::Unplaced,
+                }
+            })
+            .collect();
+
         let doomed: Vec<(AgentId, AgentProc)> = to_stop
             .into_iter()
             .filter_map(|id| procs.remove(&id).map(|p| (id, p)))
             .collect();
+        for (id, _) in &doomed {
+            self.remove_spawn_record(*id).await;
+        }
         terminate_all(doomed).await;
 
         // 2.5. 회수가 **명시된** Agent의 디렉터리를 지운다. 위 2단계가 부재와
@@ -335,7 +561,10 @@ impl AgentProcessManager {
             }
         }
 
-        Some(observations)
+        Some(ReconcileOutcome {
+            observations,
+            orphans,
+        })
     }
 
     /// 모든 Agent 프로세스를 종료한다. Worker 종료 경로에서 호출한다.
@@ -345,6 +574,12 @@ impl AgentProcessManager {
     pub async fn shutdown_all(&self) {
         let mut procs = self.procs.lock().await;
         let drained: Vec<(AgentId, AgentProc)> = procs.drain().collect();
+        // 깨끗한 종료에서는 기록을 남기지 않는다. 남기면 다음 기동의 sweep이
+        // **정상 종료를 고아로** 신고한다 — 이 경로와 SIGKILL 경로의 차이가
+        // 바로 그 파일의 유무다.
+        for (id, _) in &drained {
+            self.remove_spawn_record(*id).await;
+        }
         terminate_all(drained).await;
     }
 
@@ -388,7 +623,82 @@ impl AgentProcessManager {
             .current_dir(&workspace)
             .kill_on_drop(true);
         apply_llm_proxy_envs(&mut cmd, &self.config.llm_proxy);
-        cmd.spawn()
+        let child = cmd.spawn()?;
+
+        // 기록은 spawn **직후**에 쓴다 (로드맵 `#70` 게이트 ③). 순서가 뒤집혀
+        // 프로세스가 먼저 뜨고 기록이 나중이면, 그 사이에 Worker가 죽었을 때
+        // 아무 흔적도 남기지 않은 고아가 생긴다 — 이 기록이 막으려는 바로 그
+        // 상태다.
+        match child.id() {
+            Some(pid) => {
+                self.write_spawn_record(agent_id, pid, port, &workspace)
+                    .await
+            }
+            // 아직 살아 있는데 pid를 물어볼 수 없는 경우는 없다. `None`은 이미
+            // 죽어 거둬진 자식이라는 뜻이고, 그런 자식에 대한 기록은 다음
+            // 재기동의 sweep이 판정할 대상이 아니다.
+            None => warn!(
+                agent_id = %agent_id,
+                "spawned agent process has no pid — it will not be sweepable"
+            ),
+        }
+        Ok(child)
+    }
+
+    /// [`SPAWN_RECORD`]를 쓴다.
+    ///
+    /// 실패를 **전파하지 않는다.** 기록이 없어도 이번 incarnation의 동작은
+    /// 온전하고, 잃는 것은 다음 재기동의 sweep이 이 자식을 볼 수 있는 능력뿐이다.
+    /// 그것 때문에 방금 정상적으로 뜬 Agent를 죽이는 것은 손해가 더 크다.
+    async fn write_spawn_record(
+        &self,
+        agent_id: AgentId,
+        pid: u32,
+        port: u16,
+        workspace: &std::path::Path,
+    ) {
+        let record = SpawnRecord {
+            agent_id,
+            pid,
+            port,
+            started_at_unix: now_unix(),
+        };
+        let body = match serde_json::to_vec(&record) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(agent_id = %agent_id, error = %e, "cannot serialise the agent spawn record");
+                return;
+            }
+        };
+        let path = workspace.join(SPAWN_RECORD);
+        if let Err(e) = tokio::fs::write(&path, body).await {
+            warn!(
+                agent_id = %agent_id,
+                path = %path.display(),
+                error = %e,
+                "failed to record the spawned agent process — it will not be sweepable"
+            );
+        }
+    }
+
+    /// 기록을 지운다. 없으면 조용히 성공한다.
+    ///
+    /// **매니저가 그 프로세스를 더 이상 믿지 않게 되는 모든 자리에서 부른다.**
+    /// 기록이 남으면 다음 재기동의 sweep이 이미 끝난 일을 고아로 신고한다.
+    async fn remove_spawn_record(&self, agent_id: AgentId) {
+        let path = self
+            .workspace_root
+            .join(agent_id.to_string())
+            .join(SPAWN_RECORD);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(
+                agent_id = %agent_id,
+                error = %e,
+                "failed to remove the agent spawn record"
+            ),
+        }
     }
 
     /// Agent 디렉터리를 만들고 **root 아래로 해석되는지 확인한** 경로를 준다
@@ -457,6 +767,18 @@ impl AgentProcessManager {
         tokio::fs::remove_dir_all(&canon).await?;
         Ok(true)
     }
+}
+
+/// 지금의 벽시계 (epoch 초).
+///
+/// 시계가 epoch 이전으로 설정된 호스트에서는 0을 준다. 그 값은
+/// [`START_TIME_SLACK_SECS`] 대조를 통과하지 못하므로, 고장난 시계는 고아를
+/// **놓치는** 쪽으로 틀린다 — 남의 프로세스를 죽이는 쪽으로 틀리지 않는다.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// 여러 Agent 프로세스를 **동시에** 종료한다.
@@ -535,6 +857,213 @@ mod tests {
             desired_status: desired,
             generation: 1,
         }
+    }
+
+    /// 살아 있는 자식 하나를 만들고 그것을 가리키는 [`SPAWN_RECORD`]를 심는다.
+    ///
+    /// 이전 incarnation이 죽은 상황을 재현하는 방법이다 — 매니저의 `procs`는
+    /// 비어 있는데 디스크에는 기록이 있고 프로세스는 살아 있다. 실제 워커를
+    /// SIGKILL하는 대신 이렇게 만드는 이유는, 재현해야 하는 것이 "워커가
+    /// 죽는 방식"이 아니라 **그 결과로 남는 상태**이기 때문이다.
+    fn plant_stale_record(
+        root: &std::path::Path,
+        agent_id: AgentId,
+        port: u16,
+        started_at_unix: u64,
+    ) -> std::process::Child {
+        let child = std::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("sleep은 어느 유닉스에나 있다");
+        let dir = root.join(agent_id.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = SpawnRecord {
+            agent_id,
+            pid: child.id(),
+            port,
+            started_at_unix,
+        };
+        std::fs::write(dir.join(SPAWN_RECORD), serde_json::to_vec(&record).unwrap()).unwrap();
+        child
+    }
+
+    /// `sleep`이 아직 살아 있는지 본다. `try_wait`은 거둬 가므로 판정 뒤에도
+    /// 핸들이 유효하다.
+    fn still_alive(child: &mut std::process::Child) -> bool {
+        matches!(child.try_wait(), Ok(None))
+    }
+
+    /// **이 테스트가 이 변경의 핵심 단정 하나다.** 목록에서 사라진 것을
+    /// 종료하는 동작 자체는 이미 있었고(`absence_from_the_command_list_...`),
+    /// 없던 것은 그 종료가 오케스트레이터에 **도달하는 경로**다. 그때까지
+    /// 워커 로그 한 줄이 전부였다.
+    #[tokio::test]
+    async fn absence_from_the_list_is_reported_as_an_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39400-39419", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+
+        // 다음 beat: 권위 있는 목록이 왔는데 이 Agent가 없다.
+        let outcome = m.reconcile(Some(&[])).await.expect("목록을 줬으므로 온다");
+
+        assert_eq!(
+            outcome.orphans,
+            vec![AgentOrphan {
+                agent_id: a,
+                reason: AgentOrphanReason::Unplaced,
+            }],
+            "부재로 종료한 프로세스는 사건으로 보고된다"
+        );
+        assert!(
+            outcome.observations.is_empty(),
+            "관측 목록에 섞이면 안 된다 — 저쪽은 권위 있는 전체 집합이라 \
+             orphan의 id가 들어가면 지워야 할 관측이 살아남는다"
+        );
+        m.shutdown_all().await;
+    }
+
+    /// 앞 테스트의 짝. **명시적 회수는 고아가 아니다** — 오케스트레이터가
+    /// 시킨 일이라 새로 알려 줄 것이 없다. 이 단정이 없으면 부재와 회수를
+    /// 구분하지 않는 구현(`!keep.contains`만 보는 것)도 앞 테스트를 통과한다.
+    #[tokio::test]
+    async fn an_explicit_stop_is_not_an_orphan() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39420-39439", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        let outcome = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Stopped)]))
+            .await
+            .expect("목록을 줬으므로 온다");
+
+        assert!(m.running_agents().await.is_empty(), "회수는 종료시킨다");
+        assert!(
+            outcome.orphans.is_empty(),
+            "시킨 대로 한 것은 사건이 아니다"
+        );
+        m.shutdown_all().await;
+    }
+
+    /// 이전 incarnation이 남긴 프로세스를 재기동 sweep이 찾아 죽이고 신고한다.
+    ///
+    /// 이 경로가 없으면 그 자식은 **영원히 보이지 않는다** — 새 매니저의
+    /// `procs`는 비어 있어 `reconcile`이 원리적으로 도달하지 못한다.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_left_by_a_previous_incarnation_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39440-39459", 4);
+        let a = AgentId::new();
+        let mut child = plant_stale_record(dir.path(), a, 39440, now_unix());
+
+        let orphans = m.sweep_stale_incarnation().await;
+
+        assert_eq!(
+            orphans,
+            vec![AgentOrphan {
+                agent_id: a,
+                reason: AgentOrphanReason::StaleIncarnation,
+            }]
+        );
+        // SIGKILL이 실제로 닿았는지 본다. 신고만 하고 죽이지 않으면 그 자식은
+        // 포트를 계속 쥐고, 오케스트레이터가 같은 Agent를 다시 배정할 때
+        // 두 번째 프로세스가 뜬다.
+        for _ in 0..50 {
+            if !still_alive(&mut child) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!still_alive(&mut child), "sweep은 신고만 하지 않고 죽인다");
+        assert!(
+            !dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "판정이 끝난 기록은 지운다"
+        );
+        // 작업물은 남긴다 — 종료는 잘못해도 다시 띄우면 되지만 삭제는
+        // 되돌릴 수 없다는 `remove_workspace`의 판단이 여기서도 그대로다.
+        assert!(dir.path().join(a.to_string()).is_dir());
+        let _ = child.kill();
+    }
+
+    /// **pid 재사용 방어.** 기록의 시작 시각이 실제 프로세스의 것과 어긋나면
+    /// 아무것도 하지 않는다.
+    ///
+    /// 이 단정이 없으면 sweep은 "기록에 적힌 pid를 죽이는 코드"가 되고,
+    /// Worker가 죽은 뒤 pid가 순환한 호스트에서 **남의 프로세스를 죽인다**.
+    /// Linux의 기본 `pid_max`가 32768이라 그 순환은 드문 일이 아니다.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reused_pid_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39460-39479", 4);
+        let a = AgentId::new();
+        // 우리가 적었다고 주장하는 시각이 실제 프로세스의 시작보다 한참 전이다.
+        let mut child = plant_stale_record(dir.path(), a, 39460, now_unix() - 3600);
+
+        let orphans = m.sweep_stale_incarnation().await;
+
+        assert!(orphans.is_empty(), "우리 것이라고 말할 근거가 없다");
+        assert!(
+            still_alive(&mut child),
+            "근거가 없으면 죽이지 않는다 — 이 자리에서 틀리면 남의 프로세스를 죽인다"
+        );
+        assert!(
+            !dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "판정이 끝났으므로 기록은 지운다 — 남기면 다음 기동에 시간이 더 \
+             흘러 재사용 가능성만 커진 채로 같은 판정을 다시 한다"
+        );
+        let _ = child.kill();
+    }
+
+    /// 깨끗한 종료는 기록을 남기지 않는다. 남기면 다음 기동의 sweep이
+    /// **정상 종료를 고아로** 신고한다 — 이 경로와 SIGKILL 경로의 차이가
+    /// 바로 그 파일의 유무이므로, 이 단정이 sweep 전체의 거짓 양성률을 정한다.
+    #[tokio::test]
+    async fn a_clean_shutdown_leaves_nothing_to_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39480-39499", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        assert!(
+            dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "떠 있는 동안에는 기록이 있어야 한다"
+        );
+        m.shutdown_all().await;
+
+        assert!(
+            !dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "깨끗한 종료는 기록을 지운다"
+        );
+        let m2 = manager(&dir, fake_grok(dir.path()), "39480-39499", 4);
+        assert!(
+            m2.sweep_stale_incarnation().await.is_empty(),
+            "그러므로 다음 기동은 신고할 것이 없다"
+        );
+    }
+
+    /// 읽을 수 없는 기록은 판정을 만들지 않고 사라진다. 남겨 두면 매 기동마다
+    /// 같은 경고만 나오고 아무 결론도 나지 않는다.
+    #[tokio::test]
+    async fn an_unreadable_record_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39500-39519", 4);
+        let a = AgentId::new();
+        let agent_dir = dir.path().join(a.to_string());
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join(SPAWN_RECORD), b"{ truncated").unwrap();
+
+        assert!(m.sweep_stale_incarnation().await.is_empty());
+        assert!(!agent_dir.join(SPAWN_RECORD).exists());
     }
 
     #[tokio::test]
@@ -672,6 +1201,7 @@ mod tests {
         // 4c-A에서 거절은 워커 로그 한 줄이 전부였다. 4c-B의 핵심은 그것이
         // 오케스트레이터에 **이유와 함께** 도달한다는 것이므로, 뜬 개수만
         // 세면 이 단계가 실제로 무엇을 더했는지 증명하지 못한다.
+        let obs = obs.observations;
         assert_eq!(obs.len(), 2, "desired=running인 둘 다에 대해 말한다");
         assert_eq!(
             obs.iter()
@@ -710,6 +1240,7 @@ mod tests {
         // 거절 **경로**는 하나지만 관측의 이유는 갈린다 — 그 구분이 실제로
         // 살아 있는지 여기서 본다.
         let failed = obs
+            .observations
             .iter()
             .find(|o| o.status() == AgentObservedStatus::Failed)
             .expect("거절된 하나가 실패로 보고된다");
@@ -732,10 +1263,17 @@ mod tests {
             m.reconcile(None).await.is_none(),
             "말해 줄 것이 없는 beat은 관측도 없다"
         );
-        assert_eq!(
-            m.reconcile(Some(&[])).await,
-            Some(Vec::new()),
-            "정말로 없는 것은 빈 목록으로 말한다"
+        let outcome = m
+            .reconcile(Some(&[]))
+            .await
+            .expect("정말로 없는 것은 빈 목록으로 말한다");
+        assert!(
+            outcome.observations.is_empty(),
+            "관측할 것이 없으면 빈 목록이다"
+        );
+        assert!(
+            outcome.orphans.is_empty(),
+            "띄운 적이 없으면 정리할 고아도 없다"
         );
         m.shutdown_all().await;
     }
@@ -900,7 +1438,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            observed.as_slice(),
+            observed.observations.as_slice(),
             [AgentObservation::Failed { agent_id, .. }] if *agent_id == a
         ));
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);

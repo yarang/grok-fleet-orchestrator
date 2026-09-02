@@ -254,6 +254,78 @@ impl AgentObservation {
     }
 }
 
+/// Worker가 이번 beat에 **정리한**, 오케스트레이터가 배정하지 않은 Agent
+/// 프로세스 하나에 대한 보고 (로드맵 `#70` 게이트 ③).
+///
+/// [`AgentAck`]·[`AgentObservation`]과 형제 필드로 따로 싣는다. 셋의 차이가
+/// 이 타입이 따로 있는 이유 전부다:
+///
+/// - ACK는 "이 세대의 명령을 받았다"는 프로토콜 부기다.
+/// - 관측은 "네가 배정한 Agent가 지금 어떤 상태다"이며 **권위 있는 전체
+///   집합**이라, 침묵이 "그런 프로세스는 없다"라는 적극적인 주장이 된다.
+/// - 이것은 "네가 배정하지 **않은** 프로세스가 여기 돌고 있었고 내가 죽였다"는
+///   **사건**이다. 빈 목록은 "이번 beat에 그런 일이 없었다"일 뿐이며 아무것도
+///   지우지 않는다.
+///
+/// **관측 목록에 섞을 수 없다.** 두 가지가 동시에 막는다. 첫째,
+/// `apply_agent_observations`는 목록에 **없는** Agent의 관측을 지우는데, orphan의
+/// id가 그 목록에 들어가면 "말했다"로 세어져 정작 지워야 할 관측이 살아남는다.
+/// 둘째, `036`의 `agents_observation_requires_placement`가
+/// `worker_id IS NOT NULL OR observed_status IS NULL`을 강제하는데 orphan은
+/// **정의상 이 Worker에 배정돼 있지 않다** — DB가 이미 "orphan은 그 컬럼에 적을
+/// 수 없다"고 말하고 있다. 그래서 이 보고가 닿는 곳은 `agents`의 컬럼이 아니라
+/// 감사 로그다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOrphan {
+    pub agent_id: AgentId,
+    pub reason: AgentOrphanReason,
+}
+
+/// [`AgentOrphan`]이 왜 orphan인지 (로드맵 `#70` 게이트 ③).
+///
+/// 두 값은 생산자가 서로 다른 곳에 있고 **운영자의 처방도 다르다**. 그래서
+/// [`AgentObservationReason`]처럼 하나의 상태에 붙는 필드가 아니라, 이 타입
+/// 자체가 두 개의 사건을 구분한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOrphanReason {
+    /// 이 Worker가 돌리고 있었는데 오케스트레이터의 권위 있는 명령 목록에서
+    /// 사라졌다.
+    ///
+    /// 부재는 세 가지를 뭉친다(`remove_workspace`의 독스트링이 같은 목록을
+    /// 든다): 다른 Worker로의 재배정, 미배치(`worker_id IS NULL`), 그리고 이미
+    /// 확인이 끝난 회수. 앞의 둘이면 **같은 Agent가 두 곳에서 돌던 창이 실제로
+    /// 있었다**는 뜻이고, 그것은 `#67` 게이트 ②의 술어가 막으려는 바로 그
+    /// 상태다. 이 값이 보이면 그 술어가 뚫린 경로를 찾아야 한다 — `036`이 이미
+    /// 하나를 적어 두었다(운영자의 Worker 삭제가 관측을 지우고, 그 판단이
+    /// 틀렸으면 중복 실행이 그대로 발생한다).
+    Unplaced,
+    /// 이 Worker 프로세스가 죽은 뒤에도 살아남은 **이전 incarnation의 자식**을
+    /// 재기동 시점에 발견했다.
+    ///
+    /// `kill_on_drop`은 Drop이 돌 때만 유효하므로 SIGKILL·전원 차단·패닉 뒤에는
+    /// 자식이 남는다. 새 incarnation의 프로세스 표는 비어 있어 그 자식을 알지
+    /// 못하고, 그래서 재조정 루프만으로는 **영원히** 보이지 않는다.
+    StaleIncarnation,
+}
+
+impl AgentOrphanReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unplaced => "unplaced",
+            Self::StaleIncarnation => "stale_incarnation",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "unplaced" => Some(Self::Unplaced),
+            "stale_incarnation" => Some(Self::StaleIncarnation),
+            _ => None,
+        }
+    }
+}
+
 /// heartbeat 응답에 실려 Worker로 가는 Agent 하나에 대한 명령
 /// (로드맵 `#67` 4b).
 ///

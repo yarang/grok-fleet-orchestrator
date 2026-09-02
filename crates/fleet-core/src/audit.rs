@@ -140,6 +140,20 @@ pub mod action {
     /// `agent.create`의 `detail.worker_id`에 이미 기록되며, 한 번의 조작을
     /// 두 줄로 남기면 "이 Agent는 몇 번 옮겨졌나"를 세는 것이 어려워진다.
     pub const AGENT_ASSIGN: &str = "agent.assign";
+    /// Worker가 배정받지 않은 Agent 프로세스를 발견하고 종료했다
+    /// (로드맵 #70 게이트 ③). `detail.worker_id`와 `detail.reason`
+    /// (`AgentOrphanReason`)이 들어간다.
+    ///
+    /// **actor는 Worker이지 사람이 아니다.** `actor_user_id`는 비고
+    /// `actor_label`이 `worker:<id>`가 된다 — 이 줄을 만든 것은 heartbeat이며,
+    /// 그것을 사람의 조작으로 적으면 "누가 죽였나"에 없는 사람이 들어간다.
+    ///
+    /// 이 이벤트는 **사후 증거**다. 종료는 Worker가 이미 끝냈고 오케스트레이터가
+    /// 되돌릴 수 있는 것은 없다. 값어치는 다른 데 있다 — `#67` 게이트 ②의 술어와
+    /// `036`의 트리거는 같은 Agent가 두 Worker에서 도는 것을 막으려 하는데, 그
+    /// 방어가 뚫렸는지를 **관측할 방법이 지금까지 없었다**. `reason = unplaced`인
+    /// 줄 하나가 그 창이 실제로 열렸다는 증거다.
+    pub const AGENT_ORPHAN_TERMINATED: &str = "agent.orphan_terminated";
     /// AgentTemplate 정체성 생성 (로드맵 #86). `detail.project_id`가 없으면
     /// 전역 템플릿이다.
     pub const AGENT_TEMPLATE_CREATE: &str = "agent_template.create";
