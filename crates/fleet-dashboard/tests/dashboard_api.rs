@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use fleet_core::{
-    auth::PermissionKind, Permission, PermissionId, Session, SessionId, Task, TaskId, User, UserId,
-    Worker, WorkerId, WorkerStatus,
+    auth::PermissionKind, Permission, PermissionId, ProjectId, Session, SessionId, Task, TaskId,
+    User, UserId, Worker, WorkerId, WorkerStatus,
 };
 use fleet_dashboard::{build_dashboard_app, DashboardState, SESSION_DURATION_SECS};
 use fleet_store::mem::MemStore;
@@ -5157,4 +5157,113 @@ async fn stopping_a_never_started_agent_records_no_generation() {
         "{:?}",
         events[0].detail
     );
+}
+
+#[tokio::test]
+async fn audit_api_filters_by_project() {
+    // `GET /api/audit`의 첫 테스트다 — 이 엔드포인트는 그동안 커버리지가
+    // 0이었고, 그래서 `AuditFilter::actor_user_id`가 여기서 항상 `None`으로
+    // 하드코딩되어 있다는 사실도 테스트로는 드러난 적이 없었다.
+    let store = MemStore::new();
+    let alpha = ProjectId::new();
+    let beta = ProjectId::new();
+
+    store
+        .record_audit_event(
+            &fleet_core::AuditEvent::success("admin", fleet_core::audit::action::AGENT_CREATE)
+                .project(alpha),
+        )
+        .await
+        .unwrap();
+    store
+        .record_audit_event(
+            &fleet_core::AuditEvent::success("admin", fleet_core::audit::action::ISSUE_CREATE)
+                .project(beta),
+        )
+        .await
+        .unwrap();
+    store
+        .record_audit_event(&fleet_core::AuditEvent::success(
+            "admin",
+            fleet_core::audit::action::AUTH_LOGIN,
+        ))
+        .await
+        .unwrap();
+
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{}/api/audit", server.addr);
+
+    let all: Vec<serde_json::Value> = authed_get(&client, &base, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3, "필터 없음은 전체다: {all:?}");
+
+    let scoped: Vec<serde_json::Value> =
+        authed_get(&client, &format!("{base}?project_id={alpha}"), &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(scoped.len(), 1, "{scoped:?}");
+    assert_eq!(scoped[0]["action"], "agent.create");
+    assert_eq!(scoped[0]["project_id"], alpha.to_string());
+
+    // Project가 없는 이벤트는 `project_id` 키 자체가 없다
+    // (`skip_serializing_if`). "값이 null"과 "키가 없음"을 구분하지 않으면
+    // 클라이언트가 두 경우를 같게 다루다 조용히 어긋난다.
+    let login = all
+        .iter()
+        .find(|e| e["action"] == "auth.login")
+        .expect("auth.login");
+    assert!(login.get("project_id").is_none(), "{login:?}");
+
+    // 존재하지 않는 Project는 빈 목록이다 — 400이 아니다. 형식이 옳으면
+    // "그 Project에 아무 일도 없었다"가 정당한 답이기 때문이다.
+    let unknown: Vec<serde_json::Value> = authed_get(
+        &client,
+        &format!("{base}?project_id={}", ProjectId::new()),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert!(unknown.is_empty(), "{unknown:?}");
+}
+
+#[tokio::test]
+async fn audit_api_rejects_malformed_project_id() {
+    // 형식이 깨진 id를 조용히 `None`으로 떨어뜨리면 필터가 통째로 무시되어
+    // **전체 목록**이 돌아간다. 감사 표면에서 그 실패 양식은 과소 보고보다
+    // 위험하므로 400이어야 한다.
+    let store = MemStore::new();
+    store
+        .record_audit_event(&fleet_core::AuditEvent::success(
+            "admin",
+            fleet_core::audit::action::AUTH_LOGIN,
+        ))
+        .await
+        .unwrap();
+
+    let (server, cookie) = spawn_authed_server(store).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/audit?project_id=not-a-uuid", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400, "{:?}", resp.text().await);
 }

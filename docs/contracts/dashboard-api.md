@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/contracts/dashboard-api.md"
-last_verified: "2026-09-01"
+last_verified: "2026-09-02"
 last_verified_commit: "working-tree"
 owners: ["fleet-dashboard"]
 ---
@@ -51,7 +51,7 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 | `/api/issues/{id}/transition` | POST | 목표 상태별 (`required_capability_for_transition`) | Issue 상태 전이 |
 | `/api/issues/{id}/comments` | GET, POST | `issue:read`, `issue:comment` | Issue 코멘트 |
 | `/api/issues/{id}/links`, `/api/issues/{id}/links/{task_id}` | GET, POST, DELETE | `issue:read`, `issue:link` | Issue↔Task 연결 |
-| `/api/audit` | GET | `AuditRead` | 인증·권한 감사 로그 |
+| `/api/audit` | GET | `AuditRead` | 감사 로그. `action`·`project_id`·`limit`·`offset` 필터 |
 | `/api/tools` | GET | `DashboardView` | MCP 도구 카탈로그 |
 | `/api/users` | GET, POST | `UserRead`, `UserCreate` | 사용자 목록·생성 |
 | `/api/users/{id}/toggle`, `/api/users/{id}/delete` | POST | `UserCreate`, `UserDelete` | 사용자 상태 변경·삭제 |
@@ -62,6 +62,17 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 `project_id`가 없는(전역) 템플릿을 만들거나 고치려면 위 표의 capability에 더해
 `agent_template:manage_global`이 필요하다. 전역 템플릿은 모든 Project가 보므로, Project 하나에
 대한 권한으로 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다.
+
+`GET /api/audit`의 `project_id`는 형식이 깨졌을 때 **400**이다. 파싱 실패를 조용히 "필터
+없음"으로 떨어뜨리면 응답이 빈 목록이 아니라 **전체 목록**이 되는데, 감사 표면에서 그 실패
+양식은 과소 보고보다 위험하다. 형식이 옳은데 그 Project의 이벤트가 없으면 빈 목록이며, 이때
+`projects`에 그 id가 실제로 있는지는 검사하지 않는다 — 감사는 존재한 적 없는 대상을 지목한
+시도도 기록하므로 (로드맵 #95 1단계,
+[인가와 감사](../security/authorization-and-audit.md)).
+
+`AuditFilter`에는 `actor_user_id` 술어도 있지만 이 표면은 그것을 노출하지 않으며 항상 `None`을
+넘긴다. 즉 **행위자 축으로는 아무도 조회할 수 없다.** 이것은 의도된 제약이 아니라 미완이며,
+`project_id`를 컬럼·술어·질의 파라미터로 한 번에 넣은 이유가 이 전철을 피하는 데 있다.
 
 `/api/agent-templates`에 `PATCH`가 없는 것도 규칙이다 — 본문은 revision으로만 바뀐다. `POST
 /api/agents`는 `agent_template_id`와 `agent_template_revision_id`를 **함께** 받거나 둘 다

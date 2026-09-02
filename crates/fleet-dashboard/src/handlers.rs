@@ -1477,6 +1477,7 @@ pub async fn delete_project_api(
             &state,
             fleet_core::AuditEvent::success(&principal.user.username, action)
                 .actor(principal.user.id)
+                .project(project.id)
                 .target("project", project.id.to_string()),
         )
         .await;
@@ -1672,6 +1673,7 @@ pub async fn create_agent_api(
             fleet_core::audit::action::AGENT_CREATE,
         )
         .actor(principal.user.id)
+        .project(agent.project_id)
         .target("agent", agent.id.to_string())
         .detail(serde_json::json!({
             "name": agent.name,
@@ -1821,6 +1823,7 @@ pub async fn place_agent_api(
             fleet_core::audit::action::AGENT_ASSIGN,
         )
         .actor(principal.user.id)
+        .project(placed.project_id)
         .target("agent", agent_id.to_string())
         .detail(serde_json::json!({
             "worker_id": worker_id.to_string(),
@@ -1927,6 +1930,7 @@ pub async fn start_agent_api(
                 fleet_core::audit::action::AGENT_START,
             )
             .actor(principal.user.id)
+            .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
                 "project_id": agent.project_id.to_string(),
@@ -1998,6 +2002,7 @@ pub async fn stop_agent_api(
                 fleet_core::audit::action::AGENT_STOP,
             )
             .actor(principal.user.id)
+            .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
                 "project_id": agent.project_id.to_string(),
@@ -2182,6 +2187,7 @@ pub async fn create_agent_template_api(
             fleet_core::audit::action::AGENT_TEMPLATE_CREATE,
         )
         .actor(principal.user.id)
+        .project_opt(template.project_id)
         .target("agent_template", template.id.to_string())
         .detail(serde_json::json!({
             "name": template.name,
@@ -2304,6 +2310,7 @@ pub async fn create_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_CREATE,
         )
         .actor(principal.user.id)
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "revision_id": revision.id.to_string(),
@@ -2377,6 +2384,7 @@ pub async fn revoke_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_REVOKE,
         )
         .actor(principal.user.id)
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "revision_id": revision_id.to_string(),
@@ -2502,6 +2510,7 @@ pub async fn change_agent_template_status_api(
             fleet_core::audit::action::AGENT_TEMPLATE_STATUS_CHANGE,
         )
         .actor(principal.user.id)
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "from": template.status.as_str(),
@@ -2678,6 +2687,7 @@ pub async fn create_issue_api(
             fleet_core::audit::action::ISSUE_CREATE,
         )
         .actor(principal.user.id)
+        .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({ "project_id": project_id.to_string() })),
     )
@@ -2798,6 +2808,7 @@ pub async fn transition_issue_api(
             fleet_core::audit::action::ISSUE_TRANSITION,
         )
         .actor(principal.user.id)
+        .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({
             "to": to.as_str(),
@@ -3093,8 +3104,8 @@ fn host_to_summary(h: &fleet_core::Host, worker_name: Option<String>) -> HostSum
 /// 권한으로 맞춘다 — 이전에는 `audit:read`(admin 전용)로 잠겨 있었는데,
 /// 정작 내용은 전 역할이 `/api/events`로 볼 수 있는 이벤트라 의미가 어긋났다.
 ///
-/// 인증/권한 감사 로그는 이 페이지가 아니라 `/api/audit`가 담당한다
-/// (전용 화면은 아직 없음).
+/// 감사 로그는 이 페이지가 아니라 `/api/audit`가 담당한다 (전용 화면은
+/// 아직 없음).
 pub async fn admin_activity_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
     serve_page_if_permitted(
         &principal,
@@ -3108,16 +3119,29 @@ pub async fn admin_activity_page(Extension(principal): Extension<AuthPrincipal>)
 pub struct ListAuditQuery {
     /// 액션명으로 필터 (예: `auth.login`).
     pub action: Option<String>,
+    /// Project로 필터 (로드맵 #95 1단계).
+    ///
+    /// 컬럼만 추가하고 이 파라미터를 빼면 값이 저장되기만 하고 아무도 그
+    /// 축으로 조회할 수 없다 — `AuditFilter::actor_user_id`가 이미 그
+    /// 상태다(필드는 있으나 여기서 노출하지 않아 항상 `None`).
+    pub project_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
 }
 
-/// GET /api/audit — 인증/권한 감사 로그 JSON API.
+/// GET /api/audit — 감사 로그 JSON API.
 ///
-/// `audit_log` 테이블의 인증/권한 이벤트를 반환한다. 작업·워커 생명주기
-/// 이벤트는 별개로 `/api/events`가 담당한다.
+/// `audit_log` 테이블의 이벤트를 반환한다. 이름은 `list_auth_audit_api`지만
+/// **인증/권한 이벤트만 반환하지 않는다** — `agent.*`, `agent_template.*`,
+/// `issue.*`, `project.*`, `worker.*`도 같은 테이블에 쌓이고 여기로 나온다.
+/// 이 문장은 `#95` 1단계에서 붙인 테스트가 반증하기 전까지 "인증/권한
+/// 로그"라고 잘못 적혀 있었다. 함수명은 호출부가 많아 그대로 두되, 계약은
+/// 이름이 아니라 이 주석과 `docs/contracts/dashboard-api.md`가 정한다.
+///
+/// 작업·워커 생명주기 **이벤트 스트림**(`events` 테이블)은 별개이며
+/// `/api/events`가 담당한다 — 감사(audit)와 이벤트(event)는 다른 저장소다.
 pub async fn list_auth_audit_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
@@ -3125,9 +3149,21 @@ pub async fn list_auth_audit_api(
 ) -> Result<Json<Vec<fleet_core::AuditEvent>>, ApiError> {
     require_permission(&principal, PermissionKind::AuditRead)?;
 
+    // 형식이 깨진 id는 400이다. 조용히 `None`으로 떨어뜨리면 "그 Project에
+    // 아무 일도 없었다"가 아니라 **필터가 통째로 무시된 전체 목록**이
+    // 돌아간다 — 감사 표면에서 그 실패 양식은 과소 보고보다 위험하다.
+    let project_id = match q.project_id.as_deref() {
+        Some(raw) => Some(
+            raw.parse::<fleet_core::ProjectId>()
+                .map_err(|_| ApiError::BadRequest("invalid project_id".into()))?,
+        ),
+        None => None,
+    };
+
     let filter = fleet_core::AuditFilter {
         actor_user_id: None,
         action: q.action,
+        project_id,
         limit: q.limit,
         offset: q.offset,
     };

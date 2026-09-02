@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-08-28"
+last_verified: "2026-09-02"
 last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
@@ -280,11 +280,83 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
 | Dashboard·MCP mutation/거절 | **없음** | Dashboard는 중앙 capability 행렬 자체가 없다(`#92`가 다룸). MCP tool별 감사도 착수 전 |
 
-또한 현재 `AuditEvent`에는 `request_id`, `project_id`, `policy_revision` 상관관계 필드가 없어 구현
-게이트 6을 완전히 만족하지 못한다(`#95`). `project_id`는 대응하는 Project 엔티티가 아직 없어
-(`#48` 계열 선행) 상관시킬 대상이 없다. **실행 상관 필드는 `attempt_id`가 아니라 `task_id`이며
-그것은 이미 있다** — `TaskAttempt`를 만들지 않기로 한 [흡수 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)에
-따라, "Attempt 엔티티가 생기면 상관시킨다"는 대기 사유는 성립하지 않는다.
+### 상관관계 필드 (`#95` 1단계, 2026-09-02)
+
+**실행 상관 필드는 `attempt_id`가 아니라 `task_id`이며 그것은 이미 있다** — `TaskAttempt`를 만들지
+않기로 한 [흡수 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)에 따라,
+"Attempt 엔티티가 생기면 상관시킨다"는 대기 사유는 성립하지 않는다.
+
+나머지 세 필드는 착수 가능 여부가 서로 다르므로 한 덩어리로 다루지 않는다.
+
+| 필드 | 판정 | 근거 |
+|---|---|---|
+| `project_id` | **1단계에서 추가한다** | 대기 사유(“Project 엔티티가 아직 없다”)가 낡았다 — `#48` 1·2·3단계(2026-08-24)가 `022_projects.sql`로 `projects` 테이블을 만들었다 |
+| `request_id` | **보류 — 묶을 것이 없다** | 용도가 “한 HTTP 요청의 여러 감사 이벤트를 묶는 것”인데 **한 요청이 감사 이벤트를 2건 이상 내는 경로가 코드베이스에 없다**(아래) |
+| `policy_revision` | **보류 — 생산자가 없다** | policy revision 개념 자체가 아직 없다 |
+
+`request_id`를 보류하는 근거는 실측이다. Dashboard의 `login`만 `audit::record`를 4회 부르지만 전부
+`return Err(...)`로 끝나는 **상호 배타 분기**다. `/v1`의 fail-closed 발급 경로(`#76`)에서 감사 실패 뒤
+따라오는 revoke는 **보상 동작**이지 두 번째 감사 이벤트가 아니다. `fleet-mcp`·`fleet-worker`·
+`fleet-scheduler`에는 감사 기록이 0건이다. 묶을 대상이 없는 그룹핑 키는 매 행이 유일한 컬럼이며,
+“채울 방법이 없는 것은 미리 만들지 않는다”에 걸린다. `request_id`는 **생산자(HTTP ingress
+미들웨어)와 소비자(한 요청의 복수 감사 이벤트)가 함께 생길 때** 착수한다. W3C traceparent 전파는
+이미 있으므로(`fleet-api/src/handlers.rs`의 `continue_trace_from_headers`) 그때 `trace_id`에서
+파생시킬지 새 UUID로 할지를 함께 정한다.
+
+#### `project_id`가 컬럼이어야 하는 이유
+
+`detail` JSONB에 이미 값이 있는데 컬럼을 따로 두는 이유는 두 가지다.
+
+첫째, **JSON 안의 값은 저장돼 있지만 색인되지 않는다.** Project 범위 감사 읽기(위 “감사 규칙”)는
+`project_id`로 거르는 질의를 전제하는데, 자유 형식 JSON에 대한 필터는 `AuditFilter`에 술어를 만들
+자리가 없다.
+
+둘째, **현재 `project_id`는 규약이 아니라 관행이다.** Project 범위 감사 지점 11곳 중 값을 싣는 곳은
+5곳뿐이고, 자유 형식이라 키 오타가 나도 컴파일이 통과한 뒤 질의만 조용히 빈 결과를 낸다. 특히
+`agent_template.*` 세 지점은 `authorize_template_scope(&principal, template.project_id)`로 **인가
+판단에 이미 `project_id`를 쓰면서** 그 판단의 감사 기록에서는 그 값을 버린다.
+
+| 액션 | Project 범위 | 값의 출처 | 1단계 이전 |
+|---|---|---|---|
+| `project.create`, `project.archive_requested`, `project.archived` | 예 | `target_id`가 곧 Project id | 컬럼 없음(`detail`에도 없음) |
+| `agent.create` | 예 | `agent.project_id` | `detail`에 있음 |
+| `agent.assign` | 예 | `placed.project_id` | **없음** |
+| `agent.start`, `agent.stop` | 예 | `agent.project_id` | `detail`에 있음 |
+| `agent_template.create` | 예(글로벌 템플릿은 `NULL`) | `template.project_id` | `detail`에 있음 |
+| `agent_template.revision_create`, `.revision_revoke`, `.status_change` | 예(글로벌은 `NULL`) | `template.project_id` | **없음** |
+| `issue.create` | 예 | `issue.project_id` | `detail`에 있음 |
+| `issue.transition` | 예 | `issue.project_id` | **없음** |
+| `user.*`, `auth.*` | 아니오 | — | 해당 없음 |
+| `token.*`, `admin_token.*`, `worker.*`, `host.*`, `http.capability_denied` | 아니오 | — | 해당 없음 |
+
+빠져 있던 6곳은 모두 해당 엔티티를 **이미 손에 쥔 상태**라 추가 조회 없이 채울 수 있다. 채울 방법이
+없어 유예하는 항목은 없다.
+
+`AgentTemplate::project_id`가 `Option<ProjectId>`(글로벌 템플릿은 `NULL`)이므로 컬럼도 nullable이며,
+Project 범위가 아닌 액션에서도 `NULL`이다. 즉 `NULL`은 “값을 빠뜨렸다”가 아니라 **“이 이벤트는 어떤
+Project에도 속하지 않는다”**는 단정이다.
+
+#### FK를 걸지 않는다
+
+`project_id`에 `REFERENCES projects(id)`를 걸지 않는다. `projects`에 hard-delete 경로가 없다는 것은
+근거가 아니다(실제로 없지만 그건 우연히 성립하는 사실이다). 근거는 **감사가 “시도”의 사실을 기록하기
+때문**이다 — 존재하지 않는 Project를 지목한 거절된 요청의 실패 감사는 FK를 위반한다. FK를 걸면
+**감사가 가장 필요한 순간에 감사 쓰기가 실패한다.** 이는 `011_audit_log.sql`이 `actor_user_id`에
+`ON DELETE SET NULL`을 고른 것과 같은 계열의 판단이되 근거가 다르다: 거기서는 대상이 사라져도 기록이
+남아야 해서, 여기서는 대상이 애초에 없었어도 기록이 남아야 해서다.
+
+#### 1단계가 닫지 **못하는** 것
+
+위 “감사 규칙”은 Project 범위 읽기를 “자신의 Project event만”으로 규정하고, 상관관계 필드가 그
+**선행 조건**이라고 적는다. 1단계는 그 선행 조건만 만든다 — `GET /api/audit`는 여전히
+`PermissionKind::AuditRead` 하나로만 게이트되므로, 그 권한을 가진 principal은 **아무 Project의
+이벤트나 조회할 수 있다.** 범위 강제는 미착수이고 **구현 게이트 6은 여전히 미충족이다**(`request_id`·
+`policy_revision`도 마찬가지). Dashboard·MCP 표면의 감사 확대 역시 `#95`의 남은 범위다.
+
+이 문서가 되풀이하지 말아야 할 실패 양식이 이미 하나 있다: `AuditFilter::actor_user_id`는 필드가
+있는데 `ListAuditQuery`가 노출하지 않아 **아무도 그 축으로 조회할 수 없다.** 필드 추가와 질의
+가능성은 다른 작업이며, `project_id`는 컬럼·`AuditFilter` 술어·`ListAuditQuery` 파라미터를 한
+변경으로 함께 넣어 그 전철을 밟지 않는다.
 
 ## 구현 게이트
 

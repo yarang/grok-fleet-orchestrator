@@ -6322,3 +6322,96 @@ local peer identity)는 [인가와 감사](security/authorization-and-audit.md)�
 또 하나: 이 게이트가 증명하는 것은 **감사 로그로 대조가 성립한다**는 것까지다. 실제 Worker가
 ACK를 보내는 경로(heartbeat)는 별개로 이미 있지만, 이 테스트들은 `ack_agent_commands`를 직접
 호출하므로 heartbeat 왕복 자체를 다시 시험하지는 않는다.
+
+## 2026-09-02 — 값을 저장하는 것과 그 값으로 조회할 수 있는 것은 다르다
+
+`#95` 1단계로 `audit_log`에 `project_id` 상관관계 컬럼을 넣었다. 대기 사유였던 "Project 엔티티가
+아직 없다"는 `#48` 1·2·3단계(2026-08-24, `022_projects.sql`)로 이미 해소돼 있었고, 그 뒤로도
+로드맵 행이 옛 사유를 그대로 들고 있었다.
+
+### `detail` JSONB에 이미 넣고 있었는데 왜 컬럼인가
+
+Project 범위 감사 지점 11곳 중 5곳이 `detail.project_id`에 값을 싣고 있었다. 나머지 6곳은 아니었다.
+이것이 **관행이지 계약이 아니었다**는 증거다 — 컴파일러가 강제하지 않으니 저자가 기억한 곳에만 값이
+있었다. 그리고 값이 있는 5곳조차 **조회할 수 없었다**. `detail`은 저장될 뿐 색인되지 않고,
+`AuditFilter`에는 그 축의 술어를 걸 자리가 없다.
+
+가장 날카로운 자리는 `agent_template.*` 세 지점이다. 이들은 `authorize_template_scope(&principal,
+template.project_id)`를 호출한다 — **인가 판단에 이미 `project_id`를 쓰면서 그 판단의 감사 기록에서는
+그 값을 버리고 있었다.**
+
+### 컬럼·술어·파라미터를 한 변경으로 넣은 이유
+
+같은 저장소에 선례가 있다. `AuditFilter::actor_user_id`는 오래전부터 존재하지만 `ListAuditQuery`가
+그것을 노출한 적이 없어 `list_auth_audit_api`가 항상 `None`을 하드코딩한다 — 즉 **행위자 축으로는
+아무도 조회할 수 없다.** 필드만 만들고 표면을 열지 않으면 죽은 축이 하나 더 생긴다. 그래서
+`project_id`는 컬럼 + `AuditFilter` 술어 + `?project_id=` 쿼리 파라미터를 한 커밋에 넣었다.
+
+### FK를 걸지 않았다
+
+감사는 **시도**의 사실을 기록하며, 존재한 적 없는 Project를 지목한 거절도 그 사실에 포함된다. FK를
+걸면 감사 쓰기가 실패하는 시점이 하필 기록할 가치가 가장 큰 순간과 겹친다. `011`이 `actor_user_id`에
+`ON DELETE SET NULL`을 고른 것과 같은 계열이되 근거가 다르다 — 거기서는 대상이 사라져도 기록이
+남아야 해서, 여기서는 **대상이 애초에 없었어도** 기록이 남아야 해서다.
+`audit_records_a_project_that_does_not_exist`가 이 결정을 테스트로 고정한다.
+
+### 형식이 깨진 `project_id`는 400이다
+
+조용히 `None`으로 떨어뜨리면 "그 Project에 아무 일도 없었다"가 아니라 **필터가 통째로 무시된 전체
+목록**이 돌아간다. 감사 표면에서 그 실패 양식은 과소 보고보다 위험하다. 형식은 맞지만 존재하지 않는
+Project는 빈 목록이며 400이 아니다 — 그것은 "질문이 잘못됐다"가 아니라 "답이 없다"이기 때문이다.
+
+### backfill을 넣은 이유와 두 절이 필요한 이유
+
+컬럼만 추가하면 `?project_id=X`가 도입 이전 이벤트를 한 건도 돌려주지 않는다. 감사 표면에서 조용한
+누락은 "그 Project에서 아무 일도 없었다"로 읽히므로 부분 구현보다 나쁘다. 절이 둘인 것은 값이 두
+곳에 흩어져 있어서다 — `agent.*`/`issue.*`는 `detail`에, `project.*`는 대상 자체가 Project라
+`target_id`에 있다. 첫 절의 `WHERE project_id IS NULL` 가드가 순서 의존성과 멱등성을 동시에 준다.
+
+버려진 DB(`fleet_bf_probe`)에 `001`~`036`을 적용하고 legacy 모양의 행 7건을 넣은 뒤 `037`을 돌려
+확인했다: `detail`에 값이 있던 2건과 `target_type='project'`인 2건이 채워지고, 나머지 3건은 NULL로
+남았다. `detail`에 `"project_id":"not-a-uuid"`를 넣으면 `::uuid` 캐스트가 시끄럽게 실패한다는 것도
+확인했다 — 감사 데이터를 조용히 버리지 않는 쪽이 원하는 동작이다. 확인 후 `dropdb`로 정리했다.
+
+### `/api/audit`는 그동안 테스트가 0건이었다
+
+이 엔드포인트를 건드리는 테스트가 저장소 전체에 없었다. 참조는 라우트 등록 한 줄과 핸들러뿐이다.
+그래서 docstring이 "인증/권한 감사 로그를 반환한다"고 **거짓을 말하고 있는 것도 드러난 적이
+없었다** — `audit_log`는 처음부터 `agent.*`·`issue.*`·`project.*`를 담고 있었고, 함수명
+`list_auth_audit_api`가 그 오해를 굳혀 왔다. 이번에 붙인 테스트가 그 문장을 반증했고, 주석 두 곳과
+계약 문서를 사실에 맞췄다. 컴파일러가 잡을 수 없는 종류의 거짓은 **표면에 테스트가 붙는 순간에만**
+드러난다.
+
+### 2단계로 미룬 것
+
+| 필드 | 판정 | 근거 |
+|---|---|---|
+| `request_id` | 보류 | 한 요청이 감사 이벤트를 2건 이상 내는 경로가 **코드베이스에 없다**. 묶을 것이 없는데 묶는 키를 만들면 항상 1:1인 칸이 생긴다 |
+| `policy_revision` | 보류 | policy revision 개념 자체의 생산자가 없다 |
+
+측정 근거: dashboard `login`의 `audit::record` 4회는 서로 배타적인 분기이며 각각 `return Err(...)`로
+끝난다. fleet-api의 fail-closed mint 경로는 감사 실패 시 회수(revoke)하는데, 이는 **보상이지 두 번째
+감사 이벤트가 아니다**. `fleet-mcp`·`fleet-worker`·`fleet-scheduler`는 감사 기록이 0건이다.
+
+### 검증 한계
+
+1단계는 **범위 강제를 만들지 않는다.** `GET /api/audit`는 여전히 `PermissionKind::AuditRead` 하나로만
+잠겨 있어, 그 권한을 가진 사람은 아무 Project의 감사나 읽을 수 있다. 이번에 넣은 것은 그 축으로
+**거를 수 있게** 하는 것까지다. 인가와 감사 정본의 구현 게이트 6은 여전히 미충족이며, 막고 있는 것은
+`#58`과 같은 것 — 승인된 Project 멤버십 모델이 없다는 사실이다.
+
+### 게이트
+
+7단계 전부 `exit=0`. `rustc 1.98.0`(CI와 일치), fmt, clippy 두 피처 세트, 그리고 각 세트마다
+`cargo build -p fleet-cli` 후 `DATABASE_URL` 주입 `cargo test --workspace --no-fail-fast --
+--test-threads=1` — acp+mtls 74 스위트 1321건, no-default 74 스위트 1317건, 실패 0.
+
+새 테스트 4건이 양쪽에서 **실행됐음을 이름으로** 확인했다. 통과 개수로는 확인할 수 없다 —
+`require_db!`가 `DATABASE_URL` 부재 시 조용히 반환하므로 건너뛴 테스트도 `ok`로 찍힌다.
+`audit_integration`이 9건 0.27s/0.21s(0.00s 아님)로 실제 DB를 왕복했고, `037`이
+`_sqlx_migrations`에 `success=t`로 남았으며 `audit_log.project_id`와 `idx_audit_log_project`를
+`psql`로 직접 봤다. §3.2가 "개수가 아니라 소요 시간이 조용한 skip을 드러낸다"고 적은 지표를
+이번에는 통합 스위트가 실제로 DB에 닿았는지를 읽는 데 썼다.
+
+`fleet_test`는 매 테스트가 TRUNCATE하므로 **backfill이 실데이터에 대해 도는 것은 이 게이트가
+시험하지 않았다.** 그것은 버려진 DB에서만 확인됐다.

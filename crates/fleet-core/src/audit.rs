@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::UserId;
+use crate::ids::ProjectId;
 
 /// 감사 이벤트의 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,6 +191,18 @@ pub struct AuditEvent {
     pub outcome: AuditOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
+    /// 이 이벤트가 속한 Project (로드맵 #95 1단계).
+    ///
+    /// `detail` JSONB가 아니라 컬럼인 이유는 **질의 가능성**이다 — Project
+    /// 범위 감사 읽기는 이 축으로 거르는 질의를 전제하는데, 자유 형식 JSON에는
+    /// [`AuditFilter`]의 술어를 걸 자리가 없다. 일급 필드로 옮기면 값을 싣는
+    /// 일이 "저자가 기억했는가"에서 "필드를 채웠는가"로 바뀌기도 한다.
+    ///
+    /// `None`은 **"이 이벤트는 어떤 Project에도 속하지 않는다"**는 단정이다
+    /// (`auth.*`, `user.*`, `worker.*`, `token.*`). 글로벌 AgentTemplate처럼
+    /// 엔티티 자신의 `project_id`가 `NULL`인 경우도 같다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     /// 액션별 추가 맥락. **비밀 값 금지.**
     #[serde(default)]
     pub detail: serde_json::Value,
@@ -221,6 +234,7 @@ impl AuditEvent {
             target_id: None,
             outcome,
             ip_address: None,
+            project_id: None,
             detail: serde_json::Value::Null,
             created_at: Utc::now(),
         }
@@ -245,6 +259,19 @@ impl AuditEvent {
         self
     }
 
+    /// 소속 Project 지정 (로드맵 #95). Project 범위가 아닌 액션은 부르지 않는다.
+    pub fn project(mut self, project_id: ProjectId) -> Self {
+        self.project_id = Some(project_id);
+        self
+    }
+
+    /// 소속 Project를 `Option`으로 지정. 글로벌 AgentTemplate처럼 엔티티
+    /// 자신의 `project_id`가 `Option`인 자리에서 분기 없이 쓰기 위한 형태다.
+    pub fn project_opt(mut self, project_id: Option<ProjectId>) -> Self {
+        self.project_id = project_id;
+        self
+    }
+
     /// 추가 맥락 지정. **비밀 값을 넣지 말 것.**
     pub fn detail(mut self, detail: serde_json::Value) -> Self {
         self.detail = detail;
@@ -259,6 +286,11 @@ pub struct AuditFilter {
     pub actor_user_id: Option<UserId>,
     /// 특정 액션만 (정확히 일치).
     pub action: Option<String>,
+    /// 특정 Project의 이벤트만 (로드맵 #95 1단계).
+    ///
+    /// `None`은 "Project로 거르지 않는다"이지 "Project 없는 이벤트만"이
+    /// 아니다 — 후자를 표현할 필요가 생기면 별도 술어를 만든다.
+    pub project_id: Option<ProjectId>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -268,6 +300,7 @@ impl Default for AuditFilter {
         Self {
             actor_user_id: None,
             action: None,
+            project_id: None,
             limit: 100,
             offset: 0,
         }

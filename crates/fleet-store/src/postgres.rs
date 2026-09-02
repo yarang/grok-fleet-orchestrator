@@ -2032,8 +2032,8 @@ impl Store for PgStore {
             r#"
             INSERT INTO audit_log
                 (id, actor_user_id, actor_label, action, target_type, target_id,
-                 outcome, ip_address, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 outcome, ip_address, project_id, detail, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(event.id)
@@ -2044,6 +2044,7 @@ impl Store for PgStore {
         .bind(event.target_id.as_ref())
         .bind(event.outcome.as_str())
         .bind(event.ip_address.as_ref())
+        .bind(event.project_id.map(|id| id.as_uuid()))
         .bind(&event.detail)
         .bind(event.created_at)
         .execute(&self.pool)
@@ -2064,21 +2065,24 @@ impl Store for PgStore {
             Option<String>,
             String,
             Option<String>,
+            Option<Uuid>,
             serde_json::Value,
             DateTime<Utc>,
         )> = sqlx::query_as(
             r#"
             SELECT id, actor_user_id, actor_label, action, target_type, target_id,
-                   outcome, ip_address, detail, created_at
+                   outcome, ip_address, project_id, detail, created_at
               FROM audit_log
              WHERE ($1::uuid IS NULL OR actor_user_id = $1)
                AND ($2::text IS NULL OR action = $2)
+               AND ($3::uuid IS NULL OR project_id = $3)
              ORDER BY created_at DESC
-             LIMIT $3 OFFSET $4
+             LIMIT $4 OFFSET $5
             "#,
         )
         .bind(filter.actor_user_id.map(|id| id.as_uuid()))
         .bind(filter.action.as_ref())
+        .bind(filter.project_id.map(|id| id.as_uuid()))
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -2097,8 +2101,9 @@ impl Store for PgStore {
                 // (알 수 없는 값을 성공으로 표시하면 감사에서 더 위험하다).
                 outcome: AuditOutcome::parse_str(&r.6).unwrap_or(AuditOutcome::Failure),
                 ip_address: r.7,
-                detail: r.8,
-                created_at: r.9,
+                project_id: r.8.map(ProjectId::from),
+                detail: r.9,
+                created_at: r.10,
             })
             .collect())
     }
