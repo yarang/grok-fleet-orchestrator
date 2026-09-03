@@ -130,9 +130,18 @@ impl WorkerRunner {
             None
         };
 
-        // 4. 신호 대기.
-        let shutdown_reason = wait_for_signal().await;
-        info!(reason = %shutdown_reason, "shutdown signal received");
+        // 4. 신호 대기 — 또는 heartbeat 루프가 그보다 먼저 끝나는 것
+        //    (로드맵 `#67` 게이트 ⑥).
+        let mut hb_handle = hb_handle;
+        let (shutdown_reason, hb_fault) = await_shutdown(hb_handle.as_mut()).await;
+        match &hb_fault {
+            None => info!(reason = %shutdown_reason, "shutdown signal received"),
+            Some(_) => error!(
+                reason = %shutdown_reason,
+                "the heartbeat loop is gone — shutting down so this worker's agent \
+                 processes do not keep running unsupervised"
+            ),
+        }
 
         // 5. shutdown 전파.
         let _ = shutdown_tx.send(true);
@@ -151,7 +160,10 @@ impl WorkerRunner {
 
         // heartbeat 루프 정리 (최대 5초). on_demand 모드에서는 애초에 spawn되지
         // 않았으므로 (`hb_handle` == None) 대기할 것이 없다.
-        if let Some(hb_handle) = hb_handle {
+        //
+        // `hb_fault`가 있으면 위 `await_shutdown`이 이미 join했다 — 완료된
+        // `JoinHandle`을 다시 await하면 패닉이므로 건너뛴다.
+        if let (Some(hb_handle), None) = (hb_handle, &hb_fault) {
             let hb_join = tokio::time::timeout(std::time::Duration::from_secs(5), hb_handle).await;
             match hb_join {
                 Ok(Ok(())) => info!("heartbeat loop exited"),
@@ -192,8 +204,62 @@ impl WorkerRunner {
         // 호출할 때만 일어나야 한다.
         //
         // `WorkerClient::deregister`는 그 관리 경로용으로 남겨둔다.
+        //
+        // 루프가 결함으로 사라진 것이면 **실패로 끝낸다** (로드맵 `#67` 게이트 ⑥).
+        // `main`이 `Err`를 `ExitCode::FAILURE`로 옮기므로, systemd 같은 감시자가
+        // 이 워커를 다시 띄운다 — 그리고 재기동의 `sweep_stale_incarnation()`이
+        // 혹시 살아남은 자식을 걷는다. `Ok(())`로 끝내면 감시자는 정상 종료로
+        // 읽고 재기동하지 않으며, 그 호스트는 heartbeat 없는 워커가 된다.
+        if let Some(fault) = hb_fault {
+            error!(reason = %shutdown_reason, "fleet-worker shutdown complete (fail-closed)");
+            return Err(fault);
+        }
         info!(reason = %shutdown_reason, "fleet-worker shutdown complete");
         Ok(())
+    }
+}
+
+/// 종료 사유를 기다린다 — OS 신호, 또는 heartbeat 루프가 먼저 끝나는 것
+/// (로드맵 `#67` 게이트 ⑥). 두 번째 값이 `Some`이면 결함이다.
+///
+/// **이 함수가 없으면 죽은 루프는 보이지 않는다.** 루프는 `tokio::spawn`으로
+/// 띄우고 종료 경로에서만 join하므로, 신호가 오기 전에 루프가 끝나도 아무도
+/// 알아채지 못한다. 그동안 이 Worker는 heartbeat을 보내지 않고 — 오케스트레이터는
+/// 45초(`HealthConfig` 기본 15초 × 3) 뒤 `Offline`으로 판정한다 — Agent 프로세스는
+/// 계속 돈다. 게이트 ⑥이 만든 유예가 무의미해지는 경로가 정확히 이것이다:
+/// 펜싱은 이 루프 안에서만 일어나므로, 루프가 죽으면 유예를 아무리 넘겨도
+/// 프로세스는 멈추지 않는다.
+///
+/// 그래서 `036`의 트레이드오프에 붙은 운영 규칙("`last_seen`에서 유예가 지난 뒤에
+/// Worker를 삭제하라")이 성립하려면 이 감시가 필요하다. 그 규칙의 근거는 "유예를
+/// 넘겼으면 프로세스는 이미 없다"인데, 죽은 루프는 그 추론의 반례다.
+///
+/// **덮지 못하는 것.** 루프가 `await`에서 영구히 막히거나(데드락), 런타임이
+/// 블로킹 호출에 굶거나, 프로세스가 `SIGSTOP`으로 멈추면 `JoinHandle`은 끝나지
+/// 않으므로 이 함수도 깨어나지 않는다. 그것까지 잡으려면 루프가 매 회차 올리는
+/// 진행 카운터를 **OS 스레드**가 감시해야 하고(`spawn`한 태스크는 굶은 런타임에서
+/// 같이 굶는다), 그 스레드가 할 수 있는 유일한 조치는 `.fleet-agent.json`에 적힌
+/// pid를 직접 죽이는 것이다 — `process::abort`는 소멸자를 돌리지 않아
+/// `kill_on_drop`이 자식을 죽이지 못하기 때문이다. 이 증분에서는 만들지 않았다.
+async fn await_shutdown(
+    hb_handle: Option<&mut tokio::task::JoinHandle<()>>,
+) -> (String, Option<WorkerError>) {
+    let Some(handle) = hb_handle else {
+        // `on_demand`에는 루프가 없다 — 감시할 대상이 없으므로 신호만 기다린다.
+        return (wait_for_signal().await, None);
+    };
+    tokio::select! {
+        reason = wait_for_signal() => (reason, None),
+        joined = handle => {
+            // 루프는 shutdown 신호에만 끝나도록 쓰여 있고 그 신호는 아직 오지
+            // 않았다. 그러므로 어떤 갈래든 결함이다.
+            let reason = match joined {
+                Err(e) if e.is_panic() => "heartbeat loop panicked",
+                Err(_) => "heartbeat loop was cancelled",
+                Ok(()) => "heartbeat loop returned without a shutdown signal",
+            };
+            (reason.to_string(), Some(WorkerError::Other(reason.to_string())))
+        }
     }
 }
 
@@ -341,5 +407,74 @@ async fn wait_for_signal() -> String {
     {
         let _ = signal::ctrl_c().await;
         "ctrl_c".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 죽은 루프가 **깨우는지**가 이 시험의 전부다. 이전에는 이 자리가
+    /// `wait_for_signal().await` 하나여서 루프가 어떻게 끝나든 신호가 올
+    /// 때까지 아무 일도 일어나지 않았다 — 그동안 Agent 프로세스는 계속 돌고
+    /// 펜싱은 영영 오지 않는다. 시험이 걸리면 hang이 아니라 실패로 끝나야
+    /// 하므로 타임아웃 안에서 돌린다.
+    #[tokio::test]
+    async fn a_panicking_heartbeat_loop_ends_the_wait_as_a_fault() {
+        let mut handle = tokio::spawn(async { panic!("boom") });
+
+        let (reason, fault) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            await_shutdown(Some(&mut handle)),
+        )
+        .await
+        .expect("죽은 루프는 신호를 기다리지 않고 즉시 깨워야 한다");
+
+        assert_eq!(reason, "heartbeat loop panicked");
+        assert!(
+            fault.is_some(),
+            "결함으로 분류해야 한다 — 여기서 None이면 워커가 성공 종료 코드로 \
+             끝나고 감시자가 재기동하지 않는다"
+        );
+    }
+
+    /// 패닉이 아니라 **조용히 반환**하는 경우도 결함이다. 루프는 shutdown
+    /// 신호에만 끝나도록 쓰여 있으므로, 신호 없이 돌아온 것은 그 계약이 깨진
+    /// 것이며 결과는 패닉과 같다 — heartbeat도 펜싱도 없는 워커.
+    #[tokio::test]
+    async fn a_heartbeat_loop_that_returns_early_is_also_a_fault() {
+        let mut handle = tokio::spawn(async {});
+
+        let (reason, fault) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            await_shutdown(Some(&mut handle)),
+        )
+        .await
+        .expect("조용한 반환도 즉시 깨워야 한다");
+
+        assert_eq!(reason, "heartbeat loop returned without a shutdown signal");
+        assert!(fault.is_some());
+    }
+
+    /// 살아 있는 루프는 이 함수를 깨우지 않는다. 이 단정이 없으면 위 둘은
+    /// "무엇이든 결함으로 만든다"로도 통과한다 — 그 구현은 정상 워커를
+    /// 기동 직후 죽인다.
+    #[tokio::test]
+    async fn a_running_heartbeat_loop_does_not_wake_the_wait() {
+        let mut handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            await_shutdown(Some(&mut handle)),
+        )
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "루프가 도는 동안에는 신호를 계속 기다려야 한다"
+        );
+        handle.abort();
     }
 }
