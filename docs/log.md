@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-09-02"
+last_verified: "2026-09-03"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -6491,3 +6491,41 @@ Agent는 거기서 빠지므로 `apply_agent_observations`가 그 관측을 이�
 **`docs/log.md`의 2026-09-02 앞 항목이 적은 OpenAPI 어긋남은 이번에도 그대로다.** `agent_fenced`가
 `HeartbeatRequest`에 하나 더 붙었으므로 `openapi.yaml`과의 격차는 한 필드만큼 더 벌어졌다. 같은 이유로
 손대지 않았다 — 내 필드만 더하면 그 파일이 최신이라는 잘못된 신호를 준다.
+
+---
+
+## 2026-09-03 — lint: 어제 항목의 "푸는 경로가 없다"가 틀렸다, 그리고 self-fencing이 036에 더하는 것
+
+**정정.** 어제 `#67` 게이트 ⑥ 항목의 마지막 문단은 "영영 돌아오지 않는 Worker는 그대로 남는다 —
+`observed_status = 'running'`이 굳은 채 재배정이 영구히 막히고, 푸는 경로는 운영자 주도의 관측
+무효화인데 그것은 같은 증분에서 결정할 일이 아니다"로 끝난다. **그 경로는 이미 있다.** 036이
+정확히 그 상태를 없애려고 만들어졌다 — `workers`의 `ON DELETE SET NULL`이 `agents.worker_id`를
+비우고, `agents_clear_placement_and_observation_trg`가 `NEW.worker_id IS DISTINCT FROM OLD.worker_id`
+에서 관측 세 컬럼을 함께 지운다. `crates/fleet-store/tests/agents.rs`의 `deleting_the_worker_clears_the_observation_too`가
+삭제 뒤 `assign_agent_worker`가 `SlotClaim::Claimed`를 돌려주는 데까지 증명한다.
+
+**왜 틀렸나가 이 항목의 값이다.** 나는 "관측을 지우는 유일한 경로는 그 워커의 다음 heartbeat"이라는
+사실에서 출발했는데, 그것은 `apply_agent_observations`만 본 결론이었다. 관측을 지우는 경로는 둘이고,
+둘째는 애플리케이션이 아니라 **DB 트리거**에 있다 — 036이 그것을 트리거에 둔 이유가 바로 애플리케이션
+경로만 보면 놓치기 때문이라고 적혀 있는데, 나는 그 파일을 읽고도 heartbeat 쪽만 근거로 삼았다.
+게이트의 전제를 코드로 다시 세울 때 `grep`의 출발점을 한 축(호출자)으로만 잡으면 이런 종류를
+놓친다.
+
+**그리고 이 변경이 036에 실제로 더하는 것이 있다.** 036은 대가를 정직하게 적어 두었다 — Worker
+삭제를 운영자의 선언으로 취급하므로 "실은 살아 있는데 제어면과만 단절"이면 중복 실행이 그대로
+발생하고, 판단의 주체를 사람으로 옮긴 것이지 위험을 없앤 것이 아니라고. self-fencing이 그 위험에
+**시간 상한**을 준다: 끊긴 Worker는 `agent_fence_after_secs`(기본 300초)를 넘기면 스스로 멈추므로,
+유예를 넘겨 기다린 뒤 삭제하면 그 시점에는 프로세스가 없다. 운영 규칙으로 적을 수 있다 —
+**`last_seen`에서 유예가 지난 뒤에 삭제하라.** 게이트 ⑥의 값이 게이트 ⑥ 안에만 있지 않았다.
+
+**단 그 규칙에는 구멍이 있고 이번에 막지 않았다.** 펜싱은 Worker의 heartbeat 루프가 살아서 돌 때만
+일어난다. 그 루프는 `runner.rs`에서 `tokio::spawn`으로 띄우고 **종료 시에만** join하므로, 루프 task가
+panic하면 아무도 모르고(로그 한 줄도 종료 때까지 나오지 않는다) 프로세스가 쐐기처럼 박혀도
+(SIGSTOP·데드락) 마찬가지다. 그 경우 Agent는 계속 돌고, 유예를 넘겨 기다려도 안전은 회복되지 않는다.
+즉 위 운영 규칙은 **"워커 프로세스가 정상이라면"**이라는 전제 위에 서 있다. 막는 방법은 루프를
+감시해 panic 시 fail-closed로 워커를 내리는 것인데, 이번 증분의 범위 밖으로 두었다.
+
+**범위도 좁혀 적는다.** "Worker self-fencing"이라는 게이트 이름이 워커 전체를 덮는 것처럼 읽히지만
+덮은 것은 Agent 프로세스뿐이다. `GrokRunner`(싱글턴 grok)는 heartbeat 루프와 독립적으로 돌므로
+파티션된 Worker는 Agent가 멈춘 뒤에도 **Task는 계속 실행한다.** 그쪽의 안전은 `#62`의 dispatch 세대
+술어가 낡은 결과의 반영을 막는 것으로 따로 서 있고, 남는 것은 자원과 부작용이다.

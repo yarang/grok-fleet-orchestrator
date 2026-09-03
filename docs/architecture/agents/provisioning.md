@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/provisioning.md"
-last_verified: "2026-09-02"
+last_verified: "2026-09-03"
 last_verified_commit: "working-tree"
 ---
 
@@ -1011,6 +1011,17 @@ Agent는 옛 400 가드가 막아 남는 교집합이 최초 배정뿐이 되기
 **대가는 정직하게 적는다.** Worker 삭제를 "이 Worker는 없다"는 운영자의 선언으로 취급하는 것이므로,
 운영자가 틀렸다면(실은 살아 있고 제어면과만 단절) 중복 실행이 그대로 발생한다. 판단의 주체를
 사람으로 옮긴 것이지 위험을 없앤 것이 아니다.
+
+**2026-09-03 — 그 위험에 시간 상한이 생겼다.** 로드맵 `#67` 게이트 ⑥의 self-fencing이 들어오면서,
+제어면과 끊긴 Worker는 `worker.agent_fence_after_secs`(기본 300초)를 넘기면 자기 Agent 프로세스를
+스스로 멈춘다. 그래서 운영자가 그 유예를 **넘겨 기다린 뒤** 삭제하면 위 문단의 "실은 살아 있었다"
+경우에도 그 시점에는 프로세스가 없다. 운영 규칙: **`last_seen`에서 `agent_fence_after_secs`가 지난
+뒤에 삭제한다.**
+
+**단 이 규칙에는 아직 막지 않은 구멍이 있다.** 펜싱은 Worker의 heartbeat 루프가 살아서 돌고 있을
+때만 일어나는데, 그 루프는 `runner.rs`에서 `tokio::spawn`으로 띄우고 종료 시에만 join한다. 루프
+task가 panic하거나 프로세스가 쐐기처럼 박히면(SIGSTOP·데드락) 펜싱은 영영 일어나지 않고 Agent는
+계속 돈다 — 그 경우 유예를 넘겨 기다려도 안전은 회복되지 않으며, 판단은 다시 온전히 사람의 몫이다.
 
 ### 두 저장소의 판정 **순서**를 고정한다
 
