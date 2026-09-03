@@ -98,6 +98,19 @@ pub mod action {
     /// HTTP capability 거절 (로드맵 #76). 인증까지 통과한 principal이
     /// 대상이다 — 미인증 요청은 이 이벤트 이전에 이미 401로 걸러진다.
     pub const HTTP_CAPABILITY_DENIED: &str = "http.capability_denied";
+    /// Dashboard `/api` 권한 거절 (로드맵 #95 2단계).
+    ///
+    /// [`HTTP_CAPABILITY_DENIED`]와 **일부러 다른 액션**이다. 둘 다 "인증은
+    /// 됐지만 권한이 없다"를 뜻하지만 어휘가 다르다 — 저쪽은 capability
+    /// 토큰이 route 행렬에 걸린 것이고, 이쪽은 세션 principal이
+    /// `PermissionKind` 하나를 갖지 못한 것이다. 한 액션으로 합치면
+    /// `GET /api/audit`에서 두 표면을 분리해 세는 질의가 불가능해진다.
+    ///
+    /// `detail.required_permission`에 어떤 권한이 없었는지가 들어간다.
+    /// **`project_id`는 항상 `None`이다** — 이 이벤트는 대상 엔티티를
+    /// 적재하기 *전에* 발생하므로 어느 Project 소속인지 알 수 있는 시점이
+    /// 아니다. 이것은 누락이 아니라 단정이다.
+    pub const DASHBOARD_PERMISSION_DENIED: &str = "dashboard.permission_denied";
     /// Project 생성 (로드맵 #48).
     pub const PROJECT_CREATE: &str = "project.create";
     /// Project archive 요청(`Active → Draining`) (로드맵 #48).
@@ -256,6 +269,14 @@ impl AuditEvent {
     /// 요청 출처 IP 지정.
     pub fn ip(mut self, ip: impl Into<String>) -> Self {
         self.ip_address = Some(ip.into());
+        self
+    }
+
+    /// 요청 출처 IP를 `Option`으로 지정. 값을 미들웨어가 확정해 주는
+    /// 자리(`AuthPrincipal::client_ip`)에서 분기 없이 쓰기 위한 형태다 —
+    /// [`Self::project_opt`]와 같은 이유다.
+    pub fn ip_opt(mut self, ip: Option<String>) -> Self {
+        self.ip_address = ip;
         self
     }
 

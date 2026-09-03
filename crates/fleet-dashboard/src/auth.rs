@@ -79,6 +79,20 @@ pub struct AuthPrincipal {
     /// 권한 이름 집합 (빠른 membership 검사).
     pub permissions: Vec<PermissionKind>,
     pub session_id: fleet_core::SessionId,
+    /// 이 요청의 클라이언트 IP (로드맵 #95 2단계).
+    ///
+    /// principal에 실어 보내는 이유는 **거절 감사의 도달 범위**다. 권한
+    /// 거절을 기록하는 자리는 `require_permission` 하나인데, 그 함수는
+    /// `principal`과 `PermissionKind`만 본다. IP를 핸들러마다 추출하게
+    /// 하려면 `ConnectInfo`·`HeaderMap` 추출자를 호출부 53곳에 붙여야
+    /// 하고, 그러면 값을 싣는 일이 다시 "저자가 기억했는가"가 된다
+    /// (`#95` 1단계가 `project_id`에서 진단한 바로 그 실패 모양).
+    /// 미들웨어에서 한 번 계산하면 모든 호출부가 조건 없이 갖는다.
+    ///
+    /// `None`은 `ConnectInfo`가 없는 경우다 — 실서비스 경로에서는
+    /// `into_make_service_with_connect_info`가 항상 넣어 주므로 사실상
+    /// 테스트에서 직접 만든 principal에서만 나타난다.
+    pub client_ip: Option<String>,
 }
 
 impl AuthPrincipal {
@@ -96,7 +110,8 @@ impl AuthPrincipal {
 /// 3. 만료 확인 (지난 세션은 삭제)
 /// 4. 사용자 + 권한 로드
 /// 5. 활성화 여부 확인
-/// 6. AuthPrincipal Extension 주입
+/// 6. 클라이언트 IP 확정 (거절 감사와 세션 IP 대조가 같은 값을 보게)
+/// 7. AuthPrincipal Extension 주입
 #[allow(
     clippy::result_large_err,
     reason = "axum 핸들러·미들웨어의 반환 타입은 `IntoResponse` 바운드에 묶여 있고, \
@@ -158,35 +173,40 @@ pub async fn require_session(
         .filter_map(|p| PermissionKind::from_name(&p.name))
         .collect();
 
-    // 7. AuthPrincipal 주입.
+    // 7. 클라이언트 IP 확정. 아래 8단계의 세션 IP 대조와 `AuthPrincipal`의
+    //    거절 감사가 **같은 값**을 봐야 하므로 한 번만 계산한다 — 예전에는
+    //    이 계산이 8단계의 `if let` 안에 있어서, 세션에 `ip_address`가 없으면
+    //    아예 수행되지 않았다.
+    let client_ip = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| extract_client_ip(req.headers(), *addr));
+
+    // 8. AuthPrincipal 주입.
     let principal = AuthPrincipal {
         user,
         permissions,
         session_id: session.id,
+        client_ip: client_ip.clone(),
     };
 
-    // 8. 세션 IP 검증 (감사 목적 — 차단하지 않음, 경고만 로깅).
+    // 9. 세션 IP 검증 (감사 목적 — 차단하지 않음, 경고만 로깅).
     //    정상적인 IP 변경(VPN, 모바일 네트워크 전환 등)을 차단하지 않지만,
     //    세션 공유/도용 탐지를 위한 감사 증거를 남김.
-    if let Some(ref session_ip) = session.ip_address {
-        if let Some(axum::extract::ConnectInfo(addr)) = req
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        {
-            let current_ip = extract_client_ip(req.headers(), *addr);
-            if session_ip != &current_ip {
-                tracing::warn!(
-                    user_id = %principal.user.id,
-                    username = %principal.user.username,
-                    session_ip = %session_ip,
-                    current_ip = %current_ip,
-                    "session IP mismatch (possible session sharing)"
-                );
-            }
+    if let (Some(session_ip), Some(current_ip)) = (session.ip_address.as_ref(), client_ip.as_ref())
+    {
+        if session_ip != current_ip {
+            tracing::warn!(
+                user_id = %principal.user.id,
+                username = %principal.user.username,
+                session_ip = %session_ip,
+                current_ip = %current_ip,
+                "session IP mismatch (possible session sharing)"
+            );
         }
     }
 
-    // 9. CSRF 쿠키 갱신 — 기존 값이 있으면 재사용(그대로 유지), 없으면 새로
+    // 10. CSRF 쿠키 갱신 — 기존 값이 있으면 재사용(그대로 유지), 없으면 새로
     //    발급한다. 응답을 만들기 전에 값을 정해둬야 next.run() 안의 핸들러가
     //    (드물게) 직접 쿠키를 참조하더라도 일관된다.
     //
@@ -203,12 +223,12 @@ pub async fn require_session(
 
     req.extensions_mut().insert(principal);
 
-    // 10. 토큰 로테이션 판단은 응답 생성 **전에** 끝낸다 (session은 여기서 소비).
+    // 11. 토큰 로테이션 판단은 응답 생성 **전에** 끝낸다 (session은 여기서 소비).
     let rotation = maybe_rotate_session(&state, &session).await;
 
     let mut response = next.run(req).await;
 
-    // 11. CSRF 쿠키를 응답에 심는다 (매 요청 슬라이딩 갱신 — 세션과 수명 동기화).
+    // 12. CSRF 쿠키를 응답에 심는다 (매 요청 슬라이딩 갱신 — 세션과 수명 동기화).
     match Cookie::build((CSRF_COOKIE, csrf_token))
         .path("/")
         .http_only(false) // JS에서 읽어야 함 (더블 서밋 패턴)
@@ -229,7 +249,7 @@ pub async fn require_session(
         }
     }
 
-    // 12. 새 세션 토큰이 발급되었으면 응답에 쿠키를 심는다.
+    // 13. 새 세션 토큰이 발급되었으면 응답에 쿠키를 심는다.
     if let Some(new_token) = rotation {
         match session_cookie_header(&state, &new_token) {
             Ok(value) => {
@@ -392,22 +412,72 @@ fn internal_server_error(is_api: bool) -> Response {
 ///
 /// ```ignore
 /// pub async fn delete_worker(
+///     State(state): State<Arc<DashboardState>>,
 ///     Extension(principal): Extension<AuthPrincipal>,
 ///     // ...
 /// ) -> Result<..., StatusCode> {
-///     require_permission(&principal, PermissionKind::WorkerDelete)?;
+///     require_permission(&state, &principal, PermissionKind::WorkerDelete).await?;
 ///     // ...
 /// }
 /// ```
-pub fn require_permission(
+///
+/// # 왜 `async`이고 `state`를 받는가 (로드맵 #95 2단계)
+///
+/// 거절을 **감사에 남기기 위해서**다. 이 함수는 원래 동기였고
+/// `StatusCode::FORBIDDEN`만 돌려줬는데, 그 반환값에는 *어떤 권한이*
+/// 없었는지가 담기지 않는다. 그래서 감사를 아래쪽(에러 → 응답 변환
+/// 계층)에 붙이는 선택지가 없다 — 그 지점에 도달할 때면
+/// [`PermissionKind`]는 이미 사라진 뒤다. 기록할 수 있는 자리는
+/// 판단이 내려지는 이 자리 하나뿐이다.
+///
+/// 호출부 53곳을 전부 고치는 비용을 치른 이유는 **계약으로 만들기
+/// 위해서**다. 별도의 `require_permission_audited`를 추가하고 중요한
+/// 곳부터 옮겨 가는 쪽이 싸지만, 그러면 "감사되는 거절"이 타입이
+/// 아니라 관례가 된다 — `#95` 1단계가 `project_id`에서 진단한 실패가
+/// 정확히 그 모양이었다(11곳 중 5곳만 값을 싣고 있었다). 시그니처를
+/// 바꾸면 감사 없이 거절하는 것이 **컴파일되지 않는다**.
+///
+/// # 기록 실패는 거절을 되돌리지 않는다
+///
+/// `fleet-api`의 `record_capability_denial`과 같은 판단이다. 거절은
+/// 권한을 *주지 않는* 쪽이므로, 기록이 실패했다고 403을 200으로 바꿀
+/// 이유가 없다. 반대로 권한을 *내주는* 기록(`worker.llm_credential.export`)은
+/// 실패 시 작업 자체를 거부한다 — 방향이 반대인 게 아니라 판단의
+/// 방향이 다르다.
+///
+/// # 알려진 노출: 거절 1건 = 감사 행 1건
+///
+/// 억제(suppression)를 넣지 않았다. 즉 인증된 저권한 사용자가 막힌
+/// 엔드포인트를 반복 호출하면 호출 수만큼 `audit_log`에 행이 쌓이고,
+/// `/api`에는 로그인과 달리 rate limit이 없다 — **쓰기 볼륨을 공격자가
+/// 정한다**. 그럼에도 전건 기록을 고른 이유는 두 가지다. (1) 이 기록을
+/// 넣는 목적 자체가 권한 열거 탐지인데, 같은 (사용자, 권한) 쌍의 반복을
+/// 접어 버리면 열거와 오조작을 가르는 신호인 *빈도*가 사라진다.
+/// (2) `fleet-api`의 `record_capability_denial`도 전건 기록이라, 여기만
+/// 접으면 두 표면의 카운트를 같은 기준으로 비교할 수 없게 된다.
+///
+/// 억제를 넣는다면 자리는 이 함수 안이고, 필요한 상태는
+/// [`check_rate_limit`]이 이미 쓰는 것과 같은 종류다. 실제 남용이
+/// 관측되기 전에는 만들지 않는다.
+pub async fn require_permission(
+    state: &DashboardState,
     principal: &AuthPrincipal,
     perm: PermissionKind,
 ) -> Result<(), StatusCode> {
     if principal.has(perm) {
-        Ok(())
-    } else {
-        Err(StatusCode::FORBIDDEN)
+        return Ok(());
     }
+
+    let event = fleet_core::AuditEvent::failure(
+        principal.user.username.clone(),
+        fleet_core::audit::action::DASHBOARD_PERMISSION_DENIED,
+    )
+    .actor(principal.user.id)
+    .ip_opt(principal.client_ip.clone())
+    .detail(serde_json::json!({ "required_permission": perm.as_str() }));
+    crate::audit::record(state, event).await;
+
+    Err(StatusCode::FORBIDDEN)
 }
 
 /// 로그인 시도 가능 여부 (rate limit 판정).

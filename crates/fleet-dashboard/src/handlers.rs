@@ -33,7 +33,7 @@ pub async fn overview(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<OverviewResponse>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let workers = state
         .store
         .list_workers(&WorkerFilter::default())
@@ -125,7 +125,7 @@ pub async fn list_workers(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::WorkerList)?;
+    require_permission(&state, &principal, PermissionKind::WorkerList).await?;
     let mut filter = WorkerFilter::default();
     if let Some(s) = &q.status {
         filter.status = parse_worker_status(s);
@@ -168,7 +168,7 @@ pub async fn list_tasks(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<Vec<TaskSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskList)?;
+    require_permission(&state, &principal, PermissionKind::TaskList).await?;
     let filter = TaskFilter {
         limit: q.limit,
         offset: q.offset,
@@ -197,7 +197,7 @@ pub async fn list_task_threads_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskList)?;
+    require_permission(&state, &principal, PermissionKind::TaskList).await?;
 
     let thread_ids = state
         .store
@@ -254,7 +254,7 @@ pub async fn list_events(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListEventsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::EventsList)?;
+    require_permission(&state, &principal, PermissionKind::EventsList).await?;
     let events = state
         .store
         .list_events(q.after_seq, q.limit)
@@ -542,7 +542,7 @@ pub async fn submit_task_api(
     jar: CookieJar,
     Form(form): Form<SubmitTaskForm>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskCreate)?;
+    require_permission(&state, &principal, PermissionKind::TaskCreate).await?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
     if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
@@ -748,7 +748,7 @@ pub async fn get_task_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskRead)?;
+    require_permission(&state, &principal, PermissionKind::TaskRead).await?;
 
     let task_id: fleet_core::TaskId = id
         .parse()
@@ -790,7 +790,7 @@ pub async fn get_task_thread_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskRead)?;
+    require_permission(&state, &principal, PermissionKind::TaskRead).await?;
 
     let task_id: fleet_core::TaskId = id
         .parse()
@@ -829,7 +829,7 @@ pub async fn delete_task_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::TaskDelete)?;
+    require_permission(&state, &principal, PermissionKind::TaskDelete).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let task_id: fleet_core::TaskId = id
@@ -889,7 +889,7 @@ pub async fn get_worker_detail(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkerDetail>, ApiError> {
-    require_permission(&principal, PermissionKind::WorkerList)?;
+    require_permission(&state, &principal, PermissionKind::WorkerList).await?;
     let worker_id: fleet_core::WorkerId = id
         .parse()
         .map_err(|_| ApiError::BadRequest(format!("invalid worker id: {id}")))?;
@@ -943,7 +943,7 @@ pub async fn list_users_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<UserSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::UserRead)?;
+    require_permission(&state, &principal, PermissionKind::UserRead).await?;
     let users = state.store.list_users().await.map_err(|e| {
         tracing::error!(error = %e, "list_users failed");
         ApiError::Store(e.to_string())
@@ -984,7 +984,8 @@ pub async fn create_user_api(
     jar: CookieJar,
     Form(form): Form<CreateUserForm>,
 ) -> Result<(StatusCode, CookieJar), ApiError> {
-    require_permission(&principal, PermissionKind::UserCreate)
+    require_permission(&state, &principal, PermissionKind::UserCreate)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     // CSRF 검증.
@@ -1094,7 +1095,8 @@ pub async fn toggle_user_api(
     Path(id): Path<String>,
     Form(form): Form<ToggleUserForm>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::UserCreate)
+    require_permission(&state, &principal, PermissionKind::UserCreate)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1150,7 +1152,8 @@ pub async fn delete_user_api(
     Path(id): Path<String>,
     Form(form): Form<ToggleUserForm>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::UserDelete)
+    require_permission(&state, &principal, PermissionKind::UserDelete)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1288,7 +1291,7 @@ pub async fn list_hosts_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<HostSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let hosts = state.store.list_hosts().await.map_err(|e| {
         tracing::error!(error = %e, "list_hosts failed");
         ApiError::Store(e.to_string())
@@ -1331,7 +1334,7 @@ pub async fn list_projects_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<crate::schema::ProjectSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectRead)?;
+    require_permission(&state, &principal, PermissionKind::ProjectRead).await?;
     let projects = state
         .store
         .list_projects(&fleet_core::ProjectFilter {
@@ -1364,7 +1367,7 @@ pub async fn create_project_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateProjectRequest>,
 ) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectCreate)?;
+    require_permission(&state, &principal, PermissionKind::ProjectCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let name = body.name.trim();
@@ -1409,7 +1412,7 @@ pub async fn get_project_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectRead)?;
+    require_permission(&state, &principal, PermissionKind::ProjectRead).await?;
     let project_id = parse_project_id(&id)?;
     let project = state
         .store
@@ -1441,7 +1444,7 @@ pub async fn delete_project_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::ProjectArchiveResponse>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectDelete)?;
+    require_permission(&state, &principal, PermissionKind::ProjectDelete).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = parse_project_id(&id)?;
@@ -1536,7 +1539,7 @@ pub async fn list_agents_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListAgentsQuery>,
 ) -> Result<Json<Vec<crate::schema::AgentSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentRead).await?;
     let project_id = match query.project_id.as_deref() {
         Some(raw) => Some(parse_project_id(raw)?),
         None => None,
@@ -1575,7 +1578,7 @@ pub async fn create_agent_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateAgentRequest>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = parse_project_id(&body.project_id)?;
@@ -1708,7 +1711,7 @@ pub async fn place_agent_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::PlaceAgentRequest>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -1860,7 +1863,7 @@ pub async fn start_agent_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -1960,7 +1963,7 @@ pub async fn stop_agent_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -2041,12 +2044,13 @@ pub async fn stop_agent_api(
 /// 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다. Project
 /// 범위 템플릿은 이 검사를 통과시키고, Project별 세분화는 `#48`의 정책
 /// 컬럼이 생긴 뒤에 붙인다(그 전에는 검사할 대상이 없다).
-fn authorize_template_scope(
+async fn authorize_template_scope(
+    state: &DashboardState,
     principal: &AuthPrincipal,
     project_id: Option<fleet_core::ProjectId>,
 ) -> Result<(), ApiError> {
     if project_id.is_none() {
-        require_permission(principal, PermissionKind::AgentTemplateManageGlobal)?;
+        require_permission(state, principal, PermissionKind::AgentTemplateManageGlobal).await?;
     }
     Ok(())
 }
@@ -2089,7 +2093,7 @@ pub async fn list_agent_templates_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListAgentTemplatesQuery>,
 ) -> Result<Json<Vec<crate::schema::AgentTemplateSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
 
     // `project_scope`는 3상태다: `None`=전부, `Some(None)`=전역만,
     // `Some(Some(p))`=그 Project만. 쿼리 문자열은 그것을 직접 표현할 수
@@ -2146,14 +2150,14 @@ pub async fn create_agent_template_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateAgentTemplateRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateCreate)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = match body.project_id.as_deref() {
         Some(raw) => Some(parse_project_id(raw)?),
         None => None,
     };
-    authorize_template_scope(&principal, project_id)?;
+    authorize_template_scope(&state, &principal, project_id).await?;
 
     let name = body.name.trim();
     if name.is_empty() {
@@ -2210,7 +2214,7 @@ pub async fn get_agent_template_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
     Ok(Json(crate::schema::AgentTemplateSummary::from(&template)))
@@ -2222,7 +2226,7 @@ pub async fn list_agent_template_revisions_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::AgentTemplateRevisionSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     // 없는 템플릿과 revision이 0건인 템플릿을 구분한다 — 전자는 404여야
     // 하고, 빈 배열은 후자만을 뜻해야 한다.
@@ -2263,12 +2267,12 @@ pub async fn create_agent_template_revision_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::CreateAgentTemplateRevisionRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateUpdate)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateUpdate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let next = fleet_core::AgentTemplateBody::new(body.role_prompt.clone())
         .with_tools(body.tools.clone())
@@ -2288,7 +2292,7 @@ pub async fn create_agent_template_revision_api(
         .unwrap_or_else(|| fleet_core::AgentTemplateBody::new(""));
 
     for needed in current.required_permissions_for_change(&next) {
-        require_permission(&principal, needed)?;
+        require_permission(&state, &principal, needed).await?;
     }
 
     let revision = state
@@ -2336,12 +2340,17 @@ pub async fn revoke_agent_template_revision_api(
     headers: axum::http::HeaderMap,
     Path((id, revision_id)): Path<(String, String)>,
 ) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRevisionRevoke)?;
+    require_permission(
+        &state,
+        &principal,
+        PermissionKind::AgentTemplateRevisionRevoke,
+    )
+    .await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let revision_id = revision_id
         .parse::<fleet_core::AgentTemplateRevisionId>()
@@ -2418,7 +2427,7 @@ pub async fn agent_template_dependents_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentTemplateDependents>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     load_agent_template(&state, template_id).await?;
 
@@ -2453,12 +2462,12 @@ pub async fn change_agent_template_status_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::AgentTemplateStatusRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateLifecycle)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateLifecycle).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let next = fleet_core::AgentTemplateStatus::parse_str(&body.status)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown status: {}", body.status)))?;
@@ -2597,7 +2606,7 @@ pub async fn list_issues_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListIssuesQuery>,
 ) -> Result<Json<Vec<crate::schema::IssueSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
 
     let project_id = match query.project_id.as_deref().filter(|s| !s.is_empty()) {
         Some(raw) => Some(parse_project_id(raw)?),
@@ -2638,7 +2647,7 @@ pub async fn create_issue_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateIssueRequest>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueCreate)?;
+    require_permission(&state, &principal, PermissionKind::IssueCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let title = body.title.trim();
@@ -2702,7 +2711,7 @@ pub async fn get_issue_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let issue = load_issue(&state, parse_issue_id(&id)?).await?;
     Ok(Json(issue_summary(&state, &issue).await?))
 }
@@ -2720,13 +2729,13 @@ pub async fn update_issue_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::UpdateIssueRequest>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueUpdate)?;
+    require_permission(&state, &principal, PermissionKind::IssueUpdate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     // assignee를 건드리는 요청만 추가 권한을 요구한다 — 나머지 필드 수정에
     // assign 권한을 함께 요구하면 계약의 capability 분리가 무의미해진다.
     if body.assignee.is_some() {
-        require_permission(&principal, PermissionKind::IssueAssign)?;
+        require_permission(&state, &principal, PermissionKind::IssueAssign).await?;
     }
 
     let mut issue = load_issue(&state, parse_issue_id(&id)?).await?;
@@ -2777,7 +2786,7 @@ pub async fn transition_issue_api(
 
     let to = fleet_core::IssueStatus::parse_str(&body.status)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown issue status: {}", body.status)))?;
-    require_permission(&principal, required_capability_for_transition(to))?;
+    require_permission(&state, &principal, required_capability_for_transition(to)).await?;
 
     let close_reason = match body.close_reason.as_deref().filter(|s| !s.is_empty()) {
         Some(raw) => Some(
@@ -2827,7 +2836,7 @@ pub async fn list_issue_comments_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::IssueCommentSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let issue_id = parse_issue_id(&id)?;
     let comments = state
         .store
@@ -2856,7 +2865,7 @@ pub async fn add_issue_comment_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::AddIssueCommentRequest>,
 ) -> Result<Json<crate::schema::IssueCommentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueComment)?;
+    require_permission(&state, &principal, PermissionKind::IssueComment).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let text = body.body.trim();
@@ -2890,7 +2899,7 @@ pub async fn list_issue_links_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::IssueTaskLinkSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let links = state
         .store
         .list_issue_task_links(parse_issue_id(&id)?)
@@ -2918,7 +2927,7 @@ pub async fn link_issue_task_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::LinkIssueTaskRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueLink)?;
+    require_permission(&state, &principal, PermissionKind::IssueLink).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let issue = load_issue(&state, parse_issue_id(&id)?).await?;
@@ -2976,7 +2985,7 @@ pub async fn unlink_issue_task_api(
     headers: axum::http::HeaderMap,
     Path((id, task_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueLink)?;
+    require_permission(&state, &principal, PermissionKind::IssueLink).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let issue_id = parse_issue_id(&id)?;
@@ -3012,7 +3021,7 @@ pub async fn get_host_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(hostname): Path<String>,
 ) -> Result<Json<HostDetail>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let host = state
         .store
         .get_host_by_hostname(&hostname)
@@ -3147,7 +3156,7 @@ pub async fn list_auth_audit_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListAuditQuery>,
 ) -> Result<Json<Vec<fleet_core::AuditEvent>>, ApiError> {
-    require_permission(&principal, PermissionKind::AuditRead)?;
+    require_permission(&state, &principal, PermissionKind::AuditRead).await?;
 
     // 형식이 깨진 id는 400이다. 조용히 `None`으로 떨어뜨리면 "그 Project에
     // 아무 일도 없었다"가 아니라 **필터가 통째로 무시된 전체 목록**이
@@ -3191,9 +3200,10 @@ pub async fn admin_tools_page(Extension(principal): Extension<AuthPrincipal>) ->
 
 /// GET /api/tools — MCP 도구 목록 JSON API.
 pub async fn list_tools_api(
+    State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     // 단일 출처: fleet-mcp의 실제 도구 카탈로그를 그대로 노출한다.
     // 하드코딩 목록을 두면 MCP에 도구가 추가/삭제될 때 조용히 어긋난다.
     let tools: Vec<serde_json::Value> = fleet_mcp::schema::all_tools()
@@ -4609,6 +4619,8 @@ mod tests {
             user,
             permissions: role.permissions(),
             session_id: fleet_core::SessionId::new(),
+            // 미들웨어를 거치지 않고 만든 principal이므로 IP가 없다.
+            client_ip: None,
         }
     }
 

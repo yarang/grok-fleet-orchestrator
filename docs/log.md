@@ -6415,3 +6415,106 @@ Project는 빈 목록이며 400이 아니다 — 그것은 "질문이 잘못됐�
 
 `fleet_test`는 매 테스트가 TRUNCATE하므로 **backfill이 실데이터에 대해 도는 것은 이 게이트가
 시험하지 않았다.** 그것은 버려진 DB에서만 확인됐다.
+
+## 2026-09-03 — 거절을 기록할 수 있는 자리는 거절을 판단한 자리뿐이었다
+
+`crates/fleet-dashboard`의 `/api` 권한 거절이 감사에 남지 않고 있었다. `fleet-api`는 `#76`에서
+`http.capability_denied`로 이미 거절을 기록하고 있었으므로, 두 표면 중 한쪽만 보이는 상태였다.
+거절이 보이지 않으면 권한 열거(enumeration) 시도가 감사 표면에서 **성공한 요청만 남은 그림**과
+구분되지 않는다.
+
+### 기록할 수 있는 자리는 `require_permission` 하나뿐이었다
+
+이 함수는 `Result<(), StatusCode>`를 돌려주고 실패는 `StatusCode::FORBIDDEN` 하나다. 호출부는
+`error.rs`의 `impl From<StatusCode> for ApiError`에 기대어 `?` 하나로 넘기는데, **그 변환 시점에는
+어떤 `PermissionKind`가 없었는지가 이미 사라져 있다.** 따라서 하류의 어떤 오류 변환 계층도 이
+사실을 복원할 수 없고, 미들웨어에서 403 응답을 보고 기록하는 방식도 같은 이유로 권한 이름을
+알 수 없다. 판단한 자리가 기록해야 한다.
+
+### 병렬 헬퍼 대신 시그니처를 바꿨다
+
+`require_permission_audited`를 따로 두면 "감사되는 거절"이 계약이 아니라 **관례**가 된다. 그것은
+`#95` 1단계가 `project_id`에서 진단한 바로 그 실패 모양이다 — Project 범위 감사 지점 11곳 중
+5곳만 값을 싣고 있었고, 가장 날카로운 자리는 인가를 판단하면서 그 판단의 기록에서 같은 값을
+버리는 코드였다. 시그니처를 `async fn require_permission(&DashboardState, &AuthPrincipal,
+PermissionKind)`로 바꾸면 **감사 없이 거절하는 코드가 컴파일되지 않는다.**
+
+비용은 호출부 53곳이다(`handlers.rs` 48, `provisioning.rs` 4, `sse.rs` 1). 착수 전에 먼저 셌고,
+그 측정이 결정을 쉽게 만들었다 — async 전파는 한 단계 깊이(`authorize_template_scope` 하나)뿐이고,
+`State` 추출자가 없던 핸들러는 `list_tools_api` 하나였으며, `#[cfg(test)]` 안의 호출부는 0곳이라
+테스트용 `DashboardState` 픽스처를 새로 만들 필요가 없었다. `#73` 행이 적어 둔 "29곳"은 그 시점의
+실측이고 그 사이에 `#86`~`#93` 관리 화면이 들어왔다.
+
+### IP는 핸들러가 아니라 principal에 실었다
+
+`AuthPrincipal`에는 IP가 없었다. 호출부 53곳에 `ConnectInfo`·`HeaderMap` 추출자를 붙이는 대안은
+값을 싣는 일을 다시 "저자가 기억했는가"로 만든다 — 위에서 시그니처로 없앤 그 문제를 다른 축에서
+되살리는 셈이다.
+
+대신 `require_session`을 봤더니 **이미 `extract_client_ip`를 부르고 있었다.** 다만 그 호출이
+`if let Some(ref session_ip) = session.ip_address` 안에 있어서, 세션에 IP가 기록돼 있지 않으면
+계산 자체가 수행되지 않았다. 이 계산을 principal 구성 **위로** 끌어올려 `AuthPrincipal.client_ip`에
+싣고, 기존 세션 IP 대조는 그 값을 다시 쓰게 했다. 핸들러 시그니처 변경 0건, `AuthPrincipal` 생성
+지점은 프로덕션 1곳·테스트 헬퍼 1곳뿐이다.
+
+### 하네스가 프로덕션과 달랐다 — 그대로 뒀다면 새 단정이 아무것도 검증하지 않았다
+
+`tests/dashboard_api.rs`는 서버를 `axum::serve(listener, app)`로 띄우고 있었다(7곳). 프로덕션
+(`app.rs:438`)과 `tests/rate_limit.rs`는 `into_make_service_with_connect_info::<SocketAddr>()`를
+쓴다. 그 차이 때문에 요청 extension에 `ConnectInfo`가 없었고, `require_session`이 IP를 확정할 수
+없어 `client_ip`가 **항상 `None`**이 된다. 새로 넣은 `ip_address` 단정은 이 하네스에서 자동으로
+통과했을 것이다 — 검증한 것처럼 보이면서 아무것도 검증하지 않는 상태다. 7곳을 프로덕션 모양으로
+맞추고, 테스트에 "이 단정이 깨지면 하네스가 프로덕션에서 벗어난 것"이라는 주석을 남겼다.
+
+### 방향은 log-only다
+
+거절 기록은 실패해도 이미 결정된 403을 되돌리지 않는다. `#89`가 "감사 실패 시 Issue 생성 거절"을
+요구하는 것과 충돌하지 않는다 — **판단의 방향이 다르다.** 권한을 *내주는* 쪽(`worker.llm_credential.export`
+같은 발급·export)은 기록 실패가 곧 무증적 권한 부여이므로 fail-closed여야 하지만, *주지 않는* 쪽은
+그런 위험이 없다. `fleet-api`의 `record_capability_denial`이 같은 근거로 log-only다.
+
+### `project_id`는 항상 `None`이고, 그것은 단정이다
+
+거절은 대상 엔티티를 적재하기 *전에* 일어난다. 53곳 중 52곳이 권한 검사 시점에 어떤 엔티티도
+손에 쥐고 있지 않다. 1단계에서 `project_id`를 채운 자리들과 상황이 반대다 — 거기서는 값을 **이미
+쥐고 있으면서 버리고** 있었다. 그래서 `require_permission`에 `project_id` 인자를 더하지 않았다.
+테스트가 `event.project_id.is_none()`을 단정해 이 성질을 고정한다.
+
+### 알려진 노출: 거절 1건 = 감사 행 1건
+
+억제를 넣지 않았다. `/api`에는 로그인과 달리 rate limit이 없으므로 인증된 저권한 사용자가
+`audit_log` 쓰기 볼륨을 정할 수 있다. 그럼에도 전건 기록을 고른 이유는 두 가지다. (1) 이 기록의
+목적이 권한 열거 탐지인데 같은 (사용자, 권한) 쌍의 반복을 접으면 열거와 오조작을 가르는 신호인
+*빈도*가 사라진다. (2) `fleet-api`의 `record_capability_denial`도 전건 기록이라, 여기만 접으면 두
+표면의 카운트를 같은 기준으로 비교할 수 없다. 억제를 넣는다면 자리는 `require_permission` 안이고
+필요한 상태는 `check_rate_limit`이 이미 쓰는 것과 같은 종류다 — 실제 남용이 관측되기 전에는
+만들지 않는다.
+
+### 게이트
+
+7단계 전부 `exit=0`. `rustc 1.98.0`(CI와 일치), `RUSTFLAGS="-D warnings"`, fmt, clippy 두 피처
+세트, 그리고 각 세트마다 `cargo build -p fleet-cli` 후 `DATABASE_URL` 주입
+`cargo test --workspace --no-fail-fast -- --test-threads=1` — acp+mtls 74 스위트 1323건,
+no-default 74 스위트 1319건, 실패 0.
+
+새 테스트 2건이 양쪽에서 **실행됐음을 이름으로** 확인했다(`permission_denial_is_audited`,
+`permitted_request_is_not_audited_as_denial`). 통합 스위트가 실제로 DB에 닿았는지도 소요 시간으로
+읽었다 — `agents.rs` 49건 0.64s, `auth_integration.rs` 35건 0.73s, `audit_integration.rs` 9건
+0.28s로 `0.00s`가 아니다. `0.00s`로 끝난 다섯 스위트는 `verify_env_example`·`lifecycle`·
+`verify_examples`, 즉 DB를 쓰지 않는 파일 검사다.
+
+첫 시도는 fmt에서 `exit=1`로 멈췄다. `&state,`를 끼워 넣은 치환이 12곳을 rustfmt 폭 밖으로
+밀어냈기 때문이다. fmt를 게이트의 **첫 단계**로 둔 덕에 20분짜리 clippy 벽을 치르기 전에
+드러났다 — CI도 같은 순서라 이 배치가 CI의 실패 지점을 그대로 재현한다.
+
+**이 게이트가 증명하지 않는 것**: 새 테스트 2건은 `MemStore` 위에서 돌므로 Postgres 제약 아래의
+`audit_log` 쓰기 경로는 시험하지 않았다. `ip_address`의 `127.0.0.1`은 루프백 리스너에서 온
+값이라 `extract_client_ip`의 프록시 헤더 해석 경로는 이번에 한 번도 실행되지 않았다. 거절 폭주 시
+쓰기 증폭도 추론했을 뿐 측정하지 않았다.
+
+### 남은 것
+
+MCP tool별 감사는 착수하지 못했다. `ToolContext`에 호출 principal이 없어서 "누가 거절당했는가"를
+쓸 수 없고, 이것은 `#93`이 걸려 있는 문제와 같다(stdio 런처의 `FLEET_MCP_CAPABILITIES`가 호출
+주체 없이 열려 있다). Dashboard mutation 감사, `request_id`·`policy_revision`, `GET /api/audit`의
+범위 강제도 그대로 남는다 — 마지막 것은 승인된 Project 멤버십 모델이 없다는 `#58`의 사유와 같다.

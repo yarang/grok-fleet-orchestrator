@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-09-02"
+last_verified: "2026-09-03"
 last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
@@ -267,7 +267,8 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 ### 현재 감사 범위
 
 위 규칙은 목표 계약이다. **`#76`(2026-08-23, 1단계)로 HTTP `/v1` 표면의 mutation과 capability 거절은
-대부분 감사된다.** Dashboard·MCP 표면과 상관관계 필드는 아직이다(`#95`).
+대부분 감사된다.** `#95` 1단계(2026-09-02)가 `project_id` 상관 필드를, 2단계(2026-09-03)가 Dashboard
+`/api`의 **권한 거절**을 각각 닫았다. Dashboard의 mutation 감사와 MCP 표면 전체는 아직이다.
 
 | 경로 | 현재 감사 | 비고 |
 |---|---|---|
@@ -278,7 +279,34 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | admin token 생성·회전·회수 | **기록함 (`#76`)** | `admin_token.create`/`.rotate`/`.revoke`. 생성·회전은 fail-closed, 회수는 log-only |
 | Worker 등록·등록해제, Host 등록 | **기록함 (`#76`)** | `worker.register`/`.deregister`/`host.register`, 전부 log-only. heartbeat(고빈도)는 제외 |
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
-| Dashboard·MCP mutation/거절 | **없음** | Dashboard는 중앙 capability 행렬 자체가 없다(`#92`가 다룸). MCP tool별 감사도 착수 전 |
+| Dashboard `/api` 권한 거절 | **기록함 (`#95` 2단계)** | `dashboard.permission_denied`, log-only. `require_permission`이 유일한 판단 지점이므로 그 안에서 기록한다 — 아래 참조 |
+| Dashboard mutation, MCP mutation/거절 | **없음** | Dashboard의 중앙 capability 행렬은 여전히 없다(`#92`가 다룸). MCP tool별 감사는 `ToolContext`에 호출 principal이 없어 착수 전 |
+
+#### Dashboard 권한 거절 감사 (`#95` 2단계, 2026-09-03)
+
+`crates/fleet-dashboard/src/auth.rs`의 `require_permission`이 거절을 기록한다. **거절을 기록할 수
+있는 자리가 그곳뿐이다** — 이 함수는 `StatusCode::FORBIDDEN`만 돌려주고, `error.rs`의
+`impl From<StatusCode> for ApiError`가 그것을 `ApiError`로 바꾸는 시점에는 *어떤* `PermissionKind`가
+없었는지가 이미 사라져 있다. 따라서 하류의 어떤 오류 변환 계층도 이 사실을 복원할 수 없다.
+
+| 항목 | 값 | 이유 |
+|---|---|---|
+| action | `dashboard.permission_denied` | `http.capability_denied`와 **일부러 다른 어휘**다. 저쪽은 capability 토큰이 route 행렬에 걸린 것이고 이쪽은 세션 principal이 `PermissionKind` 하나를 갖지 못한 것이라, 한 액션으로 합치면 `GET /api/audit`에서 두 표면을 분리해 세는 질의가 불가능해진다 |
+| 방향 | **log-only** | 거절은 권한을 *주지 않는* 쪽이라 기록 실패가 응답을 바꿔야 할 위험이 없다. `worker.llm_credential.export` 같은 발급 계열의 fail-closed와 방향이 반대다 |
+| `detail.required_permission` | 없던 권한 이름 | 이 값이 없으면 기록이 “무언가 막혔다” 이상을 말하지 못한다 |
+| `ip_address` | 요청 출처 IP | `AuthPrincipal.client_ip`에서 온다 — `require_session`이 세션 IP 대조에 쓰던 계산을 principal 구성 **위로** 끌어올려 모든 호출부가 조건 없이 갖게 했다. 호출부 53곳에 `ConnectInfo`·`HeaderMap` 추출자를 붙이는 대안은 값을 싣는 일을 다시 “저자가 기억했는가”로 만든다 |
+| `project_id` | **항상 `None`** | 거절은 대상 엔티티를 적재하기 *전에* 일어난다. 누락이 아니라 단정이다 |
+
+**시그니처를 53곳에서 바꾼 이유**는 계약과 관례의 차이다. `require_permission_audited` 같은 병렬
+헬퍼를 두면 “감사되는 거절”이 규칙이 아니라 관례가 되고, 그것은 `#95` 1단계가 `project_id`에서
+진단한 바로 그 실패 모양이다(감사 지점 11곳 중 5곳만 값을 싣고 있었다). 시그니처를 바꾸면 **감사
+없이 거절하는 코드가 컴파일되지 않는다.**
+
+**알려진 노출**: 억제(suppression)를 넣지 않아 거절 1건이 감사 행 1건이 되고, `/api`에는 로그인과
+달리 rate limit이 없다 — 인증된 저권한 사용자가 쓰기 볼륨을 정할 수 있다. 그럼에도 전건 기록을
+고른 이유는 (1) 이 기록의 목적이 권한 열거 탐지인데 반복을 접으면 열거와 오조작을 가르는 *빈도*가
+사라지고, (2) `fleet-api`의 `record_capability_denial`도 전건 기록이라 여기만 접으면 두 표면의
+카운트를 같은 기준으로 비교할 수 없어서다. 실제 남용이 관측되기 전에는 억제를 만들지 않는다.
 
 ### 상관관계 필드 (`#95` 1단계, 2026-09-02)
 
@@ -328,6 +356,7 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | `issue.transition` | 예 | `issue.project_id` | **없음** |
 | `user.*`, `auth.*` | 아니오 | — | 해당 없음 |
 | `token.*`, `admin_token.*`, `worker.*`, `host.*`, `http.capability_denied` | 아니오 | — | 해당 없음 |
+| `dashboard.permission_denied` | **알 수 없음** | — | 거절은 대상 엔티티를 적재하기 *전에* 일어난다 — `None`은 누락이 아니라 단정이다 |
 
 빠져 있던 6곳은 모두 해당 엔티티를 **이미 손에 쥔 상태**라 추가 조회 없이 채울 수 있다. 채울 방법이
 없어 유예하는 항목은 없다.

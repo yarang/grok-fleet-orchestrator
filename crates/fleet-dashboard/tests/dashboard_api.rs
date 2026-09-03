@@ -6,6 +6,14 @@
 //! Phase 9.1 RBAC 도입 후 모든 보호 경로는 `require_session` 미들웨어를 통과합니다.
 //! 테스트는 MemStore에 테스트용 사용자 + 세션을 사전 주입하고, 세션 쿠키를
 //! 포함하여 요청을 보냅니다.
+//!
+//! **서버는 `into_make_service_with_connect_info::<SocketAddr>()`로 띄웁니다**
+//! (로드맵 #95 2단계). 이전에는 `axum::serve(listener, app)`을 그대로 써서
+//! 프로덕션(`app.rs`)·`rate_limit.rs`와 달리 요청 extension에 `ConnectInfo`가
+//! 없었고, 그래서 `require_session`이 클라이언트 IP를 확정할 수 없었습니다.
+//! 권한 거절 감사가 `ip_address`를 싣기 시작하면서 그 차이가 **검증의 공백**이
+//! 됩니다 — 하네스가 프로덕션과 다르면 여기서 초록인 것이 그쪽에서도 초록이라는
+//! 근거가 되지 못합니다.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -167,7 +175,11 @@ async fn spawn_server_inner(store: MemStore) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     TestServer {
         addr,
@@ -195,7 +207,11 @@ async fn spawn_authed_server_with_base_path(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     (
         TestServer {
@@ -249,7 +265,11 @@ async fn spawn_server_with_dispatcher(store: MemStore, worker: Worker) -> (TestS
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     (
         TestServer {
@@ -1422,7 +1442,11 @@ async fn spawn_authed_server_with_store_handle(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     (
         TestServer {
@@ -2181,7 +2205,11 @@ async fn spawn_dispatcher_server_with_store(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     (
         TestServer {
@@ -2454,7 +2482,11 @@ async fn spawn_issue_server(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     (
         TestServer {
@@ -3854,7 +3886,11 @@ async fn delete_task_requires_task_delete_permission() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
 
     let client = reqwest::Client::new();
@@ -5266,4 +5302,144 @@ async fn audit_api_rejects_malformed_project_id() {
     .await
     .unwrap();
     assert_eq!(resp.status(), 400, "{:?}", resp.text().await);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Dashboard 권한 거절 감사 (로드맵 #95 2단계)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// `spawn_authed_server_with_store_handle`의 권한 지정판.
+///
+/// `MemStore`는 `Clone`이 아니므로 `spawn_server`에 넘기고 나면 같은 저장소를
+/// 다시 들여다볼 방법이 없다. 감사를 검증하려면 서버가 쓰는 바로 그 저장소
+/// 핸들이 필요하다.
+async fn spawn_server_with_perms_and_store(
+    perm_kinds: &[PermissionKind],
+) -> (TestServer, String, Arc<dyn Store>) {
+    let (store, cookie) = seed_test_session_with_perms(MemStore::new(), perm_kinds).await;
+    let store = Arc::new(store) as Arc<dyn Store>;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://__test_unused__@localhost/__none__")
+        .expect("connect_lazy must not perform I/O");
+    let state = Arc::new(DashboardState::new(store.clone(), pool, None));
+    let app = build_dashboard_app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    (
+        TestServer {
+            addr,
+            _handle: handle,
+        },
+        cookie,
+        store,
+    )
+}
+
+/// 권한이 없어 403이 난 요청이 감사에 남는지.
+///
+/// `#73`이 `fleet-api`에서 한 것과 같은 불변식을 Dashboard `/api`에 적용한
+/// 것이다. 거절이 기록되지 않으면 권한 열거(enumeration) 시도가 감사 표면에서
+/// 완전히 보이지 않는다 — 성공한 요청만 남으므로 "아무 일도 없었다"와
+/// 구분되지 않는다.
+#[tokio::test]
+async fn permission_denial_is_audited() {
+    // DashboardView만 있고 UserRead는 없는 사용자.
+    let (server, cookie, store) =
+        spawn_server_with_perms_and_store(&[PermissionKind::DashboardView]).await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/users", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 403, "UserRead가 없으면 403이어야 한다");
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::DASHBOARD_PERMISSION_DENIED.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "거절 감사가 정확히 1건이어야 한다: {events:?}"
+    );
+
+    let event = &events[0];
+    assert_eq!(event.outcome, fleet_core::AuditOutcome::Failure);
+    assert_eq!(event.actor_label, "test_limited");
+    assert!(
+        event.actor_user_id.is_some(),
+        "인증은 통과했으므로 행위자 ID가 있어야 한다"
+    );
+    assert_eq!(
+        event
+            .detail
+            .get("required_permission")
+            .and_then(|v| v.as_str()),
+        Some(PermissionKind::UserRead.as_str()),
+        "어떤 권한이 없었는지가 남아야 한다 — 이 값이 없으면 거절 기록이 \
+         '무언가 막혔다' 이상을 말하지 못한다: {event:?}"
+    );
+    // 하네스가 `into_make_service_with_connect_info`로 뜨므로 IP가 실린다.
+    // 이 단정이 깨지면 하네스가 프로덕션 모양에서 벗어난 것이다.
+    assert_eq!(
+        event.ip_address.as_deref(),
+        Some("127.0.0.1"),
+        "거절 감사에 출처 IP가 실려야 한다: {event:?}"
+    );
+    assert!(
+        event.project_id.is_none(),
+        "거절은 대상 엔티티를 적재하기 전에 일어나므로 Project를 알 수 없다"
+    );
+}
+
+/// 허용된 요청은 거절 감사를 남기지 않는다.
+///
+/// 위 테스트만 있으면 `require_permission`이 **무조건** 기록해도 초록이다.
+#[tokio::test]
+async fn permitted_request_is_not_audited_as_denial() {
+    let (server, cookie, store) = spawn_server_with_perms_and_store(&[
+        PermissionKind::DashboardView,
+        PermissionKind::UserRead,
+    ])
+    .await;
+    let client = reqwest::Client::new();
+
+    let resp = authed_get(
+        &client,
+        &format!("http://{}/api/users", server.addr),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let events = store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(fleet_core::audit::action::DASHBOARD_PERMISSION_DENIED.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        events.is_empty(),
+        "허용된 요청은 거절 감사를 남기지 않아야 한다: {events:?}"
+    );
 }

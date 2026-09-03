@@ -28,8 +28,13 @@ pub async fn create_ssh_key_api(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<CreateSshKeyRequest>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
     let master_key = state
@@ -94,7 +99,12 @@ pub async fn list_ssh_keys_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<SshKeySummary>>, StatusCode> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await?;
 
     let keys = state.store.list_ssh_keys().await.map_err(|e| {
         tracing::error!(error = %e, "list_ssh_keys failed");
@@ -120,8 +130,13 @@ pub async fn delete_ssh_key_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     let deleted = state.store.delete_ssh_key(&name).await.map_err(|e| {
         tracing::error!(error = %e, "delete_ssh_key failed");
@@ -149,8 +164,13 @@ pub async fn provision_host_api(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<ProvisionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
     let master_key = state
