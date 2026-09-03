@@ -108,11 +108,18 @@ impl WorkerRunner {
             let hb_interval = register_resp
                 .heartbeat_interval_secs
                 .max(config.worker.heartbeat_interval_secs);
+            let hb_fence_after = config.worker.agent_fence_after_secs;
             let hb_shutdown_rx = shutdown_rx.clone();
             let hb_agent_manager = agent_manager.clone();
             Some(tokio::spawn(async move {
                 hb_client
-                    .run_heartbeat_loop(hb_interval, hb_grok_bind, hb_agent_manager, hb_shutdown_rx)
+                    .run_heartbeat_loop(
+                        hb_interval,
+                        hb_fence_after,
+                        hb_grok_bind,
+                        hb_agent_manager,
+                        hb_shutdown_rx,
+                    )
                     .await;
             }))
         } else {

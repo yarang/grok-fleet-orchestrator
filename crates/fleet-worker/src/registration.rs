@@ -110,6 +110,15 @@ pub struct RegistrationClient {
     /// 유실은 감사 로그에 줄 하나가 빠지는 것으로 끝나며, 그것이 프로세스
     /// 상태를 틀리게 만들지는 않는다.
     pending_orphans: std::sync::Mutex<Vec<fleet_core::AgentOrphan>>,
+    /// 다음 heartbeat에 실어 보낼 self-fencing 사건 (로드맵 #67 게이트 ⑥).
+    ///
+    /// `pending_orphans`와 성격이 같은 일회성 사건 버퍼이고, 유실의 결과도
+    /// 같다 — 감사 줄 하나가 빠질 뿐 프로세스 상태를 틀리게 만들지 않는다.
+    /// 상태 쪽은 다음 beat의 관측 목록이 따로 바로잡는다.
+    ///
+    /// **이 버퍼는 정의상 단절 중에 쌓인다.** 그래서 여기 담긴 것은 연결이
+    /// 돌아온 뒤에야 나가며, 그때까지 오케스트레이터는 이 사건을 모른다.
+    pending_fenced: std::sync::Mutex<Vec<fleet_core::AgentFenced>>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -193,6 +202,13 @@ struct HeartbeatRequest {
     /// 것과 뜻이 같다.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     agent_orphans: Vec<fleet_core::AgentOrphan>,
+    /// 제어면 단절로 이 Worker가 스스로 멈춘 Agent들 (로드맵 #67 게이트 ⑥).
+    ///
+    /// `agent_orphans`와 같은 사건 목록이라 비면 보내지 않는다. 두 목록을
+    /// 하나로 합치지 않는 이유는 `AgentFenced`의 독스트링에 있다 — 저쪽은
+    /// 배정되지 않은 프로세스이고 이쪽은 배정이 유효한 채로 멈춘 것이다.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_fenced: Vec<fleet_core::AgentFenced>,
 }
 
 /// heartbeat 요청용 OS 정보 (fleet-core::OsInfo와 동일 구조).
@@ -247,6 +263,7 @@ impl RegistrationClient {
             pending_acks: std::sync::Mutex::new(Vec::new()),
             pending_observations: std::sync::Mutex::new(None),
             pending_orphans: std::sync::Mutex::new(Vec::new()),
+            pending_fenced: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -369,6 +386,7 @@ impl RegistrationClient {
             agent_acks: std::mem::take(&mut *self.pending_acks.lock().unwrap()),
             agent_observations: self.pending_observations.lock().unwrap().take(),
             agent_orphans: std::mem::take(&mut *self.pending_orphans.lock().unwrap()),
+            agent_fenced: std::mem::take(&mut *self.pending_fenced.lock().unwrap()),
         };
 
         let url = format!(
@@ -427,12 +445,24 @@ impl RegistrationClient {
     pub async fn run_heartbeat_loop(
         &self,
         interval_secs: u32,
+        fence_after_secs: u32,
         grok_bind_addr: String,
         agent_manager: Arc<crate::agent_process::AgentProcessManager>,
         mut shutdown_rx: watch::Receiver<bool>,
     ) {
         let interval = Duration::from_secs(interval_secs.max(1) as u64);
-        info!(interval_secs, "starting heartbeat loop");
+        // 설정 검증은 `worker.heartbeat_interval_secs`만 보지만, 실제 주기는
+        // 서버가 등록 응답으로 올릴 수 있다(`runner.rs`의 `max`). 그 경우
+        // 유예가 주기에 추월당해 heartbeat 한 번의 실패가 곧바로 펜싱이
+        // 된다 — 여기서 최소 한 번의 재시도를 남긴다.
+        let fence_after =
+            Duration::from_secs(fence_after_secs as u64).max(interval + Duration::from_secs(1));
+        info!(interval_secs, fence_after_secs, "starting heartbeat loop");
+
+        // 제어면과 마지막으로 닿은 시각. 루프 진입을 기준점으로 삼는다 —
+        // 등록 직후라 이 시점에 연결은 실제로 있었고, `None`으로 두면 첫
+        // beat이 실패했을 때 "얼마나 끊겼는지"를 말할 수 없다.
+        let mut last_contact = std::time::Instant::now();
 
         // 첫 beat **전에** 이전 incarnation의 잔해를 걷는다 (로드맵 `#70`
         // 게이트 ③). 순서가 이렇지 않으면 안 되는 이유가 있다: 첫 beat의
@@ -463,6 +493,7 @@ impl RegistrationClient {
             // heartbeat 전송.
             match self.heartbeat_once(agent_healthy).await {
                 Ok(resp) => {
+                    last_contact = std::time::Instant::now();
                     if resp.desired_state == "drain" {
                         info!("Worker is in Draining state by Orchestrator direction");
                     }
@@ -487,6 +518,42 @@ impl RegistrationClient {
                     // heartbeat 자체가 실패하면 권위 있는 목록이 없다 — 명령을
                     // 추측해서 프로세스를 건드리지 않는다.
                     warn!(error = %e, "heartbeat failed — will retry next interval");
+
+                    // 다만 **영원히** 유지하지는 않는다 (로드맵 `#67` 게이트 ⑥).
+                    //
+                    // 여기서 죽이는 것이 중복 실행을 막기 위해서가 아니라는
+                    // 점이 중요하다. 그쪽은 게이트 ②가 이미 닫았다 — 재배정
+                    // UPDATE의 `observed_status` 술어가 `running`으로 보고된
+                    // Agent를 다른 Worker로 옮기지 못하게 한다. 그래서 이
+                    // 유예는 **감독 없는 실행의 상한**이며, 그 술어를 언젠가
+                    // 풀 수 있게 만드는 것이기도 하다: 관측을 지우는 유일한
+                    // 경로가 이 Worker의 다음 heartbeat이므로, 프로세스를
+                    // 멈추고 다시 연결돼야 비로소 그 Agent가 자유로워진다.
+                    let unreachable = last_contact.elapsed();
+                    if unreachable >= fence_after {
+                        // `fence_all`이 표를 비우므로 두 번째 호출부터는 빈
+                        // 목록이다 — "이미 펜싱했다"는 상태를 따로 들지 않는
+                        // 이유다.
+                        let fenced = agent_manager.fence_all().await;
+                        if !fenced.is_empty() {
+                            warn!(
+                                count = fenced.len(),
+                                unreachable_secs = unreachable.as_secs(),
+                                "control plane unreachable past the fence deadline — \
+                                 stopping this worker's agent processes"
+                            );
+                            let unreachable_secs = unreachable.as_secs();
+                            self.pending_fenced
+                                .lock()
+                                .unwrap()
+                                .extend(fenced.into_iter().map(|agent_id| {
+                                    fleet_core::AgentFenced {
+                                        agent_id,
+                                        unreachable_secs,
+                                    }
+                                }));
+                        }
+                    }
                 }
             }
 
@@ -786,9 +853,134 @@ impl DiskCache {
 mod tests {
     use super::*;
     use axum::{routing::post, Json, Router};
+    use fleet_core::AgentId;
     use serde_json::Value;
     use tokio::net::TcpListener;
     use tokio::sync::Mutex as TokioMutex;
+
+    /// 인자를 무시하고 오래 자는 가짜 grok. `agent_process`의 같은 이름 헬퍼와
+    /// 같은 것이지만 저쪽은 그 모듈의 `mod tests` 안에 있어 여기서 쓸 수 없다.
+    fn fake_grok(dir: &std::path::Path) -> String {
+        use std::io::Write;
+        let path = dir.join("fake-grok.sh");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh\nexec sleep 300").unwrap();
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    /// Agent 하나를 실제로 띄운 매니저. 펜싱 시험은 "죽었는가"를 물으므로
+    /// 프로세스가 진짜로 있어야 한다.
+    async fn manager_running_one(
+        dir: &tempfile::TempDir,
+        ports: &str,
+    ) -> (Arc<crate::agent_process::AgentProcessManager>, AgentId) {
+        let config = WorkerConfig::for_test()
+            .grok_bin(fake_grok(dir.path()))
+            .agent_port_range(ports)
+            .agent_workspace_root(dir.path().to_string_lossy().into_owned())
+            .build();
+        let m = Arc::new(crate::agent_process::AgentProcessManager::new(Arc::new(config)).unwrap());
+        let a = AgentId::new();
+        let _ = m
+            .reconcile(Some(&[fleet_core::AgentCommand {
+                agent_id: a,
+                desired_status: fleet_core::AgentDesiredStatus::Running,
+                generation: 1,
+            }]))
+            .await;
+        assert_eq!(m.running_agents().await, vec![a], "시험 전제: 하나 떠 있다");
+        (m, a)
+    }
+
+    /// 제어면과 끊긴 채로 유예를 넘기면 이 Worker는 자기 Agent를 멈추고 그
+    /// 사실을 다음 beat에 실을 버퍼에 넣는다 (로드맵 `#67` 게이트 ⑥).
+    ///
+    /// **버퍼가 이 시험의 절반이다.** 프로세스를 멈추는 것만으로는 운영자에게
+    /// 멀쩡하던 Agent가 이유 없이 사라진 것으로 보인다 — 상태는 다음 beat의
+    /// 관측이 바로잡지만 이유를 나르는 경로는 이 버퍼뿐이다.
+    #[tokio::test]
+    async fn an_outage_past_the_deadline_stops_agents_and_keeps_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, a) = manager_running_one(&dir, "39620-39639").await;
+
+        // 아무도 듣지 않는 주소 — heartbeat은 매 beat 연결 거부로 실패한다.
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url("http://127.0.0.1:1")
+                .build(),
+        );
+        let client = Arc::new(RegistrationClient::new(config).unwrap());
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let hb = client.clone();
+        let hb_m = m.clone();
+        let handle = tokio::spawn(async move {
+            // 유예 1초는 루프의 하한(주기+1초)에 걸려 2초가 된다 — 즉 첫
+            // 실패로는 멈추지 않고 최소 한 번은 재시도한다.
+            hb.run_heartbeat_loop(1, 1, "127.0.0.1:1".into(), hb_m, shutdown_rx)
+                .await;
+        });
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            m.running_agents().await.is_empty(),
+            "유예를 넘긴 단절에서는 프로세스를 유지하지 않는다"
+        );
+        let buffered = client.pending_fenced.lock().unwrap().clone();
+        assert_eq!(buffered.len(), 1, "멈춘 Agent 하나가 사건으로 남아야 한다");
+        assert_eq!(buffered[0].agent_id, a);
+        assert!(
+            buffered[0].unreachable_secs >= 2,
+            "실제로 잰 경과 시간을 실어야 한다 — 받은 값 {}",
+            buffered[0].unreachable_secs
+        );
+    }
+
+    /// 유예 안의 단절은 아무것도 건드리지 않는다. 여기서 성급하면 잠깐의
+    /// 네트워크 흔들림이 곧바로 진행 중인 작업의 손실이 되고, 그 대가로 얻는
+    /// 안전은 없다 — 중복 실행은 오케스트레이터의 재배정 술어(`#67` 게이트 ②)가
+    /// 이미 막는다.
+    #[tokio::test]
+    async fn an_outage_within_the_deadline_leaves_agents_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, _) = manager_running_one(&dir, "39640-39659").await;
+
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url("http://127.0.0.1:1")
+                .build(),
+        );
+        let client = Arc::new(RegistrationClient::new(config).unwrap());
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let hb = client.clone();
+        let hb_m = m.clone();
+        let handle = tokio::spawn(async move {
+            hb.run_heartbeat_loop(1, 3600, "127.0.0.1:1".into(), hb_m, shutdown_rx)
+                .await;
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert_eq!(
+            m.running_agents().await.len(),
+            1,
+            "여러 beat이 실패해도 유예 안이면 그대로 둔다"
+        );
+        assert!(
+            client.pending_fenced.lock().unwrap().is_empty(),
+            "멈춘 것이 없으므로 보고할 사건도 없다"
+        );
+    }
 
     /// heartbeat 루프 테스트용 Agent 매니저.
     ///
@@ -1056,7 +1248,13 @@ mod tests {
         let hb_client = client.clone();
         let hb_handle = tokio::spawn(async move {
             hb_client
-                .run_heartbeat_loop(1, "127.0.0.1:1".into(), test_agent_manager(), shutdown_rx)
+                .run_heartbeat_loop(
+                    1,
+                    300,
+                    "127.0.0.1:1".into(),
+                    test_agent_manager(),
+                    shutdown_rx,
+                )
                 .await;
         });
 
@@ -1131,6 +1329,7 @@ mod tests {
             agent_acks: Vec::new(),
             agent_observations: None,
             agent_orphans: Vec::new(),
+            agent_fenced: Vec::new(),
         };
         let json = serde_json::to_value(&req).unwrap();
         let obj = json.as_object().unwrap();
@@ -1170,6 +1369,14 @@ mod tests {
         assert!(
             !obj.contains_key("agent_orphans"),
             "agent_orphans must be omitted when empty"
+        );
+        // `agent_fenced`(로드맵 #67 게이트 ⑥)도 같은 사건 목록이다. 이 필드가
+        // 특히 자주 비는 이유가 있다 — 펜싱은 단절이 유예를 넘긴 beat **한
+        // 번만** 사건을 만들고(`fence_all`이 표를 비운다) 그 뒤로는 연결이
+        // 돌아올 때까지 계속 비어 있다.
+        assert!(
+            !obj.contains_key("agent_fenced"),
+            "agent_fenced must be omitted when empty"
         );
     }
 

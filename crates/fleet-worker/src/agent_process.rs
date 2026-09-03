@@ -583,6 +583,36 @@ impl AgentProcessManager {
         terminate_all(drained).await;
     }
 
+    /// 제어면을 잃었을 때 이 Worker의 Agent 프로세스를 **전부** 멈추고, 멈춘
+    /// 것들의 id를 돌려준다 (로드맵 `#67` 게이트 ⑥).
+    ///
+    /// [`Self::shutdown_all`]과 프로세스를 다루는 방식은 같고 두 가지가 다르다.
+    ///
+    /// 첫째, **workspace를 지우지 않는다.** 배정은 여전히 유효하고 연결이
+    /// 돌아오면 같은 Agent가 같은 자리에서 다시 뜬다 — 여기서 지우면 펜싱이
+    /// 네트워크 단절을 작업 손실로 바꾼다. workspace를 지우는 것은
+    /// `remove_workspace`가 다루는 **미배치** 경로뿐이다.
+    ///
+    /// 둘째, 멈춘 id를 돌려준다. 상태는 다음 beat의 관측 목록이 저절로
+    /// 바로잡지만(멈춘 Agent가 목록에서 빠지면 오케스트레이터가 그 관측을
+    /// 지운다) 그 경로는 **왜** 멈췄는지를 나르지 못한다.
+    ///
+    /// spawn 기록은 `shutdown_all`과 같은 이유로 지운다 — 이것은 의도된 정지라
+    /// 기록을 남기면 다음 기동의 sweep이 **정상 종료를 고아로** 신고한다.
+    ///
+    /// 두 번 불러도 안전하다. 첫 호출이 표를 비우므로 두 번째는 빈 목록을
+    /// 돌려주고, 그래서 호출자가 "이미 펜싱했다"는 상태를 따로 들 필요가 없다.
+    pub async fn fence_all(&self) -> Vec<AgentId> {
+        let mut procs = self.procs.lock().await;
+        let drained: Vec<(AgentId, AgentProc)> = procs.drain().collect();
+        let fenced: Vec<AgentId> = drained.iter().map(|(id, _)| *id).collect();
+        for id in &fenced {
+            self.remove_spawn_record(*id).await;
+        }
+        terminate_all(drained).await;
+        fenced
+    }
+
     /// 범위에서 아직 쓰지 않는 포트 하나.
     ///
     /// 우리가 이미 잡은 포트를 제외한 뒤, 남은 후보를 **실제로 bind해 본다**.
@@ -1048,6 +1078,105 @@ mod tests {
         assert!(
             m2.sweep_stale_incarnation().await.is_empty(),
             "그러므로 다음 기동은 신고할 것이 없다"
+        );
+    }
+
+    /// 펜싱은 돌던 것을 전부 멈추고 **무엇을 멈췄는지** 돌려준다. 그 목록이
+    /// 없으면 오케스트레이터는 Agent가 왜 멈췄는지 영영 알 수 없다 — 상태는
+    /// 다음 beat의 관측이 바로잡지만 이유를 나르는 경로는 이것뿐이다.
+    #[tokio::test]
+    async fn fencing_stops_every_process_and_names_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39520-39539", 4);
+        let (a, b) = (AgentId::new(), AgentId::new());
+
+        let _ = m
+            .reconcile(Some(&[
+                cmd(a, AgentDesiredStatus::Running),
+                cmd(b, AgentDesiredStatus::Running),
+            ]))
+            .await;
+        assert_eq!(m.running_agents().await.len(), 2, "둘 다 떠 있어야 한다");
+
+        let mut fenced = m.fence_all().await;
+        fenced.sort();
+        let mut expected = vec![a, b];
+        expected.sort();
+
+        assert_eq!(fenced, expected, "멈춘 것을 전부 이름으로 돌려준다");
+        assert!(
+            m.running_agents().await.is_empty(),
+            "펜싱 뒤에 남아 있는 프로세스가 없어야 한다"
+        );
+    }
+
+    /// **workspace는 지우지 않는다.** 배정은 여전히 유효하고 연결이 돌아오면
+    /// 같은 Agent가 같은 자리에서 다시 뜬다 — 여기서 지우면 펜싱이 네트워크
+    /// 단절을 작업 손실로 바꾼다. 미배치 경로(`remove_workspace`)와 갈리는
+    /// 자리가 정확히 여기다.
+    #[tokio::test]
+    async fn fencing_keeps_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39540-39559", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        let ws = dir.path().join(a.to_string());
+        assert!(ws.exists(), "떠 있는 동안 workspace가 있어야 한다");
+
+        m.fence_all().await;
+
+        assert!(
+            ws.exists(),
+            "펜싱은 프로세스만 멈춘다 — 배정이 살아 있으므로 작업물도 살아야 한다"
+        );
+    }
+
+    /// 펜싱은 **의도된** 정지이므로 spawn 기록을 남기지 않는다. 남기면 다음
+    /// 기동의 sweep이 이 정지를 `stale_incarnation` 고아로 신고하고, 운영자는
+    /// 네트워크를 봐야 할 자리에서 SIGKILL 흔적을 쫓게 된다.
+    #[tokio::test]
+    async fn fencing_leaves_nothing_for_the_next_sweep_to_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39560-39579", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+        m.fence_all().await;
+
+        assert!(
+            !dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "의도된 정지는 기록을 지운다"
+        );
+        let m2 = manager(&dir, fake_grok(dir.path()), "39560-39579", 4);
+        assert!(
+            m2.sweep_stale_incarnation().await.is_empty(),
+            "그러므로 다음 기동은 이 정지를 고아로 신고하지 않는다"
+        );
+    }
+
+    /// 두 번째 호출은 빈 목록이다. 이것이 호출자가 "이미 펜싱했다"는 상태를
+    /// 따로 들지 않아도 되는 근거이며 — 단절이 이어지는 동안 heartbeat 루프는
+    /// 매 beat 이 함수를 부른다 — 같은 사건이 감사에 반복해서 쌓이지 않는
+    /// 이유이기도 하다.
+    #[tokio::test]
+    async fn fencing_twice_reports_the_event_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manager(&dir, fake_grok(dir.path()), "39580-39599", 4);
+        let a = AgentId::new();
+
+        let _ = m
+            .reconcile(Some(&[cmd(a, AgentDesiredStatus::Running)]))
+            .await;
+
+        assert_eq!(m.fence_all().await, vec![a], "첫 호출이 사건을 만든다");
+        assert!(
+            m.fence_all().await.is_empty(),
+            "두 번째 호출은 멈출 것이 없으므로 사건도 만들지 않는다"
         );
     }
 

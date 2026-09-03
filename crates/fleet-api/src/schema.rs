@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use fleet_core::{
-    AgentAck, AgentCommand, AgentObservation, AgentOrphan, BootstrapToken, PermissionKind,
-    WorkerLivenessMode, WorkerStatus,
+    AgentAck, AgentCommand, AgentFenced, AgentObservation, AgentOrphan, BootstrapToken,
+    PermissionKind, WorkerLivenessMode, WorkerStatus,
 };
 
 /// `POST /v1/workers/register` 요청 바디.
@@ -125,6 +125,19 @@ pub struct HeartbeatRequest {
     /// 감사 줄만 남기며, 한 beat에 받아들이는 개수에 상한을 둔다.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_orphans: Vec<AgentOrphan>,
+    /// Worker가 제어면 단절로 스스로 멈춘 Agent들 (로드맵 `#67` 게이트 ⑥).
+    ///
+    /// `agent_orphans`와 같은 사건 목록이고(빈 목록이 지우는 것이 없으므로
+    /// `Vec`이다) 같은 이유로 Worker가 통제하는 값이라 상한을 둔다.
+    ///
+    /// **이 목록으로 `agents` 행을 고치지 않는다.** 저쪽은 그럴 자리가 아예
+    /// 없어서(orphan은 미배치라 `036`이 금지한다) 감사만 남겼지만, 이쪽은
+    /// 이유가 다르다 — 고칠 필요가 없다. 같은 beat의 `agent_observations`가
+    /// 권위 있는 전체 집합이고 멈춘 Agent는 거기서 빠지므로,
+    /// `apply_agent_observations`가 그 관측을 이미 지운다. 여기서 또 쓰면 같은
+    /// 사실을 두 경로가 쓰게 되고 둘이 어긋날 수 있다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_fenced: Vec<AgentFenced>,
 }
 
 /// heartbeat 요청용 OS 정보.

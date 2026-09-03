@@ -224,7 +224,12 @@ pub async fn register_worker(
 /// 크다. 정직한 Worker가 한 beat에 이 수를 넘길 수 있는 경로는 재기동 sweep과
 /// 재조정이 겹치는 경우뿐이고, 그것도 상한을 넘지 못한다. 넘으면 그 자체가
 /// 이상 신호이므로 조용히 자르지 않고 경고를 남긴다.
-const MAX_ORPHANS_PER_BEAT: usize = 32;
+///
+/// **두 목록에 각각 적용한다** — `agent_orphans`와 `agent_fenced`(로드맵 `#67`
+/// 게이트 ⑥)다. 합산하지 않는 이유는 둘이 서로 다른 사건이고 한쪽이 많다고
+/// 다른 쪽을 잘라야 할 이유가 없기 때문이며, 그래도 한 beat의 총량은 여전히
+/// 유한하다.
+const MAX_AGENT_EVENTS_PER_BEAT: usize = 32;
 
 /// `POST /v1/workers/heartbeat`.
 #[tracing::instrument(skip(state, req, headers), fields(worker_id = %req.worker_id, active_tasks = req.active_tasks))]
@@ -422,7 +427,7 @@ pub async fn heartbeat(
     // 이유는, 그렇게 하면 감사 저장 장애 하나가 Worker를 `Offline`으로 떨어뜨려
     // 훨씬 큰 것을 잃기 때문이다. 대신 `error!`로 남긴다 — 이 자리의 실패는
     // `warn!`인 위의 둘과 달리 되돌릴 수 없다.
-    for orphan in req.agent_orphans.iter().take(MAX_ORPHANS_PER_BEAT) {
+    for orphan in req.agent_orphans.iter().take(MAX_AGENT_EVENTS_PER_BEAT) {
         let event = AuditEvent::success(
             format!("worker:{worker_id}"),
             action::AGENT_ORPHAN_TERMINATED,
@@ -441,12 +446,47 @@ pub async fn heartbeat(
             );
         }
     }
-    if req.agent_orphans.len() > MAX_ORPHANS_PER_BEAT {
+    if req.agent_orphans.len() > MAX_AGENT_EVENTS_PER_BEAT {
         tracing::warn!(
             %worker_id,
             reported = req.agent_orphans.len(),
-            cap = MAX_ORPHANS_PER_BEAT,
+            cap = MAX_AGENT_EVENTS_PER_BEAT,
             "worker reported more orphans than one beat accepts — the rest are dropped"
+        );
+    }
+    // 제어면 단절로 Worker가 스스로 멈춘 Agent들을 감사에 남긴다
+    // (로드맵 #67 게이트 ⑥).
+    //
+    // **`agents` 행은 여기서도 건드리지 않는다.** 위의 orphan과 이유가 다르다 —
+    // 저쪽은 미배치라 쓸 자리가 없었지만, 이쪽은 **이미 쓰였다**. 같은 요청의
+    // `agent_observations`가 권위 있는 전체 집합이고 멈춘 Agent는 거기서
+    // 빠지므로 위의 `apply_agent_observations`가 그 관측을 지운 뒤다. 그래서
+    // 남길 것은 상태가 아니라 **이유**뿐이다.
+    //
+    // 손실의 성격도 orphan과 같아 `error!`를 쓴다 — 단절 중에 일어난 일회성
+    // 사건이라 여기서 놓치면 되살릴 원천이 없다.
+    for fenced in req.agent_fenced.iter().take(MAX_AGENT_EVENTS_PER_BEAT) {
+        let event = AuditEvent::success(format!("worker:{worker_id}"), action::AGENT_SELF_FENCED)
+            .target("agent", fenced.agent_id.to_string())
+            .detail(serde_json::json!({
+                "worker_id": worker_id.to_string(),
+                "unreachable_secs": fenced.unreachable_secs,
+            }));
+        if let Err(e) = state.store.record_audit_event(&event).await {
+            tracing::error!(
+                %worker_id,
+                agent_id = %fenced.agent_id,
+                error = %e,
+                "failed to record an agent self-fencing — the event is lost"
+            );
+        }
+    }
+    if req.agent_fenced.len() > MAX_AGENT_EVENTS_PER_BEAT {
+        tracing::warn!(
+            %worker_id,
+            reported = req.agent_fenced.len(),
+            cap = MAX_AGENT_EVENTS_PER_BEAT,
+            "worker reported more fenced agents than one beat accepts — the rest are dropped"
         );
     }
     // 같은 이유로 조회 실패도 치명적이지 않다. 다만 **빈 목록으로 대신하지

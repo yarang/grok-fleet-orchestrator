@@ -154,6 +154,22 @@ pub mod action {
     /// 방어가 뚫렸는지를 **관측할 방법이 지금까지 없었다**. `reason = unplaced`인
     /// 줄 하나가 그 창이 실제로 열렸다는 증거다.
     pub const AGENT_ORPHAN_TERMINATED: &str = "agent.orphan_terminated";
+    /// Worker가 제어면을 잃어 스스로 자기 Agent 프로세스를 멈췄다
+    /// (로드맵 #67 게이트 ⑥). `detail.worker_id`와
+    /// `detail.unreachable_secs`가 들어간다.
+    ///
+    /// `AGENT_ORPHAN_TERMINATED`와 actor 규칙은 같고(만든 것은 heartbeat이므로
+    /// `worker:<id>`) 사후 증거라는 성격도 같다. 다른 것은 **운영자의 처방**이다
+    /// — orphan의 `unplaced`는 "중복 실행을 막는 술어가 뚫렸다"를 뜻해 코드를
+    /// 보게 하지만, 이 줄은 그 Worker가 얼마나 오래 고립됐는지를 말하므로
+    /// 네트워크를 보게 한다.
+    ///
+    /// **이 줄은 늦게 도착한다.** 사건은 단절 중에 일어나고 보고는 연결이
+    /// 돌아온 뒤에야 실리므로, `created_at`은 종료 시각이 아니라 재연결
+    /// 시각이다. 종료 시점을 알아야 하면 `detail.unreachable_secs`를 빼서
+    /// 거슬러 올라간다. Worker가 영영 돌아오지 않으면 이 줄도 오지 않는다 —
+    /// 그때 남는 신호는 `HealthChecker`가 찍는 Worker의 `Offline` 전이뿐이다.
+    pub const AGENT_SELF_FENCED: &str = "agent.self_fenced";
     /// AgentTemplate 정체성 생성 (로드맵 #86). `detail.project_id`가 없으면
     /// 전역 템플릿이다.
     pub const AGENT_TEMPLATE_CREATE: &str = "agent_template.create";

@@ -171,7 +171,7 @@ async fn full_lifecycle_register_heartbeat_deregister() {
     let hb_client = client.clone();
     let hb_handle = tokio::spawn(async move {
         hb_client
-            .run_heartbeat_loop(1, grok_addr, test_agent_manager(), shutdown_rx)
+            .run_heartbeat_loop(1, 300, grok_addr, test_agent_manager(), shutdown_rx)
             .await;
     });
 
@@ -242,7 +242,13 @@ async fn heartbeat_reports_unhealthy_when_grok_down() {
     let hb_client = client.clone();
     let hb_handle = tokio::spawn(async move {
         hb_client
-            .run_heartbeat_loop(1, "127.0.0.1:9".into(), test_agent_manager(), shutdown_rx)
+            .run_heartbeat_loop(
+                1,
+                300,
+                "127.0.0.1:9".into(),
+                test_agent_manager(),
+                shutdown_rx,
+            )
             .await;
     });
 

@@ -42,7 +42,7 @@ pub mod worker;
 
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
 pub use agent::{
-    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFilter, AgentObservation,
+    Agent, AgentAck, AgentCommand, AgentDesiredStatus, AgentFenced, AgentFilter, AgentObservation,
     AgentObservationReason, AgentObservedStatus, AgentOrphan, AgentOrphanReason, AgentStatus,
 };
 pub use agent_template::{

@@ -450,6 +450,104 @@ async fn agent_orphan_terminations_reported_by_a_worker_are_audited() {
     assert_eq!(events[0].actor_label, format!("worker:{worker_id}"));
 }
 
+/// Worker가 제어면을 잃어 스스로 Agent를 멈췄다는 사실이 감사에 도달한다
+/// (로드맵 `#67` 게이트 ⑥).
+///
+/// **상태가 아니라 이유를 나르는 경로다.** 멈춘 Agent가 관측 목록에서 빠지면
+/// `apply_agent_observations`가 그 관측을 지우므로 상태는 저절로 옳아진다.
+/// 그러나 그 경로는 **왜** 멈췄는지를 말하지 못해, 운영자에게는 멀쩡하던
+/// Agent가 이유 없이 사라진 것으로 보인다.
+#[tokio::test]
+async fn agent_self_fencing_reported_by_a_worker_is_audited() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let state = AppState::new(store.clone());
+    let srv = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let reg: serde_json::Value = client
+        .post(format!("{}/v1/workers/register", srv.url))
+        .json(&json!({
+            "name": "fencing-reporter",
+            "agent_endpoint": "wss://10.0.9.9:2419/ws",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let worker_id = reg["worker_id"].as_str().unwrap().to_string();
+
+    // orphan과 달리 이 Agent는 이 Worker에 **배정돼 있었다**. 그래서 이 보고는
+    // 관측이 이미 지운 상태를 다시 쓰지 않고 이유만 남긴다.
+    let fenced_agent = uuid::Uuid::new_v4().to_string();
+    let hb = client
+        .post(format!("{}/v1/workers/heartbeat", srv.url))
+        .json(&json!({
+            "worker_id": worker_id,
+            "agent_fenced": [
+                {"agent_id": fenced_agent, "unreachable_secs": 312}
+            ],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        hb.status(),
+        200,
+        "펜싱 보고가 heartbeat을 실패시키지 않는다"
+    );
+
+    let events = find_events(&store, fleet_core::audit::action::AGENT_SELF_FENCED).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].target_id.as_deref(), Some(fenced_agent.as_str()));
+    assert_eq!(events[0].detail["worker_id"], worker_id);
+    // 경과 시간이 실려야 종료 시각을 거슬러 올라갈 수 있다 — 이 줄의
+    // `created_at`은 종료가 아니라 **재연결** 시각이다.
+    assert_eq!(events[0].detail["unreachable_secs"], 312);
+    assert!(events[0].actor_user_id.is_none());
+    assert_eq!(events[0].actor_label, format!("worker:{worker_id}"));
+}
+
+/// 펜싱 보고도 상한을 넘지 못한다. 두 목록에 각각 걸리며, 그래서 한쪽을
+/// 가득 채워 다른 쪽의 상한을 밀어낼 수 없다.
+#[tokio::test]
+async fn a_single_beat_cannot_write_unbounded_self_fencing_audit_rows() {
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+    let state = AppState::new(store.clone());
+    let srv = spawn(state).await;
+    let client = reqwest::Client::new();
+
+    let reg: serde_json::Value = client
+        .post(format!("{}/v1/workers/register", srv.url))
+        .json(&json!({"name": "noisy-fencer", "agent_endpoint": "wss://10.0.9.9:2419/ws"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let worker_id = reg["worker_id"].as_str().unwrap().to_string();
+
+    let fenced: Vec<serde_json::Value> = (0..100)
+        .map(|_| json!({"agent_id": uuid::Uuid::new_v4().to_string(), "unreachable_secs": 600}))
+        .collect();
+    let hb = client
+        .post(format!("{}/v1/workers/heartbeat", srv.url))
+        .json(&json!({"worker_id": worker_id, "agent_fenced": fenced}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hb.status(), 200);
+
+    let events = find_events(&store, fleet_core::audit::action::AGENT_SELF_FENCED).await;
+    assert_eq!(
+        events.len(),
+        32,
+        "상한(MAX_AGENT_EVENTS_PER_BEAT)까지만 기록한다"
+    );
+}
+
 /// 한 beat이 남기는 줄 수에 상한이 있다.
 ///
 /// 이 목록은 **Worker가 통제한다.** 인증된 Worker라는 것과 그 Worker가 보내는
@@ -493,6 +591,6 @@ async fn a_single_beat_cannot_write_unbounded_orphan_audit_rows() {
     assert_eq!(
         events.len(),
         32,
-        "상한(MAX_ORPHANS_PER_BEAT)까지만 기록한다"
+        "상한(MAX_AGENT_EVENTS_PER_BEAT)까지만 기록한다"
     );
 }

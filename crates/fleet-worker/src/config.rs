@@ -11,6 +11,7 @@
 //! labels = { arch = "arm64", gpu = "false" }
 //! existing_worker_id = "550e8400-..."  # 재등록 시 ID 유지 (옵션)
 //! liveness_mode = "periodic"           # "periodic" | "on_demand" (기본 periodic, 옵션)
+//! agent_fence_after_secs = 300         # 제어면 단절이 이만큼 이어지면 Agent를 멈춘다
 //!
 //! [grok]
 //! bin = "/usr/local/bin/grok"
@@ -78,6 +79,22 @@ pub struct WorkerSection {
     /// 하트비트 주기 (초).
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u32,
+    /// 제어면과 이만큼 끊겨 있으면 이 Worker가 자기 Agent 프로세스를 스스로
+    /// 멈춘다 (로드맵 `#67` 게이트 ⑥).
+    ///
+    /// **기본값이 넉넉한 데에는 이유가 있다.** 같은 Agent가 두 곳에서 도는
+    /// 것은 이미 오케스트레이터가 막는다 — 게이트 ②가 재배정 UPDATE에
+    /// `observed_status`를 술어로 걸어, `running`으로 보고된 Agent는 다른
+    /// Worker로 옮겨지지 않는다. 그래서 이 유예는 **안전을 사는 값이 아니라**
+    /// 감독 없는 실행이 얼마나 길어지는지를 정하는 값이다. 짧게 잡으면 잠깐의
+    /// 네트워크 단절이 곧바로 진행 중인 작업의 손실이 되고, 그 대가로 얻는
+    /// 안전은 이미 다른 곳에서 지불돼 있어 없다.
+    ///
+    /// 오케스트레이터가 Worker를 `Offline`으로 판정하는 기준(기본
+    /// `15s × 3 = 45s`)보다 **한참 커야 한다.** 그보다 짧으면 오케스트레이터가
+    /// 이 Worker를 아직 살아 있다고 보는 동안 프로세스가 사라진다.
+    #[serde(default = "default_agent_fence_after")]
+    pub agent_fence_after_secs: u32,
     /// register/heartbeat/deregister bearer 인증에 쓰는 worker operational
     /// credential (로드맵 #60). `fleet-worker join`이 발급받아 이 필드에
     /// 기록하며, `fleet workers credential rotate/revoke` 뒤에는 재-join하거나
@@ -157,6 +174,12 @@ fn default_restart_delay() -> u32 {
 }
 fn default_agent_port_range() -> String {
     "2420-2519".to_string()
+}
+/// 5분. 오케스트레이터의 기본 Offline 판정(45초)의 여섯 배가 넘는다 —
+/// 필드 독스트링이 적은 대로 이 값은 안전이 아니라 감독 없는 실행의 상한을
+/// 정하므로, 짧게 잡을 이유가 없고 짧게 잡으면 잃기만 한다.
+fn default_agent_fence_after() -> u32 {
+    300
 }
 fn default_max_agent_processes() -> u32 {
     4
@@ -240,6 +263,15 @@ impl WorkerConfig {
         {
             return Err(WorkerError::Config(
                 "worker.orchestrator_url must start with http:// or https://".into(),
+            ));
+        }
+        // 유예가 한 beat보다 짧으면 heartbeat 한 번을 놓치자마자 펜싱한다 —
+        // 재시도의 기회가 원리적으로 없어져 이 값이 "단절"이 아니라 "실패
+        // 한 번"을 뜻하게 된다.
+        if self.worker.agent_fence_after_secs <= self.worker.heartbeat_interval_secs {
+            return Err(WorkerError::Config(
+                "worker.agent_fence_after_secs must be greater than worker.heartbeat_interval_secs"
+                    .into(),
             ));
         }
         if self.grok.bin.is_empty() {
@@ -469,6 +501,7 @@ pub struct WorkerConfigBuilder {
     agent_port_range: Option<String>,
     agent_workspace_root: Option<String>,
     max_agent_processes: Option<u32>,
+    agent_fence_after_secs: Option<u32>,
 }
 
 impl WorkerConfigBuilder {
@@ -529,6 +562,11 @@ impl WorkerConfigBuilder {
         self.max_agent_processes = Some(n);
         self
     }
+    /// 제어면 단절 유예 오버라이드 (테스트용). 기본값은 프로덕션과 같은 300초.
+    pub fn agent_fence_after_secs(mut self, n: u32) -> Self {
+        self.agent_fence_after_secs = Some(n);
+        self
+    }
     pub fn liveness_mode(mut self, mode: WorkerLivenessMode) -> Self {
         self.liveness_mode = mode;
         self
@@ -541,6 +579,9 @@ impl WorkerConfigBuilder {
                     .orchestrator_url
                     .unwrap_or_else(|| "http://127.0.0.1:8080".into()),
                 heartbeat_interval_secs: 1,
+                agent_fence_after_secs: self
+                    .agent_fence_after_secs
+                    .unwrap_or_else(default_agent_fence_after),
                 operational_token: self.operational_token,
                 labels: self.labels,
                 existing_worker_id: None,
@@ -634,6 +675,48 @@ secret = "x"
 "#;
         let err = toml.parse::<WorkerConfig>().unwrap_err();
         assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    /// 유예가 beat 주기보다 짧거나 같으면 heartbeat 한 번의 실패가 곧바로
+    /// 펜싱이 된다 — 재시도의 기회가 원리적으로 없어져, 그 값은 "단절"이
+    /// 아니라 "실패 한 번"을 뜻하게 된다.
+    #[test]
+    fn rejects_a_fence_deadline_that_leaves_no_room_to_retry() {
+        let toml = r#"
+[worker]
+name = "x"
+orchestrator_url = "http://localhost"
+heartbeat_interval_secs = 30
+agent_fence_after_secs = 30
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let err = toml.parse::<WorkerConfig>().unwrap_err();
+        assert!(matches!(err, WorkerError::Config(_)));
+    }
+
+    /// 기본값은 오케스트레이터의 Offline 판정(기본 45초)보다 한참 크다.
+    /// 짧게 잡아서 얻는 안전은 게이트 ②가 이미 지불했으므로 없고, 잃는 것은
+    /// 잠깐의 네트워크 흔들림에 날아가는 진행 중인 작업이다.
+    #[test]
+    fn the_default_fence_deadline_outlasts_the_orchestrator_offline_call() {
+        let toml = r#"
+[worker]
+name = "x"
+orchestrator_url = "http://localhost"
+
+[grok]
+bin = "/x"
+secret = "x"
+"#;
+        let config: WorkerConfig = toml.parse().unwrap();
+        assert_eq!(config.worker.agent_fence_after_secs, 300);
+        assert!(
+            config.worker.agent_fence_after_secs > 45,
+            "45초는 HealthConfig의 기본값(15초 × 3회)이다"
+        );
     }
 
     #[test]
