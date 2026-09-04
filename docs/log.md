@@ -2,7 +2,7 @@
 type: wiki
 status: canonical
 source: "docs/log.md"
-last_verified: "2026-09-03"
+last_verified: "2026-09-04"
 ---
 
 # Docs — 변경 로그 (Log)
@@ -6568,3 +6568,50 @@ Worker를 삭제하라". 그 근거는 "유예를 넘겼으면 프로세스는 �
 것이 아니라 `.fleet-agent.json`에 적힌 pid를 **직접** 죽이는 것이다: `process::abort`는 소멸자를
 돌리지 않으므로 `kill_on_drop`이 자식에게 SIGKILL을 보내지 못한다. 즉 워커를 죽여도 Agent는
 살아남는다. 이 증분에서는 만들지 않았고, 036의 운영 규칙은 그 경우에 대해 여전히 성립하지 않는다.
+
+---
+
+## 2026-09-04 — ingest: 게이트 ⑥의 E2E, 그리고 그 시험이 잡아낸 내 서술 오류
+
+**E2E를 쓴 이유는 증명이 두 조각으로 나뉘어 있었기 때문이다.** 워커 쪽 시험은 유예를 넘긴 단절에서
+프로세스가 멈추는 것까지 보고, 저장소 쪽 시험은 관측 없는 Agent가 옮겨지는 것을 본다. 그 사이를 잇는
+것이 없었다. `crates/fleet-worker/tests/self_fencing_e2e.rs`가 진짜 오케스트레이터를 in-process로
+띄우고 배정→기동→관측 도달→파티션→유예 초과→정지→회복→감사 도달→재기동 수렴까지 한 줄기로 세운다.
+`fleet-worker`에 `fleet-api`를 dev-dep으로 넣었고 순환이 아니다(`fleet-api`는 `fleet-worker`를
+의존하지 않는다).
+
+**시험이 내 서술 하나를 반증했다.** 게이트 ⑥을 넣으면서 "펜싱이 게이트 ②의 술어를 풀 수 있게
+만든다 — 관측을 지우는 유일한 경로가 그 워커의 다음 heartbeat이므로 멈추고 재연결해야 Agent가
+자유로워진다"고 적었다. **재연결은 관측을 지우지 않고 되살린다.** 오케스트레이터가 여전히 그 Agent를
+그 Worker에서 원하므로(`desired=running`) 워커는 연결이 돌아오자마자 다시 띄운다. 배정이 그대로인 한
+그것이 옳은 동작이고, 갇힌 Agent를 실제로 푸는 것은 배치를 거두거나 Worker를 지우는 것(036)이다.
+펜싱이 더하는 것은 그 판단에 붙는 **시간 상한**이지 술어의 해제가 아니다. 이틀 전 036에 대해 "푸는
+경로가 없다"고 틀렸던 것과 같은 자리에서, 이번에는 반대 방향으로 틀렸다 — 둘 다 관측을 지우는 경로를
+한 축으로만 읽은 결과다.
+
+**파티션을 만드는 방법이 처음 것부터 틀렸다.** 오케스트레이터 태스크를 `abort`하면 파티션이 되지
+않는다. `abort`는 accept 루프만 끊고, 이미 맺어진 연결을 서빙하는 태스크는 그대로 살아남는다. 워커의
+`reqwest`는 연결을 풀에 넣어 재사용하므로(로그의 `pooling idle connection`) 서버를 "죽인" 뒤에도
+heartbeat이 계속 성공했고, 그래서 펜싱이 발동하지 않았다. 해결은 워커와 오케스트레이터 **사이**에 TCP
+링크를 두고 그것을 끊는 것이다 — 연결 태스크를 `JoinSet`에 담아 링크 태스크가 소유하므로 `abort`가
+소켓까지 함께 닫는다. 이름 그대로의 파티션이 되기도 한다: 오케스트레이터는 내내 살아 있다.
+
+**그 전에 하루치 시간을 먹은 것은 시험용 가짜 grok이었다.** 인자를 무시하고 `sleep 300`을 하는
+스크립트를 grok 바이너리로 줬는데, `heartbeat_once`가 첫 beat에서 `grok --version`을 **블로킹**
+`std::process::Command::output()`으로 부른다(`detect_grok_version`). 그래서 heartbeat이 자식 수명만큼
+런타임 스레드를 붙잡았고, 증상은 "5초 `tokio::time::sleep`이 300초 걸린다"였다. 원인을 찾은 것은
+추론이 아니라 `gdb -p <pid> -batch -ex "thread apply all bt"`였다 — 스택 한 장이
+`heartbeat_once → detect_version → Command::output → wait4`를 그대로 보여줬다. **간헐적으로 보이는
+정지에는 스택을 뜨는 것이 가장 짧은 길이다.**
+
+**그 과정에서 제품 쪽 관찰도 하나 남긴다(고치지 않았다).** `detect_grok_version`은 타임아웃 없는
+블로킹 `Command::output()`을 async 런타임 위에서 부른다. `get_or_init`이라 한 번만 돌지만, 그 한 번이
+`grok --version`에 걸리면 heartbeat 루프가 무기한 멈춘다 — 그리고 그 정지는 `JoinHandle`이 끝나지
+않으므로 어제 넣은 `await_shutdown`이 잡지 못한다. 즉 게이트 ⑥이 문서에 "덮지 못한다"고 적어 둔
+바로 그 부류의 실재하는 경로다. 고치려면 `spawn_blocking` + 타임아웃이면 되지만 게이트 ⑥의 범위가
+아니라 남긴다.
+
+**게이트는 여전히 부분이다.** 요구는 self-fencing **과** stale process cleanup의 E2E인데 앞의 절반만
+덮었다 — 재기동 뒤 `sweep_stale_incarnation`이 살아남은 자식을 걷는 경로는 단위 시험이 증명하고 이
+E2E에는 없다. Store도 `MemStore`다(그 대가로 `DATABASE_URL` 없이 모든 잡에서 돈다 — §4.3이 경고한
+조건부 게이트를 피한다).

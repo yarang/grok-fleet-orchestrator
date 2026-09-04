@@ -50,6 +50,9 @@ hex = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+fleet-api = { workspace = true }
+fleet-store = { workspace = true, features = ["test-support"] }
+serde_json = { workspace = true }
 axum = { version = "0.7", features = ["json"] }
 tempfile = "3"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
