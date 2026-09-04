@@ -5443,3 +5443,284 @@ async fn permitted_request_is_not_audited_as_denial() {
         "허용된 요청은 거절 감사를 남기지 않아야 한다: {events:?}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Dashboard mutation 감사 (로드맵 #95 3단계)
+//
+//  `audit_contract.rs`가 "모든 mutation route가 분류됐는가"를 잠근다면,
+//  여기서는 "실제로 행이 남는가, 그리고 **남지 않아야 할 때 남지 않는가**"를
+//  HTTP로 확인한다. 후자가 더 중요하다 — 무조건 기록하는 구현도 긍정
+//  테스트만으로는 초록이기 때문이다.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// 감사 표에서 특정 action의 행만 가져온다.
+async fn audit_rows(store: &Arc<dyn Store>, action: &str) -> Vec<fleet_core::AuditEvent> {
+    store
+        .list_audit_events(&fleet_core::AuditFilter {
+            action: Some(action.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
+/// Issue 수정 감사는 바뀐 **필드 이름**만 남기고 값은 남기지 않는다.
+///
+/// title/body는 사용자가 붙여 넣는 임의 텍스트라 자격증명이 섞여 들어올 수
+/// 있고, 감사 로그는 보관 기간이 길고 열람 범위가 넓다. 바뀐 뒤의 값은 Issue
+/// 행이 이미 보존하므로 감사가 값을 중복 보관할 이유도 없다.
+#[tokio::test]
+async fn issue_update_audit_records_field_names_not_values() {
+    const SENTINEL: &str = "SENTINEL-SECRET-VALUE-9f3a";
+
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "before").await;
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::PATCH,
+        &format!("http://{}/api/issues/{id}", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "title": SENTINEL, "body": SENTINEL }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    let events = audit_rows(&store, fleet_core::audit::action::ISSUE_UPDATE).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+
+    assert_eq!(event.outcome, fleet_core::AuditOutcome::Success);
+    assert_eq!(event.actor_label, "test_admin");
+    assert!(event.actor_user_id.is_some());
+    assert_eq!(event.target_type.as_deref(), Some("issue"));
+    assert_eq!(event.target_id.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        event.project_id,
+        Some(project.id),
+        "Issue 수정은 Project를 알 수 있는 자리다 — 상관 키가 비면 \
+         프로젝트 단위 조회에서 이 행이 사라진다: {event:?}"
+    );
+    assert_eq!(
+        event.ip_address.as_deref(),
+        Some("127.0.0.1"),
+        "mutation 감사에도 출처 IP가 실려야 한다: {event:?}"
+    );
+
+    let fields: Vec<&str> = event
+        .detail
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .expect("detail.fields")
+        .iter()
+        .map(|v| v.as_str().expect("필드 이름은 문자열"))
+        .collect();
+    assert_eq!(fields, vec!["title", "body"], "{event:?}");
+
+    // 값이 새어 나가지 않았는가. `Debug`로 통째로 훑는 이유는 detail만 보면
+    // target_id·actor_label 등 다른 칸으로 새는 경로를 놓치기 때문이다.
+    assert!(
+        !format!("{event:?}").contains(SENTINEL),
+        "감사 행 어디에도 필드 **값**이 들어가면 안 된다: {event:?}"
+    );
+}
+
+/// 코멘트 감사는 본문을 남기지 않는다.
+#[tokio::test]
+async fn issue_comment_audit_does_not_carry_the_comment_body() {
+    const SENTINEL: &str = "SENTINEL-COMMENT-BODY-71c2";
+
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "topic").await;
+
+    let resp = authed_json(
+        &client,
+        reqwest::Method::POST,
+        &format!("http://{}/api/issues/{id}/comments", server.addr),
+        &cookie,
+    )
+    .json(&serde_json::json!({ "body": SENTINEL }))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    let events = audit_rows(&store, fleet_core::audit::action::ISSUE_COMMENT).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(event.project_id, Some(project.id));
+    assert_eq!(event.ip_address.as_deref(), Some("127.0.0.1"));
+    assert!(
+        event.detail.get("comment_id").is_some(),
+        "어느 코멘트인지는 남아야 한다 — 본문은 `issue_comments` 행에서 찾는다: {event:?}"
+    );
+    assert!(
+        !format!("{event:?}").contains(SENTINEL),
+        "본문이 감사에 들어가면 안 된다: {event:?}"
+    );
+}
+
+/// 멱등 재연결은 감사 행을 늘리지 않는다.
+///
+/// 이 단정이 없으면 "몇 번 연결했는가"가 아니라 "몇 번 요청했는가"를 세는
+/// 감사가 된다. 두 숫자가 갈리는 순간 감사 행 수는 사실을 말하지 않는다.
+#[tokio::test]
+async fn linking_the_same_task_twice_is_audited_once() {
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "work").await;
+
+    let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
+        prompt: "do the work".into(),
+        created_by: "test".into(),
+        ..Default::default()
+    });
+    store.insert_task(&task).await.unwrap();
+
+    let url = format!("http://{}/api/issues/{id}/links", server.addr);
+    let body = serde_json::json!({ "task_id": task.id.to_string() });
+
+    for expected_created in [true, false] {
+        let resp = authed_json(&client, reqwest::Method::POST, &url, &cookie)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.json::<serde_json::Value>().await.unwrap()["created"],
+            expected_created,
+            "두 번째 연결은 아무것도 만들지 않는다"
+        );
+    }
+
+    let events = audit_rows(&store, fleet_core::audit::action::ISSUE_LINK).await;
+    assert_eq!(
+        events.len(),
+        1,
+        "요청은 2건이지만 실제로 만들어진 링크는 1건이다: {events:?}"
+    );
+    assert_eq!(events[0].project_id, Some(project.id));
+    assert_eq!(events[0].ip_address.as_deref(), Some("127.0.0.1"));
+    assert_eq!(
+        events[0].detail.get("task_id").and_then(|v| v.as_str()),
+        Some(task.id.to_string().as_str()),
+        "어느 Task와 엮였는지가 남아야 한다: {events:?}"
+    );
+}
+
+/// 걸려 있지 않은 링크를 해제해도 감사 행은 생기지 않는다.
+///
+/// 이 경로는 HTTP 200에 `removed: false`로 조용히 성공한다. 응답만 보면
+/// 성공한 해제와 구분되지 않으므로, 감사가 이 둘을 구분하는지는 여기서만
+/// 확인된다.
+#[tokio::test]
+async fn unlinking_a_task_that_is_not_linked_is_not_audited() {
+    let (server, cookie, store, project) = spawn_issue_server(None).await;
+    let client = reqwest::Client::new();
+    let id = make_issue(&client, &server, &cookie, &project.id.to_string(), "work").await;
+
+    let never_linked = fleet_core::TaskId::new();
+    let resp = authed_json(
+        &client,
+        reqwest::Method::DELETE,
+        &format!(
+            "http://{}/api/issues/{id}/links/{never_linked}",
+            server.addr
+        ),
+        &cookie,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<serde_json::Value>().await.unwrap()["removed"],
+        false
+    );
+
+    let events = audit_rows(&store, fleet_core::audit::action::ISSUE_UNLINK).await;
+    assert!(
+        events.is_empty(),
+        "아무것도 제거되지 않았으면 기록도 없어야 한다: {events:?}"
+    );
+}
+
+/// 비밀번호 재설정 요청은 **토큰이 실제로 만들어진 경우에만** 기록된다.
+///
+/// 이 엔드포인트는 계정 열거를 막기 위해 존재 여부와 무관하게 같은 응답을
+/// 준다. 그래서 두 가지가 동시에 걸려 있다.
+///
+/// 1. 존재하지 않는 이메일까지 기록하면 `actor_label`에 공격자가 넣은
+///    임의 문자열이 실린다(`actor_user_id`는 FK라 채울 수 없다). 감사 표는
+///    보관 기간이 길고 회수할 방법이 없다.
+/// 2. 반대로 아무것도 기록하지 않으면, 응답이 항상 같으므로 "그 요청이
+///    실제로 토큰을 만들었는가"를 아는 경로가 사라진다.
+///
+/// 두 분기를 한 테스트에 둔 이유는 한쪽만 있으면 통과 방법이 생기기
+/// 때문이다 — 부정만 있으면 아무것도 기록하지 않는 구현이, 긍정만 있으면
+/// 무조건 기록하는 구현이 초록이 된다.
+#[tokio::test]
+async fn forgot_password_audits_only_when_a_token_is_actually_minted() {
+    let (server, _cookie, store) = spawn_authed_server_with_store_handle(MemStore::new()).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/forgot-password", server.addr);
+    let post = |email: &str| {
+        client
+            .post(&url)
+            .header("cookie", format!("fleet_csrf={TEST_CSRF}"))
+            .form(&[("email", email), ("csrf_token", TEST_CSRF)])
+            .send()
+    };
+
+    // (1) 존재하지 않는 이메일 — 아무것도 바뀌지 않으므로 기록도 없다.
+    let resp = post("attacker-controlled@nowhere.invalid").await.unwrap();
+    assert_eq!(resp.status(), 200, "열거 방지를 위해 응답은 동일하다");
+    let events = audit_rows(
+        &store,
+        fleet_core::audit::action::AUTH_PASSWORD_RESET_REQUESTED,
+    )
+    .await;
+    assert!(
+        events.is_empty(),
+        "미존재 계정은 mutation이 없으므로 기록도 없어야 한다: {events:?}"
+    );
+
+    // (2) 실재하는 계정 — 토큰이 만들어졌으므로 기록된다.
+    let resp = post("test@example.com").await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let events = audit_rows(
+        &store,
+        fleet_core::audit::action::AUTH_PASSWORD_RESET_REQUESTED,
+    )
+    .await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(
+        event.actor_label, "test_admin",
+        "행위자는 요청자가 아니라 **대상 계정**이다 — 이 엔드포인트는 \
+         미인증이라 요청자의 신원이 증명되지 않는다: {event:?}"
+    );
+    assert!(
+        event.actor_user_id.is_some(),
+        "실재하는 사용자이므로 FK를 채울 수 있다: {event:?}"
+    );
+    assert_eq!(
+        event
+            .detail
+            .get("unauthenticated")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "이 표시가 없으면 나중에 읽는 사람이 '이 사용자가 직접 요청했다'로 \
+         오독한다: {event:?}"
+    );
+    assert_eq!(event.ip_address.as_deref(), Some("127.0.0.1"));
+    assert!(
+        event.project_id.is_none(),
+        "인증 이벤트는 Project에 속하지 않는다: {event:?}"
+    );
+}

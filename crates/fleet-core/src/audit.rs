@@ -183,6 +183,60 @@ pub mod action {
     /// "언제 누구에 의해 지워졌는가"이며, `actor`/`target`이 인덱스가 있는
     /// 자리에 남는 조회 가능한 유일한 경로라는 뜻이다.
     pub const TASK_DELETE: &str = "task.delete";
+    /// Task 제출 (로드맵 #95 3단계).
+    ///
+    /// `detail`에 **prompt를 넣지 않는다.** prompt는 사용자가 붙여 넣은 임의
+    /// 텍스트라 자격증명이 섞여 들어올 수 있고, 감사 로그는 보관 기간이 길고
+    /// 열람 범위가 넓다. 무엇이 제출됐는지는 `target_id`가 가리키는 Task 행이
+    /// 이미 보존하므로, 이 이벤트가 더할 것은 "누가·어느 Project로" 뿐이다.
+    pub const TASK_SUBMIT: &str = "task.submit";
+    /// Issue 필드 수정 (로드맵 #95 3단계). `detail.fields`에 바뀐 필드 **이름**만
+    /// 들어간다 — 값은 Issue 행에 이미 있고, 본문은 임의 사용자 텍스트다.
+    pub const ISSUE_UPDATE: &str = "issue.update";
+    /// Issue 코멘트 추가 (로드맵 #95 3단계). `detail.comment_id`만 남기고 본문은
+    /// 넣지 않는다 — [`TASK_SUBMIT`]과 같은 이유다.
+    pub const ISSUE_COMMENT: &str = "issue.comment";
+    /// Issue ↔ Task 연관 추가 (로드맵 #95 3단계).
+    ///
+    /// 이 연산은 멱등이라 이미 있는 링크를 다시 걸면 아무것도 바뀌지 않는다.
+    /// **실제로 생성된 경우에만 기록한다** — 멱등 no-op까지 남기면 감사
+    /// 행 수가 "몇 번 연결했는가"가 아니라 "몇 번 요청했는가"를 세게 된다.
+    pub const ISSUE_LINK: &str = "issue.link";
+    /// Issue ↔ Task 연관 해제 (로드맵 #95 3단계). [`ISSUE_LINK`]과 같은 이유로
+    /// 실제로 제거된 경우에만 기록한다.
+    pub const ISSUE_UNLINK: &str = "issue.unlink";
+    /// SSH 비밀키 업로드 (로드맵 #95 3단계).
+    ///
+    /// `detail`에는 fingerprint와 키 타입만 넣는다 — 비밀키 원문은 물론이고
+    /// 그 어떤 파생 평문도 넣지 않는다. fingerprint는 공개키 해시라 비밀이
+    /// 아니면서, 나중에 "그때 올라간 키가 이 키인가"를 대조할 수 있는
+    /// 유일한 값이다.
+    pub const SSH_KEY_CREATE: &str = "ssh_key.create";
+    /// SSH 비밀키 삭제 (로드맵 #95 3단계).
+    pub const SSH_KEY_DELETE: &str = "ssh_key.delete";
+    /// 원격 호스트 프로비저닝 (로드맵 #95 3단계).
+    ///
+    /// [`HOST_REGISTER`]와 다르다 — 저쪽은 Worker가 스스로 등록하는 것이고,
+    /// 이쪽은 대시보드 사용자가 원격 호스트에 SSH로 들어가 소프트웨어를
+    /// 설치하는 것이다. `detail.succeeded`가 playbook 결과이며, 실패한
+    /// playbook도 HTTP 200으로 끝나므로 **응답 코드로는 성패를 알 수 없다**.
+    ///
+    /// `detail`에 `grok_secret`·`api_token`을 넣지 않는다. 요청 구조체를
+    /// 통째로 직렬화하면 둘 다 딸려 들어간다.
+    pub const HOST_PROVISION: &str = "host.provision";
+    /// 비밀번호 재설정 링크 요청 (로드맵 #95 3단계).
+    ///
+    /// [`AUTH_PASSWORD_RESET`]은 재설정이 *완료*된 것이고 이쪽은 토큰이
+    /// *발급*된 것이다. 계정 열거 방지를 위해 응답이 항상 동일하므로,
+    /// "요청이 실제로 토큰을 만들었는가"를 아는 유일한 경로가 이 기록이다.
+    ///
+    /// 존재하지 않는 이메일에 대해서는 **기록하지 않는다.** 그 경로는 아무것도
+    /// 바꾸지 않으며, 기록하려면 `actor_label`에 공격자가 넣은 문자열을 실어야
+    /// 한다(`actor_user_id`는 FK라 채울 수 없다).
+    pub const AUTH_PASSWORD_RESET_REQUESTED: &str = "auth.password_reset_requested";
+    /// 이메일 인증 메일 재발송 (로드맵 #95 3단계). [`AUTH_PASSWORD_RESET_REQUESTED`]와
+    /// 같은 이유로 실재하는 미인증 사용자에 대해서만 기록한다.
+    pub const AUTH_VERIFICATION_RESENT: &str = "auth.verification_resent";
 }
 
 /// 감사 로그 한 건.

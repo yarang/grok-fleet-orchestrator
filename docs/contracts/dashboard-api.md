@@ -63,6 +63,13 @@ Dashboard API는 같은 저장소의 first-party UI와 함께 배포된다. 따�
 `agent_template:manage_global`이 필요하다. 전역 템플릿은 모든 Project가 보므로, Project 하나에
 대한 권한으로 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다.
 
+**이 표면의 non-GET route는 전부 감사된다**(로드맵 `#95` 3단계). 상태를 바꾸는 GET은 `/verify-email` 하나이며 이쪽도 감사된다. 권한 거절은
+`dashboard.permission_denied`로, 성공한 변경은 route별 action으로 기록된다 — 대응표와 `detail`에
+무엇을 넣지 않는지는 [인가와 감사](../security/authorization-and-audit.md)가 정본이다. 새 mutation
+route를 추가하면 `crates/fleet-dashboard/tests/audit_contract.rs`의 표도 함께 갱신해야 한다:
+그 테스트가 라우터 원문을 읽어 미분류 route를 찾아낸다. 다만 감사 기록이 **행을 실제로 남기는지**는
+그 테스트가 보지 않는다.
+
 `GET /api/audit`의 `project_id`는 형식이 깨졌을 때 **400**이다. 파싱 실패를 조용히 "필터
 없음"으로 떨어뜨리면 응답이 빈 목록이 아니라 **전체 목록**이 되는데, 감사 표면에서 그 실패
 양식은 과소 보고보다 위험하다. 형식이 옳은데 그 Project의 이벤트가 없으면 빈 목록이며, 이때

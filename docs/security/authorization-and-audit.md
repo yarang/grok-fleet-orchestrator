@@ -268,7 +268,8 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 
 위 규칙은 목표 계약이다. **`#76`(2026-08-23, 1단계)로 HTTP `/v1` 표면의 mutation과 capability 거절은
 대부분 감사된다.** `#95` 1단계(2026-09-02)가 `project_id` 상관 필드를, 2단계(2026-09-03)가 Dashboard
-`/api`의 **권한 거절**을 각각 닫았다. Dashboard의 mutation 감사와 MCP 표면 전체는 아직이다.
+`/api`의 **권한 거절**을, 3단계(2026-09-04)가 Dashboard의 **non-GET route 31개 전부와 상태를 바꾸는 GET 1개**를 각각 닫았다. MCP
+표면은 아직이다.
 
 | 경로 | 현재 감사 | 비고 |
 |---|---|---|
@@ -280,7 +281,8 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | Worker 등록·등록해제, Host 등록 | **기록함 (`#76`)** | `worker.register`/`.deregister`/`host.register`, 전부 log-only. heartbeat(고빈도)는 제외 |
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
 | Dashboard `/api` 권한 거절 | **기록함 (`#95` 2단계)** | `dashboard.permission_denied`, log-only. `require_permission`이 유일한 판단 지점이므로 그 안에서 기록한다 — 아래 참조 |
-| Dashboard mutation, MCP mutation/거절 | **없음** | Dashboard의 중앙 capability 행렬은 여전히 없다(`#92`가 다룸). MCP tool별 감사는 `ToolContext`에 호출 principal이 없어 착수 전 |
+| Dashboard `/api`·폼 mutation | **기록함 (`#95` 3단계)** | non-GET route 31개 전부, 여기에 상태를 바꾸는 GET(`/verify-email`) 1개. 라우터 원문을 읽는 계약 테스트가 분류 누락을 테스트 시점에 깨뜨린다 — 아래 참조 |
+| MCP mutation/거절 | **없음** | MCP tool별 감사는 `ToolContext`에 호출 principal이 없어 착수 전. Dashboard의 중앙 capability 행렬도 여전히 없다(`#92`가 다룸) |
 
 #### Dashboard 권한 거절 감사 (`#95` 2단계, 2026-09-03)
 
@@ -307,6 +309,99 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 고른 이유는 (1) 이 기록의 목적이 권한 열거 탐지인데 반복을 접으면 열거와 오조작을 가르는 *빈도*가
 사라지고, (2) `fleet-api`의 `record_capability_denial`도 전건 기록이라 여기만 접으면 두 표면의
 카운트를 같은 기준으로 비교할 수 없어서다. 실제 남용이 관측되기 전에는 억제를 만들지 않는다.
+
+#### Dashboard mutation 감사 (`#95` 3단계, 2026-09-04)
+
+2단계 직후의 상태는 **31개 mutation route 중 20개만 감사**였다. 빠진 11개는 무작위가 아니라
+나중에 추가된 표면들이다 — Issue의 수정·코멘트·링크, Task 제출, SSH 키, 호스트 프로비저닝,
+비밀번호 재설정 요청과 인증 메일 재발송. 원인이 여기 있다: **거절은 `require_permission`이라는
+한 지점을 지나므로 계약이지만, mutation 감사는 핸들러마다 `audit::record`를 부르는 관례였다.**
+관례는 표면이 늘어날 때마다 저자의 기억에 의존하고, 기억은 골고루 실패하지 않는다.
+
+관례를 계약으로 바꾸는 자리가 타입 시스템이 아니라는 점이 이 단계의 핵심이다. 2단계는 시그니처를
+바꿔 “감사 없이 거절하는 코드가 컴파일되지 않게” 만들 수 있었지만, mutation은 저장소 호출의
+성공 분기 안에서 일어나므로 강제할 시그니처가 없다. 그래서 `crates/fleet-dashboard/tests/audit_contract.rs`가
+**`app.rs`의 라우터 원문을 읽어** 모든 non-GET route가 표에 분류돼 있는지 확인한다. 새 mutation route를
+추가하고 표를 갱신하지 않으면 그 테스트가 깨진다.
+
+| route | action |
+|---|---|
+| `POST /login`, `POST /logout`, `POST /bootstrap` | `auth.login`, `auth.logout`, `auth.bootstrap` |
+| `POST /forgot-password`, `POST /reset-password` | `auth.password_reset_requested`, `auth.password_reset` |
+| `POST /resend-verification`, `POST /api/users/resend-verification` | `auth.verification_resent` |
+| `POST /api/users`, `POST /api/users/:id/toggle`, `POST /api/users/:id/delete` | `user.create`, `user.toggle`, `user.delete` |
+| `POST /api/projects`, `DELETE /api/projects/:id` | `project.create`, `project.archive_requested`·`project.archived` |
+| `POST /api/agents`, `POST /api/agents/:id/place`, `POST /api/agents/:id/start`, `DELETE /api/agents/:id` | `agent.create`, `agent.assign`, `agent.start`, `agent.stop` |
+| `POST /api/agent-templates` 계열 4개 | `agent_template.create`·`.revision_create`·`.revision_revoke`·`.status_change` |
+| `POST /api/issues`, `PATCH /api/issues/:id`, `POST …/comments`, `POST …/transition` | `issue.create`, `issue.update`, `issue.comment`, `issue.transition` |
+| `POST /api/issues/:id/links`, `DELETE /api/issues/:id/links/:task_id` | `issue.link`, `issue.unlink` |
+| `POST /api/tasks`, `DELETE /api/tasks/:id` | `task.submit`, `task.delete` |
+| `POST /api/ssh-keys`, `DELETE /api/ssh-keys/:name` | `ssh_key.create`, `ssh_key.delete` |
+| `POST /api/hosts/provision` | `host.provision` |
+
+**route 하나가 행 하나가 아니다.** `DELETE /api/projects/:id`는 `advance_project_archive`가 돌려준
+상태 전이를 순회하며 기록하므로 한 요청이 `project.archive_requested`와 `project.archived`를 연달아
+낼 수 있다. 그래서 계약 표는 route를 action **집합**에 대응시킨다.
+
+##### `detail`에 무엇을 넣지 않는가
+
+| 경로 | 넣는 것 | 넣지 않는 것 | 이유 |
+|---|---|---|---|
+| `issue.update` | 바뀐 **필드 이름** 목록 | 필드 값 | title/body는 임의 텍스트라 자격증명이 섞일 수 있고, 바뀐 값은 Issue 행이 이미 보존한다 |
+| `issue.comment` | `comment_id` | 코멘트 본문 | 같은 이유. 본문은 `issue_comments`에서 찾는다 |
+| `host.provision` | 호스트 이름, `succeeded`, 단계 요약 | `ProvisionRequest` 전체 | 이 구조체는 `grok_secret`과 `api_token`을 들고 있다 — 통째로 직렬화하면 비밀이 감사 표에 영구 보존된다 |
+| `auth.password_reset_requested` | `unauthenticated: true` | 재설정 토큰 | `audit.rs` 모듈 문서의 금지 규칙 |
+
+##### 기록하지 *않는* 경우가 계약의 절반이다
+
+- 멱등 재연결(`POST …/links`를 두 번)은 행을 1건만 남긴다. 요청 수가 아니라 **실제로 만들어진
+  링크 수**를 세지 않으면 감사 행 수가 사실을 말하지 않는다.
+- 걸려 있지 않은 링크의 해제는 HTTP 200 `removed: false`로 조용히 성공하며, 행을 남기지 않는다.
+- `POST /forgot-password`는 **토큰이 실제로 발급된 경우에만** 기록한다. 계정 열거 방지 때문에
+  응답이 항상 같으므로, 미존재 계정까지 기록하면 `actor_label`에 공격자가 넣은 임의 문자열이
+  실린다(`actor_user_id`는 FK라 채울 수 없다). 감사 표는 보관 기간이 길고 회수 수단이 없다.
+  기록 지점을 `if let Ok(Some(user))` 안에 둔 결과로 FK 안전성이 **따라 나온다** — 별도 검증을
+  붙인 것이 아니다.
+
+##### IP는 관례가 아니라 전건이다
+
+2단계가 `AuthPrincipal.client_ip`를 만들었지만 실제로 쓰던 곳은 거절 감사 하나였다. 3단계에서
+principal이 잡히는 mutation 감사 전부(16곳)에 `.ip_opt(principal.client_ip.clone())`를 붙였다.
+예외는 principal이 없는 두 곳(`verify_email_page`, `resend_verification_api`)이며, 이들은
+`.actor(user.id)`를 쓰므로 자연히 제외된다.
+
+##### 메서드는 상태 변경의 근사값이다
+
+계약 테스트의 스캐너는 **non-GET을 mutation으로** 센다. 값싸고 대부분 맞지만 하나를 빗나간다 —
+메일 링크로 도달하는 `GET /verify-email`은 토큰을 소비하고 `users.email_verified`를 세운다.
+링크는 GET일 수밖에 없다. 메일 클라이언트는 POST를 만들지 못한다.
+
+이 자리를 그냥 두면 `#95` 3단계가 닫으려던 결함이 정확히 한 곳에 살아남는다. `AUTH_EMAIL_VERIFIED`를
+남기는 `audit::record` 호출을 지워도 두 계약 테스트가 **모두 초록**이기 때문이다 — 스캐너는 GET을
+걸러내고, action 검증은 표를 순회하는데 그 route가 표에 없다.
+
+정의를 "본문이 상태를 바꾸는 route"로 넓히는 것은 답이 아니다. 소스 스캔으로는 그것을 판정할 수
+없고, 판정하려 들면 아래 *검증 한계*가 말하는 본문 해석의 함정으로 들어간다. 그래서 정의는 값싸게
+두고 **예외를 눈에 보이는 표로** 옮겼다 — `audit_contract.rs`의 `STATE_CHANGING_GET_ROUTES`가 항목
+하나(`GET /verify-email` → `auth.email_verified`)를 담고, 그 경로가 사라지거나 action이 지워지면
+깨진다. 다만 이 표는 사람이 적는 것이라 **새로 생긴 상태 변경 GET은 잡지 못한다**.
+
+##### 검증 한계
+
+- `host.provision`과 SSH 키 두 handler는 **런타임 테스트가 없다.** 전자는 실제 SSH 연결을,
+  후자는 키 픽스처를 요구하는데 둘 다 이 단계의 범위에 비해 과하다. 계약 테스트가 “분류돼
+  있는가”까지는 잠그지만 “실제로 행이 남는가”는 코드 읽기로만 확인했다.
+- 계약 테스트는 route 분류만 본다. 어느 핸들러가 어느 action을 내는지는 **본문을 파싱하지
+  않는다** — `provision_host_api`는 헬퍼 안에서 기록하고 `delete_project_api`는 action을 변수로
+  계산하므로, 본문 스캔은 첫날부터 예외 두 개를 안고 시작한다. 예외는 쌓이고, 쌓이면 테스트가
+  점점 더 틀린 말을 한다.
+- `STATE_CHANGING_GET_ROUTES`는 자동으로 채워지지 않는다. 지금 항목이 하나뿐인 것은 감사 호출
+  38곳의 감싸는 함수를 전부 뽑아 GET 핸들러가 `verify_email_page` 하나임을 확인한 결과이지,
+  테스트가 그것을 보장하기 때문이 아니다. 새 상태 변경 GET이 생기면 이 표는 침묵한다.
+- 계약 테스트가 `.route()` 인자에서 메서드를 하나도 인식하지 못하면 **실패하도록** 했다.
+  0개는 route가 없다는 뜻이 아니라 파서가 새 표기를 못 읽는다는 뜻인데, 그것을 통과로
+  처리하면 route가 계약에서 조용히 사라진다. 실제로 개발 중 `axum::routing::delete(...)`
+  표기를 놓쳐 31개 중 29개만 인식한 적이 있고, 그때 테스트는 **초록이었다**.
 
 ### 상관관계 필드 (`#95` 1단계, 2026-09-02)
 

@@ -684,6 +684,8 @@ pub async fn submit_task_api(
         .map_err(|e| ApiError::BadRequest(format!("cwd: {e}")))?;
 
     let task_id = task.id;
+    // `submit()`이 소유권을 가져가므로 감사에 쓸 값은 미리 꺼내 둔다.
+    let task_project_id = task.project_id;
 
     match dispatcher.submit(task).await {
         Ok(id) => {
@@ -709,6 +711,25 @@ pub async fn submit_task_api(
                 .flatten()
                 .map(|t| matches!(t.status, fleet_core::TaskStatus::Dispatched { .. }))
                 .unwrap_or(true);
+            // 멱등 흡수(`deduplicated`)는 Task 행을 만들지 않았으므로 기록하지
+            // 않는다 — `issue.link`와 같은 규칙이다. 그래서 `detail`에
+            // `deduplicated` 필드를 두지 않는다: 이 자리에서는 항상 false이고,
+            // 항상 같은 값인 필드는 읽는 사람을 오도한다.
+            if !deduplicated {
+                crate::audit::record(
+                    &state,
+                    fleet_core::AuditEvent::success(
+                        &principal.user.username,
+                        fleet_core::audit::action::TASK_SUBMIT,
+                    )
+                    .actor(principal.user.id)
+                    .project_opt(task_project_id)
+                    .target("task", id.to_string())
+                    .ip_opt(principal.client_ip.clone())
+                    .detail(serde_json::json!({ "dispatched": actually_dispatched })),
+                )
+                .await;
+            }
             Ok(Json(serde_json::json!({
                 "task_id": id,
                 "dispatched": actually_dispatched,
@@ -1074,6 +1095,7 @@ pub async fn create_user_api(
             fleet_core::audit::action::USER_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user.id.as_uuid().to_string())
         .detail(serde_json::json!({ "email": form.email })),
     )
@@ -1134,6 +1156,7 @@ pub async fn toggle_user_api(
             fleet_core::audit::action::USER_TOGGLE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user_id.as_uuid().to_string())
         .detail(serde_json::json!({
             "target_username": user.username,
@@ -1193,6 +1216,7 @@ pub async fn delete_user_api(
             fleet_core::audit::action::USER_DELETE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user_id.as_uuid().to_string())
         .detail(serde_json::json!({ "target_username": user.username })),
     )
@@ -1398,6 +1422,7 @@ pub async fn create_project_api(
             fleet_core::audit::action::PROJECT_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("project", project.id.to_string())
         .detail(serde_json::json!({ "name": project.name })),
     )
@@ -1480,6 +1505,7 @@ pub async fn delete_project_api(
             &state,
             fleet_core::AuditEvent::success(&principal.user.username, action)
                 .actor(principal.user.id)
+                .ip_opt(principal.client_ip.clone())
                 .project(project.id)
                 .target("project", project.id.to_string()),
         )
@@ -1676,6 +1702,7 @@ pub async fn create_agent_api(
             fleet_core::audit::action::AGENT_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project(agent.project_id)
         .target("agent", agent.id.to_string())
         .detail(serde_json::json!({
@@ -1826,6 +1853,7 @@ pub async fn place_agent_api(
             fleet_core::audit::action::AGENT_ASSIGN,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project(placed.project_id)
         .target("agent", agent_id.to_string())
         .detail(serde_json::json!({
@@ -1933,6 +1961,7 @@ pub async fn start_agent_api(
                 fleet_core::audit::action::AGENT_START,
             )
             .actor(principal.user.id)
+            .ip_opt(principal.client_ip.clone())
             .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
@@ -2005,6 +2034,7 @@ pub async fn stop_agent_api(
                 fleet_core::audit::action::AGENT_STOP,
             )
             .actor(principal.user.id)
+            .ip_opt(principal.client_ip.clone())
             .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
@@ -2191,6 +2221,7 @@ pub async fn create_agent_template_api(
             fleet_core::audit::action::AGENT_TEMPLATE_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project_opt(template.project_id)
         .target("agent_template", template.id.to_string())
         .detail(serde_json::json!({
@@ -2314,6 +2345,7 @@ pub async fn create_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
@@ -2393,6 +2425,7 @@ pub async fn revoke_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_REVOKE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
@@ -2519,6 +2552,7 @@ pub async fn change_agent_template_status_api(
             fleet_core::audit::action::AGENT_TEMPLATE_STATUS_CHANGE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
@@ -2696,6 +2730,7 @@ pub async fn create_issue_api(
             fleet_core::audit::action::ISSUE_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({ "project_id": project_id.to_string() })),
@@ -2740,24 +2775,35 @@ pub async fn update_issue_api(
 
     let mut issue = load_issue(&state, parse_issue_id(&id)?).await?;
 
+    // 감사 `detail`에 실을 "무엇이 바뀌었는가". **값이 아니라 필드 이름만**
+    // 모은다 — title/body는 임의 사용자 텍스트이고, 바뀐 뒤의 값은 Issue 행이
+    // 이미 보존한다. 각 분기 안에서 push하는 이유는 아래 `if let`들이 `body`의
+    // 필드를 소유권째 가져가기 때문이다(뒤에서 다시 볼 수 없다).
+    let mut changed: Vec<&'static str> = Vec::new();
+
     if let Some(title) = body.title.as_deref() {
         let title = title.trim();
         if title.is_empty() {
             return Err(ApiError::BadRequest("title must not be empty".into()));
         }
         issue.title = title.to_string();
+        changed.push("title");
     }
     if let Some(b) = body.body {
         issue.body = b;
+        changed.push("body");
     }
     if let Some(sev) = body.severity.as_deref().filter(|s| !s.is_empty()) {
         issue.severity = parse_severity(sev)?;
+        changed.push("severity");
     }
     if let Some(labels) = body.labels {
         issue.labels = labels;
+        changed.push("labels");
     }
     if let Some(assignee) = body.assignee {
         issue.assignee = assignee.filter(|s| !s.trim().is_empty());
+        changed.push("assignee");
     }
 
     state
@@ -2765,6 +2811,20 @@ pub async fn update_issue_api(
         .update_issue_fields(&issue)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_UPDATE,
+        )
+        .actor(principal.user.id)
+        .project(issue.project_id)
+        .target("issue", issue.id.to_string())
+        .ip_opt(principal.client_ip.clone())
+        .detail(serde_json::json!({ "fields": changed })),
+    )
+    .await;
 
     let issue = load_issue(&state, issue.id).await?;
     Ok(Json(issue_summary(&state, &issue).await?))
@@ -2817,6 +2877,7 @@ pub async fn transition_issue_api(
             fleet_core::audit::action::ISSUE_TRANSITION,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({
@@ -2884,6 +2945,22 @@ pub async fn add_issue_comment_api(
         .add_issue_comment(&comment)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    // 본문은 넣지 않는다 — 코멘트 원문은 `issue_comments` 행이 보존하고,
+    // 감사가 더할 것은 "누가 언제 어느 Issue에 달았는가"뿐이다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_COMMENT,
+        )
+        .actor(principal.user.id)
+        .project(issue.project_id)
+        .target("issue", issue.id.to_string())
+        .ip_opt(principal.client_ip.clone())
+        .detail(serde_json::json!({ "comment_id": comment.id.to_string() })),
+    )
+    .await;
 
     Ok(Json(crate::schema::IssueCommentSummary {
         id: comment.id.to_string(),
@@ -2970,6 +3047,25 @@ pub async fn link_issue_task_api(
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
 
+    // 멱등 no-op은 기록하지 않는다 — 이미 있는 링크를 다시 걸어도 아무것도
+    // 바뀌지 않으므로, 기록하면 감사 행 수가 "몇 번 연결했는가"가 아니라
+    // "몇 번 요청했는가"를 세게 된다.
+    if created {
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::ISSUE_LINK,
+            )
+            .actor(principal.user.id)
+            .project(issue.project_id)
+            .target("issue", issue.id.to_string())
+            .ip_opt(principal.client_ip.clone())
+            .detail(serde_json::json!({ "task_id": task_id.to_string() })),
+        )
+        .await;
+    }
+
     Ok(Json(serde_json::json!({
         "issue_id": issue.id.to_string(),
         "task_id": task_id.to_string(),
@@ -2998,6 +3094,32 @@ pub async fn unlink_issue_task_api(
         .unlink_issue_task(issue_id, task_id)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    // `link`와 달리 이 핸들러는 Issue를 적재하지 않는다(미존재 Issue에 대한
+    // 해제는 `removed: false`로 조용히 성공한다 — 기존 동작이다). 따라서
+    // `project_id`는 실제로 제거된 경우에만, 그 시점에 조회해서 채운다.
+    // 조회가 실패하면 `None`이 되는데, 여기서의 `None`은 다른 이벤트에서와
+    // 달리 "Project가 없다"는 단정이 아니라 **알아내지 못했다**는 뜻이다.
+    if removed {
+        let project_id = load_issue(&state, issue_id)
+            .await
+            .ok()
+            .map(|i| i.project_id);
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::ISSUE_UNLINK,
+            )
+            .actor(principal.user.id)
+            .project_opt(project_id)
+            .target("issue", issue_id.to_string())
+            .ip_opt(principal.client_ip.clone())
+            .detail(serde_json::json!({ "task_id": task_id.to_string() })),
+        )
+        .await;
+    }
+
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -3505,7 +3627,8 @@ pub async fn logout(
             &principal.user.username,
             fleet_core::audit::action::AUTH_LOGOUT,
         )
-        .actor(principal.user.id),
+        .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone()),
     )
     .await;
     let removed = Cookie::from(SESSION_COOKIE);
@@ -3634,6 +3757,22 @@ pub async fn resend_verification_api(
         .create_email_verification_token(&verification)
         .await
         .map_err(|_| ApiError::Internal("DB error".into()))?;
+
+    // 감사: 이 엔드포인트는 **미인증**이다. 따라서 `actor_*`는 요청자가 증명된
+    // 신원이 아니라 *대상 계정*을 가리킨다 — `detail.unauthenticated`가 그
+    // 사실을 표시한다. 이 표시가 없으면 나중에 읽는 사람이 "이 사용자가 직접
+    // 재발송했다"로 오독한다. raw 토큰은 넣지 않는다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &user.username,
+            fleet_core::audit::action::AUTH_VERIFICATION_RESENT,
+        )
+        .actor(user.id)
+        .target("user", user.id.to_string())
+        .detail(serde_json::json!({ "unauthenticated": true, "via": "api" })),
+    )
+    .await;
 
     // 이메일 발송 (SMTP 미설정 시 로그 출력).
     let base_url =
@@ -3813,6 +3952,22 @@ pub async fn resend_verification_form(
                 .await
             {
                 tracing::error!(error = %e, "create_email_verification_token failed");
+            } else {
+                // 토큰이 실제로 만들어졌을 때만 기록한다. 미인증 엔드포인트라
+                // `actor_*`는 대상 계정을 가리킨다(`resend_verification_api`
+                // 주석 참고).
+                crate::audit::record(
+                    &state,
+                    fleet_core::AuditEvent::success(
+                        &user.username,
+                        fleet_core::audit::action::AUTH_VERIFICATION_RESENT,
+                    )
+                    .actor(user.id)
+                    .target("user", user.id.to_string())
+                    .ip(&ip)
+                    .detail(serde_json::json!({ "unauthenticated": true, "via": "form" })),
+                )
+                .await;
             }
 
             let base_url =
@@ -3960,6 +4115,24 @@ pub async fn forgot_password(
         };
         if let Err(e) = state.store.create_password_reset_token(&reset_token).await {
             tracing::error!(error = %e, "create_password_reset_token failed");
+        } else {
+            // 응답은 계정 존재 여부와 무관하게 동일하므로(열거 방지), "요청이
+            // 실제로 재설정 토큰을 만들었는가"를 아는 경로는 이 기록뿐이다.
+            // 존재하지 않는 이메일에서는 아무것도 만들어지지 않으므로 기록도
+            // 없다 — 덕분에 공격자가 넣은 문자열이 감사에 들어갈 길이 없다.
+            // raw 토큰과 재설정 URL은 절대 넣지 않는다.
+            crate::audit::record(
+                &state,
+                fleet_core::AuditEvent::success(
+                    &user.username,
+                    fleet_core::audit::action::AUTH_PASSWORD_RESET_REQUESTED,
+                )
+                .actor(user.id)
+                .target("user", user.id.to_string())
+                .ip(&ip)
+                .detail(serde_json::json!({ "unauthenticated": true })),
+            )
+            .await;
         }
 
         let base_url =
