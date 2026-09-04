@@ -120,6 +120,25 @@ async fn self_fenced_events(store: &Arc<dyn Store>) -> Vec<fleet_core::AuditEven
         .expect("list_audit_events")
 }
 
+/// spawn 기록의 pid. 파일이 없으면 `None`.
+fn spawn_record_pid(record: &std::path::Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(record).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.get("pid")?.as_u64().map(|p| p as u32)
+}
+
+async fn orphan_events(store: &Arc<dyn Store>) -> Vec<fleet_core::AuditEvent> {
+    store
+        .list_audit_events(&fleet_core::AuditFilter {
+            actor_user_id: None,
+            action: Some(fleet_core::audit::action::AGENT_ORPHAN_TERMINATED.to_string()),
+            limit: 100,
+            offset: 0,
+        })
+        .await
+        .expect("list_audit_events")
+}
+
 async fn observed(store: &Arc<dyn Store>, agent_id: AgentId) -> Option<AgentObservedStatus> {
     store
         .get_agent(agent_id)
@@ -345,5 +364,164 @@ async fn a_partition_fences_the_agent_and_reconnecting_frees_it_for_another_work
     let _ = shutdown_tx.send(true);
     let _ = loop_handle.await;
     manager.shutdown_all().await;
+    net.abort();
+}
+
+/// 워커가 SIGKILL로 죽어 살아남은 Agent 프로세스를, 다음 incarnation이 걷어
+/// 오케스트레이터에 신고한다 (로드맵 `#70` 게이트 ③ · `#67` 게이트 ⑥의 나머지 절반).
+///
+/// 위 시험이 덮은 self-fencing과 **다른 실패**다. 저쪽은 워커가 살아서 스스로
+/// 멈추는 경로이고, 이쪽은 워커가 멈출 기회조차 없이 죽은 뒤의 잔해다.
+/// `kill_on_drop`은 Drop이 돌 때만 유효하므로 SIGKILL·전원 차단·패닉 뒤에는
+/// 자식이 남고, 새 incarnation의 `procs`는 비어 있어 `reconcile`이 **원리적으로**
+/// 그것에 도달하지 못한다 — 유일한 근거가 디스크의 `.fleet-agent.json`이다.
+///
+/// **죽음을 `std::mem::forget`으로 만든다.** 매니저를 잊으면 `Child`가 Drop되지
+/// 않아 `kill_on_drop`이 발동하지 않는다 — SIGKILL당한 워커가 남기는 상태와
+/// 같다. 프로세스를 실제로 죽이는 대신 이 방법을 쓰는 이유는, 시험 프로세스
+/// 자신이 그 워커이기 때문이다.
+///
+/// **검증 한계**: sweep이 그 자식을 실제로 죽였는지는 여기서 다시 보지 않는다.
+/// 죽은 자식은 부모(이 시험 프로세스)가 거두지 않아 좀비로 남고, 그 상태에서는
+/// `kill -0`이 성공하므로 이식성 있는 생사 판정이 되지 못한다. 그 단정은
+/// `Child` 핸들을 쥔 `fleet-worker::agent_process`의 단위 시험이 맡는다. 이
+/// 시험이 맡은 것은 **그 사건이 오케스트레이터까지 닿는 경로**다.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hard_killed_worker_reports_the_surviving_agent_on_its_next_incarnation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(MemStore::new());
+
+    let backend = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap()
+    };
+    let _server = serve_at(backend, store.clone()).await;
+    let front = {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap()
+    };
+    let net = link(front, backend).await;
+
+    let config = Arc::new(
+        WorkerConfig::for_test()
+            .name("e2e-dying-worker")
+            .orchestrator_url(format!("http://{front}"))
+            .grok_bin(fake_grok(dir.path()))
+            .agent_port_range("39800-39819")
+            .agent_workspace_root(dir.path().to_string_lossy().into_owned())
+            .build(),
+    );
+    let client = Arc::new(RegistrationClient::new(config.clone()).unwrap());
+    let worker_id: WorkerId = client
+        .register_once()
+        .await
+        .expect("register")
+        .worker_id
+        .parse()
+        .unwrap();
+
+    let project = Project::new("e2e-sweep");
+    store
+        .create_project(&project)
+        .await
+        .expect("create project");
+    let mut agent =
+        Agent::new(project.id, "survivor").with_placement(worker_id, chrono::Utc::now());
+    agent.desired_status = AgentDesiredStatus::Running;
+    agent.command_generation = 1;
+    assert_eq!(
+        store.create_agent(&agent).await.expect("create agent"),
+        Some(worker_id)
+    );
+
+    // 1. 첫 incarnation이 Agent를 띄운다.
+    let first = Arc::new(
+        fleet_worker::AgentProcessManager::new(config.clone()).expect("agent process manager"),
+    );
+    let (stop_first, first_rx) = watch::channel(false);
+    let first_loop = {
+        let (c, m) = (client.clone(), first.clone());
+        tokio::spawn(async move {
+            c.run_heartbeat_loop(1, 3600, "127.0.0.1:1".into(), m, first_rx)
+                .await;
+        })
+    };
+    until(
+        "첫 incarnation이 Agent를 띄우지 않았다",
+        std::time::Duration::from_secs(20),
+        || {
+            let m = first.clone();
+            async move { !m.running_agents().await.is_empty() }
+        },
+    )
+    .await;
+
+    let record = dir
+        .path()
+        .join(agent.id.to_string())
+        .join(".fleet-agent.json");
+    let doomed_pid = spawn_record_pid(&record).expect("떠 있는 동안에는 spawn 기록이 있어야 한다");
+
+    // 2. 워커가 **거칠게** 죽는다. 루프를 세우고 매니저를 잊으면 `Child`가
+    //    Drop되지 않아 자식이 살아남고 기록도 남는다 — SIGKILL의 상태 그대로다.
+    let _ = stop_first.send(true);
+    let _ = first_loop.await;
+    std::mem::forget(first);
+    assert_eq!(
+        spawn_record_pid(&record),
+        Some(doomed_pid),
+        "거친 죽음은 기록을 남긴다 — 이것이 유일한 근거다"
+    );
+
+    // 3. 새 incarnation. `run_heartbeat_loop`은 첫 beat **전에** sweep을 돌린다.
+    let second = Arc::new(
+        fleet_worker::AgentProcessManager::new(config.clone()).expect("agent process manager"),
+    );
+    let (stop_second, second_rx) = watch::channel(false);
+    let second_loop = {
+        let (c, m) = (client.clone(), second.clone());
+        tokio::spawn(async move {
+            c.run_heartbeat_loop(1, 3600, "127.0.0.1:1".into(), m, second_rx)
+                .await;
+        })
+    };
+
+    // 4. 그 잔해가 오케스트레이터까지 닿는다. 이것이 없으면 그 종료는 워커
+    //    로그 한 줄로만 남는다.
+    until(
+        "이전 incarnation의 잔해가 감사에 닿지 않았다",
+        std::time::Duration::from_secs(20),
+        || {
+            let s = store.clone();
+            async move { !orphan_events(&s).await.is_empty() }
+        },
+    )
+    .await;
+
+    let events = orphan_events(&store).await;
+    assert_eq!(events.len(), 1, "잔해 하나가 한 줄로 남아야 한다");
+    assert_eq!(
+        events[0].target_id.as_deref(),
+        Some(agent.id.to_string().as_str())
+    );
+    assert_eq!(
+        events[0].detail["reason"], "stale_incarnation",
+        "부재(`unplaced`)가 아니라 이전 incarnation의 잔해다 — 운영자의 처방이 다르다"
+    );
+    assert_eq!(events[0].actor_label, format!("worker:{worker_id}"));
+    // 기록 파일이 **사라졌는지**를 묻지 않는다. sweep이 옛 기록을 지운 뒤 같은
+    // beat의 `reconcile`이 같은 Agent를 다시 띄우며 새 기록을 쓰기 때문이다
+    // (배정과 `desired=running`이 그대로이므로 옳은 동작이다). 물어야 할 것은
+    // 그 파일이 **누구의 것인가**이고, pid가 그것을 가른다.
+    let now_pid = spawn_record_pid(&record);
+    assert!(
+        now_pid.is_none() || now_pid != Some(doomed_pid),
+        "판정이 끝난 기록은 남지 않아야 한다 — 여전히 옛 pid({doomed_pid})다"
+    );
+
+    let _ = stop_second.send(true);
+    let _ = second_loop.await;
+    second.shutdown_all().await;
     net.abort();
 }
