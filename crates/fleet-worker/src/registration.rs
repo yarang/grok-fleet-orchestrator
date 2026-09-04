@@ -75,7 +75,9 @@ pub struct RegistrationClient {
     /// 디스크 여유 공간 캐시. blocking syscall을 피하기 위해 백그라운드 수집 + TTL 캐싱.
     disk_cache: Arc<DiskCache>,
     /// grok CLI 버전 (변하지 않으므로 최초 1회만 수집).
-    grok_version: OnceLock<Option<String>>,
+    /// `tokio::sync::OnceCell`이지 `OnceLock`이 아니다 — 초기화가 async여야
+    /// 하기 때문이다. 그 이유는 [`detect_grok_version`]의 독스트링에 있다.
+    grok_version: tokio::sync::OnceCell<Option<String>>,
     /// OS 정보 (변하지 않으므로 최초 1회만 수집).
     os_info: OnceLock<Option<WorkerOsInfo>>,
     /// 다음 heartbeat에 실어 보낼 Agent 명령 수신 확인 (로드맵 #67 4b).
@@ -258,7 +260,7 @@ impl RegistrationClient {
             http,
             worker_id: tokio::sync::Mutex::new(None),
             disk_cache: Arc::new(DiskCache::new()),
-            grok_version: OnceLock::new(),
+            grok_version: tokio::sync::OnceCell::new(),
             os_info: OnceLock::new(),
             pending_acks: std::sync::Mutex::new(Vec::new()),
             pending_observations: std::sync::Mutex::new(None),
@@ -362,6 +364,7 @@ impl RegistrationClient {
         let grok_version = self
             .grok_version
             .get_or_init(|| self.detect_version())
+            .await
             .clone();
 
         // OS 정보 — 캐시된 값 사용 (변하지 않으므로 최초 1회만 수집).
@@ -611,9 +614,8 @@ impl RegistrationClient {
     }
 
     /// grok CLI 버전을 감지하여 반환 (최초 1회만 실행, 이후 캐시).
-    fn detect_version(&self) -> Option<String> {
-        let grok_path = &self.config.grok.bin;
-        detect_grok_version(grok_path)
+    async fn detect_version(&self) -> Option<String> {
+        detect_grok_version(&self.config.grok.bin).await
     }
 
     /// OS 정보를 수집하여 반환 (최초 1회만 실행, 이후 캐시).
@@ -682,15 +684,59 @@ fn collect_fast_metrics() -> FastMetrics {
     }
 }
 
+/// [`detect_grok_version`]이 `grok --version`을 기다리는 최대 시간.
+///
+/// 정상 바이너리는 즉시 답하므로 이 값은 "정상 범위"가 아니라 **고장의 상한**이다.
+/// 넉넉히 잡아도 잃는 것이 없고(정상 경로는 이 값에 닿지 않는다) 짧게 잡으면
+/// 부하가 걸린 호스트에서 멀쩡한 버전을 미상으로 만든다.
+const GROK_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// grok CLI 버전 감지. `grok --version` 출력에서 추출.
 ///
 /// 출력 형식: `grok 0.2.103 (89c3d36fb6)`
 /// 두 번째 토큰(버전 번호)을 추출한다. 실패 시 None.
-fn detect_grok_version(grok_path: &str) -> Option<String> {
-    let output = std::process::Command::new(grok_path)
-        .arg("--version")
-        .output()
-        .ok()?;
+///
+/// **블로킹이 아니어야 하고 반드시 끝나야 한다.** 예전에는 `std::process::Command`
+/// 의 `output()`을 그대로 불렀는데, 그것은 자식이 끝날 때까지 **호출한 스레드를
+/// 붙잡는다**. 이 함수는 `heartbeat_once` 안에서 불리므로, `--version`에 답하지
+/// 않는 grok 바이너리 하나가 heartbeat 루프를 무기한 멈춘다 — 그러면 이 Worker는
+/// 오케스트레이터에게 `Offline`으로 보이고, 로드맵 `#67` 게이트 ⑥의 self-fencing도
+/// 일어나지 않는다(펜싱은 그 루프 안에 있다). 게다가 그 정지는 `JoinHandle`이
+/// 끝나지 않으므로 `runner.rs`의 `await_shutdown` 감시도 잡지 못한다.
+///
+/// 가정이 아니라 실측이다 — `#67` 게이트 ⑥의 E2E를 만들다 실제로 밟았다. 가짜
+/// grok이 인자를 무시하고 자는 스크립트였고, 증상은 "5초 `tokio::time::sleep`이
+/// 300초 걸린다"였다(`gdb`의 스택이
+/// `heartbeat_once → detect_version → Command::output → wait4`를 그대로 보여줬다).
+///
+/// 그래서 `tokio::process`로 바꾸고 [`GROK_VERSION_TIMEOUT`]을 씌운다. 타임아웃이
+/// 지나면 future가 떨어지고 `kill_on_drop`이 자식을 죽인다 — `spawn_blocking`으로
+/// 감싸는 대안을 쓰지 않은 이유가 이것이다: 그쪽은 취소가 되지 않아 타임아웃이
+/// 걸려도 블로킹 스레드가 자식과 함께 영원히 남는다.
+///
+/// **실패는 `None`으로 캐시된다.** 버전은 메타데이터이므로 이것 때문에 heartbeat을
+/// 실패시키지 않는다 — 그렇게 하면 느린 바이너리 하나가 워커를 `Offline`으로
+/// 떨어뜨려 훨씬 큰 것을 잃는다. 대신 그 Worker의 버전은 재기동 전까지 미상으로
+/// 남는다. 매 beat 다시 시도하지 않는 것은 의도적이다 — 답하지 않는 바이너리를
+/// 상대로 재시도하면 beat마다 타임아웃 하나씩을 쌓게 된다.
+async fn detect_grok_version(grok_path: &str) -> Option<String> {
+    let output = tokio::time::timeout(
+        GROK_VERSION_TIMEOUT,
+        tokio::process::Command::new(grok_path)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        warn!(
+            grok = grok_path,
+            ?GROK_VERSION_TIMEOUT,
+            "grok --version timed out"
+        )
+    })
+    .ok()?
+    .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{stdout}{stderr}");
@@ -872,6 +918,82 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         path.to_string_lossy().into_owned()
+    }
+
+    /// `--version`에 답하지 않는 grok이 **런타임을 붙잡지 않는다.**
+    ///
+    /// 이것이 이 수정이 막는 결함 그대로다. 예전 구현은 `std::process`의
+    /// `output()`이라 호출한 스레드가 자식과 함께 멈췄고, `heartbeat_once`가
+    /// 그것을 부르므로 heartbeat도 펜싱도 함께 멈췄다.
+    ///
+    /// 단정을 타임아웃이 아니라 **다른 태스크의 진행**으로 세운다 — 블로킹은
+    /// "이 함수가 늦다"가 아니라 "그동안 아무도 못 돈다"가 증상이기 때문이다.
+    /// 단일 스레드 런타임(`#[tokio::test]`의 기본값)이라 블로킹이면 아래
+    /// `sleep`이 자식 수명만큼 밀린다.
+    #[tokio::test]
+    async fn a_grok_that_never_answers_version_does_not_block_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_grok(dir.path());
+
+        let probe = tokio::spawn(async move { detect_grok_version(&bin).await });
+
+        let t = std::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let slept = t.elapsed();
+
+        assert!(
+            slept < Duration::from_secs(2),
+            "다른 태스크가 계속 돌아야 한다 — 200ms sleep이 {slept:?} 걸렸다"
+        );
+        probe.abort();
+    }
+
+    /// 그리고 **끝난다.** 답하지 않는 바이너리를 무한히 기다리면 이 Worker의
+    /// 버전은 영원히 미지수이고, 그 사이 `OnceCell`의 초기화가 끝나지 않아
+    /// 매 beat이 같은 자리에서 다시 기다린다.
+    ///
+    /// 실패를 `None`으로 돌려주는 것이 계약이다 — 버전은 메타데이터이므로
+    /// 여기서 heartbeat을 실패시키면 느린 바이너리 하나가 워커를 `Offline`으로
+    /// 떨어뜨린다.
+    #[tokio::test]
+    async fn a_grok_that_never_answers_version_gives_up_and_reports_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_grok(dir.path());
+
+        let t = std::time::Instant::now();
+        let version = detect_grok_version(&bin).await;
+        let elapsed = t.elapsed();
+
+        assert_eq!(version, None, "답하지 않으면 미상이다");
+        assert!(
+            elapsed >= GROK_VERSION_TIMEOUT,
+            "유예 전에 포기하면 느린 호스트에서 멀쩡한 버전을 미상으로 만든다 — {elapsed:?}"
+        );
+        assert!(
+            elapsed < GROK_VERSION_TIMEOUT + Duration::from_secs(5),
+            "유예가 지나면 포기해야 한다 — {elapsed:?}"
+        );
+    }
+
+    /// 정상 바이너리는 그대로 읽힌다. 위 둘만 있으면 "항상 None을 준다"는
+    /// 구현도 통과하는데, 그러면 모든 Worker의 버전이 미상이 된다.
+    #[tokio::test]
+    async fn a_normal_grok_version_is_still_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("versioned-grok.sh");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "#!/bin/sh\necho 'grok 0.2.103 (89c3d36fb6)'").unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let version = detect_grok_version(&path.to_string_lossy()).await;
+        assert_eq!(version.as_deref(), Some("0.2.103"));
     }
 
     /// Agent 하나를 실제로 띄운 매니저. 펜싱 시험은 "죽었는가"를 물으므로
