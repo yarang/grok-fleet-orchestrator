@@ -1582,6 +1582,7 @@ impl Store for MemStore {
         cluster_id: &str,
         instance_id: &str,
         ttl: std::time::Duration,
+        binary_version: Option<&str>,
     ) -> Result<ControlLease, StoreError> {
         let now = Utc::now();
         let ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::seconds(30));
@@ -1602,6 +1603,10 @@ impl Store for MemStore {
             acquired_at: now,
             expires_at: now + ttl,
             last_renewed_at: now,
+            // PgStore와 같이 **획득과 같은 쓰기**로 남긴다. 두 Store가 같은
+            // 입력에 다른 답을 내면 MemStore로 통과한 시험이 아무것도
+            // 증명하지 못한다.
+            binary_version: binary_version.map(str::to_string),
         };
         leases.insert(cluster_id.to_string(), lease.clone());
         Ok(lease)
@@ -2784,12 +2789,22 @@ mod agent_command_fence_tests {
     /// fence를 **낡은 것**으로 만든다. `(살아 있는 fence, 낡은 fence)`.
     async fn stale_and_current(store: &MemStore, cluster: &str) -> (ControlFence, ControlFence) {
         let first = store
-            .acquire_control_lease(cluster, "instance-a", std::time::Duration::from_millis(1))
+            .acquire_control_lease(
+                cluster,
+                "instance-a",
+                std::time::Duration::from_millis(1),
+                None,
+            )
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = store
-            .acquire_control_lease(cluster, "instance-b", std::time::Duration::from_secs(30))
+            .acquire_control_lease(
+                cluster,
+                "instance-b",
+                std::time::Duration::from_secs(30),
+                None,
+            )
             .await
             .unwrap();
         assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");
@@ -2886,7 +2901,12 @@ mod agent_command_fence_tests {
     async fn the_epoch_is_stamped_only_when_a_command_is_actually_issued() {
         let (store, agent, _worker) = seeded().await;
         let first = store
-            .acquire_control_lease("c-stamp", "instance-a", std::time::Duration::from_millis(1))
+            .acquire_control_lease(
+                "c-stamp",
+                "instance-a",
+                std::time::Duration::from_millis(1),
+                None,
+            )
             .await
             .unwrap();
         let f1 = ControlFence {
@@ -2903,7 +2923,12 @@ mod agent_command_fence_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let second = store
-            .acquire_control_lease("c-stamp", "instance-b", std::time::Duration::from_secs(30))
+            .acquire_control_lease(
+                "c-stamp",
+                "instance-b",
+                std::time::Duration::from_secs(30),
+                None,
+            )
             .await
             .unwrap();
         let f2 = ControlFence {

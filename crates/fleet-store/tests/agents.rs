@@ -1466,12 +1466,22 @@ async fn fences(
 ) -> (fleet_store::ControlFence, fleet_store::ControlFence) {
     let cluster = format!("agents-fence-{label}-{}", uuid::Uuid::new_v4());
     let first = store
-        .acquire_control_lease(&cluster, "instance-a", std::time::Duration::from_millis(1))
+        .acquire_control_lease(
+            &cluster,
+            "instance-a",
+            std::time::Duration::from_millis(1),
+            None,
+        )
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     let second = store
-        .acquire_control_lease(&cluster, "instance-b", std::time::Duration::from_secs(30))
+        .acquire_control_lease(
+            &cluster,
+            "instance-b",
+            std::time::Duration::from_secs(30),
+            None,
+        )
         .await
         .unwrap();
     assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");

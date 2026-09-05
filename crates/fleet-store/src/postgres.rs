@@ -189,12 +189,24 @@ impl PgStore {
     /// 즉시 사라지게 한다 — 따라서 여기 잡히는 것은 **살아 있는** 인스턴스이거나
     /// **크래시로 죽은 지 TTL이 지나지 않은** 인스턴스뿐이다. 시간 비교는
     /// `acquire_control_lease`와 같은 술어(`expires_at` vs `NOW()`)를 쓴다.
-    async fn live_control_lease_holder(&self) -> Result<Option<(String, String, i64)>, StoreError> {
-        let row: Option<(String, String, i64)> = sqlx::query_as(
+    async fn live_control_lease_holder(
+        &self,
+    ) -> Result<Option<(String, String, i64, Option<String>)>, StoreError> {
+        // `binary_version`을 컬럼으로 직접 SELECT하지 않는 이유가 있다. 이
+        // 함수는 **마이그레이션을 적용하기 전에** 도는 가드가 부르므로, 037이
+        // 아직 적용되지 않은 DB를 상대할 수 있다. 컬럼명을 그대로 쓰면 그런
+        // DB에서 가드 자신이 `UndefinedColumn`으로 깨진다 — 스키마를 지키려는
+        // 코드가 옛 스키마에서 못 도는 셈이다.
+        //
+        // `to_jsonb(행)`은 그 행에 **실제로 있는** 컬럼만 담고, `->>`는 없는
+        // 키에 NULL을 준다. 그래서 037 이전 DB에서는 `None`, 이후에는 값이
+        // 나온다 — 추가 왕복도, 컬럼 존재 조회도 필요 없다.
+        let row: Option<(String, String, i64, Option<String>)> = sqlx::query_as(
             "SELECT cluster_id, \
                     active_instance_id, \
-                    CEIL(EXTRACT(EPOCH FROM (expires_at - NOW())))::BIGINT \
-               FROM control_plane_lease \
+                    CEIL(EXTRACT(EPOCH FROM (expires_at - NOW())))::BIGINT, \
+                    to_jsonb(l) ->> 'binary_version' \
+               FROM control_plane_lease l \
               WHERE expires_at > NOW() \
               ORDER BY cluster_id \
               LIMIT 1",
@@ -239,15 +251,25 @@ impl PgStore {
         if !self.relation_exists("control_plane_lease").await? {
             return Ok(());
         }
-        let Some((cluster_id, instance_id, remaining_secs)) =
+        let Some((cluster_id, instance_id, remaining_secs, holder_version)) =
             self.live_control_lease_holder().await?
         else {
             return Ok(());
         };
+        // 버전을 메시지에 싣는 것이 037의 **읽는 쪽**이다. 값을 기록만 하고
+        // 아무도 읽지 않으면 그것은 아무도 보지 않는 컬럼이고, 마이그레이션을
+        // 하나 더한 대가만 남는다. 운영자가 이 버전을 가장 알고 싶은 순간이
+        // 정확히 여기다 — 기동이 막혔고 어느 인스턴스를 세워야 할지 정해야 할
+        // 때. 모르는 경우(037 이전 행이거나 이 컬럼을 쓰지 않는 옛 바이너리)는
+        // 문구를 아예 넣지 않는다. "unknown"을 적으면 그것이 버전인 줄 읽는다.
+        let held_by = match &holder_version {
+            Some(v) => format!("instance '{instance_id}' (binary version {v})"),
+            None => format!("instance '{instance_id}'"),
+        };
         let versions: Vec<String> = pending.iter().map(|v| v.to_string()).collect();
         let versions = versions.join(", ");
         Err(StoreError::Migration(format!(
-            "refusing to apply migrations [{versions}] while instance '{instance_id}' holds a \
+            "refusing to apply migrations [{versions}] while {held_by} holds a \
              live control plane lease for cluster '{cluster_id}' (expires in {remaining_secs}s): \
              this binary is newer than the database and would change the schema underneath the \
              running instance. Stop the active instance — a graceful shutdown releases the lease \
@@ -2633,6 +2655,7 @@ impl Store for PgStore {
         cluster_id: &str,
         instance_id: &str,
         ttl: std::time::Duration,
+        binary_version: Option<&str>,
     ) -> Result<ControlLease, StoreError> {
         // `ON CONFLICT ... DO UPDATE ... WHERE`가 이 메서드의 CAS 전체를
         // 단일 원자적 statement로 표현한다. WHERE 조건(만료됨)이 거짓이면
@@ -2645,21 +2668,25 @@ impl Store for PgStore {
         let row = sqlx::query(
             r#"
             INSERT INTO control_plane_lease
-                (cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at)
-            VALUES ($1, $2, 1, NOW(), NOW() + $3, NOW())
+                (cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at,
+                 binary_version)
+            VALUES ($1, $2, 1, NOW(), NOW() + $3, NOW(), $4)
             ON CONFLICT (cluster_id) DO UPDATE
                SET active_instance_id = EXCLUDED.active_instance_id,
                    epoch = control_plane_lease.epoch + 1,
                    acquired_at = NOW(),
                    expires_at = NOW() + $3,
-                   last_renewed_at = NOW()
+                   last_renewed_at = NOW(),
+                   binary_version = EXCLUDED.binary_version
              WHERE control_plane_lease.expires_at < NOW()
-            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at
+            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at,
+                      last_renewed_at, binary_version
             "#,
         )
         .bind(cluster_id)
         .bind(instance_id)
         .bind(ttl)
+        .bind(binary_version)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
@@ -2691,7 +2718,8 @@ impl Store for PgStore {
                AND active_instance_id = $2
                AND epoch = $3
                AND expires_at > NOW()
-            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at
+            RETURNING cluster_id, active_instance_id, epoch, acquired_at, expires_at,
+                      last_renewed_at, binary_version
             "#,
         )
         .bind(cluster_id)
@@ -2732,7 +2760,8 @@ impl Store for PgStore {
         cluster_id: &str,
     ) -> Result<Option<ControlLease>, StoreError> {
         let row = sqlx::query(
-            "SELECT cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at \
+            "SELECT cluster_id, active_instance_id, epoch, acquired_at, expires_at, \
+                    last_renewed_at, binary_version \
                FROM control_plane_lease WHERE cluster_id = $1",
         )
         .bind(cluster_id)
@@ -4291,6 +4320,7 @@ fn row_to_control_lease(row: sqlx::postgres::PgRow) -> Result<ControlLease, Stor
         acquired_at: row.try_get("acquired_at")?,
         expires_at: row.try_get("expires_at")?,
         last_renewed_at: row.try_get("last_renewed_at")?,
+        binary_version: row.try_get("binary_version")?,
     })
 }
 

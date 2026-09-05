@@ -116,6 +116,7 @@ pub struct LeaseManager {
     store: Arc<dyn Store>,
     cluster_id: String,
     instance_id: String,
+    binary_version: String,
     config: LeaseManagerConfig,
     status: Arc<Mutex<LeaseStatus>>,
     shutdown: CancellationToken,
@@ -253,16 +254,27 @@ impl LeaseObserver {
 }
 
 impl LeaseManager {
+    /// `binary_version`은 **선택이 아니라 필수 인자다** (로드맵 `#67` 게이트 ⑤).
+    ///
+    /// 빌더로 두면 부르지 않는 호출부가 조용히 `NULL`을 남기고, 그러면
+    /// 037이 만든 컬럼은 프로덕션에서 늘 비어 있는 채로 "생산자가 있다"고
+    /// 믿게 만든다. 인자로 두면 컴파일러가 모든 호출부에 값을 요구한다.
+    ///
+    /// 값은 **리스를 쥐는 바이너리**의 것이어야 한다 — 이 크레이트에서
+    /// `CARGO_PKG_VERSION`을 읽으면 `fleet-scheduler`의 버전이지 `fleet`의
+    /// 버전이 아니다.
     pub fn new(
         store: Arc<dyn Store>,
         cluster_id: impl Into<String>,
         instance_id: impl Into<String>,
+        binary_version: impl Into<String>,
         config: LeaseManagerConfig,
     ) -> Self {
         Self {
             store,
             cluster_id: cluster_id.into(),
             instance_id: instance_id.into(),
+            binary_version: binary_version.into(),
             config,
             status: Arc::new(Mutex::new(LeaseStatus::Stopped)),
             shutdown: CancellationToken::new(),
@@ -289,7 +301,12 @@ impl LeaseManager {
     pub async fn try_acquire(&self) -> Result<ControlLease, StoreError> {
         let result = self
             .store
-            .acquire_control_lease(&self.cluster_id, &self.instance_id, self.config.ttl)
+            .acquire_control_lease(
+                &self.cluster_id,
+                &self.instance_id,
+                self.config.ttl,
+                Some(&self.binary_version),
+            )
             .await;
         match &result {
             Ok(lease) => {
@@ -298,6 +315,7 @@ impl LeaseManager {
                     cluster_id = %self.cluster_id,
                     instance_id = %self.instance_id,
                     epoch = lease.epoch,
+                    binary_version = %self.binary_version,
                     "control plane lease acquired"
                 );
             }
@@ -458,7 +476,7 @@ mod tests {
         instance_id: &str,
         config: LeaseManagerConfig,
     ) -> LeaseManager {
-        LeaseManager::new(store, "test-cluster", instance_id, config)
+        LeaseManager::new(store, "test-cluster", instance_id, "0.0.0-test", config)
     }
 
     /// 백그라운드 루프가 첫 acquire를 끝낼 때까지 기다린다.

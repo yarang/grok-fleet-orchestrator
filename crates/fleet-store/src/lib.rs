@@ -92,6 +92,13 @@ pub struct ControlLease {
     pub acquired_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub last_renewed_at: DateTime<Utc>,
+    /// 이 리스를 쥔 인스턴스의 바이너리 버전 (로드맵 `#67` 게이트 ⑤, 037).
+    ///
+    /// **`None`은 "다르다"가 아니라 "모른다"다.** 이 컬럼을 쓰지 않는 옛
+    /// 바이너리가 쥐었거나, 037 이전에 만들어진 행이다. 읽는 쪽은 둘을
+    /// 구분해야 한다 — 모르는 것을 불일치로 취급하면 롤링 업그레이드 중의
+    /// 정상 상태가 경고로 보인다.
+    pub binary_version: Option<String>,
 }
 
 /// Task 상태 쓰기에 함께 거는 control-plane epoch 술어 (로드맵 #62 3단계).
@@ -1071,11 +1078,19 @@ pub trait Store: Send + Sync {
     /// 다이어그램의 `Refused` 전이. 기존 lease가 이미 만료됐으면 그대로
     /// 가로채(`epoch`를 올려) 새로 획득한다 — Cold Standby가 이전 Primary의
     /// TTL 만료를 기다렸다가 자동으로 승격하는 경로다.
+    /// `binary_version`은 **획득과 같은 쓰기**로 남아야 한다. 따로 쓰면 그
+    /// 사이에 "리스는 있는데 버전은 모른다"는 창이 생기고, 그 창은 하필
+    /// 인수인계 직후 — 버전을 가장 알고 싶은 순간 — 에 열린다.
+    ///
+    /// 값을 Store가 스스로 만들지 않고 **호출자가 넘기는** 이유는, 여기서
+    /// `CARGO_PKG_VERSION`을 읽으면 그것이 `fleet-store`의 버전이지 리스를 쥔
+    /// **바이너리**의 버전이 아니기 때문이다.
     async fn acquire_control_lease(
         &self,
         _cluster_id: &str,
         _instance_id: &str,
         _ttl: std::time::Duration,
+        _binary_version: Option<&str>,
     ) -> Result<ControlLease, StoreError> {
         Err(StoreError::Unsupported("acquire_control_lease"))
     }

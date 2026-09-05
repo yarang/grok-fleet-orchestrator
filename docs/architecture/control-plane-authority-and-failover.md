@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/control-plane-authority-and-failover.md"
-last_verified: "2026-09-05"
+last_verified: "2026-09-06"
 last_verified_commit: "working-tree"
 owners: ["architecture", "operations"]
 ---
@@ -353,7 +353,7 @@ AND (dispatch_control_epoch IS NULL OR dispatch_control_epoch = $5)
 | DB에 적용된 마이그레이션이 바이너리에 없음 (DB가 앞섬) | **닫힘** | sqlx — `Migrator::run_direct`의 `validate_applied_migrations`가 `VersionMissing`으로 거절 |
 | 적용된 버전의 체크섬이 다름 | **닫힘** | sqlx — `VersionMismatch` |
 | 바이너리에만 있는 마이그레이션 (바이너리가 앞섬) | **닫힘** (2026-08-26) | `PgStore::guard_migration_against_live_lease` |
-| binary 버전 비호환 | **미착수** | 생산자가 없다 — 아래 |
+| binary 버전 비호환 | **생산자만 (2026-09-06)** | `LeaseManager`가 획득과 같은 쓰기로 기록 — 거절은 보류, 아래 |
 
 앞의 두 줄은 이 프로젝트가 `set_ignore_missing`을 호출하지 않아 sqlx 기본값
 (`ignore_missing: false`)이 그대로 걸리기 때문에 **이미 성립하고 있었다.** 이전 판의
@@ -386,6 +386,41 @@ Primary와 DB 하나를 공유하므로, 더 새 바이너리를 든 Standby가 
 참인 죽은 검사가 된다 — epoch 강제 ②를 `#67`에 귀속시킨 것과 같은 판단이다. 이 절반은
 **미착수로 남기고**, 생산자(승격 시 자신의 버전을 lease 행에 기록하는 쓰기)가 생기는
 시점에 함께 넣는다.
+
+**2026-09-06 — 생산자를 만들었다. 거절은 여전히 넣지 않는다.** 037이
+`control_plane_lease.binary_version`(NULL 허용)을 더하고, `LeaseManager`가 획득과 **같은
+쓰기**로 자기 버전을 남긴다. 값은 호출자가 넘긴다 — 라이브러리 크레이트에서
+`CARGO_PKG_VERSION`을 읽으면 그 크레이트의 버전이지 리스를 쥔 **바이너리**의 것이 아니기
+때문이고, `fleet-cli`의 `runtime.rs`가 그 자리다. `LeaseManager::new`의 **필수 인자**로 둔
+것도 같은 이유다: 빌더로 두면 부르지 않은 호출부가 조용히 `NULL`을 남겨, 컬럼은 있는데
+프로덕션에서는 늘 비는 상태가 된다.
+
+**거절을 함께 넣지 않은 이유는 정책이 없기 때문이다.** 버전이 다르다고 기동을 막는 술어는
+롤링 업그레이드를 통째로 거절한다 — 새 바이너리는 정의상 옛 Primary가 리스를 쥔 동안
+올라온다. 무엇을 "비호환"으로 볼지(0.x에서 어느 축이 깨지는 축인지, 같은 major면 섞여 돌아도
+되는지)는 이 프로젝트가 선언한 적이 없고, 그 계약 없이 술어를 고르면 코드가 운영 절차를
+임의로 정하는 셈이다. 그래서 관측만 만들고 강제는 미룬다 — `#70` 게이트 ③이 orphan을 막기
+전에 먼저 보이게 만든 것과 같은 순서다.
+
+**읽는 쪽을 같은 증분에 넣었다.** 기록만 하고 아무도 읽지 않으면 그것은 아무도 보지 않는
+컬럼이고 마이그레이션을 하나 더한 대가만 남는다 — 실제로 이 저장소에는 `get_control_lease`의
+프로덕션 호출자가 **0건**이고 CLI·API·MCP 어디에도 리스를 보여주는 표면이 없다(2026-09-06
+확인). 그래서 위 표 세 번째 줄의 가드가 읽는 쪽이 된다: 거절 메시지가 이제 막고 있는
+인스턴스의 **버전**을 함께 말한다. 운영자가 그 값을 가장 알고 싶은 순간이 정확히 거기다.
+
+**가드의 읽기는 컬럼 이름을 지목하지 않는다.** 그 함수는 마이그레이션을 적용하기 **전에**
+돌므로 037이 아직 없는 DB를 상대할 수 있고, 컬럼명을 그대로 쓰면 스키마를 지키려는 코드가
+옛 스키마에서 `UndefinedColumn`으로 깨진다. `to_jsonb(행) ->> 'binary_version'`은 없는 키에
+NULL을 주므로 추가 왕복 없이 두 상태를 모두 견딘다. 반면 `acquire_control_lease`와
+`get_control_lease`는 037 이후를 전제한다 — 프로덕션에서 리스 획득은 항상 migration 뒤이므로
+문제가 아니지만, 부분 마이그레이션 DB를 만드는 `migration_lease_guard`의 시험들은 그래서
+store API를 우회해 행을 직접 넣는다.
+
+**아직 도달하지 않는 경로가 하나 있다.** 거절 메시지에 버전이 실리려면 037이 적용된 DB에서
+동시에 마이그레이션이 밀려 있어야 하는데, 037이 마지막인 지금 그 조합은 자연스럽게 생기지
+않는다(036까지만 적용된 DB에서는 컬럼이 없어 `None`이다). 038이 생기는 순간부터 실제
+운영에서 나타난다. 시험은 `_sqlx_migrations`의 마지막 기록만 지워 그 조합을 만들어 읽는 쪽을
+지금 고정해 둔다.
 
 **라이브 관측 (2026-08-26).** 임시 DB를 마지막 마이그레이션 직전까지만 올리고
 `control_plane_lease`에 `expires_at = NOW() + 120s`인 행을 넣은 뒤 실제 바이너리로 관찰했다.

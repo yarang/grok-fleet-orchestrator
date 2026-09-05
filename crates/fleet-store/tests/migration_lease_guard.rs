@@ -39,7 +39,6 @@
 //! ```
 
 use std::borrow::Cow;
-use std::time::Duration as StdDuration;
 
 use fleet_store::{PgStore, Store};
 use sqlx::migrate::{Migration, Migrator};
@@ -100,6 +99,38 @@ fn migrator_up_to(max_version: i64) -> Migrator {
         migrations: Cow::Owned(kept),
         ..Migrator::DEFAULT
     }
+}
+
+/// 리스 행을 **037 이전 컬럼만으로** 직접 넣는다.
+///
+/// `PgStore::acquire_control_lease`를 쓸 수 없다. 그 함수는 037이 만든
+/// `binary_version`에 값을 쓰므로, 이 파일이 일부러 만드는 **부분 마이그레이션**
+/// DB(마지막 하나를 뺀 상태)에서는 `UndefinedColumn`으로 깨진다. 프로덕션은 이
+/// 상황을 만들지 않는다 — 리스 획득은 항상 migration **뒤에** 일어난다
+/// (`fleet-cli`의 `runtime.rs`) — 그러나 이 시험의 전제가 정확히 "바이너리가
+/// DB보다 앞선 상태"이므로 여기서는 store API를 우회한다.
+async fn insert_pre_037_lease(
+    pool: &PgPool,
+    cluster_id: &str,
+    instance_id: &str,
+    ttl_secs: i64,
+) -> i64 {
+    sqlx::query(
+        "INSERT INTO control_plane_lease \
+             (cluster_id, active_instance_id, epoch, acquired_at, expires_at, last_renewed_at) \
+         VALUES ($1, $2, 1, NOW(), NOW() + make_interval(secs => $3), NOW())",
+    )
+    .bind(cluster_id)
+    .bind(instance_id)
+    .bind(ttl_secs as f64)
+    .execute(pool)
+    .await
+    .expect("seed lease row");
+    // epoch를 돌려주는 이유: 부분 마이그레이션 DB에서는 `get_control_lease`도
+    // 쓸 수 없다. 그쪽 SELECT가 `binary_version`을 이름으로 지목하므로 같은
+    // `UndefinedColumn`으로 깨진다 — 가드의 읽기만 `to_jsonb`로 컬럼 부재를
+    // 흡수하고, 일반 조회 API는 037 이후를 전제한다.
+    1
 }
 
 async fn relation_exists(pool: &PgPool, name: &str) -> bool {
@@ -201,10 +232,7 @@ async fn migration_is_refused_while_another_instance_holds_a_live_lease() {
 
     let store = PgStore::from_pool(pool.clone());
     // 살아 있는 primary.
-    store
-        .acquire_control_lease("guard-cluster", "primary-1", StdDuration::from_secs(60))
-        .await
-        .expect("first acquire must succeed");
+    let _ = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
 
     let err = store
         .migrate()
@@ -253,14 +281,11 @@ async fn migration_proceeds_immediately_after_the_holder_releases() {
         .expect("partial migration must succeed");
 
     let store = PgStore::from_pool(pool.clone());
-    let lease = store
-        .acquire_control_lease("guard-cluster", "primary-1", StdDuration::from_secs(60))
-        .await
-        .expect("first acquire must succeed");
+    let epoch = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
     assert!(store.migrate().await.is_err(), "live lease must block");
 
     let released = store
-        .release_control_lease("guard-cluster", "primary-1", lease.epoch)
+        .release_control_lease("guard-cluster", "primary-1", epoch)
         .await
         .expect("release must succeed");
     assert!(released, "release must affect the row");
@@ -293,10 +318,7 @@ async fn a_live_lease_does_not_block_a_migration_that_changes_nothing() {
         .await
         .expect("initial migration must succeed");
 
-    store
-        .acquire_control_lease("guard-cluster", "primary-1", StdDuration::from_secs(60))
-        .await
-        .expect("first acquire must succeed");
+    let _ = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
 
     // 같은 바이너리의 standby가 기동하는 상황 — pending이 없으므로 통과.
     store
@@ -340,6 +362,66 @@ async fn db_ahead_of_binary_is_refused_by_sqlx_itself() {
     assert!(
         msg.contains("99999"),
         "sqlx must name the version it cannot resolve: {msg}"
+    );
+
+    temp.drop_database(pool).await;
+}
+
+/// 거절 메시지가 리스를 쥔 **바이너리 버전**을 함께 말한다 (로드맵 `#67` 게이트 ⑤).
+///
+/// 037이 만든 컬럼의 **읽는 쪽**이 이것이다. 값을 기록만 하고 아무도 읽지 않으면
+/// 그것은 아무도 보지 않는 컬럼이고, 마이그레이션을 하나 더한 대가만 남는다.
+/// 운영자가 이 값을 가장 알고 싶은 순간이 정확히 여기다 — 기동이 막혔고 어느
+/// 인스턴스를 세워야 할지 정해야 할 때.
+///
+/// **상태를 만드는 방법이 이 시험의 요령이다.** "컬럼은 있는데 마이그레이션이
+/// 밀려 있다"는 조합은 037이 마지막 마이그레이션인 지금 자연스럽게 만들 수 없다.
+/// 그래서 전부 적용한 뒤 `_sqlx_migrations`의 마지막 기록만 지운다 — 스키마는
+/// 037을 지난 상태로 두고 sqlx에게는 037이 밀린 것으로 보이게 한다.
+#[tokio::test]
+async fn the_refusal_names_the_binary_version_of_the_holder() {
+    let Some(temp) = TempDatabase::create().await else {
+        return;
+    };
+    let pool = temp.connect().await;
+    let (_previous, last) = last_two_versions();
+
+    migrator_up_to(last)
+        .run(&pool)
+        .await
+        .expect("full migration must succeed");
+
+    let store = PgStore::from_pool(pool.clone());
+    store
+        .acquire_control_lease(
+            "guard-cluster",
+            "primary-1",
+            std::time::Duration::from_secs(60),
+            Some("9.9.9-holder"),
+        )
+        .await
+        .expect("acquire must succeed on a fully migrated database");
+
+    // 마지막 마이그레이션을 "밀린 것"으로 되돌린다. 스키마는 그대로다.
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1")
+        .bind(last)
+        .execute(&pool)
+        .await
+        .expect("unrecord the last migration");
+
+    let err = store
+        .migrate()
+        .await
+        .expect_err("a live lease must still block");
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains("9.9.9-holder"),
+        "거절 메시지가 리스를 쥔 바이너리 버전을 말해야 한다 — 받은 메시지: {msg}"
+    );
+    assert!(
+        msg.contains("primary-1"),
+        "인스턴스 이름도 함께 남아야 한다 — 버전만으로는 무엇을 세울지 알 수 없다"
     );
 
     temp.drop_database(pool).await;

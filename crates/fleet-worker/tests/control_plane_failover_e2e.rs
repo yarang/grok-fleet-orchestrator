@@ -191,7 +191,8 @@ async fn a_worker_reconnects_to_the_promoted_instance_and_its_pending_work_moves
         poll_interval: Duration::from_millis(300),
         shutdown_grace: Duration::from_secs(3),
     };
-    let primary = LeaseManager::new(store.clone(), "c1", "primary", lease_cfg()).spawn();
+    let primary =
+        LeaseManager::new(store.clone(), "c1", "primary", "0.0.0-test", lease_cfg()).spawn();
     until(
         "Primary가 리스를 잡지 못했다",
         Duration::from_secs(10),
@@ -201,7 +202,8 @@ async fn a_worker_reconnects_to_the_promoted_instance_and_its_pending_work_moves
         },
     )
     .await;
-    let standby = LeaseManager::new(store.clone(), "c1", "standby", lease_cfg()).spawn();
+    let standby =
+        LeaseManager::new(store.clone(), "c1", "standby", "0.0.0-test", lease_cfg()).spawn();
 
     // Standby의 Reconciler는 돌지만 리스가 없으므로 아무것도 건드리지 않는다.
     let standby_state = scheduler(store.clone(), standby.observer()).await;

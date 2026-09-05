@@ -438,7 +438,7 @@ fn unique_cluster() -> String {
 /// lease를 한 번 획득하고 그 epoch로 fence를 만든다.
 async fn acquire_fence(store: &Arc<dyn Store>, cluster: &str, instance: &str) -> ControlFence {
     let lease = store
-        .acquire_control_lease(cluster, instance, TTL)
+        .acquire_control_lease(cluster, instance, TTL, None)
         .await
         .expect("lease acquisition must succeed on a fresh cluster id");
     ControlFence {

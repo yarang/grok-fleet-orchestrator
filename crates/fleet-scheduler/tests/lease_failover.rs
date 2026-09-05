@@ -117,8 +117,8 @@ async fn pending_work_waits_for_promotion_and_only_the_new_primary_reconciles_it
     });
     store.insert_task(&task).await.unwrap();
 
-    let primary = LeaseManager::new(store.clone(), "c1", "primary", fast_lease());
-    let standby = LeaseManager::new(store.clone(), "c1", "standby", fast_lease());
+    let primary = LeaseManager::new(store.clone(), "c1", "primary", "0.0.0-test", fast_lease());
+    let standby = LeaseManager::new(store.clone(), "c1", "standby", "0.0.0-test", fast_lease());
 
     let primary_handle = primary.spawn();
     until(

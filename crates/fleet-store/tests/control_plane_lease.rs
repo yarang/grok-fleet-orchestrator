@@ -69,7 +69,7 @@ async fn first_acquire_succeeds_with_epoch_one() {
     let cluster_id = cluster("first-acquire");
 
     let lease = store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(30), None)
         .await
         .unwrap();
 
@@ -85,12 +85,12 @@ async fn second_acquire_by_different_instance_is_refused_while_valid() {
     let cluster_id = cluster("refuse-while-valid");
 
     store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(30), None)
         .await
         .unwrap();
 
     let err = store
-        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30), None)
         .await
         .expect_err("a second instance must not acquire a still-valid lease");
     assert!(matches!(err, StoreError::Conflict(_)));
@@ -107,7 +107,7 @@ async fn acquire_after_expiry_is_taken_over_with_incremented_epoch() {
     let cluster_id = cluster("takeover-after-expiry");
 
     store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1), None)
         .await
         .unwrap();
 
@@ -116,7 +116,7 @@ async fn acquire_after_expiry_is_taken_over_with_incremented_epoch() {
     tokio::time::sleep(StdDuration::from_millis(200)).await;
 
     let taken_over = store
-        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30), None)
         .await
         .expect("an expired lease must be takeable by a new instance");
     assert_eq!(taken_over.active_instance_id, "instance-b");
@@ -129,7 +129,7 @@ async fn renew_extends_expiry_and_keeps_epoch() {
     let cluster_id = cluster("renew-extends");
 
     let first = store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(5))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(5), None)
         .await
         .unwrap();
 
@@ -160,13 +160,13 @@ async fn renew_with_stale_epoch_fails() {
     let cluster_id = cluster("renew-stale-epoch");
 
     store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1), None)
         .await
         .unwrap();
     tokio::time::sleep(StdDuration::from_millis(200)).await;
     // instance-b가 만료된 lease를 가로챈다 (epoch 2).
     store
-        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30), None)
         .await
         .unwrap();
 
@@ -187,7 +187,7 @@ async fn renew_after_expiry_fails_even_with_correct_instance_and_epoch() {
     let cluster_id = cluster("renew-after-expiry");
 
     let lease = store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_millis(1), None)
         .await
         .unwrap();
     tokio::time::sleep(StdDuration::from_millis(200)).await;
@@ -214,7 +214,7 @@ async fn release_lets_another_instance_acquire_immediately() {
     let cluster_id = cluster("release-immediate");
 
     let lease = store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(60))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(60), None)
         .await
         .unwrap();
 
@@ -227,7 +227,7 @@ async fn release_lets_another_instance_acquire_immediately() {
     // release 직후, 아직 60초 TTL이 한참 남았어야 정상인데도 다른 instance가
     // 곧바로 획득할 수 있어야 한다 — TTL 만료를 기다리지 않는 정상 종료 경로.
     let taken = store
-        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30))
+        .acquire_control_lease(&cluster_id, "instance-b", StdDuration::from_secs(30), None)
         .await
         .expect("release must let a new instance acquire without waiting out the TTL");
     assert_eq!(taken.active_instance_id, "instance-b");
@@ -240,7 +240,7 @@ async fn release_with_wrong_instance_is_a_noop() {
     let cluster_id = cluster("release-wrong-instance");
 
     let lease = store
-        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(60))
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(60), None)
         .await
         .unwrap();
 
@@ -293,6 +293,7 @@ async fn concurrent_acquire_attempts_only_one_wins() {
                     &cluster_id,
                     &format!("instance-{i}"),
                     StdDuration::from_secs(60),
+                    None,
                 )
                 .await
         }));
@@ -313,4 +314,69 @@ async fn concurrent_acquire_attempts_only_one_wins() {
 
     let final_lease = store.get_control_lease(&cluster_id).await.unwrap().unwrap();
     assert_eq!(final_lease.epoch, 1);
+}
+
+/// 생산자가 실제로 값을 남기고, 인수인계가 그 값을 **덮는다** (로드맵 `#67` 게이트 ⑤).
+///
+/// 덮는 쪽이 이 시험의 절반이다. 버전은 "이 리스를 지금 쥔 바이너리"를 말하므로,
+/// 인수인계 뒤에도 옛 값이 남아 있으면 그것은 사실이 아니라 **유물**이고, 읽는
+/// 쪽(마이그레이션 가드의 거절 메시지)이 세워야 할 인스턴스를 틀리게 지목한다.
+#[tokio::test]
+async fn the_binary_version_of_the_current_holder_is_recorded_and_replaced() {
+    require_db!(store);
+    let cluster_id = cluster("binary-version");
+
+    let first = store
+        .acquire_control_lease(
+            &cluster_id,
+            "instance-a",
+            StdDuration::from_millis(1),
+            Some("1.2.3"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.binary_version.as_deref(), Some("1.2.3"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let second = store
+        .acquire_control_lease(
+            &cluster_id,
+            "instance-b",
+            StdDuration::from_secs(30),
+            Some("4.5.6"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second.binary_version.as_deref(),
+        Some("4.5.6"),
+        "인수인계는 버전도 함께 옮긴다"
+    );
+
+    // 조회 경로도 같은 값을 준다 — 037의 값이 `RETURNING`에만 있고 `SELECT`에
+    // 빠지면 획득한 인스턴스만 알고 다른 아무도 못 읽는다.
+    let fetched = store
+        .get_control_lease(&cluster_id)
+        .await
+        .unwrap()
+        .expect("lease");
+    assert_eq!(fetched.binary_version.as_deref(), Some("4.5.6"));
+}
+
+/// 버전을 주지 않는 호출자는 `None`으로 남는다 — "다르다"가 아니라 "모른다".
+///
+/// 이 갈래가 필요한 이유는 037 이전에 만들어진 행과 이 컬럼을 쓰지 않는 옛
+/// 바이너리 때문이다. `NOT NULL`이었다면 둘 다 곧바로 깨진다.
+#[tokio::test]
+async fn a_holder_that_reports_no_version_stays_unknown() {
+    require_db!(store);
+    let cluster_id = cluster("binary-version-none");
+
+    let lease = store
+        .acquire_control_lease(&cluster_id, "instance-a", StdDuration::from_secs(30), None)
+        .await
+        .unwrap();
+
+    assert_eq!(lease.binary_version, None);
 }

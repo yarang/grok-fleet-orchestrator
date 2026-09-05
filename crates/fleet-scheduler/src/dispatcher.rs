@@ -1570,7 +1570,7 @@ mod tests {
         let ttl = std::time::Duration::from_secs(60);
         let store: Arc<dyn Store> = Arc::new(MemStore::new());
         let held = store
-            .acquire_control_lease("c62", "instance-a", ttl)
+            .acquire_control_lease("c62", "instance-a", ttl, None)
             .await
             .unwrap();
 
@@ -1580,7 +1580,7 @@ mod tests {
             .await
             .unwrap();
         let taken = store
-            .acquire_control_lease("c62", "instance-b", ttl)
+            .acquire_control_lease("c62", "instance-b", ttl, None)
             .await
             .unwrap();
         assert!(taken.epoch > held.epoch);

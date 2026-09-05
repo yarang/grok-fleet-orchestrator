@@ -301,6 +301,10 @@ pub async fn run_serve(
         store.clone(),
         "default",
         uuid::Uuid::new_v4().to_string(),
+        // 여기가 037의 **생산자**다 (로드맵 `#67` 게이트 ⑤). `fleet` 바이너리
+        // 안에서 읽으므로 이것이 실제로 리스를 쥐는 바이너리의 버전이다 —
+        // 라이브러리 크레이트에서 읽으면 그 크레이트의 버전이 된다.
+        env!("CARGO_PKG_VERSION"),
         LeaseManagerConfig::default(),
     );
     let lease_handle = lease_manager.spawn();
