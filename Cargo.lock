@@ -1822,6 +1822,7 @@ dependencies = [
  "clap",
  "fleet-api",
  "fleet-core",
+ "fleet-scheduler",
  "fleet-store",
  "fleet-transport",
  "hex",
