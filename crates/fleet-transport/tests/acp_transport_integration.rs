@@ -260,7 +260,25 @@ async fn ping_registered_worker_ok() {
         .register(worker, &endpoint(addr), 1)
         .await
         .expect("register");
-    assert!(transport.ping(worker).await.is_ok());
+    let first = transport.ping(worker).await.expect("ping");
+    let second = transport.ping(worker).await.expect("ping");
+
+    // **왕복이 아니라는 사실을 여기서 못박는다.** `ping`은 이름도
+    // 반환형(`Duration`)도 probe처럼 보이지만 supervisor가 든 연결 상태를 읽고
+    // 상수를 돌려줄 뿐이다. 그 사실이 중요한 이유는 `#70` 게이트 ⑤ 때문이다 —
+    // 그 게이트는 on_demand 워커에 dispatch하기 전 살아 있음을 **확인**할 것을
+    // 요구하는데, 연결만 서 있고 응답하지 않는 워커는 이 함수를 그대로
+    // 통과한다. 이 단정이 있으면 누군가 진짜 왕복을 넣을 때 시험이 붉어지며
+    // "그 변경이 게이트 ⑤의 probe를 만든 것인지"를 의도적으로 판단하게 된다.
+    assert_eq!(
+        first, second,
+        "두 번의 ping이 같은 값이어야 한다 — 측정이라면 값이 흔들린다"
+    );
+    assert_eq!(
+        first,
+        std::time::Duration::from_millis(1),
+        "성공 값은 측정이 아니라 상수다"
+    );
 }
 
 #[tokio::test]

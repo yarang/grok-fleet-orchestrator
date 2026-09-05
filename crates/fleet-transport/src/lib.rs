@@ -154,7 +154,21 @@ pub trait WorkerTransport: Send + Sync {
     /// 진행 중인 작업을 취소.
     async fn cancel(&self, task_id: TaskId) -> Result<(), TransportError>;
 
-    /// 워커 연결을 테스트 (헬스체크용).
+    /// 워커 **연결 상태**를 확인한다.
+    ///
+    /// **돌려주는 `Duration`을 왕복 측정으로 읽지 말 것.** 구현이 실제로
+    /// 왕복을 하는지는 구현마다 다르고, 이 저장소의 두 구현은 **하지 않는다**
+    /// — `AcpTransport`는 supervisor가 들고 있는 연결 상태를 읽고 상수를
+    /// 돌려주며(`acp_transport.rs`의 같은 함수), `MockTransport`는 등록 여부만
+    /// 본다. 즉 이 함수가 `Ok`를 준다는 것은 "연결이 서 있다"이지 "저쪽이
+    /// 응답했다"가 아니다.
+    ///
+    /// **그래서 이것을 `#70` 게이트 ⑤의 probe로 쓸 수 없다.** 그 게이트는
+    /// on_demand 워커에 dispatch하기 전 살아 있음을 **확인**할 것을 요구하는데
+    /// (`selector.rs`의 "on_demand 워커를 후보에서 빼는 이유" 참고), 연결만
+    /// 서 있고 응답하지 않는 워커는 여기를 그대로 통과한다. 이름과 반환형이
+    /// probe처럼 보이는 것이 함정이라 여기 적어 둔다 — 그 게이트를 닫으려면
+    /// 응답을 실제로 받는 수단을 **새로 만들어야 한다.**
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError>;
 
     /// 워커 이벤트 스트림을 구독.

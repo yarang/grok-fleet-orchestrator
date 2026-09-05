@@ -681,6 +681,8 @@ impl WorkerTransport for AcpTransport {
         Ok(())
     }
 
+    /// **왕복하지 않는다.** supervisor가 유지하는 연결 상태를 읽고 상수를
+    /// 돌려준다 — 트레이트 쪽 독스트링에 그 이유와 파급을 적었다.
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError> {
         let clients = self.clients.read().await;
         let session = clients

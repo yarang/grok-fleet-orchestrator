@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: code-checked
 source: "docs/architecture/observability-and-reconciliation.md"
-last_verified: "2026-09-02"
+last_verified: "2026-09-05"
 last_verified_commit: "working-tree"
 owners: ["operations", "scheduler", "security"]
 ---
@@ -149,7 +149,7 @@ Worker 자신이 이미 쥐고 있던 두 근거였다 — 명령 목록에서�
 | 2. inventory-first recovery E2E | 차단 | control epoch·fencing token을 갖는 Reconciler가 없다. `crates/fleet-scheduler/src/reconcile.rs`는 `#62`의 stale `Pending`/`Dispatched` sweeper이며 이 문서의 Reconciler가 아니다. 선행 `#63`·`#67` |
 | 3. ACK 유실·orphan·grant expiry quarantine | **부분** | **orphan 쪽이 닫혔다(2026-09-02)**: Worker가 배정받지 않은 Agent 프로세스를 종료하고 그 사실을 heartbeat의 `agent_orphans`로 보고하며, 오케스트레이터가 `agent.orphan_terminated`로 감사한다. 근거는 둘이고 서로 다른 실패를 덮는다 — 명령 목록에서의 **부재**(`unplaced`)와 이전 incarnation이 남긴 **디스크 기록**(`stale_incarnation`). 후자가 없으면 Worker가 SIGKILL로 죽은 뒤 살아남은 자식은 원리적으로 관측 불가능하다(`procs`는 메모리다). `agents` 행은 건드리지 않는다 — orphan은 정의상 미배치라 `036`의 `agents_observation_requires_placement`가 그 컬럼 쓰기를 금지하며, 그래서 감사 로그가 유일한 자리다. 남은 것: ACK 유실의 `OutcomeUnknown` 승격(Reconciler 선행)과 grant expiry quarantine. lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) |
 | 4. `Started` effect·archive hold 자동 redrive 금지 | 차단 | effect ledger가 코드에 존재하지 않는다(`EffectLedger`/`PartiallyApplied` grep 0건). archive hold 테이블은 `#91` |
-| 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**은 ACP probe가 없어 미구현(선행 `#67`). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 |
+| 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**은 ACP probe가 없어 미구현(선행 `#67`). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문. **2026-09-05 재판정: 이 사유는 그대로 유효하다.** 다만 그 자리에 **함정이 하나 있어 함께 적는다** — `WorkerTransport::ping`은 이름도 반환형(`Duration`)도 probe처럼 보이지만 왕복하지 않는다. `AcpTransport`의 구현은 supervisor가 든 연결 상태를 읽고 `Duration::from_millis(1)` **상수**를 돌려주며(`MockTransport`는 등록 여부만 본다), 그래서 연결만 서 있고 응답하지 않는 워커가 그대로 통과한다. 이 게이트를 닫으려는 사람이 정확히 이 함수를 집게 되므로, 트레이트 독스트링에 그 파급을 적고 `acp_transport_integration`의 `ping_registered_worker_ok`가 "두 번의 ping이 같은 값이고 그 값이 상수"임을 단정으로 고정했다 — 누군가 진짜 왕복을 넣으면 그 시험이 붉어지며 의도적 판단을 강제한다. **한편 쓸 수 있는 더 약한 신호는 있다**: `is_connected`는 supervisor가 유지하는 실제 연결 상태를 반영하므로 "등록되면 영구히 `Online`"보다는 낫다. 그러나 그것도 응답이 아니라 연결이므로 이 게이트가 요구하는 확인은 되지 못한다. 둘 다 프로덕션 코드에서 부르는 곳이 없다(시험에서만 쓴다) |
 | 6. audit 상관관계 필드로 경로 재구성 | 차단 | `lease_generation`·`fencing_token`·`control_epoch`와 effect 경로가 필드로 존재하지 않는다. `crates/fleet-core/src/audit.rs`는 actor·outcome 계열만 갖는다 |
 | 7. `CancelUnconfirmed` 전 archive 차단 | 차단 | `CancelUnconfirmed` 상태가 코드에 존재하지 않는다(grep 0건). 선행 `#67`·`#91` |
 
