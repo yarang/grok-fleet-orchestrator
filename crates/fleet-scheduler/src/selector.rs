@@ -79,7 +79,7 @@
 //! 경고도 이 배정이 범위 밖이라고 적어 왔지만, 강제하는 코드는 없었다.
 //!
 //! 그래서 여기서 후보에서 뺀다. **이것은 영구 규칙이 아니라 상태 기계의 안전한
-//! 절반이다** — dispatch 직전 ACP probe(로드맵 #67 의존)가 들어오면 이 필터는
+//! 절반이다** — dispatch 직전 ACP probe(로드맵 #70 게이트 5)가 들어오면 이 필터는
 //! "probe 성공한 on_demand 워커는 후보에 포함"으로 바뀌어 `unchecked → probe →
 //! dispatch` 흐름이 완성된다. probe가 없는 지금 선택지는 "확인 없이 보낸다"와
 //! "보내지 않는다" 둘뿐이고, 후자가 안전한 쪽이다.
@@ -236,7 +236,7 @@ impl WorkerSelector {
         }
 
         // 1.5. liveness 필터 (로드맵 #70) — `on_demand` 워커는 heartbeat을 보내지
-        // 않으므로 `Online` 표시가 실제 생존을 뜻하지 않는다. probe(로드맵 #67)가
+        // 않으므로 `Online` 표시가 실제 생존을 뜻하지 않는다. probe(로드맵 #70)가
         // 들어오기 전까지 후보에서 제외한다. 모듈 최상단 "on_demand 워커를
         // 후보에서 빼는 이유" 참고.
         //
@@ -1107,7 +1107,7 @@ mod tests {
     #[tokio::test]
     async fn on_demand_worker_is_never_a_dispatch_candidate() {
         // on_demand 워커 하나뿐인 fleet — heartbeat이 없어 Online 표시를
-        // 신뢰할 수 없고 probe(로드맵 #67)도 없으므로 배정하지 않는다.
+        // 신뢰할 수 없고 probe(로드맵 #70)도 없으므로 배정하지 않는다.
         let workers = vec![make_on_demand_worker("laptop", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));

@@ -129,20 +129,24 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 6. audit 상관관계 필드만으로 incident의 Project·Task·lease·effect 경로를 재구성하는 시험
 7. `CancelUnconfirmed` Task가 증거 기반으로 해소되기 전까지 Project archive가 진행되지 않는 시험
 
-## 구현 상태 (2026-08-28)
+## 구현 상태 (2026-09-06)
 
-게이트별 현황이다. **닫힌 게이트는 두 개뿐이고, 나머지 다섯은 이 문서가 전제하는 하부 구조가
-저장소에 존재하지 않아 시험을 작성할 수조차 없다.** 없는 것을 미리 만들지 않기 위해, 무엇이
-막고 있는지를 여기에 명시한다.
+게이트별 현황이다. **닫힌 것은 게이트 1 하나, 부분은 게이트 5 하나이며, 남은 다섯은
+2·3·4·6·7이다.** 다만 그 다섯의 막힘이 전부 같은 종류는 아니다 — 게이트 4와 7은 하부
+구조(effect ledger, `CancelUnconfirmed`)가 저장소에 **없어서** 시험을 작성할 수조차 없고,
+게이트 2와 3은 **같은 하나**를 기다린다(워커가 명령과 무관하게 들고 있는 것을 여는 process
+inventory). 게이트 6은 그 둘과 또 달라서 게이트 4의 effect 경로가 생겨야 열린다. 부분인
+게이트 5만이 수단까지 이미 저장소에 있고 **배선이 없을 뿐**이다. 없는 것을 미리 만들지 않기
+위해, 그리고 이미 들어온 것을 다시 만들지 않기 위해, 무엇이 어느 쪽인지를 여기에 명시한다.
 
 | 게이트 | 상태 | 근거 / 막고 있는 것 |
 | --- | --- | --- |
 | 1. metric 노출 금지 | **닫힘** | `crates/fleet-api/src/metrics.rs`의 `metrics_body_never_exposes_ids_prompts_or_secrets`(fixture의 UUID·prompt·리포지터리 URL·`?server-key=` secret이 본문에 없음)와 `metrics_body_labels_stay_within_a_bounded_allow_list`(라벨 이름·값이 유한 허용 목록 안) |
-| 2. inventory-first recovery E2E | 차단 | control epoch·fencing token을 갖는 Reconciler가 없다. `crates/fleet-scheduler/src/reconcile.rs`는 `#62`의 stale `Pending`/`Dispatched` sweeper이며 이 문서의 Reconciler가 아니다. 선행 `#63`·`#67` |
-| 3. ACK 유실·orphan·grant expiry quarantine | 차단 | start/stop ACK는 `#67` 4b에서 왔고 `worker_incarnation`은 `workers.incarnation_started_at`(028)으로 있다. 남은 것은 **quarantine의 대상**이다 — 비교할 process inventory가 없어 orphan을 지목할 수 없다. lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) |
+| 2. inventory-first recovery E2E | 차단 | **Reconciler는 있고 fencing도 있다** — `crates/fleet-scheduler/src/reconcile.rs`의 `Reconciler`는 `lease_allows_control()`로 lease를 잃은 인스턴스의 sweep 전체를 건너뛴다(시험 `reconcile_once_skips_the_whole_sweep_when_control_plane_lease_is_fenced`). 선행으로 적혀 있던 `#63`의 lease/epoch primitive도 1~4단계로 들어왔다. 없는 것은 **inventory-first라는 순서**다: 이 Reconciler는 `#62`의 stale `Pending`/`Dispatched` sweeper라 **저장소가 기억하는 작업만** 훑고, failover 뒤 워커에게 "무엇을 들고 있는가"를 먼저 묻지 않는다. 그 물음의 답이 게이트 3이 지목하는 inventory와 같은 것이므로, 선행은 `#63`이 아니라 **게이트 3**이다 |
+| 3. ACK 유실·orphan·grant expiry quarantine | 차단 | start/stop ACK는 `#67` 4b에서 왔고 `worker_incarnation`은 `workers.incarnation_started_at`(028)으로 있다. `#67` 4c-B가 관측 채널까지 넣었지만 **그것으로 orphan을 지목할 수는 없다** — `crates/fleet-worker/src/agent_process.rs`의 재조정 루프는 관측을 `Vec::with_capacity(commands.len())`에 담고 `commands.iter().filter(desired_status == Running)`만 순회하므로, 오케스트레이터가 **이미 배치했다고 믿는** Agent를 확인·부인할 뿐 명령한 적 없는 프로세스를 실어 나를 형식이 없다. 같은 루프 2단계는 목록에서 사라진 프로세스를 **보고 없이** 종료하고, `procs`는 in-memory라 워커가 SIGKILL되면 워커 자신도 자기 자식을 잃는다. 남은 것은 워커가 **명령과 무관하게** 들고 있는 것을 여는 inventory 보고이며, 게이트 2도 같은 것을 기다린다. lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) |
 | 4. `Started` effect·archive hold 자동 redrive 금지 | 차단 | effect ledger가 코드에 존재하지 않는다(`EffectLedger`/`PartiallyApplied` grep 0건). archive hold 테이블은 `#91` |
-| 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**은 ACP probe가 없어 미구현(선행 `#67`). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 |
-| 6. audit 상관관계 필드로 경로 재구성 | 차단 | `lease_generation`·`fencing_token`·`control_epoch`와 effect 경로가 필드로 존재하지 않는다. `crates/fleet-core/src/audit.rs`는 actor·outcome 계열만 갖는다 |
+| 5. on-demand Worker probe 전 dispatch 금지 | **부분** | 안전한 절반은 닫혔다 — `WorkerSelector::select`가 `on_demand` 워커를 후보에서 제외한다(`selector.rs` 1.5단계, 시험 4건). 나머지 절반인 **probe 성공 후 dispatch 허용**의 막힘은 수단이 아니라 배선이다: `WorkerTransport::ping(worker_id) -> Duration`이 이미 트레이트에 있고, 없는 것은 selector가 dispatch 직전에 그것을 부르고 결과를 후보 판정에 되먹이는 경로다. **소유는 이 게이트(`#70`)이지 `#67`이 아니다** — probe는 Agent 프로비저닝이 아니라 Worker liveness이고 수단인 `ping`도 `fleet-transport`에 있다(2026-09-06 귀속 정정: 이 표와 `selector.rs`·`health.rs` 주석은 `#67`을, `#67` 로드맵 행과 `placement.rs`는 `#70`을 지목해 **서로에게 미루고 있었다**). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 |
+| 6. audit 상관관계 필드로 경로 재구성 | 차단 | **일부는 들어왔다** — `project_id`는 `037`로 `audit_log`의 1급 컬럼이 되어 `AuditFilter` 술어와 인덱스를 갖고(`#95` 1단계), Agent 배정·회수의 `generation`은 `detail`에 실린다(`#67` 게이트 ④). 없는 것은 **effect 경로**다: effect ledger가 없으므로(게이트 4) 감사는 "누가 언제 무엇을 시켰는가"까지만 말하고 "그 시킴이 어디까지 적용됐는가"를 말하지 못한다. `lease_generation`·`fencing_token`은 요구에서 빠진다 — `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01). `control_epoch`는 `026`·`035`로 이미 저장소에 있으나, 감사 필드로 승격할지는 effect 경로가 생긴 뒤에 판단한다 |
 | 7. `CancelUnconfirmed` 전 archive 차단 | 차단 | `CancelUnconfirmed` 상태가 코드에 존재하지 않는다(grep 0건). 선행 `#67`·`#91` |
 
 게이트 5의 판정 근거를 남긴다: 이 차단은 새로 도입한 제약이 아니라 **이미 문서가 요구하고 있었으나
