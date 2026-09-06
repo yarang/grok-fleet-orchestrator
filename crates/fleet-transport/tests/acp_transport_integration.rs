@@ -58,6 +58,9 @@ struct MockState {
     /// `session/list`에 답하기 전 기다릴 밀리초. 왕복이 실제로 측정되는지를
     /// 보기 위한 것이라 하한으로만 쓴다.
     session_list_delay_ms: Arc<AtomicU64>,
+    /// 켜면 `session/prompt` 처리 중에 도구 호출 알림 두 건(시작·완료)을
+    /// 흘려보낸다 (로드맵 `#70` 게이트 ④ 선행).
+    emit_tool_calls: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +133,46 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string();
+
+                if state.emit_tool_calls.load(Ordering::SeqCst) {
+                    let session_id_for_tool = req
+                        .get("params")
+                        .and_then(|p| p.get("sessionId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    // 시작 알림. `title`·`rawInput`에 비밀을 심어 두어, 그것이
+                    // 오케스트레이터까지 흘러오는지 시험이 확인할 수 있게 한다.
+                    let started = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id_for_tool,
+                            "update": {
+                                "sessionUpdate": "tool_call",
+                                "toolCallId": "tc-1",
+                                "title": "Read /etc/SECRET-PATH",
+                                "kind": "read",
+                                "status": "in_progress",
+                                "rawInput": { "path": "/etc/SECRET-PATH" },
+                            },
+                        },
+                    });
+                    let _ = writer.send(WsMessage::Text(started.to_string())).await;
+                    let done = json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": session_id_for_tool,
+                            "update": {
+                                "sessionUpdate": "tool_call_update",
+                                "toolCallId": "tc-1",
+                                "status": "completed",
+                            },
+                        },
+                    });
+                    let _ = writer.send(WsMessage::Text(done.to_string())).await;
+                }
 
                 let chunks: Vec<String> = {
                     let mut q = state.scripted_chunks.lock().await;
@@ -457,6 +500,79 @@ async fn probe_unknown_worker_errors() {
     ));
 }
 
+/// Agent가 도구를 호출하면 그 사실이 **오케스트레이터에 도달한다**
+/// (로드맵 `#70` 게이트 ④ 선행).
+///
+/// 이 시험이 이 증분의 핵심이다. 그 전까지 `handle_session_notification`은
+/// `AgentMessageChunk`가 아닌 모든 알림을 `_ => None`으로 버렸다 — 즉 Task가
+/// 실제로 무엇을 했는지에 대한 유일한 증거가 매번 폐기됐고, effect ledger에
+/// 적을 것 자체가 없었다.
+///
+/// **비밀을 함께 흘려보내 확인한다.** mock이 `title`과 `rawInput`에 심는
+/// `SECRET-PATH`가 도착한 이벤트에 없어야 한다. 이 관측은 durable 이벤트
+/// 로그로 가므로 한 번 새면 지우는 경로가 없다.
+#[tokio::test]
+async fn tool_calls_reach_the_orchestrator_without_their_free_form_text() {
+    let (state, addr) = start_mock_server().await;
+    state.emit_tool_calls.store(true, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+    let mut events = transport.subscribe().await.expect("subscribe");
+
+    let task_id = TaskId::new();
+    transport
+        .dispatch(dispatch_req(task_id, worker, "go"))
+        .await
+        .expect("dispatch");
+
+    let mut observed = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && observed.len() < 2 {
+        match timeout(Duration::from_millis(500), events.recv()).await {
+            Ok(Some(WorkerEvent::ToolCall {
+                task_id: t,
+                invocation,
+            })) => {
+                assert_eq!(t, task_id);
+                observed.push(invocation);
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+
+    assert_eq!(
+        observed.len(),
+        2,
+        "시작과 완료 두 건이 도착해야 한다 — 받은 것 {observed:?}"
+    );
+    assert!(
+        observed.iter().all(|i| i.tool_call_id == "tc-1"),
+        "같은 호출임을 소비자가 알 수 있어야 한다: {observed:?}"
+    );
+    assert_eq!(observed[0].kind, fleet_core::ToolInvocationKind::Read);
+    assert_eq!(
+        observed[0].status,
+        fleet_core::ToolInvocationStatus::InProgress
+    );
+    assert_eq!(
+        observed[1].status,
+        fleet_core::ToolInvocationStatus::Completed,
+        "완료 전이가 보여야 한다 — 그것이 effect ledger가 물을 사실이다"
+    );
+
+    let rendered = serde_json::to_string(&observed).unwrap();
+    assert!(
+        !rendered.contains("SECRET-PATH"),
+        "자유 서술이 durable 이벤트로 새어 나갔다: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn cancel_unknown_task_is_noop() {
     let transport = AcpTransport::new();
@@ -494,6 +610,11 @@ async fn dispatch_streams_output_and_completes() {
             })) => {
                 assert_eq!(t, task_id);
                 output.push_str(&chunk);
+            }
+            // 이 시험의 mock은 도구 호출을 보내지 않는다. 도착하면 그 자체가
+            // 결함이므로 조용히 넘기지 않는다.
+            Ok(Some(WorkerEvent::ToolCall { invocation, .. })) => {
+                panic!("unexpected tool call: {invocation:?}")
             }
             Ok(Some(WorkerEvent::Completed { task_id: t, result })) => {
                 assert_eq!(t, task_id);

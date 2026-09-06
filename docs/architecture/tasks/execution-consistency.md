@@ -100,6 +100,32 @@ alert 대상이다.
 도구 실행이 파일·Git 밖에 영향을 줄 수 있으면 Worker는 호출 전 `tool_effect`를 durable ledger에
 기록해야 한다. process output이나 모델의 "완료" 서술은 effect 증거가 아니다.
 
+**2026-09-06 — 이 원장은 아직 없지만, 그것이 읽을 증거는 이제 남는다.** 원장이 미구현인 이유가
+그동안 "만들지 않았다"로만 적혀 있었는데 실제 막힌 자리는 더 앞이었다: 도구는 Worker의 grok
+프로세스 **안에서** 돌고 오케스트레이터는 ACP로 `session/prompt`만 보낸다. ACP는 `session/update`로
+도구 호출을 알려주지만 `acp_transport.rs`의 알림 핸들러가 그것을 `_ => None`으로 전부 버리고
+있었다 — 즉 **원장에 적을 것 자체가 오케스트레이터에 도달한 적이 없었다.**
+
+그 알림을 이제 `WorkerEvent::ToolCall`로 올려 `FleetEvent::TaskToolCall`로 남긴다
+(`fleet_core::ToolInvocation`). 위 여덟 상태·idempotency key·external receipt는 **아무것도**
+구현하지 않는다 — 이것은 원장이 아니라 원장의 입력이다.
+
+기록하는 것은 넷뿐이다: `tool_call_id`, `name`(= 위 문단의 `tool_id`), `kind`(닫힌 어휘 10종),
+`status`(닫힌 어휘 4종). ACP가 함께 주는 `title`·`raw_input`·`raw_output`·`content`·`locations`는
+**버린다** — [관측성 정본](../observability-and-reconciliation.md)의 금지 목록(prompt·사용자
+입력·repository URL·raw provider payload)에 걸리며, `title`은 "Read /home/user/.ssh/id_rsa"처럼
+경로와 인자를 사람이 읽는 문장으로 담는다. 이 관측은 durable 이벤트 로그로 가므로 한 번 새면
+지우는 경로가 없다.
+
+**이 기록이 effect 증거가 아니라는 것은 그대로다.** 바로 위 문단이 "process output이나 모델의
+'완료' 서술은 effect 증거가 아니다"라고 적은 대로, `status = Completed`는 Agent가 그렇게 보고했다는
+뜻이지 부작용이 적용됐다는 증명이 아니다. 증명은 provider receipt/external reference에서 오고,
+그것은 여전히 없다.
+
+`name`을 읽기 위해 SDK의 `unstable_tool_call_name` 피처를 켰다(선례: `unstable_end_turn_token_usage`).
+unstable 표면은 예고 없이 바뀔 수 있지만 그 위험은 조용하지 않다 — 필드가 사라지면 매핑 함수가
+컴파일에서 깨진다.
+
 | Effect 상태 | 의미 | 다음 동작 |
 |---|---|---|
 | `Planned` | 실행 전 정책·입력 hash·idempotency key 확보 | 호출 가능 |

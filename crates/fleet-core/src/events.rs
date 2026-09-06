@@ -43,6 +43,22 @@ pub enum FleetEvent {
         at: DateTime<Utc>,
     },
 
+    /// Agent가 Task 실행 중 도구를 호출했다고 알려 왔다
+    /// (로드맵 `#70` 게이트 ④ 선행).
+    ///
+    /// **이것은 effect가 적용됐다는 증거가 아니다.** Agent의 보고이며,
+    /// [실행 일관성](../../../docs/architecture/tasks/execution-consistency.md)이
+    /// "process output이나 모델의 '완료' 서술은 effect 증거가 아니다"라고 적은
+    /// 그것이다. 그럼에도 남기는 이유는 이것이 오케스트레이터가 가질 수 있는
+    /// **유일한** 실행 증거이고, 그것 없이는 effect ledger에 적을 것 자체가
+    /// 없기 때문이다. 자세한 것은 [`ToolInvocation`]의 모듈 문서에 있다.
+    TaskToolCall {
+        task_id: TaskId,
+        worker_id: WorkerId,
+        invocation: crate::ToolInvocation,
+        at: DateTime<Utc>,
+    },
+
     /// 작업이 성공적으로 완료.
     TaskCompleted {
         task_id: TaskId,
@@ -109,6 +125,7 @@ impl FleetEvent {
             Self::TaskCancelled { .. } => "task_cancelled",
             Self::WorkerJoined { .. } => "worker_joined",
             Self::WorkerLeft { .. } => "worker_left",
+            Self::TaskToolCall { .. } => "task_tool_call",
             Self::WorkerCircuitChanged { .. } => "worker_circuit_changed",
             Self::WorkerHeartbeat { .. } => "worker_heartbeat",
         }
@@ -125,6 +142,7 @@ impl FleetEvent {
             | Self::TaskCancelled { at, .. }
             | Self::WorkerJoined { at, .. }
             | Self::WorkerLeft { at, .. }
+            | Self::TaskToolCall { at, .. }
             | Self::WorkerCircuitChanged { at, .. }
             | Self::WorkerHeartbeat { at, .. } => *at,
         }
@@ -242,6 +260,20 @@ impl FleetEvent {
             worker_id,
             from,
             to,
+            at: Utc::now(),
+        }
+    }
+
+    /// Agent가 알려 온 도구 호출 하나 (로드맵 `#70` 게이트 ④ 선행).
+    pub fn task_tool_call(
+        task_id: TaskId,
+        worker_id: WorkerId,
+        invocation: crate::ToolInvocation,
+    ) -> Self {
+        Self::TaskToolCall {
+            task_id,
+            worker_id,
+            invocation,
             at: Utc::now(),
         }
     }

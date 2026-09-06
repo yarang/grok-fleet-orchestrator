@@ -38,6 +38,7 @@ pub mod ids;
 pub mod issue;
 pub mod project;
 pub mod task;
+pub mod tool_invocation;
 pub mod worker;
 
 // 주요 타입 re-export (fleet_core::Task 등으로 접근 가능)
@@ -74,6 +75,7 @@ pub use task::{
     TaskResult, TaskStatus, TaskStatusFilter, TokenUsage, TransitionOrigin, TransitionOutcome,
     WorkspacePathError,
 };
+pub use tool_invocation::{ToolInvocation, ToolInvocationKind, ToolInvocationStatus};
 pub use worker::{
     mask_server_key, split_server_key, CircuitState, OsInfo, Worker, WorkerFilter, WorkerHeartbeat,
     WorkerLivenessMode, WorkerStatus,

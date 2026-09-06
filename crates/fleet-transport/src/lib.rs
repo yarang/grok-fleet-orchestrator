@@ -81,7 +81,24 @@ pub enum WorkerEvent {
         chunk: String,
     },
     /// 작업 완료.
-    Completed { task_id: TaskId, result: TaskResult },
+    /// Agent가 도구를 호출했다고 알려 왔다 (로드맵 `#70` 게이트 ④ 선행).
+    ///
+    /// **`Output`과 같은 부류다** — 권위 있는 결정이 아니라 관측이며,
+    /// Task의 최종 상태나 breaker를 건드리지 않는다. 그래서 소비자 쪽에서도
+    /// lease와 무관하게 흘려보낸다(`dispatcher.rs`).
+    ///
+    /// 이 이벤트가 존재하기 전에는 이 정보가 `handle_session_notification`의
+    /// `_ => None`에서 **매번 폐기됐다.** 즉 Task가 실제로 무엇을 했는지에
+    /// 대한 유일한 증거가 오케스트레이터에 도달한 적이 없다.
+    ToolCall {
+        task_id: TaskId,
+        invocation: fleet_core::ToolInvocation,
+    },
+
+    Completed {
+        task_id: TaskId,
+        result: TaskResult,
+    },
     /// 작업이 실패로 처리됨. `observation`이 **그 판단의 근거가 어디까지인지**를
     /// 함께 싣는다 — 이 필드가 없던 동안 dispatcher는 여섯 생성 지점(테스트 double
     /// 포함) 전부를 `FailureKind::WorkerError`로 못 박았고, 그중 **셋**은 워커가

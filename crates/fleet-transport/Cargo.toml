@@ -47,7 +47,13 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 
 # ACP-only (optional) — 공식 SDK, vendor/agent-client-protocol-rust-sdk 로컬 경로.
-agent-client-protocol = { path = "../../vendor/agent-client-protocol-rust-sdk/src/agent-client-protocol", optional = true, features = ["unstable_end_turn_token_usage"] }
+# `unstable_tool_call_name`(2026-09-06, 로드맵 `#70` 게이트 ④ 선행): 도구 호출
+# 관측에서 `ToolCall.name`을 읽기 위해 켠다. 그 필드가 실행 일관성 정본의
+# effect ledger가 이름을 댄 `tool_id`에 대응하는 **유일한** 필드다 — 없으면
+# "Execute 도구가 돌았다"까지만 말할 수 있고 어떤 도구인지는 말할 수 없다.
+# SDK는 unstable 표면이 예고 없이 바뀔 수 있다고 적어 두었지만, 그 위험은
+# 조용하지 않다: 필드가 사라지면 `invocation_of`가 컴파일에서 깨진다.
+agent-client-protocol = { path = "../../vendor/agent-client-protocol-rust-sdk/src/agent-client-protocol", optional = true, features = ["unstable_end_turn_token_usage", "unstable_tool_call_name"] }
 agent-client-protocol-http = { path = "../../vendor/agent-client-protocol-rust-sdk/src/agent-client-protocol-http", optional = true, features = ["client"] }
 futures = { workspace = true, optional = true }
 

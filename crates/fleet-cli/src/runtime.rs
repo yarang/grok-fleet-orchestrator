@@ -1209,20 +1209,15 @@ async fn run_events_list(after_seq: u64, limit: u32, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// 이벤트 종류 문자열.
+///
+/// **[`fleet_core::FleetEvent::event_type`]에 위임한다.** 예전에는 같은 match를
+/// 여기 한 벌 더 두었는데, 그것은 새 variant가 생길 때마다 두 곳을 고쳐야
+/// 하는 구조였고 한쪽만 고치면 CLI가 조용히 옛 이름을 찍는다. 2026-09-06에
+/// `TaskToolCall`을 더하면서 실제로 두 곳을 고치게 되어 옮겼다 — 저장된
+/// `event_type` 칼럼과 CLI 표시가 **정의상** 같아진다.
 fn event_type_str(e: &fleet_core::FleetEvent) -> &'static str {
-    use fleet_core::FleetEvent;
-    match e {
-        FleetEvent::TaskCreated { .. } => "task_created",
-        FleetEvent::TaskDispatched { .. } => "task_dispatched",
-        FleetEvent::TaskProgress { .. } => "task_progress",
-        FleetEvent::TaskCompleted { .. } => "task_completed",
-        FleetEvent::TaskFailed { .. } => "task_failed",
-        FleetEvent::TaskCancelled { .. } => "task_cancelled",
-        FleetEvent::WorkerJoined { .. } => "worker_joined",
-        FleetEvent::WorkerLeft { .. } => "worker_left",
-        FleetEvent::WorkerCircuitChanged { .. } => "worker_circuit_changed",
-        FleetEvent::WorkerHeartbeat { .. } => "worker_heartbeat",
-    }
+    e.event_type()
 }
 
 fn event_detail_str(e: &fleet_core::FleetEvent) -> String {

@@ -134,6 +134,12 @@ enum SessionMsg {
     /// 루프가 보장하므로, 이 배리어는 오직 "컨슈머가 실제로 다 처리했는지"만
     /// 확인한다.
     Flush(oneshot::Sender<()>),
+    /// `session/update`에서 추출한 도구 호출 관측 (로드맵 `#70` 게이트 ④ 선행).
+    ///
+    /// `Chunk`와 같은 큐를 타는 이유는 **순서 때문이다.** 도구 호출과 그것이
+    /// 만든 출력은 인과 관계가 있고, 별도 경로로 보내면 그 순서가 소비자에게
+    /// 뒤집혀 도착할 수 있다.
+    Tool(fleet_core::ToolInvocation),
 }
 
 /// 워커별 세션. supervisor와 dispatch/cancel 양쪽에서 공유.
@@ -524,6 +530,12 @@ impl WorkerTransport for AcpTransport {
                                 task_id,
                                 seq: out_seq,
                                 chunk: text,
+                            });
+                        }
+                        SessionMsg::Tool(invocation) => {
+                            let _ = worker_broadcaster.send(WorkerEvent::ToolCall {
+                                task_id,
+                                invocation,
                             });
                         }
                         SessionMsg::Flush(ack) => {
@@ -981,11 +993,18 @@ async fn handle_session_notification(
     sessions_map: &Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
     notification: SessionNotification,
 ) {
-    let text = match &notification.update {
-        SessionUpdate::AgentMessageChunk(chunk) => extract_chunk_text(chunk),
+    // `_ => None`으로 전부 버리던 자리다 (로드맵 `#70` 게이트 ④ 선행).
+    // 도구 호출 알림은 Task가 실제로 무엇을 했는지에 대해 오케스트레이터가
+    // 가질 수 있는 **유일한** 증거인데, 그것이 매번 폐기되고 있었다.
+    let msg = match &notification.update {
+        SessionUpdate::AgentMessageChunk(chunk) => extract_chunk_text(chunk).map(SessionMsg::Chunk),
+        SessionUpdate::ToolCall(call) => Some(SessionMsg::Tool(invocation_of(call))),
+        SessionUpdate::ToolCallUpdate(update) => {
+            Some(SessionMsg::Tool(invocation_of_update(update)))
+        }
         _ => None,
     };
-    let Some(text) = text else { return };
+    let Some(msg) = msg else { return };
 
     let notify_tx = {
         let sessions = sessions_map.lock().await;
@@ -994,7 +1013,91 @@ async fn handle_session_notification(
             .map(|entry| entry.notify_tx.clone())
     };
     let Some(notify_tx) = notify_tx else { return };
-    let _ = notify_tx.send(SessionMsg::Chunk(text));
+    let _ = notify_tx.send(msg);
+}
+
+/// ACP `ToolKind` → 저장 어휘.
+///
+/// ACP가 새 종류를 더하면 [`Other`](fleet_core::ToolInvocationKind::Other)로
+/// 접는다 — 그쪽 독스트링이 적은 대로, 알 수 없는 종류에 새 이름을 지어 주면
+/// 옛 이벤트를 읽는 쪽이 깨진다. `_` arm이 있는 것은 그 결정이지 게으름이
+/// 아니다.
+fn kind_of(kind: &agent_client_protocol::schema::v1::ToolKind) -> fleet_core::ToolInvocationKind {
+    use agent_client_protocol::schema::v1::ToolKind as K;
+    use fleet_core::ToolInvocationKind as O;
+    match kind {
+        K::Read => O::Read,
+        K::Edit => O::Edit,
+        K::Delete => O::Delete,
+        K::Move => O::Move,
+        K::Search => O::Search,
+        K::Execute => O::Execute,
+        K::Think => O::Think,
+        K::Fetch => O::Fetch,
+        K::SwitchMode => O::SwitchMode,
+        _ => O::Other,
+    }
+}
+
+/// ACP `ToolCallStatus` → 저장 어휘.
+fn status_of(
+    status: &agent_client_protocol::schema::v1::ToolCallStatus,
+) -> fleet_core::ToolInvocationStatus {
+    use agent_client_protocol::schema::v1::ToolCallStatus as S;
+    use fleet_core::ToolInvocationStatus as O;
+    match status {
+        S::Pending => O::Pending,
+        S::InProgress => O::InProgress,
+        S::Completed => O::Completed,
+        S::Failed => O::Failed,
+        // 위 `kind_of`와 같은 이유. 다만 여기서 `Pending`으로 접는 것은
+        // **덜 아는 쪽**으로 접는 것이다 — 모르는 상태를 종료로 읽으면
+        // 끝나지 않은 호출이 끝난 것으로 기록된다.
+        _ => O::Pending,
+    }
+}
+
+/// 시작 알림에서 관측을 만든다.
+///
+/// **`title`·`raw_input`·`raw_output`·`content`·`locations`를 읽지 않는다.**
+/// 그 다섯은 경로·인자·파일 내용을 담아 관측성 정본의 금지 목록에 걸린다 —
+/// 근거는 [`fleet_core::ToolInvocation`]의 모듈 문서에 있다.
+fn invocation_of(call: &agent_client_protocol::schema::v1::ToolCall) -> fleet_core::ToolInvocation {
+    fleet_core::ToolInvocation {
+        tool_call_id: call.tool_call_id.0.to_string(),
+        name: call.name.clone(),
+        kind: kind_of(&call.kind),
+        status: status_of(&call.status),
+    }
+}
+
+/// 변화 알림에서 관측을 만든다.
+///
+/// 갱신은 **바뀐 필드만** 싣는다. 빠진 필드를 지어내지 않고 가장 덜 아는
+/// 값으로 둔다 — `kind`는 `Other`, `status`는 `Pending`. 이것이 앞 알림의
+/// 값을 여기서 이어 붙이는 것보다 나은 이유는, 이어 붙이려면 세션별로 도구
+/// 호출 표를 들어야 하고 그 표는 이 계층이 소유할 상태가 아니기 때문이다.
+/// 소비자는 `tool_call_id`로 같은 호출임을 알 수 있으므로 이어 붙이는 것은
+/// 읽는 쪽에서 하면 된다.
+fn invocation_of_update(
+    update: &agent_client_protocol::schema::v1::ToolCallUpdate,
+) -> fleet_core::ToolInvocation {
+    fleet_core::ToolInvocation {
+        tool_call_id: update.tool_call_id.0.to_string(),
+        name: update.fields.name.clone(),
+        kind: update
+            .fields
+            .kind
+            .as_ref()
+            .map(kind_of)
+            .unwrap_or(fleet_core::ToolInvocationKind::Other),
+        status: update
+            .fields
+            .status
+            .as_ref()
+            .map(status_of)
+            .unwrap_or(fleet_core::ToolInvocationStatus::Pending),
+    }
 }
 
 /// `PromptResponse`에서 토큰 사용량 추출 (`unstable_end_turn_token_usage`
@@ -1272,6 +1375,137 @@ mod tests {
         assert!(
             error_is_an_agent_answer(&agent_internal_error),
             "Agent가 보낸 -32603은 답이다 — 판정 근거는 코드가 아니라 표식이다"
+        );
+    }
+
+    /// **관측이 자유 서술을 옮기지 않는다** (로드맵 `#70` 게이트 ④ 선행).
+    ///
+    /// 이 시험이 이 증분에서 가장 중요한 단정이다. ACP의 `ToolCall`은
+    /// `title`·`raw_input`·`raw_output`·`content`·`locations`를 함께 주는데,
+    /// 그 다섯은 경로·인자·파일 내용을 담아 관측성 정본의 금지 목록
+    /// (prompt·사용자 입력·repository URL·raw provider payload)에 걸린다.
+    /// 그리고 이 관측은 **durable 이벤트 로그로 간다** — 한 번 새면 지우는
+    /// 경로가 없다.
+    ///
+    /// 필드를 하나씩 세는 대신 **직렬화 결과에서 비밀을 찾는** 이유: 나중에
+    /// 누가 필드를 더해도 이 시험이 잡는다. 필드 목록을 세는 시험은 그때
+    /// 같이 고쳐지면서 조용히 통과한다.
+    #[test]
+    fn a_tool_observation_carries_no_free_form_text() {
+        use agent_client_protocol::schema::v1::{ToolCall, ToolCallStatus, ToolKind};
+
+        let mut call = ToolCall::new("call-1", "Read /home/user/.ssh/id_rsa (SECRET-IN-TITLE)");
+        call.kind = ToolKind::Read;
+        call.status = ToolCallStatus::InProgress;
+        call.raw_input = Some(serde_json::json!({ "path": "SECRET-IN-INPUT" }));
+        call.raw_output = Some(serde_json::json!({ "body": "SECRET-IN-OUTPUT" }));
+
+        let observed = invocation_of(&call);
+        let rendered = serde_json::to_string(&observed).expect("serializable");
+
+        for secret in [
+            "SECRET-IN-TITLE",
+            "SECRET-IN-INPUT",
+            "SECRET-IN-OUTPUT",
+            "id_rsa",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "관측에 {secret}이 실렸다 — durable 이벤트 로그로 가는 값이다: {rendered}"
+            );
+        }
+        // 남겨야 하는 것은 남았는지도 함께 본다. 이것이 없으면 "전부 버리는"
+        // 구현이 위 단정을 통과한다.
+        assert_eq!(observed.tool_call_id, "call-1");
+        assert_eq!(observed.kind, fleet_core::ToolInvocationKind::Read);
+        assert_eq!(
+            observed.status,
+            fleet_core::ToolInvocationStatus::InProgress
+        );
+    }
+
+    /// 종류가 뒤바뀌지 않는다.
+    ///
+    /// 열 가지를 손으로 옮기는 코드라 `Read`를 `Edit`으로 적는 실수가
+    /// 컴파일에 잡히지 않는다. 표 전체를 세운다.
+    #[test]
+    fn every_tool_kind_maps_to_its_own_twin() {
+        use agent_client_protocol::schema::v1::ToolKind as K;
+        use fleet_core::ToolInvocationKind as O;
+
+        let table = [
+            (K::Read, O::Read),
+            (K::Edit, O::Edit),
+            (K::Delete, O::Delete),
+            (K::Move, O::Move),
+            (K::Search, O::Search),
+            (K::Execute, O::Execute),
+            (K::Think, O::Think),
+            (K::Fetch, O::Fetch),
+            (K::SwitchMode, O::SwitchMode),
+            (K::Other, O::Other),
+        ];
+        for (acp, ours) in table {
+            assert_eq!(kind_of(&acp), ours, "{acp:?} was mapped to the wrong kind");
+        }
+    }
+
+    /// 상태도 마찬가지. 특히 `InProgress`가 종료로 접히면 끝나지 않은 호출이
+    /// 끝난 것으로 기록된다.
+    #[test]
+    fn every_tool_status_maps_to_its_own_twin() {
+        use agent_client_protocol::schema::v1::ToolCallStatus as S;
+        use fleet_core::ToolInvocationStatus as O;
+
+        let table = [
+            (S::Pending, O::Pending),
+            (S::InProgress, O::InProgress),
+            (S::Completed, O::Completed),
+            (S::Failed, O::Failed),
+        ];
+        for (acp, ours) in table {
+            assert_eq!(
+                status_of(&acp),
+                ours,
+                "{acp:?} was mapped to the wrong status"
+            );
+        }
+    }
+
+    /// 갱신 알림이 빠뜨린 필드를 **지어내지 않는다**.
+    ///
+    /// ACP의 갱신은 바뀐 필드만 싣는다. 없는 값을 앞 알림에서 이어 붙이려면
+    /// 세션별 도구 호출 표를 들어야 하는데 그것은 이 계층이 소유할 상태가
+    /// 아니다. 대신 **가장 덜 아는 값**으로 둔다 — 특히 `status`를 `Pending`
+    /// 으로 두는 것이 중요하다. 종료로 접으면 끝나지 않은 호출이 끝난 것으로
+    /// 기록된다.
+    #[test]
+    fn an_update_that_omits_fields_claims_the_least() {
+        use agent_client_protocol::schema::v1::{
+            ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        };
+
+        let bare = invocation_of_update(&ToolCallUpdate::new(
+            "call-2",
+            ToolCallUpdateFields::default(),
+        ));
+        assert_eq!(bare.tool_call_id, "call-2");
+        assert_eq!(bare.kind, fleet_core::ToolInvocationKind::Other);
+        assert_eq!(
+            bare.status,
+            fleet_core::ToolInvocationStatus::Pending,
+            "모르는 상태를 종료로 읽으면 끝나지 않은 호출이 끝난 것이 된다"
+        );
+
+        // 실린 필드는 그대로 옮긴다.
+        let mut fields = ToolCallUpdateFields::default();
+        fields.status = Some(ToolCallStatus::Completed);
+        fields.title = Some("SECRET-IN-UPDATE-TITLE".into());
+        let filled = invocation_of_update(&ToolCallUpdate::new("call-2", fields));
+        assert_eq!(filled.status, fleet_core::ToolInvocationStatus::Completed);
+        assert!(
+            !serde_json::to_string(&filled).unwrap().contains("SECRET"),
+            "갱신 경로도 자유 서술을 옮기지 않는다"
         );
     }
 }

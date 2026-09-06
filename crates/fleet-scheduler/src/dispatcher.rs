@@ -117,7 +117,10 @@ impl Dispatcher {
         // 결정이다. `Output`(stdout/stderr 버퍼링)은 권위 있는 결정이 아니라
         // 순수 append-only 관측 데이터 전달이므로 lease 여부와 무관하게
         // 계속 흘려보낸다 — 막으면 사용자가 보고 있는 실시간 출력만 끊기고
-        // 얻는 안전 이득은 없다.
+        // 얻는 안전 이득은 없다. `ToolCall`(로드맵 #70 게이트 ④ 선행)도 같은
+        // 부류이며, 여기서 막으면 **오히려 손해가 크다** — 리스를 잃은 창은
+        // 새 소유자가 재조정해야 하는 구간이고, 그 재조정이 물을 "이 Task가
+        // 무엇을 했는가"의 증거가 정확히 이 이벤트다.
         if matches!(
             event,
             WorkerEvent::Completed { .. } | WorkerEvent::Failed { .. }
@@ -129,7 +132,9 @@ impl Dispatcher {
                 WorkerEvent::Completed { task_id, .. } | WorkerEvent::Failed { task_id, .. } => {
                     *task_id
                 }
-                WorkerEvent::Output { .. } => unreachable!("filtered by the matches! guard above"),
+                WorkerEvent::Output { .. } | WorkerEvent::ToolCall { .. } => {
+                    unreachable!("filtered by the matches! guard above")
+                }
             };
             warn!(
                 %task_id,
@@ -333,6 +338,37 @@ impl Dispatcher {
             } => {
                 let _ = self.state.store.append_output(task_id, &chunk).await;
                 tracing::debug!(%task_id, seq, "output chunk buffered");
+            }
+            WorkerEvent::ToolCall {
+                task_id,
+                invocation,
+            } => {
+                // 워커를 모르면 이벤트를 만들 수 없다. 지어내지 않고 버리는
+                // 이유: `worker_id`는 이 관측을 나중에 process inventory와
+                // 대조할 때의 축인데, 틀린 축은 없는 축보다 나쁘다.
+                let Some(worker_id) = self.current_worker_of(task_id).await else {
+                    tracing::debug!(
+                        %task_id,
+                        "dropping a tool-call observation for a task with no current worker"
+                    );
+                    return;
+                };
+                // `invocation`을 로그 메시지에 통째로 넣지 않는다 — 필드 단위로
+                // 넘겨야 관측성 정본의 금지 목록을 코드에서 눈으로 확인할 수
+                // 있다. (그 넷은 전부 안전하지만, 형태를 지키는 것이 나중에
+                // 필드가 늘 때의 방어다.)
+                tracing::debug!(
+                    %task_id, %worker_id,
+                    tool_call_id = %invocation.tool_call_id,
+                    kind = ?invocation.kind,
+                    status = ?invocation.status,
+                    "tool call observed"
+                );
+                let _ = self
+                    .state
+                    .store
+                    .append_event(&FleetEvent::task_tool_call(task_id, worker_id, invocation))
+                    .await;
             }
         }
     }
@@ -1761,6 +1797,101 @@ mod tests {
                 .iter()
                 .any(|c| c.chunk.contains("hello from worker")),
             "output must still be buffered while fenced: {output:?}"
+        );
+    }
+
+    /// 도구 호출 관측이 **durable 이벤트로 남는다** (로드맵 `#70` 게이트 ④ 선행).
+    ///
+    /// transport 쪽 시험은 관측이 오케스트레이터에 **도달**하는 것까지 본다.
+    /// 도달한 것이 사라지지 않는지는 여기서 본다 — 둘 사이가 이 증분에서
+    /// 새로 생긴 구간이고, effect ledger가 나중에 읽을 곳이 바로 이 로그다.
+    ///
+    /// **fenced 상태에서 돌린다.** 관측을 리스 뒤에 가두면 안 되는 이유가
+    /// `Output`보다 이쪽이 강하다: 리스를 잃은 창은 새 소유자가 재조정해야
+    /// 하는 구간이고, 그 재조정이 물을 "이 Task가 무엇을 했는가"의 증거가
+    /// 정확히 이 이벤트다.
+    #[tokio::test]
+    async fn a_tool_call_observation_is_recorded_even_while_fenced() {
+        let (state, dispatcher) = setup_fenced();
+
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::ToolCall {
+                task_id,
+                invocation: fleet_core::ToolInvocation {
+                    tool_call_id: "tc-9".into(),
+                    name: Some("bash".into()),
+                    kind: fleet_core::ToolInvocationKind::Execute,
+                    status: fleet_core::ToolInvocationStatus::Completed,
+                },
+            })
+            .await;
+
+        let events = state.store.list_events(0, 100).await.unwrap();
+        let recorded = events
+            .iter()
+            .find(|e| e.event.event_type() == "task_tool_call")
+            .unwrap_or_else(|| {
+                panic!(
+                    "도구 호출이 이벤트 로그에 남아야 한다 — 받은 것 {:?}",
+                    events
+                        .iter()
+                        .map(|e| e.event.event_type())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let payload = serde_json::to_string(&recorded.event).unwrap();
+        assert!(
+            payload.contains("tc-9"),
+            "어느 호출인지 남아야 한다: {payload}"
+        );
+        assert!(payload.contains("execute"), "종류가 남아야 한다: {payload}");
+        assert!(
+            payload.contains(&worker.id.to_string()),
+            "나중에 process inventory와 대조할 축이 남아야 한다: {payload}"
+        );
+    }
+
+    /// 워커를 모르는 Task의 관측은 **지어내지 않고 버린다**.
+    ///
+    /// `worker_id`는 이 관측을 process inventory와 대조할 때의 축인데, 틀린
+    /// 축은 없는 축보다 나쁘다 — 엉뚱한 워커의 활동으로 읽힌다.
+    #[tokio::test]
+    async fn a_tool_call_for_a_task_with_no_worker_is_dropped() {
+        let (state, dispatcher) = setup_fenced();
+
+        let task = sample_task(); // Pending — 배정된 워커가 없다.
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::ToolCall {
+                task_id,
+                invocation: fleet_core::ToolInvocation {
+                    tool_call_id: "tc-orphan".into(),
+                    name: None,
+                    kind: fleet_core::ToolInvocationKind::Execute,
+                    status: fleet_core::ToolInvocationStatus::Completed,
+                },
+            })
+            .await;
+
+        let events = state.store.list_events(0, 100).await.unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event.event_type() == "task_tool_call"),
+            "축을 모르면 기록하지 않는다"
         );
     }
 
