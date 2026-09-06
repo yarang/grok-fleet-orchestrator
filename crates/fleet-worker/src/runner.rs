@@ -102,6 +102,9 @@ impl WorkerRunner {
         //    않는 것이 계약이므로 루프 자체를 시작하지 않는다. shutdown 채널은
         //    두 모드 모두 필요 없으므로 periodic 분기 안에서만 만든다.
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // 워치독 비콘은 루프를 소유한 클라이언트에서 가져온다 — 아무도 올리지
+        // 않는 비콘을 넘기는 실수가 성립하지 않도록.
+        let progress = client.progress();
         let hb_handle = if config.worker.liveness_mode == fleet_core::WorkerLivenessMode::Periodic {
             let hb_client = client.clone();
             let hb_grok_bind = config.grok.bind_addr.clone();
@@ -130,6 +133,20 @@ impl WorkerRunner {
             None
         };
 
+        // 3-b. 워치독을 전용 OS 스레드에 띄운다 (로드맵 `#67` 게이트 ⑥).
+        //
+        // heartbeat 루프가 **있을 때만** 띄운다. `on_demand`에는 비콘을 올릴
+        // 주체가 아예 없어서, 띄우면 정상 동작하는 Worker를 기한이 차는 대로
+        // 죽인다. 근거는 `#67`이 아니라 `#61`에 있다 — 그 모드의 계약이
+        // "idle에는 트래픽을 내지 않는다"이므로 주기적 진행 자체가 없다.
+        let _watchdog = hb_handle.as_ref().and_then(|_| {
+            crate::watchdog::spawn(
+                progress.clone(),
+                agent_manager.workspace_root().to_path_buf(),
+                std::time::Duration::from_secs(config.worker.watchdog_stall_after_secs as u64),
+            )
+        });
+
         // 4. 신호 대기 — 또는 heartbeat 루프가 그보다 먼저 끝나는 것
         //    (로드맵 `#67` 게이트 ⑥).
         let mut hb_handle = hb_handle;
@@ -143,7 +160,11 @@ impl WorkerRunner {
             ),
         }
 
-        // 5. shutdown 전파.
+        // 5. shutdown 전파. **워치독을 가장 먼저 해제한다** — 아래 정리가
+        //    기한을 넘겨 오래 걸리면(멈추지 않는 grok을 10초 기다리는 것부터가
+        //    그렇다) 루프는 이미 beat을 멈춘 뒤라, 해제가 늦으면 워치독이
+        //    정상 종료 중인 프로세스를 죽인다.
+        progress.disarm();
         let _ = shutdown_tx.send(true);
         let _ = grok_shutdown_tx.send(true);
         let _ = mtls_shutdown_tx.send(true);

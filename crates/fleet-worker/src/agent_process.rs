@@ -37,7 +37,7 @@
 //! 전이 이벤트), 그 채널은 지금 없고 소비자도 없다. 4c-B는 상태만 다룬다.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::process::{Child, Command};
@@ -105,6 +105,84 @@ struct SpawnRecord {
 /// 재사용될 만큼 시간이 흐른 경우는 이 창을 한참 벗어난다.
 const START_TIME_SLACK_SECS: u64 = 5;
 
+/// 기록에 적힌 pid가 **우리가 띄운 그 자식인지** 판정한다.
+///
+/// [`AgentProcessManager::sweep_stale_incarnation`]과
+/// [`terminate_recorded_agents_blocking`]이 공유한다. 이 판정이 두 벌로
+/// 갈리면 한쪽만 pid 재사용을 거르게 되고, 거르지 못하는 쪽은 **남의
+/// 프로세스를 죽이는 코드**가 된다 — 나뉘어도 되는 종류의 로직이 아니다.
+fn is_our_child(observed_start_time: u64, record: &SpawnRecord) -> bool {
+    observed_start_time.abs_diff(record.started_at_unix) <= START_TIME_SLACK_SECS
+}
+
+/// 워치독이 죽인 자식 하나.
+pub(crate) struct KilledAgent {
+    pub agent_id: AgentId,
+    pub pid: u32,
+    /// `kill(2)`이 성공했는가. 실패해도(권한 부족 등) 보고에서 빼지 않는다 —
+    /// 그 자식이 아직 거기 있다는 것이야말로 운영자가 알아야 할 사실이다.
+    pub killed: bool,
+}
+
+/// [`SPAWN_RECORD`]에 적힌 Agent 프로세스를 **동기적으로** 전부 죽인다
+/// (워치독 전용, 로드맵 `#67` 게이트 ⑥).
+///
+/// [`AgentProcessManager::sweep_stale_incarnation`]과 같은 근거(디스크 기록)와
+/// 같은 pid 재사용 방어([`is_our_child`])를 쓰지만 세 가지가 다르다.
+///
+/// 1. **동기적이다.** 부르는 쪽이 확정한 사실이 "이 프로세스의 tokio 런타임이
+///    진행하지 않는다"이므로, `async`를 부르는 것은 정의상 걸린다.
+/// 2. **기록을 지우지 않는다.** 여기서 디스크에 쓰는 것은 멈춰 선 프로세스에
+///    실패 경로를 하나 더 붙이는 일이고, 지우지 않아도 손해가 없다 — 재기동한
+///    incarnation의 sweep이 그 기록을 읽어 프로세스가 없음을 확인하고 지운다.
+///    kill이 실패했다면 그 sweep이 **다시 시도한다**, 이쪽이 오히려 낫다.
+/// 3. **읽을 수 없는 기록을 지우지 않고 건너뛴다.** 같은 이유다.
+pub(crate) fn terminate_recorded_agents_blocking(workspace_root: &Path) -> Vec<KilledAgent> {
+    let records = read_spawn_records_blocking(workspace_root);
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let pids: Vec<sysinfo::Pid> = records
+        .iter()
+        .map(|r| sysinfo::Pid::from_u32(r.pid))
+        .collect();
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&pids), true);
+
+    records
+        .iter()
+        .filter_map(|record| {
+            let proc = sys.process(sysinfo::Pid::from_u32(record.pid))?;
+            if !is_our_child(proc.start_time(), record) {
+                return None;
+            }
+            Some(KilledAgent {
+                agent_id: record.agent_id,
+                pid: record.pid,
+                killed: proc.kill(),
+            })
+        })
+        .collect()
+}
+
+/// [`AgentProcessManager::read_spawn_records`]의 동기 쌍둥이.
+///
+/// 두 벌이 있는 이유는 파일 API가 다르기 때문이지만(tokio 대 std), 부작용도
+/// 다르다 — 이쪽은 읽을 수 없는 기록을 **지우지 않는다**
+/// ([`terminate_recorded_agents_blocking`]의 3번). 둘이 같은 트리에서 같은
+/// 기록을 본다는 것은 테스트가 지킨다.
+fn read_spawn_records_blocking(workspace_root: &Path) -> Vec<SpawnRecord> {
+    let Ok(dir) = std::fs::read_dir(workspace_root) else {
+        return Vec::new();
+    };
+    dir.flatten()
+        .filter_map(|entry| {
+            let body = std::fs::read(entry.path().join(SPAWN_RECORD)).ok()?;
+            serde_json::from_slice::<SpawnRecord>(&body).ok()
+        })
+        .collect()
+}
+
 /// [`AgentProcessManager::reconcile`]이 이번 beat에 만든 것 (로드맵 `#70` 게이트 ③).
 ///
 /// 두 목록을 **한 구조체로 함께** 돌려주는 이유는 둘 다 같은 한 번의 순회에서
@@ -171,6 +249,17 @@ pub struct AgentProcessManager {
 }
 
 impl AgentProcessManager {
+    /// 이 매니저가 자식의 workspace를 두는 루트.
+    ///
+    /// 워치독이 [`terminate_recorded_agents_blocking`]에 넘길 경로다. 설정에서
+    /// 다시 유도하지 않고 여기서 가져오는 이유: 위 [`new`](Self::new)의 유도는
+    /// `agent_workspace_root`가 없을 때 `current_dir()`을 섞는데, 그것을 두
+    /// 곳에서 따로 계산하면 프로세스가 도중에 `chdir`한 배포에서 워치독만
+    /// 엉뚱한 트리를 본다.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     /// 설정에서 매니저를 만든다. 포트 범위와 workspace 루트를 **여기서** 확정한다.
     ///
     /// 파싱 실패를 기동 시점으로 당기는 이유: 첫 Agent 명령이 도착하는 것은 몇
@@ -279,7 +368,7 @@ impl AgentProcessManager {
         for record in records {
             if let Some(proc) = sys.process(sysinfo::Pid::from_u32(record.pid)) {
                 let observed = proc.start_time();
-                if observed.abs_diff(record.started_at_unix) <= START_TIME_SLACK_SECS {
+                if is_our_child(observed, &record) {
                     // 죽이는 것과 신고하는 것을 **묶지 않는다.** kill이 실패해도
                     // (권한 부족 등) 고아는 거기 있고 포트를 쥐고 있으므로,
                     // 운영자가 알아야 할 사실은 달라지지 않는다.
@@ -1600,5 +1689,106 @@ mod tests {
             "got: {ws:?}"
         );
         assert!(real.path().join(a.to_string()).is_dir());
+    }
+
+    // ---- 워치독의 동기 종료 경로 (로드맵 `#67` 게이트 ⑥) ----
+    //
+    // 이 네 개가 지키는 것은 "워치독이 sweep과 **같은 판정을 다른 방식으로**
+    // 한다"는 것이다. 방식이 다른 이유(런타임이 멈춰 있다)는 정당하지만, 그
+    // 대가로 판정이 두 벌이 되어 갈릴 수 있는 자리가 셋 생긴다 — pid 재사용
+    // 방어, 기록을 읽는 방법, 기록에 남기는 부작용.
+
+    #[test]
+    fn the_watchdog_kills_a_recorded_child_without_a_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AgentId::new();
+        let mut child = plant_stale_record(dir.path(), a, 39470, now_unix());
+
+        // 런타임 없이 — `#[tokio::test]`가 아니다. 이것이 이 함수의 존재 이유다.
+        let killed = terminate_recorded_agents_blocking(dir.path());
+
+        assert_eq!(killed.len(), 1, "the recorded child must be reported");
+        assert_eq!(killed[0].agent_id, a);
+        assert_eq!(killed[0].pid, child.id());
+        assert!(killed[0].killed, "kill(2) on our own child must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !still_alive(&mut child),
+            "the child must actually be gone, not merely reported"
+        );
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn the_watchdog_spares_a_reused_pid_just_as_the_sweep_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AgentId::new();
+        // 기록의 시작 시각이 한 시간 전 = 이 pid는 그 사이에 재사용됐다.
+        let mut child = plant_stale_record(dir.path(), a, 39471, now_unix() - 3600);
+
+        let killed = terminate_recorded_agents_blocking(dir.path());
+
+        assert!(
+            killed.is_empty(),
+            "a reused pid must not be reported as ours: {:?}",
+            killed.iter().map(|k| k.pid).collect::<Vec<_>>()
+        );
+        assert!(
+            still_alive(&mut child),
+            "the watchdog must never kill an unrelated process"
+        );
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn the_watchdog_leaves_the_record_for_the_next_incarnation() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = AgentId::new();
+        let mut child = plant_stale_record(dir.path(), a, 39472, now_unix());
+
+        terminate_recorded_agents_blocking(dir.path());
+
+        // sweep과 **반대**다. 저쪽은 판정이 어느 쪽이든 기록을 지우지만, 이쪽은
+        // 멈춰 선 프로세스에서 디스크 쓰기를 하지 않는다. 남겨 두는 것이
+        // 안전한 이유는 재기동의 sweep이 그것을 마저 처리하기 때문이고, 그
+        // 뒷정리를 여기서 확인한다.
+        assert!(
+            dir.path().join(a.to_string()).join(SPAWN_RECORD).exists(),
+            "the watchdog must not write to disk while the runtime is wedged"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn both_record_readers_see_the_same_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (AgentId::new(), AgentId::new());
+        let mut one = plant_stale_record(dir.path(), a, 39473, now_unix());
+        let mut two = plant_stale_record(dir.path(), b, 39474, now_unix() - 3600);
+        // 기록이 아닌 파일과 빈 디렉터리도 섞어 둔다 — 두 구현이 갈릴 만한 자리다.
+        std::fs::create_dir_all(dir.path().join("not-an-agent")).unwrap();
+        std::fs::write(dir.path().join("stray.json"), b"{}").unwrap();
+
+        let m = manager(&dir, fake_grok(dir.path()), "39473-39479", 4);
+        let mut from_async = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(m.read_spawn_records());
+        let mut from_sync = read_spawn_records_blocking(dir.path());
+
+        from_async.sort_by_key(|r| r.pid);
+        from_sync.sort_by_key(|r| r.pid);
+        assert_eq!(
+            from_async.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            from_sync.iter().map(|r| r.pid).collect::<Vec<_>>(),
+            "the two readers must not drift apart"
+        );
+        assert_eq!(from_sync.len(), 2, "both must find exactly the two records");
+        let _ = one.kill();
+        let _ = one.wait();
+        let _ = two.kill();
+        let _ = two.wait();
     }
 }

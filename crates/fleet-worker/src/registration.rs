@@ -121,6 +121,16 @@ pub struct RegistrationClient {
     /// **이 버퍼는 정의상 단절 중에 쌓인다.** 그래서 여기 담긴 것은 연결이
     /// 돌아온 뒤에야 나가며, 그때까지 오케스트레이터는 이 사건을 모른다.
     pending_fenced: std::sync::Mutex<Vec<fleet_core::AgentFenced>>,
+    /// heartbeat 루프가 한 바퀴 돌 때마다 올리는 카운터
+    /// (로드맵 `#67` 게이트 ⑥ — OS 스레드 워치독).
+    ///
+    /// 비콘을 [`run_heartbeat_loop`](Self::run_heartbeat_loop)의 인자가 아니라
+    /// **루프를 소유한 쪽의 필드**로 둔 이유가 있다. 인자로 받으면 아무도
+    /// 올리지 않는 비콘을 워치독에 넘길 수 있고, 그 실수는 컴파일도 되고
+    /// 테스트도 통과한 뒤 **굶주림이 실제로 일어난 그 순간에만** 드러난다.
+    /// 여기서는 워치독에 넘길 수 있는 비콘이 [`progress`](Self::progress)가
+    /// 주는 그것 하나뿐이다.
+    progress: Arc<crate::watchdog::ProgressBeacon>,
 }
 
 /// `POST /v1/workers/register` 응답.
@@ -266,7 +276,14 @@ impl RegistrationClient {
             pending_observations: std::sync::Mutex::new(None),
             pending_orphans: std::sync::Mutex::new(Vec::new()),
             pending_fenced: std::sync::Mutex::new(Vec::new()),
+            progress: Arc::new(crate::watchdog::ProgressBeacon::default()),
         })
+    }
+
+    /// 이 클라이언트의 heartbeat 루프가 올리는 진행 비콘
+    /// (로드맵 `#67` 게이트 ⑥ — OS 스레드 워치독).
+    pub fn progress(&self) -> Arc<crate::watchdog::ProgressBeacon> {
+        self.progress.clone()
     }
 
     /// orchestrator에 등록. 실패 시 5초 간격으로 무한 재시도.
@@ -462,6 +479,16 @@ impl RegistrationClient {
             Duration::from_secs(fence_after_secs as u64).max(interval + Duration::from_secs(1));
         info!(interval_secs, fence_after_secs, "starting heartbeat loop");
 
+        // 정상 종료 경로에서 워치독을 해제하는 것은 **이 루프의 책임이다**
+        // (로드맵 `#67` 게이트 ⑥). 해제를 부르는 쪽에 맡기면 "beat을 올리는 곳"과
+        // "그만 올린다고 알리는 곳"이 갈라지고, 그 둘이 어긋난 채로도 컴파일과
+        // 테스트가 전부 통과한 뒤 **종료가 느린 배포에서만** 드러난다 —
+        // 워치독이 정상 종료 중인 프로세스를 죽이는 형태로.
+        //
+        // `runner.rs`도 shutdown을 전파하기 전에 한 번 더 해제한다. 그쪽은
+        // 이 루프가 **이미 사라진** 경우(패닉·취소)를 위한 것이라 여기와
+        // 겹치지 않는다.
+
         // 제어면과 마지막으로 닿은 시각. 루프 진입을 기준점으로 삼는다 —
         // 등록 직후라 이 시점에 연결은 실제로 있었고, `None`으로 두면 첫
         // beat이 실패했을 때 "얼마나 끊겼는지"를 말할 수 없다.
@@ -482,9 +509,15 @@ impl RegistrationClient {
         }
 
         loop {
+            // 워치독에 한 바퀴의 **시작**을 알린다. shutdown 체크보다 앞에
+            // 두는 이유: 아래 어느 지점에서 걸리든 이번 바퀴는 시작한 것으로
+            // 세어져야 하고, 그래야 "멈춘 자리"가 직전 beat 하나로 좁혀진다.
+            self.progress.beat();
+
             // shutdown 체크.
             if *shutdown_rx.borrow() {
                 info!("heartbeat loop shutting down");
+                self.progress.disarm();
                 return;
             }
 
@@ -566,6 +599,7 @@ impl RegistrationClient {
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
                         info!("heartbeat loop received shutdown");
+                        self.progress.disarm();
                         return;
                     }
                 }
@@ -1669,6 +1703,100 @@ mod tests {
             empty.agents,
             Some(Vec::new()),
             "명시적 빈 배열은 '정말로 없음'이다"
+        );
+    }
+
+    /// 제어면이 안 닿는 것은 **루프의 정지가 아니다** (로드맵 `#67` 게이트 ⑥ 워치독).
+    ///
+    /// 이 단정 하나가 워치독의 의미를 고정한다. 비콘이 heartbeat *성공*을
+    /// 세면 단절된 Worker가 곧 죽는데, 그것은 이미 자기 펜싱(게이트 ⑥)이
+    /// 훨씬 부드럽게 다루는 경우이고 — 프로세스만 멈추고 Worker는 살아
+    /// 재연결을 기다린다 — 워치독이 끼어들면 그 복구 경로를 없앤다.
+    /// 비콘이 세는 것은 **한 바퀴의 시작**뿐이며, 그것은 heartbeat이 실패해도
+    /// 계속 일어난다.
+    ///
+    /// 나머지 워치독 테스트가 전부 비콘을 손으로 올리므로, 진짜 루프가
+    /// 비콘을 올린다는 사실을 지키는 것은 이 테스트뿐이다.
+    #[tokio::test]
+    async fn an_unreachable_control_plane_still_counts_as_loop_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, _) = manager_running_one(&dir, "39660-39679").await;
+
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url("http://127.0.0.1:1")
+                .build(),
+        );
+        let client = Arc::new(RegistrationClient::new(config).unwrap());
+        let beacon = client.progress();
+        assert_eq!(beacon.beats(), 0, "시험 전제: 아직 한 바퀴도 돌지 않았다");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let hb = client.clone();
+        let handle = tokio::spawn(async move {
+            // 펜싱 유예는 넉넉히 — 여기서 재고 싶은 것은 펜싱이 아니다.
+            hb.run_heartbeat_loop(1, 3600, "127.0.0.1:1".into(), m, shutdown_rx)
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        let beats = beacon.beats();
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            beats >= 3,
+            "3.5초 동안 1초 주기로 돌았으면 최소 세 바퀴다 — 받은 값 {beats}"
+        );
+    }
+
+    /// 워치독 해제는 되돌릴 수 없다. 되돌릴 수 있으면 종료 도중에 다시
+    /// 무장되는 순서가 존재하게 되고, 그 순서는 정상 종료를 죽인다.
+    #[test]
+    fn disarming_a_beacon_is_permanent() {
+        let b = crate::watchdog::ProgressBeacon::default();
+        assert!(!b.is_disarmed());
+        b.disarm();
+        b.beat();
+        assert!(b.is_disarmed(), "beat이 무장을 되살려서는 안 된다");
+    }
+
+    /// 정상 종료는 워치독을 해제한다 (로드맵 `#67` 게이트 ⑥).
+    ///
+    /// 해제하지 않으면 그 뒤의 정리 — `runner.rs`는 grok에 10초, heartbeat
+    /// 루프에 5초, mTLS proxy에 5초를 기다린다 — 동안 비콘이 멈춰 있고,
+    /// 워치독은 그것을 굶주림과 구분할 방법이 없다. 즉 이 단정이 없으면
+    /// 짧은 기한을 설정한 배포에서 **정상 종료가 자기 Agent를 죽인다**.
+    #[tokio::test]
+    async fn a_graceful_shutdown_disarms_the_watchdog() {
+        let dir = tempfile::tempdir().unwrap();
+        let (m, _) = manager_running_one(&dir, "39680-39699").await;
+
+        let config = Arc::new(
+            WorkerConfig::for_test()
+                .orchestrator_url("http://127.0.0.1:1")
+                .build(),
+        );
+        let client = Arc::new(RegistrationClient::new(config).unwrap());
+        let beacon = client.progress();
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let hb = client.clone();
+        let handle = tokio::spawn(async move {
+            hb.run_heartbeat_loop(1, 3600, "127.0.0.1:1".into(), m, shutdown_rx)
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !beacon.is_disarmed(),
+            "돌고 있는 동안에는 무장이 유지돼야 한다"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+
+        assert!(
+            beacon.is_disarmed(),
+            "종료한 루프는 워치독을 해제하고 나가야 한다"
         );
     }
 }

@@ -95,6 +95,25 @@ pub struct WorkerSection {
     /// 이 Worker를 아직 살아 있다고 보는 동안 프로세스가 사라진다.
     #[serde(default = "default_agent_fence_after")]
     pub agent_fence_after_secs: u32,
+    /// heartbeat 루프가 이만큼 **한 바퀴도 돌지 않으면** 워치독이 Agent
+    /// 프로세스를 죽이고 이 Worker를 끝낸다 (로드맵 `#67` 게이트 ⑥). `0`이면 끈다.
+    ///
+    /// **`agent_fence_after_secs`와 재는 대상이 다르다.** 저쪽은 제어면과의
+    /// *단절*을 재고 루프가 도는 동안에만 평가된다. 이쪽은 루프 자체의
+    /// *정지*를 재며, 저쪽이 원리적으로 평가될 수 없는 경우
+    /// (런타임 굶주림·데드락)만을 위한 값이다 — 둘은 서로 배타적인 조건에서
+    /// 발동하므로 대소를 맞출 이유가 없다.
+    ///
+    /// 기본값이 heartbeat 주기의 수십 배인 것은 **오탐의 대가가 비대칭이기**
+    /// 때문이다. 늦게 잡으면 이미 오케스트레이터가 `Offline`으로 판정해 둔
+    /// Worker가 조금 더 오래 살아 있을 뿐이지만, 잘못 잡으면 멀쩡히 일하던
+    /// Worker와 그 Agent가 죽는다.
+    ///
+    /// 값을 끄는 것이 옳은 자리가 하나 있다 — **디버거를 붙이는 경우다.**
+    /// 워치독은 프로세스 전체의 정지를 굶주림과 구분하지만 그 구분은 자기
+    /// 잠의 초과에 기대므로 완전하지 않다.
+    #[serde(default = "default_watchdog_stall_after")]
+    pub watchdog_stall_after_secs: u32,
     /// register/heartbeat/deregister bearer 인증에 쓰는 worker operational
     /// credential (로드맵 #60). `fleet-worker join`이 발급받아 이 필드에
     /// 기록하며, `fleet workers credential rotate/revoke` 뒤에는 재-join하거나
@@ -180,6 +199,15 @@ fn default_agent_port_range() -> String {
 /// 정하므로, 짧게 잡을 이유가 없고 짧게 잡으면 잃기만 한다.
 fn default_agent_fence_after() -> u32 {
     300
+}
+/// 10분. heartbeat 기본 주기(15초)의 40배다.
+///
+/// 이 값이 재는 것은 "제어면이 안 닿는다"가 아니라 "이 프로세스의 런타임이
+/// 한 바퀴도 돌지 못했다"이고, 후자는 정상 운영에서 **초 단위로도** 일어나지
+/// 않는다. 그래서 넉넉함의 근거는 정상 동작의 분산이 아니라 오탐의 대가다 —
+/// 필드 독스트링의 비대칭 항목을 참고.
+fn default_watchdog_stall_after() -> u32 {
+    600
 }
 fn default_max_agent_processes() -> u32 {
     4
@@ -271,6 +299,17 @@ impl WorkerConfig {
         if self.worker.agent_fence_after_secs <= self.worker.heartbeat_interval_secs {
             return Err(WorkerError::Config(
                 "worker.agent_fence_after_secs must be greater than worker.heartbeat_interval_secs"
+                    .into(),
+            ));
+        }
+        // 기한이 한 beat보다 짧으면 정상적인 한 바퀴가 곧 초과다. 0(끔)은
+        // 이 검사를 지나간다 — 끄는 것은 설정 오류가 아니라 선택이다.
+        if self.worker.watchdog_stall_after_secs != 0
+            && self.worker.watchdog_stall_after_secs <= self.worker.heartbeat_interval_secs
+        {
+            return Err(WorkerError::Config(
+                "worker.watchdog_stall_after_secs must be 0 or greater than \
+                 worker.heartbeat_interval_secs"
                     .into(),
             ));
         }
@@ -586,6 +625,7 @@ impl WorkerConfigBuilder {
                 labels: self.labels,
                 existing_worker_id: None,
                 liveness_mode: self.liveness_mode,
+                watchdog_stall_after_secs: default_watchdog_stall_after(),
             },
             grok: GrokSection {
                 bin: self.grok_bin.unwrap_or_else(|| "/bin/true".into()),

@@ -41,6 +41,7 @@ pub mod join;
 pub mod registration;
 pub mod runner;
 pub mod skill_loader;
+pub mod watchdog;
 
 pub use agent_process::AgentProcessManager;
 pub use config::WorkerConfig;
