@@ -1,8 +1,8 @@
 //! 워커 선택 알고리즘.
 //!
 //! 선택 순서:
-//! 0. liveness 필터 (로드맵 #70 — liveness가 확인되지 않은 워커 제외.
-//!    아래 "on_demand 워커를 후보에서 빼는 이유" 설명 참고)
+//! 0. liveness 표시 (로드맵 #70 — `on_demand` 워커는 확인이 필요하다고 표시만
+//!    한다. 실제 확인은 8번. 아래 "on_demand 워커를 후보에서 빼는 이유" 참고)
 //! 1. 라벨 매칭 필터 (`required_labels`)
 //! 2. 모델 매칭 필터 (`task.model` — 지정된 경우 `labels["model"]`이 정확히
 //!    일치하는 워커만 후보로 남긴다. 지정하지 않으면 기존과 동일)
@@ -13,6 +13,8 @@
 //! 5. 용량 필터 (동시 상한에 도달한 워커 제외 — 아래 "부하의 출처" 설명 참고)
 //! 6. `server_hint`가 있으면 해당 워커 (없거나 사용 불가면 에러, 폴백 안 함)
 //! 7. 없으면 least-loaded (부하 최소)
+//! 8. 고른 워커가 `on_demand`면 ACP probe로 응답을 확인 (실패 시 least-loaded
+//!    갈래에서만 다음 후보로 내려간다 — 지목 갈래는 폴백하지 않는다)
 //!
 //! ## 부하의 출처: store 원장 (`Worker::active_tasks` 아님) — 로드맵 #67 3단계
 //!
@@ -78,17 +80,48 @@
 //! `handlers.rs`가 렌더링하는 worker.toml의 "아직 프로덕션에서 쓰지 말 것"
 //! 경고도 이 배정이 범위 밖이라고 적어 왔지만, 강제하는 코드는 없었다.
 //!
-//! 그래서 여기서 후보에서 뺀다. **이것은 영구 규칙이 아니라 상태 기계의 안전한
-//! 절반이다** — dispatch 직전 ACP probe(로드맵 #67 의존)가 들어오면 이 필터는
-//! "probe 성공한 on_demand 워커는 후보에 포함"으로 바뀌어 `unchecked → probe →
-//! dispatch` 흐름이 완성된다. probe가 없는 지금 선택지는 "확인 없이 보낸다"와
-//! "보내지 않는다" 둘뿐이고, 후자가 안전한 쪽이다.
+//! 그래서 한동안 여기서 후보에서 통째로 뺐다. **그것은 영구 규칙이 아니라
+//! 상태 기계의 안전한 절반이었다** — 위 문단은 "dispatch 직전 ACP probe가
+//! 들어오면 이 필터는 `probe 성공한 on_demand 워커는 후보에 포함`으로 바뀌어
+//! `unchecked → probe → dispatch` 흐름이 완성된다"고 적어 뒀고,
+//! **2026-09-06에 그렇게 됐다** (`WorkerTransport::probe`).
 //!
-//! 별도의 `Unchecked` 워커 상태를 새로 만들지는 않았다. probe가 없는 한 그
-//! 상태에서 빠져나올 방법이 없어 도달했다가 영영 못 나오는 상태가 되기
-//! 때문이다. 상태를 늘리는 대신 이미 있는 `liveness_mode`를 판단 근거로 쓴다.
+//! ## probe는 후보를 좁히는 필터가 아니라 **결승전**에서 돈다
+//!
+//! 배치가 자연스러워 보이는 자리는 위 0번(liveness 필터)이지만 거기가 아니다.
+//! 그 자리의 검사는 `liveness_mode`를 읽는 로컬 연산이라 공짜인 반면, probe는
+//! **왕복**이다. 0번에 두면 라벨·모델·credential·회로·용량 필터에서 어차피
+//! 떨어질 워커까지 전부 왕복시키게 되고, dispatch 루프가 최대 1000건의 Pending을
+//! 도는 구조(`dispatcher.rs`)에서 그 비용은 선형으로 쌓인다.
+//!
+//! 그래서 순서를 나눴다. 0번은 **표시만** 남기고(그 워커는 확인이 필요하다),
+//! 실제 왕복은 모든 값싼 필터가 후보를 좁힌 **뒤** 승자에게만 건다. 결과가
+//! 같으면서 왕복 횟수가 후보 수가 아니라 "떨어진 on_demand 승자 수 + 1"이 된다.
+//!
+//! **폴백은 유지된다.** least-loaded 갈래에서는 정렬된 순서대로 내려가며
+//! probe에 실패한 on_demand 워커를 건너뛴다 — 그래서 죽은 on_demand 워커 하나가
+//! 살아 있는 periodic 워커로 갈 Task를 막지 못한다. 반대로 `server_hint`와
+//! `agent_id` 갈래는 **폴백하지 않는다**. 그 둘은 설계상 지목이고, 지목한
+//! 워커가 응답하지 않는다는 사실을 다른 워커로 조용히 덮으면 지목의 의미가
+//! 사라진다.
+//!
+//! 별도의 `Unchecked` 워커 상태는 여전히 만들지 않는다. 이제는 probe가 있어서
+//! "빠져나올 방법이 없는 상태"라는 원래 이유는 사라졌지만, 다른 이유가 그
+//! 자리를 대신한다 — probe 결과를 워커 행에 적으면 그것이 **얼마나 오래
+//! 유효한가**라는 두 번째 파라미터가 생기고, 그 값이 틀리면 죽은 워커가
+//! 유효기간 동안 살아 있는 것으로 남는다. 매번 새로 묻는 쪽에는 그 파라미터가
+//! 아예 없다.
+//!
+//! ## Agent 배치(`placement.rs`)는 이 변경을 따라가지 않는다
+//!
+//! 그쪽의 `AllUnprobed`는 이름이 같지만 이유가 다르다. Agent 프로세스를 띄우는
+//! 것은 워커의 heartbeat 루프이고(`agent_process.rs`의 `reconcile`),
+//! `on_demand` 워커는 그 루프를 **아예 시작하지 않는다**(`runner.rs`). 즉 거기
+//! 배치된 Agent는 probe가 성공하든 말든 영영 뜨지 않는다. 그 제외의 근거는
+//! `#70`이 아니라 `#61`의 모드 계약이므로 probe로 풀리지 않는다.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -97,6 +130,7 @@ use fleet_core::{
     WorkerStatus,
 };
 use fleet_store::Store;
+use fleet_transport::WorkerTransport;
 
 use crate::breaker::{BreakerRegistry, BreakerState};
 
@@ -209,11 +243,69 @@ pub enum SelectionError {
 pub struct WorkerSelector {
     store: Arc<dyn Store>,
     breakers: Arc<BreakerRegistry>,
+    /// `on_demand` 워커의 응답을 확인하는 수단 (로드맵 `#70` 게이트 ⑤).
+    ///
+    /// **`Option`이 아니다.** 없으면 `on_demand` 워커를 통째로 빼는 예전
+    /// 동작으로 조용히 돌아가는데, 그것은 "기능이 꺼졌다"가 아니라 "기능이
+    /// 있는데 아무도 못 쓴다"로 보인다 — 그리고 그 상태는 컴파일도 되고
+    /// 테스트도 통과한다. 필수 인자로 두면 그 실수가 성립하지 않는다.
+    transport: Arc<dyn WorkerTransport>,
 }
 
+/// [`WorkerSelector::select`]가 `on_demand` 승자에게 거는 probe의 제한 시간.
+///
+/// **이미 맺어진 ACP 연결 위의 왕복 한 번**이므로 초 단위면 넉넉하다. 워커
+/// 프로세스가 죽었으면 연결도 죽어 있어 `probe`가 상태 검사에서 즉시 실패하고,
+/// 여기까지 오는 것은 "연결은 서 있는데 답이 없는" 경우뿐이다 — 그 경우를
+/// 오래 기다릴 이유가 없다. 이 값이 곧 dispatch에 얹히는 지연의 상한이다.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl WorkerSelector {
-    pub fn new(store: Arc<dyn Store>, breakers: Arc<BreakerRegistry>) -> Self {
-        Self { store, breakers }
+    /// 새 selector. `transport`가 필수인 이유는 위 필드 독스트링에 있다.
+    pub fn new(
+        store: Arc<dyn Store>,
+        breakers: Arc<BreakerRegistry>,
+        transport: Arc<dyn WorkerTransport>,
+    ) -> Self {
+        Self {
+            store,
+            breakers,
+            transport,
+        }
+    }
+
+    /// 이 워커가 지금 응답하는가 (로드맵 `#70` 게이트 ⑤).
+    ///
+    /// `periodic` 워커는 **묻지 않는다.** 그쪽은 heartbeat이 같은 사실을 이미
+    /// 주기적으로 말하고 있어, dispatch마다 왕복을 더하면 비용만 늘고 얻는
+    /// 것이 없다. 이 함수가 있는 이유는 정확히 heartbeat이 없는 모드 때문이다.
+    async fn responds(&self, worker: &fleet_core::Worker) -> bool {
+        if worker.liveness_mode != WorkerLivenessMode::OnDemand {
+            return true;
+        }
+        match self.transport.probe(worker.id, PROBE_TIMEOUT).await {
+            Ok(outcome) => {
+                tracing::debug!(
+                    target: "fleet::selector",
+                    worker = %worker.name,
+                    round_trip_ms = outcome.round_trip.as_millis(),
+                    answered_with_error = outcome.answered_with_error,
+                    "on_demand worker answered the pre-dispatch probe"
+                );
+                true
+            }
+            Err(e) => {
+                // `warn`인 이유: 이 워커는 저장소에서 `Online`이고 운영자에게는
+                // 멀쩡해 보이는데 Task를 받지 못한다. 그 불일치를 설명하는
+                // 유일한 줄이 여기다.
+                tracing::warn!(
+                    target: "fleet::selector",
+                    worker = %worker.name, error = %e,
+                    "on_demand worker did not answer the pre-dispatch probe — not dispatching to it"
+                );
+                false
+            }
+        }
     }
 
     /// 작업에 적합한 워커를 선택.
@@ -235,19 +327,16 @@ impl WorkerSelector {
             return Err(SelectionError::AllOffline);
         }
 
-        // 1.5. liveness 필터 (로드맵 #70) — `on_demand` 워커는 heartbeat을 보내지
-        // 않으므로 `Online` 표시가 실제 생존을 뜻하지 않는다. probe(로드맵 #67)가
-        // 들어오기 전까지 후보에서 제외한다. 모듈 최상단 "on_demand 워커를
-        // 후보에서 빼는 이유" 참고.
+        // 1.5. liveness는 여기서 **거르지 않는다** (로드맵 #70 게이트 ⑤).
         //
-        // 라벨/모델 필터보다 **먼저** 건다: liveness는 워커가 이 작업에 적합한지
-        // 이전에 애초에 배정 가능한 대상인지의 문제이고, 순서를 뒤로 미루면
-        // "라벨이 안 맞아서 실패"처럼 원인이 잘못 보고된다.
-        candidates.retain(|w| w.liveness_mode != WorkerLivenessMode::OnDemand);
-
-        if candidates.is_empty() {
-            return Err(SelectionError::AllUnprobed);
-        }
+        // 예전에는 이 자리에서 `on_demand` 워커를 통째로 뺐다 — probe가 없어
+        // "확인 없이 보낸다"와 "보내지 않는다" 둘뿐이었고 후자가 안전했기
+        // 때문이다. 이제 probe가 있으므로 확인하고 보낸다.
+        //
+        // **확인을 여기가 아니라 아래 8번에 두는 이유**는 모듈 최상단
+        // "probe는 후보를 좁히는 필터가 아니라 결승전에서 돈다"에 있다: 이
+        // 자리의 다른 검사들과 달리 probe는 왕복이라, 어차피 뒤 필터에서
+        // 떨어질 워커까지 전부 왕복시키게 된다.
 
         // 2. 라벨 매칭 필터
         candidates.retain(|w| {
@@ -368,6 +457,13 @@ impl WorkerSelector {
                 return Err(SelectionError::AgentUnplaced(agent.name));
             };
             return match candidates.iter().find(|w| w.id == worker_id) {
+                // 8. 지목 갈래의 probe — **폴백하지 않는다.** Agent는 특정
+                //    워커에 배치돼 있고 그 배치가 곧 이 Task의 목적지다.
+                //    응답하지 않는다는 사실을 다른 워커로 덮으면 그 Agent의
+                //    작업이 엉뚱한 곳에서 돈다.
+                Some(w) if !self.responds(w).await => {
+                    Err(SelectionError::AgentWorkerUnavailable(agent.name))
+                }
                 Some(w) => Ok(w.id),
                 None if at_capacity_ids.contains(&worker_id) => {
                     Err(SelectionError::AgentWorkerAtCapacity(agent.name))
@@ -380,6 +476,12 @@ impl WorkerSelector {
         if let Some(hint) = &task.server_hint {
             let hinted = candidates.iter().find(|w| &w.name == hint);
             return match hinted {
+                // 8. 지목 갈래의 probe — 위 `agent_id`와 같은 이유로 폴백하지
+                //    않는다. 힌트는 이미 "없거나 사용 불가면 에러, 폴백 안 함"
+                //    이 계약이므로 여기서만 예외를 두면 규칙이 갈린다.
+                Some(w) if !self.responds(w).await => {
+                    Err(SelectionError::HintedUnavailable(hint.clone()))
+                }
                 Some(w) => Ok(w.id),
                 None if at_capacity.iter().any(|n| n == hint) => {
                     Err(SelectionError::HintedAtCapacity(hint.clone()))
@@ -418,10 +520,28 @@ impl WorkerSelector {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
-        candidates
-            .first()
-            .map(|w| w.id)
-            .ok_or(SelectionError::AllOffline)
+        // 후보가 아예 없는 것은 probe와 무관하다(전부 회로 차단된 경우 등).
+        // 아래 루프에 넘기면 그 사실이 `AllUnprobed`로 잘못 보고된다.
+        if candidates.is_empty() {
+            return Err(SelectionError::AllOffline);
+        }
+
+        // 8. 부하가 낮은 순서대로 내려가며 `on_demand` 승자만 확인한다
+        //    (로드맵 #70 게이트 ⑤).
+        //
+        //    **여기서는 폴백한다.** 지목이 없는 선택이므로 이 Task가 어느
+        //    워커에서 도는지는 계약이 아니고, 죽은 on_demand 워커 하나가
+        //    살아 있는 워커로 갈 Task를 막을 이유가 없다.
+        for w in &candidates {
+            if self.responds(w).await {
+                return Ok(w.id);
+            }
+        }
+
+        // 여기 도달했다는 것은 후보가 **전부** `on_demand`였고 전부 응답하지
+        // 않았다는 뜻이다 — `periodic` 워커가 하나라도 있었으면 `responds`가
+        // 묻지도 않고 `true`를 주어 위에서 반환됐다.
+        Err(SelectionError::AllUnprobed)
     }
 }
 
@@ -472,6 +592,109 @@ mod tests {
         WorkerHeartbeat, WorkerId, WorkerLivenessMode, WorkerStatus,
     };
     use fleet_store::{Store, StoreError};
+    use fleet_transport::WorkerTransport;
+
+    /// probe가 **모두 성공하는** transport로 selector를 만든다.
+    ///
+    /// 기본값을 "전부 응답한다"로 둔 이유: 기존 시험 29건은 probe 이전에
+    /// 쓰인 것들이고 그것들이 검증하는 것은 필터·정렬이지 liveness가 아니다.
+    /// 여기서 실패를 기본으로 두면 그 29건이 전부 새 이유로 붉어지면서
+    /// **원래 지키던 것을 더 이상 지키지 않게 된다.**
+    fn test_selector(store: Arc<dyn Store>, breakers: Arc<BreakerRegistry>) -> WorkerSelector {
+        WorkerSelector::new(store, breakers, Arc::new(ProbeSpy::default()))
+    }
+
+    /// probe 결과를 조종하거나 호출을 되짚어 보아야 하는 시험용.
+    fn test_selector_with(
+        store: Arc<dyn Store>,
+        breakers: Arc<BreakerRegistry>,
+        spy: Arc<ProbeSpy>,
+    ) -> WorkerSelector {
+        WorkerSelector::new(store, breakers, spy)
+    }
+
+    /// probe를 지켜보는 transport.
+    ///
+    /// **호출을 세는 것이 응답을 흉내 내는 것만큼 중요하다.** 이 증분의 설계
+    /// 주장은 "probe는 모든 후보가 아니라 결승전에서만 돈다"인데, 응답만
+    /// 흉내 내면 그 주장은 한 줄도 검증되지 않는다 — 모든 후보를 왕복시키는
+    /// 구현도 똑같이 초록이다.
+    #[derive(Default)]
+    struct ProbeSpy {
+        /// 이 워커들의 probe는 실패한다.
+        silent: std::sync::Mutex<std::collections::HashSet<WorkerId>>,
+        /// probe가 불린 워커, 불린 순서대로.
+        calls: std::sync::Mutex<Vec<WorkerId>>,
+    }
+
+    impl ProbeSpy {
+        fn silencing(ids: &[WorkerId]) -> Arc<Self> {
+            let spy = Self::default();
+            spy.silent.lock().unwrap().extend(ids.iter().copied());
+            Arc::new(spy)
+        }
+        fn probed(&self) -> Vec<WorkerId> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl WorkerTransport for ProbeSpy {
+        async fn register(
+            &self,
+            _: WorkerId,
+            _: &str,
+            _: u32,
+        ) -> Result<(), fleet_transport::TransportError> {
+            Ok(())
+        }
+        async fn unregister(&self, _: WorkerId) -> Result<(), fleet_transport::TransportError> {
+            Ok(())
+        }
+        async fn is_connected(&self, _: WorkerId) -> bool {
+            true
+        }
+        async fn dispatch(
+            &self,
+            _: fleet_transport::DispatchRequest,
+        ) -> Result<(), fleet_transport::TransportError> {
+            Ok(())
+        }
+        async fn cancel(&self, _: TaskId) -> Result<(), fleet_transport::TransportError> {
+            Ok(())
+        }
+        async fn ping(
+            &self,
+            _: WorkerId,
+        ) -> Result<std::time::Duration, fleet_transport::TransportError> {
+            Ok(std::time::Duration::from_millis(1))
+        }
+        async fn probe(
+            &self,
+            worker_id: WorkerId,
+            _: std::time::Duration,
+        ) -> Result<fleet_transport::ProbeOutcome, fleet_transport::TransportError> {
+            self.calls.lock().unwrap().push(worker_id);
+            if self.silent.lock().unwrap().contains(&worker_id) {
+                return Err(fleet_transport::TransportError::Connection(
+                    "worker did not answer the probe".into(),
+                ));
+            }
+            Ok(fleet_transport::ProbeOutcome {
+                round_trip: std::time::Duration::from_millis(1),
+                answered_with_error: false,
+            })
+        }
+        async fn subscribe(
+            &self,
+        ) -> Result<
+            tokio::sync::mpsc::UnboundedReceiver<fleet_transport::WorkerEvent>,
+            fleet_transport::TransportError,
+        > {
+            let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            Ok(rx)
+        }
+    }
 
     /// 인메모리 mock Store (selector 테스트용).
     struct MockStore {
@@ -761,7 +984,7 @@ mod tests {
                 .with_load("medium", 2),
         );
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let task = make_task("work", None, &[]);
         let selected = selector.select(&task).await.unwrap();
@@ -784,7 +1007,7 @@ mod tests {
         ];
         let store = Arc::new(MockStore::new(workers).with_load("liar", 4));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let selected = selector
             .select(&make_task("work", None, &[]))
@@ -810,7 +1033,7 @@ mod tests {
         let cap = w.max_concurrent;
         let store = Arc::new(MockStore::new(vec![w]).with_load("solo", cap));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let result = selector.select(&make_task("work", None, &[])).await;
         assert!(
@@ -828,7 +1051,7 @@ mod tests {
             MockStore::new(vec![hinted, make_worker("cpu-1", 0, &[])]).with_load("gpu-1", cap),
         );
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let result = selector
             .select(&make_task("work", Some("gpu-1"), &[]))
@@ -844,7 +1067,7 @@ mod tests {
         let workers = vec![make_worker("w1", 0, &[]), make_worker("gpu-1", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let task = make_task("work", Some("gpu-1"), &[]);
         let selected = selector.select(&task).await.unwrap();
@@ -860,7 +1083,7 @@ mod tests {
         let workers = vec![offline, make_worker("online-1", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let task = make_task("work", Some("offline-1"), &[]);
         let result = selector.select(&task).await;
@@ -875,7 +1098,7 @@ mod tests {
         ];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let task = make_task("train", None, &["gpu"]);
         let result = selector.select(&task).await;
@@ -887,7 +1110,7 @@ mod tests {
         let workers = vec![make_worker("cpu-1", 0, &[("arch", "x86_64")])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let task = make_task("train", None, &["tpu"]);
         let result = selector.select(&task).await;
@@ -904,7 +1127,7 @@ mod tests {
         // 않도록 gemini-1에 gemini credential을 부여한다.
         let store = Arc::new(MockStore::new(workers).with_credential("gemini-1", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let mut task = make_task("work", None, &[]);
         task.model = Some("gemini".into());
@@ -925,7 +1148,7 @@ mod tests {
         ];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let mut task = make_task("work", None, &[]);
         task.model = Some("gemini".into());
@@ -965,7 +1188,7 @@ mod tests {
                 .with_load("medium", 2),
         );
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let task = make_task("work", None, &[]); // model: None (default)
         let selected = selector.select(&task).await.unwrap();
@@ -992,7 +1215,7 @@ mod tests {
         // 로드맵 #71 — credential 필터가 gpu-gemini를 걸러내지 않도록 credential 부여.
         let store = Arc::new(MockStore::new(workers).with_credential("gpu-gemini", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let mut task = make_task("train", None, &["gpu"]);
         task.model = Some("gemini".into());
@@ -1017,7 +1240,7 @@ mod tests {
         let workers = vec![make_worker("gemini-1", 0, &[("model", "gemini")])];
         let store = Arc::new(MockStore::new(workers).with_credential("gemini-1", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let mut task = make_task("work", None, &[]);
         task.model = Some("gemini".into());
@@ -1033,7 +1256,7 @@ mod tests {
         let workers = vec![make_worker("gemini-1", 0, &[("model", "gemini")])];
         let store = Arc::new(MockStore::new(workers)); // credential 미부여
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         let mut task = make_task("work", None, &[]);
         task.model = Some("gemini".into());
@@ -1057,7 +1280,7 @@ mod tests {
         // gemini-2만 credential 프로비저닝 완료.
         let store = Arc::new(MockStore::new(workers).with_credential("gemini-2", "gemini"));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let mut task = make_task("work", None, &[]);
         task.model = Some("gemini".into());
@@ -1076,7 +1299,7 @@ mod tests {
         let workers = vec![make_worker("plain-1", 0, &[])]; // credential 없음
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let task = make_task("work", None, &[]); // model: None
 
@@ -1105,88 +1328,206 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_demand_worker_is_never_a_dispatch_candidate() {
-        // on_demand 워커 하나뿐인 fleet — heartbeat이 없어 Online 표시를
-        // 신뢰할 수 없고 probe(로드맵 #67)도 없으므로 배정하지 않는다.
+    async fn an_on_demand_worker_that_answers_the_probe_is_dispatchable() {
+        // **이 증분이 바꾼 것이다.** 예전에는 on_demand 워커 하나뿐인 fleet이
+        // 무조건 `AllUnprobed`였다 — 확인할 수단이 없어 "보내지 않는다"가
+        // 안전한 쪽이었기 때문이다. 이제 확인할 수 있으므로 확인하고 보낸다.
         let workers = vec![make_on_demand_worker("laptop", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let spy = Arc::new(ProbeSpy::default());
+        let selector = test_selector_with(store.clone(), breakers, spy.clone());
 
-        let task = make_task("work", None, &[]);
+        let selected = selector
+            .select(&make_task("work", None, &[]))
+            .await
+            .expect("응답하는 on_demand 워커는 배정 대상이다");
 
-        match selector.select(&task).await {
+        let laptop = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        assert_eq!(selected, laptop.id);
+        assert_eq!(
+            spy.probed(),
+            vec![laptop.id],
+            "그 워커를 실제로 물어봤어야 한다 — 묻지 않고 통과시키면 예전의 \
+             '확인 없이 보낸다'로 되돌아간 것이다"
+        );
+    }
+
+    /// 응답하지 않는 on_demand 워커는 여전히 배정 대상이 아니다.
+    ///
+    /// 위 시험이 연 문을 이 시험이 지킨다. 둘 중 하나만으로는 부족하다 —
+    /// 앞엣것만 있으면 probe를 무시하는 구현이 통과하고, 뒤엣것만 있으면
+    /// 예전처럼 통째로 빼는 구현이 통과한다.
+    #[tokio::test]
+    async fn an_on_demand_worker_that_stays_silent_is_not_a_dispatch_candidate() {
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let laptop = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = test_selector_with(store, breakers, ProbeSpy::silencing(&[laptop.id]));
+
+        match selector.select(&make_task("work", None, &[])).await {
             Err(SelectionError::AllUnprobed) => {}
             other => panic!("expected AllUnprobed, got {:?}", other),
         }
     }
 
     #[tokio::test]
-    async fn periodic_worker_is_preferred_over_idle_on_demand_worker() {
-        // 부하가 더 높아도 heartbeat을 보내는 워커가 선택되어야 한다 —
-        // least-loaded 정책보다 liveness 필터가 먼저다. 이 순서가 뒤집히면
-        // "가장 한가한 워커"가 사실은 죽어 있는 워커가 된다.
+    async fn a_silent_on_demand_worker_falls_back_to_the_busier_one_that_answers() {
+        // 예전 이 시험의 이름은 `periodic_worker_is_preferred_over_idle_on_demand_worker`
+        // 였고, 단정은 "liveness 필터가 least-loaded보다 먼저다"였다. **그
+        // 단정은 이제 틀렸다** — 응답하는 idle 워커를 놔두고 바쁜 워커를
+        // 고를 이유가 없다(아래 `an_idle_on_demand_worker_that_answers_wins_on_load`).
+        //
+        // 그때 지키던 것 중 살아남아야 하는 절반은 이것이다: 한가한 워커가
+        // **응답하지 않으면** 바쁘더라도 응답하는 워커로 간다. 폴백이 없으면
+        // 죽은 on_demand 워커 하나가 살아 있는 워커로 갈 Task를 막는다.
         let workers = vec![
             make_on_demand_worker("idle-laptop", 0, &[]),
             make_worker("busy-server", 0, &[]),
         ];
         // 부하는 store 파생 카운트로 심는다. max_concurrent 기본값이 4이므로
-        // 3까지만 — 4 이상이면 용량 필터(3.5단계)에 걸려 liveness 필터가 아닌
-        // 다른 이유로 비게 되고, 이 테스트가 검증하려는 순서를 못 보게 된다.
+        // 3까지만 — 4 이상이면 용량 필터(3.5단계)에 걸려 다른 이유로 후보에서
+        // 빠지고, 이 시험이 보려는 폴백을 못 보게 된다.
         let store = Arc::new(MockStore::new(workers).with_load("busy-server", 3));
+        let laptop = store
+            .get_worker_by_name("idle-laptop")
+            .await
+            .unwrap()
+            .unwrap();
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let spy = ProbeSpy::silencing(&[laptop.id]);
+        let selector = test_selector_with(store.clone(), breakers, spy.clone());
 
-        let task = make_task("work", None, &[]);
+        let selected = selector
+            .select(&make_task("work", None, &[]))
+            .await
+            .unwrap();
 
-        let selected = selector.select(&task).await.unwrap();
-        let expected = store
+        let busy = store
             .get_worker_by_name("busy-server")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(
-            selected, expected.id,
-            "liveness filter must outrank the least-loaded policy"
+            selected, busy.id,
+            "응답하지 않는 한가한 워커 대신 응답하는 바쁜 워커로 가야 한다"
+        );
+        assert_eq!(
+            spy.probed(),
+            vec![laptop.id],
+            "물어본 것은 on_demand 워커 하나뿐이어야 한다 — periodic 워커는 \
+             heartbeat이 같은 사실을 이미 말하고 있으므로 왕복을 더할 이유가 없다"
+        );
+    }
+
+    /// 응답하면 least-loaded가 그대로 이긴다.
+    ///
+    /// 위 시험만 있으면 "on_demand는 항상 뒤로 밀린다"는 구현도 통과한다 —
+    /// 그건 예전 동작이고, 이 증분이 없앤 것이다.
+    #[tokio::test]
+    async fn an_idle_on_demand_worker_that_answers_wins_on_load() {
+        let workers = vec![
+            make_on_demand_worker("idle-laptop", 0, &[]),
+            make_worker("busy-server", 0, &[]),
+        ];
+        let store = Arc::new(MockStore::new(workers).with_load("busy-server", 3));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = test_selector(store.clone(), breakers);
+
+        let selected = selector
+            .select(&make_task("work", None, &[]))
+            .await
+            .unwrap();
+
+        let laptop = store
+            .get_worker_by_name("idle-laptop")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            selected, laptop.id,
+            "응답을 확인했으면 liveness는 더 이상 순위에 개입하지 않는다"
         );
     }
 
     #[tokio::test]
-    async fn on_demand_worker_cannot_be_forced_by_server_hint() {
-        // server_hint는 폴백을 막을 뿐 필터를 무시하는 권한이 아니다.
-        // 여기서는 후보가 통째로 비므로 hint 처리 이전에 AllUnprobed로 끝난다.
-        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+    async fn a_hinted_on_demand_worker_that_stays_silent_is_not_replaced() {
+        // 예전에는 후보가 통째로 비어 hint 처리 **이전에** `AllUnprobed`로
+        // 끝났다. 이제는 hint가 on_demand 워커에 닿을 수 있고, 그 워커가
+        // 응답하지 않으면 `HintedUnavailable`이다.
+        //
+        // **지목 갈래는 폴백하지 않는다**는 것이 여기서 지켜야 할 것이다.
+        // 응답하는 다른 워커를 옆에 둬서 그 유혹을 실제로 만든다 — 그것이
+        // 없으면 폴백하는 구현도 이 시험을 통과한다.
+        let workers = vec![
+            make_on_demand_worker("laptop", 0, &[]),
+            make_worker("healthy", 0, &[]),
+        ];
         let store = Arc::new(MockStore::new(workers));
+        let laptop = store.get_worker_by_name("laptop").await.unwrap().unwrap();
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector_with(store, breakers, ProbeSpy::silencing(&[laptop.id]));
 
-        let task = make_task("work", Some("laptop"), &[]);
-
-        match selector.select(&task).await {
-            Err(SelectionError::AllUnprobed) => {}
-            other => panic!(
-                "expected AllUnprobed even with an explicit hint, got {:?}",
-                other
-            ),
+        match selector
+            .select(&make_task("work", Some("laptop"), &[]))
+            .await
+        {
+            Ok(w) => panic!("지목한 워커가 침묵하면 다른 워커로 가면 안 된다 (selected {w})"),
+            Err(SelectionError::HintedUnavailable(name)) => assert_eq!(name, "laptop"),
+            other => panic!("expected HintedUnavailable, got {:?}", other),
         }
     }
 
+    /// 응답하면 hint가 on_demand 워커에도 닿는다.
     #[tokio::test]
-    async fn on_demand_exclusion_is_reported_before_label_mismatch() {
-        // 원인 보고의 정확도 검증: on_demand 워커가 라벨도 만족하지 않을 때,
-        // 운영자에게 "라벨이 안 맞는다"가 아니라 "probe되지 않았다"가 보여야
-        // 한다. 필터 순서를 뒤로 미루면 이 단정이 깨진다.
+    async fn a_hinted_on_demand_worker_that_answers_is_used() {
+        let workers = vec![
+            make_on_demand_worker("laptop", 0, &[]),
+            make_worker("healthy", 0, &[]),
+        ];
+        let store = Arc::new(MockStore::new(workers));
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = test_selector(store.clone(), breakers);
+
+        let selected = selector
+            .select(&make_task("work", Some("laptop"), &[]))
+            .await
+            .unwrap();
+
+        let laptop = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        assert_eq!(selected, laptop.id);
+    }
+
+    #[tokio::test]
+    async fn a_label_mismatch_is_reported_without_probing_at_all() {
+        // **이 시험의 단정이 이 증분에서 뒤집혔고, 그것이 옳다.**
+        //
+        // 예전 이름은 `on_demand_exclusion_is_reported_before_label_mismatch`
+        // 였고, on_demand 워커가 라벨도 만족하지 않을 때 `AllUnprobed`를
+        // 요구했다. 그 근거는 "liveness는 적합성 이전의 문제"였는데, probe가
+        // 결승전으로 내려간 지금 그 자리에는 liveness **사실이 없다** —
+        // 물어보지 않았기 때문이다. 그 상태에서 `AllUnprobed`를 보고하는 것은
+        // 확인하지 않은 것을 확인했다고 말하는 것이다. 라벨 불일치는 실제로
+        // 확인한 사실이므로 그쪽이 정확하다.
+        //
+        // 동시에 이 시험이 모듈 최상단의 비용 논거를 못박는다: 어차피 떨어질
+        // 워커는 **왕복시키지 않는다**.
         let workers = vec![make_on_demand_worker("laptop", 0, &[])];
         let store = Arc::new(MockStore::new(workers));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let spy = Arc::new(ProbeSpy::default());
+        let selector = test_selector_with(store, breakers, spy.clone());
 
-        let task = make_task("work", None, &["gpu"]);
-
-        match selector.select(&task).await {
-            Err(SelectionError::AllUnprobed) => {}
-            other => panic!("expected AllUnprobed, not a label error, got {:?}", other),
+        match selector.select(&make_task("work", None, &["gpu"])).await {
+            Err(SelectionError::NoMatchingLabels) => {}
+            other => panic!("expected NoMatchingLabels, got {:?}", other),
         }
+        assert!(
+            spy.probed().is_empty(),
+            "라벨에서 떨어질 워커를 왕복시키면 안 된다 — 받은 호출 {:?}",
+            spy.probed()
+        );
     }
 
     // ── 로드맵 #49 2단계 — `tasks.agent_id` 라우팅 ──────────────────────────
@@ -1229,7 +1570,7 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store.clone(), breakers);
+        let selector = test_selector(store.clone(), breakers);
 
         let selected = selector.select(&make_agent_task(agent_id)).await.unwrap();
         assert_eq!(
@@ -1242,7 +1583,7 @@ mod tests {
     async fn agent_pin_rejects_unknown_agent() {
         let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(AgentId::new())).await {
             Err(SelectionError::AgentNotFound(_)) => {}
@@ -1259,7 +1600,7 @@ mod tests {
         let store =
             Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]).with_failing_agent_lookup());
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(AgentId::new())).await {
             Err(SelectionError::AgentNotFound(_)) => {
@@ -1280,7 +1621,7 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(agent_id)).await {
             Err(SelectionError::AgentNotRunning(name)) => assert_eq!(name, "planner"),
@@ -1298,7 +1639,7 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(agent_id)).await {
             Err(SelectionError::AgentNotRunning(_)) => {}
@@ -1323,7 +1664,7 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(agent_id)).await {
             Err(SelectionError::AgentNotObserved(name)) => assert_eq!(name, "planner"),
@@ -1338,7 +1679,7 @@ mod tests {
         let agent_id = agent.id;
         let store = Arc::new(MockStore::new(vec![make_worker("w1", 0, &[])]).with_agent(agent));
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(agent_id)).await {
             Err(SelectionError::AgentUnplaced(name)) => assert_eq!(name, "planner"),
@@ -1370,7 +1711,9 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        // 배치된 워커가 **침묵한다**. 예전에는 on_demand라는 사실만으로
+        // 후보에서 빠졌지만, 이제 그 워커를 뺄 근거는 probe 실패뿐이다.
+        let selector = test_selector_with(store, breakers, ProbeSpy::silencing(&[host.id]));
 
         match selector.select(&make_agent_task(agent_id)).await {
             Ok(w) => panic!("멀쩡한 워커로 폴백하면 안 된다 (selected {w})"),
@@ -1401,7 +1744,7 @@ mod tests {
         store.agents.lock().unwrap().push(agent);
 
         let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
-        let selector = WorkerSelector::new(store, breakers);
+        let selector = test_selector(store, breakers);
 
         match selector.select(&make_agent_task(agent_id)).await {
             Err(SelectionError::AgentWorkerAtCapacity(name)) => assert_eq!(name, "planner"),

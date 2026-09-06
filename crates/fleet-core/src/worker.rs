@@ -62,9 +62,12 @@ pub struct Worker {
     pub worker_version: Option<String>,
     /// Liveness 보고 방식 (로드맵 #61). 기본값 `Periodic` — 기존 배포와의
     /// 하위 호환을 위해 필드가 없는 구 페이로드/행은 이 값으로 취급한다.
-    /// `OnDemand`는 스키마·모니터링 예외만 이 증분에서 구현되며, 실제 dispatch
-    /// 경로(사전 ACP probe 등)는 별도 control-stream 인프라(로드맵 #67) 없이는
-    /// 아직 안전하지 않다 — [`docs/architecture/worker-liveness-policy.md`] 참고.
+    /// `OnDemand`의 dispatch 경로는 2026-09-06에 열렸다 — `WorkerSelector`가
+    /// 고른 워커가 이 모드면 dispatch 직전에 ACP probe로 응답을 확인한다
+    /// (로드맵 `#70` 게이트 ⑤). Agent **배치**는 여전히 이 모드를 받지
+    /// 않는다: Agent 프로세스를 띄우는 것은 워커의 heartbeat 루프인데 이
+    /// 모드는 그 루프를 시작하지 않기 때문이며, 그 제외는 probe로 풀리지
+    /// 않는다 — [`docs/architecture/worker-liveness-policy.md`] 참고.
     #[serde(default)]
     pub liveness_mode: WorkerLivenessMode,
     /// 최초 등록 시각. 재등록해도 보존된다 — selector의 타이브레이크
@@ -167,10 +170,11 @@ pub enum WorkerStatus {
 ///
 /// - `Periodic`: 기본값. `heartbeat_interval_secs`마다 heartbeat 전송,
 ///   fleet-scheduler의 HealthChecker가 누락 시 Offline으로 전이.
-/// - `OnDemand`: idle 시 트래픽 없음. 이 열거값은 스키마/모니터링 예외
-///   (HealthChecker skip)만 이번 증분에서 지원한다 — dispatch 직전 ACP probe는
-///   아직 구현되지 않았으므로(로드맵 #67 의존) `on_demand`로 설정된 워커에
-///   실제로 task를 배정하는 로직은 이 증분의 범위 밖이다.
+/// - `OnDemand`: idle 시 트래픽 없음. HealthChecker는 이 모드를 강등하지
+///   않으므로 저장된 `Online`은 생존을 뜻하지 않고, 그래서 `WorkerSelector`가
+///   dispatch 직전에 ACP probe로 응답을 확인한다(로드맵 `#70` 게이트 ⑤,
+///   2026-09-06). Agent 배치(`placement.rs`)는 여전히 이 모드를 제외한다 —
+///   근거가 liveness가 아니라 `#61`의 모드 계약이라 probe로 풀리지 않는다.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerLivenessMode {

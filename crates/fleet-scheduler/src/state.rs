@@ -34,7 +34,7 @@ impl FleetState {
         breaker_config: CircuitBreakerConfig,
     ) -> Self {
         let breakers = Arc::new(BreakerRegistry::new(breaker_config));
-        let selector = WorkerSelector::new(store.clone(), breakers.clone());
+        let selector = WorkerSelector::new(store.clone(), breakers.clone(), transport.clone());
         Self {
             store,
             transport,

@@ -37,6 +37,23 @@ flowchart TD
 | `periodic` | 기본값 | `heartbeat_interval_secs`마다 | missed heartbeat threshold | 빠른 장애 감지와 자원 텔레메트리, 규모에 비례한 요청 수 |
 | `on_demand` | 명시 opt-in | 없음 | dispatch 직전 ACP probe 실패 또는 실제 command 실패 | idle 부하 없음, 첫 작업의 probe 지연·일시 실패 가능 |
 
+**2026-09-06: 위 표의 `on_demand` 행이 설계에서 구현으로 넘어왔다.** "dispatch 직전
+ACP probe"가 실제로 존재한다 — `WorkerTransport::probe`가 `session/list`를 왕복시키고,
+`WorkerSelector`가 고른 워커의 `liveness_mode`가 `on_demand`이면 dispatch 전에 그것을
+건다(로드맵 `#70` 게이트 ⑤). 표의 "첫 작업의 probe 지연"은 그 왕복 한 번이며 상한은
+`selector.rs`의 `PROBE_TIMEOUT`(5초)이다.
+
+두 가지를 함께 적어 둔다.
+
+- **probe는 `periodic` 워커에는 걸지 않는다.** heartbeat이 같은 사실을 이미 주기적으로
+  말하고 있어 dispatch마다 왕복을 더하면 비용만 는다. 이 표의 두 행이 서로 다른 수단으로
+  같은 질문에 답하는 것이지, 한쪽이 다른 쪽을 보강하는 관계가 아니다.
+- **Agent 배치는 여전히 `on_demand`를 받지 않는다.** Agent 프로세스를 띄우는 것은 워커의
+  heartbeat 루프인데(`agent_process.rs`의 `reconcile`) 이 모드는 그 루프를 아예 시작하지
+  않는다(`runner.rs`). 즉 거기 배치된 Agent는 probe가 성공하든 말든 뜨지 않으며, 그 제외의
+  근거는 liveness가 아니라 이 문서가 정의한 모드 계약이다. 아래 "Agent control 제약"과 같은
+  이유다.
+
 `on_demand` Worker에 일반 HealthChecker의 heartbeat timeout을 적용하면 idle 상태인
 정상 Worker를 오프라인으로 잘못 전이시키므로 금지한다. 단순히
 `heartbeat_interval_secs = 0`으로 처리하지 않는다. 0은 모호하며 잘못된 타이머·나눗셈
