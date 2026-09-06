@@ -74,6 +74,16 @@ impl WorkerTransport for RecordingTransportShared {
     async fn ping(&self, _: WorkerId) -> Result<Duration, TransportError> {
         Ok(Duration::from_millis(1))
     }
+    async fn probe(
+        &self,
+        _: WorkerId,
+        _: Duration,
+    ) -> Result<fleet_transport::ProbeOutcome, TransportError> {
+        Ok(fleet_transport::ProbeOutcome {
+            round_trip: Duration::from_millis(1),
+            answered_with_error: false,
+        })
+    }
     async fn subscribe(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
@@ -249,6 +259,16 @@ async fn transport_failure_does_not_break_store_registration() {
         }
         async fn ping(&self, _: WorkerId) -> Result<Duration, TransportError> {
             Ok(Duration::from_millis(1))
+        }
+        async fn probe(
+            &self,
+            _: WorkerId,
+            _: Duration,
+        ) -> Result<fleet_transport::ProbeOutcome, TransportError> {
+            Ok(fleet_transport::ProbeOutcome {
+                round_trip: Duration::from_millis(1),
+                answered_with_error: false,
+            })
         }
         async fn subscribe(
             &self,

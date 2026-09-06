@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::debug;
 
-use crate::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
+use crate::{DispatchRequest, ProbeOutcome, TransportError, WorkerEvent, WorkerTransport};
 
 /// Mock 내부 브로드캐스트 채널의 버퍼 크기.
 /// WorkerEvent는 Clone 가능해야 broadcast로 전달 가능.
@@ -63,6 +63,11 @@ struct Inner {
     /// 이벤트 브로드캐스트 채널 (subscribe()가 호출될 때마다 새 receiver 생성).
     /// 모든 WorkerEvent는 여기로 송출됨.
     event_tx: broadcast::Sender<WorkerEvent>,
+    /// probe가 실패해야 하는 워커와 그 사유 (로드맵 `#70` 게이트 ⑤).
+    probe_failures: HashMap<WorkerId, String>,
+    /// probe가 "오류로 답함"을 보고해야 하는 워커. **실패가 아니다** —
+    /// [`WorkerTransport::probe`]의 독스트링대로 거절도 살아 있다는 증거다.
+    probe_answers_with_error: std::collections::HashSet<WorkerId>,
 }
 
 /// 인메모리 `WorkerTransport`. 테스트에서 `Arc<MockTransport>`로 공유.
@@ -83,9 +88,31 @@ impl MockTransport {
             active: HashMap::new(),
             capacities: HashMap::new(),
             event_tx,
+            probe_failures: HashMap::new(),
+            probe_answers_with_error: std::collections::HashSet::new(),
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    /// 이 워커의 probe를 실패시킨다 (로드맵 `#70` 게이트 ⑤). `None`이면 해제.
+    pub async fn set_probe_failure(&self, worker_id: WorkerId, reason: Option<String>) {
+        let mut guard = self.inner.lock().await;
+        match reason {
+            Some(r) => guard.probe_failures.insert(worker_id, r),
+            None => guard.probe_failures.remove(&worker_id),
+        };
+    }
+
+    /// 이 워커의 probe가 "Agent가 오류로 답함"을 보고하게 한다. 그래도
+    /// probe는 **성공**이며, 소비자가 그 둘을 혼동하지 않는지 시험한다.
+    pub async fn set_probe_answers_with_error(&self, worker_id: WorkerId, yes: bool) {
+        let mut guard = self.inner.lock().await;
+        if yes {
+            guard.probe_answers_with_error.insert(worker_id);
+        } else {
+            guard.probe_answers_with_error.remove(&worker_id);
         }
     }
 
@@ -264,6 +291,31 @@ impl WorkerTransport for MockTransport {
             return Err(TransportError::WorkerNotRegistered(worker_id.to_string()));
         }
         Ok(Duration::from_millis(1))
+    }
+
+    /// **왕복을 흉내 내지 않는다** — 등록 여부만 보고 즉시 답한다.
+    ///
+    /// 이 mock에는 응답할 상대가 없으므로 "저쪽이 답했다"를 재현할 수단이
+    /// 아예 없다. `ping`과 달라지는 자리는 [`set_probe_failure`]로 **실패를
+    /// 주입할 수 있다는 것**이며, 이 게이트의 소비자(selector·dispatcher)가
+    /// 시험해야 하는 것은 왕복 자체가 아니라 "probe가 실패하면 어떻게 되는가"
+    /// 이므로 그것으로 충분하다. 왕복은 `AcpTransport`의 통합 시험이 맡는다.
+    async fn probe(
+        &self,
+        worker_id: WorkerId,
+        _timeout: Duration,
+    ) -> Result<ProbeOutcome, TransportError> {
+        let guard = self.inner.lock().await;
+        if !guard.workers.contains_key(&worker_id) {
+            return Err(TransportError::WorkerNotRegistered(worker_id.to_string()));
+        }
+        if let Some(reason) = guard.probe_failures.get(&worker_id) {
+            return Err(TransportError::Connection(reason.clone()));
+        }
+        Ok(ProbeOutcome {
+            round_trip: Duration::from_millis(1),
+            answered_with_error: guard.probe_answers_with_error.contains(&worker_id),
+        })
     }
 
     async fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {

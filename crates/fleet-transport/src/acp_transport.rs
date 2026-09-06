@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v1::{
-    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
-    SessionId, SessionNotification, SessionUpdate, TextContent,
+    CancelNotification, ContentBlock, InitializeRequest, ListSessionsRequest, NewSessionRequest,
+    PromptRequest, SessionId, SessionNotification, SessionUpdate, TextContent,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{Agent, ConnectionTo};
@@ -62,7 +62,9 @@ use tracing::{debug, info, warn};
 
 #[cfg(feature = "mtls")]
 use crate::tls::ClientTlsConfig;
-use crate::{DispatchRequest, FailureObservation, TransportError, WorkerEvent, WorkerTransport};
+use crate::{
+    DispatchRequest, FailureObservation, ProbeOutcome, TransportError, WorkerEvent, WorkerTransport,
+};
 
 /// 브로드캐스트 채널 용량.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -699,6 +701,101 @@ impl WorkerTransport for AcpTransport {
         Ok(Duration::from_millis(1))
     }
 
+    /// `session/list` 한 번을 실제로 왕복시킨다 (로드맵 `#70` 게이트 ⑤).
+    ///
+    /// **`session/list`를 고른 이유는 부작용이 없기 때문이다.** ACP에서
+    /// 이쪽(client)이 agent에게 보낼 수 있는 요청 중 상태를 바꾸지 않는 것은
+    /// 사실상 이것뿐이다. `session/new`는 세션을 만들고 용량을 소모하며
+    /// 실패한 probe가 정리되지 않은 세션을 남기고, `initialize`는 스펙상
+    /// 연결당 한 번이라 두 번째 호출의 의미가 구현에 달려 있다.
+    ///
+    /// **grok이 `session/list`를 구현하지 않아도 이 probe는 성립한다.** 그
+    /// 경우 `-32601`이 돌아오는데, 그것도 저쪽이 요청을 받아 해석하고 답을
+    /// 만들어 보낸 것이므로 살아 있다는 증거로는 같은 값이다
+    /// ([`ProbeOutcome::answered_with_error`]). 이 성질이 없으면 이 함수는
+    /// "grok의 특정 버전이 이 메서드를 아는가"를 재는 것이 되고, 그것은
+    /// liveness가 아니다.
+    ///
+    /// **연결이 죽은 것과 Agent가 거절한 것은 SDK에서 같은 `Err`로 온다.**
+    /// 구분하지 않으면 죽은 연결이 "거절했으니 살아 있다"로 보고되어, 이
+    /// probe가 막으려는 바로 그 일이 일어난다. `is_incoming_transport_closed`가
+    /// 그 둘을 가른다 — SDK가 EOF 뒤의 요청에 심어 주는 표식이다.
+    async fn probe(
+        &self,
+        worker_id: WorkerId,
+        timeout: Duration,
+    ) -> Result<ProbeOutcome, TransportError> {
+        let session = {
+            let clients = self.clients.read().await;
+            clients
+                .get(&worker_id)
+                .cloned()
+                .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?
+        };
+        let state = *session.state.read().await;
+        if state != ConnState::Connected {
+            return Err(TransportError::Connection(format!(
+                "worker {worker_id} not connected (state={state:?}); cannot probe"
+            )));
+        }
+        let connection = {
+            let guard = session.connection.lock().await;
+            guard.clone().ok_or_else(|| {
+                TransportError::Connection(format!(
+                    "worker {worker_id} session disappeared mid-probe"
+                ))
+            })?
+        };
+
+        let started = Instant::now();
+        let answered = tokio::time::timeout(
+            timeout,
+            connection
+                .send_request(ListSessionsRequest::new())
+                .block_task(),
+        )
+        .await;
+        let round_trip = started.elapsed();
+
+        match answered {
+            Ok(Ok(_)) => Ok(ProbeOutcome {
+                round_trip,
+                answered_with_error: false,
+            }),
+            Ok(Err(e)) => {
+                // **여기가 이 함수에서 가장 틀리기 쉬운 자리다.** Agent의 거절과
+                // 연결의 죽음이 SDK에서 같은 `Err`로 도착하므로, 구분하지 않으면
+                // 끊긴 연결이 `answered_with_error = true`로 **살아 있다고 보고된다** —
+                // 이 probe가 막으려는 바로 그 일이다(실측 2026-09-06: 소켓을
+                // 닫으면 `-32603` + `data: "response to ... never received"`가 오고,
+                // 그것을 거절로 읽으면 그대로 통과한다).
+                // 두 신호가 **모두** "답"이라고 해야 답으로 친다. 서로
+                // 독립이라 한쪽이 놓쳐도 다른 쪽이 잡는다: 연결 상태는
+                // 구조적이고(이 오류는 연결 teardown이 응답 oneshot을
+                // 취소하며 만들어지고, supervisor는 같은 teardown에서
+                // 상태를 쓴다 — 순서는 우연이 아니라 인과다), 문구 표식은
+                // 상태 전이가 늦는 경합에서 먼저 잡는다. 판정이 애매하면
+                // "답이 아니다" 쪽으로 접는다 — 살아 있는 워커를 한 번 더
+                // 확인하는 비용은 probe 한 번이지만, 죽은 워커에 dispatch
+                // 하는 비용은 그 Task 하나다.
+                let still_connected = *session.state.read().await == ConnState::Connected;
+                if !(error_is_an_agent_answer(&e) && still_connected) {
+                    return Err(TransportError::Connection(format!(
+                        "worker {worker_id} connection died during the probe: {e}"
+                    )));
+                }
+                debug!(%worker_id, error = %e, "worker answered the probe with an error — it is alive");
+                Ok(ProbeOutcome {
+                    round_trip,
+                    answered_with_error: true,
+                })
+            }
+            Err(_) => Err(TransportError::Connection(format!(
+                "worker {worker_id} did not answer the probe within {timeout:?}"
+            ))),
+        }
+    }
+
     async fn subscribe(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
@@ -996,6 +1093,34 @@ fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
     Ok(client)
 }
 
+/// SDK가 **답이 오지 않았을 때** 스스로 만들어 넣는 오류 문구의 표식.
+///
+/// `jsonrpc.rs`가 두 곳에서 `"response to `{method}` never received: {err}"`로
+/// 만든다. 두 곳 모두 "응답 채널이 취소됐다" — 즉 저쪽이 답을 만들지
+/// 않았다는 뜻이다.
+const NO_ANSWER_MARKER: &str = "never received";
+
+/// 이 오류가 **Agent가 만들어 보낸 답**의 모양인가 (로드맵 `#70` 게이트 ⑤).
+///
+/// 이 판정이 필요한 이유는 Agent의 거절과 연결의 죽음이 SDK에서 같은 `Err`로
+/// 도착하기 때문이다. 구분하지 않으면 끊긴 연결이 "거절했으니 살아 있다"로
+/// 보고되어, probe가 막으려는 바로 그 일이 일어난다(실측 2026-09-06).
+///
+/// **이것은 두 신호 중 텍스트 쪽이다.** 벤더된 SDK가 문구를 바꾸면 조용히
+/// 무력해지므로 [`probe`](AcpTransport::probe)는 연결 상태(구조적 신호)와
+/// **함께** 쓴다. 그래도 이 함수를 따로 떼어 둔 이유는 그 조합에서는 한쪽만
+/// 고장 나도 시험이 붉어지지 않기 때문이다 — 아래 단위 시험이 이쪽만
+/// 독립적으로 못박는다.
+fn error_is_an_agent_answer(e: &agent_client_protocol::Error) -> bool {
+    if agent_client_protocol::is_incoming_transport_closed(e) {
+        return false;
+    }
+    !e.data
+        .as_ref()
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|d| d.contains(NO_ANSWER_MARKER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,5 +1222,56 @@ mod tests {
             result,
             Err(TransportError::WorkerNotRegistered(_))
         ));
+    }
+
+    /// [`error_is_an_agent_answer`]의 두 갈래를 독립적으로 못박는다
+    /// (로드맵 `#70` 게이트 ⑤).
+    ///
+    /// **통합 시험만으로는 이 신호가 살아 있는지 알 수 없다.** `probe`는 이것과
+    /// 연결 상태를 AND로 묶으므로, 이쪽이 통째로 고장 나도 상태 신호가 혼자
+    /// 통합 시험을 통과시킨다(2026-09-06 변이로 확인: 이 판정을 지워도
+    /// `a_connection_that_dies_during_the_probe_is_not_an_answer`가 초록이었다).
+    /// 다중 방어에서 각 겹은 이렇게 따로 시험하지 않으면 조용히 하나씩
+    /// 죽는다.
+    #[test]
+    fn an_error_the_sdk_manufactured_locally_is_not_an_answer() {
+        // Agent가 실제로 보낸 거절 — 답이다.
+        let rejected = agent_client_protocol::Error::method_not_found();
+        assert!(
+            error_is_an_agent_answer(&rejected),
+            "거절도 Agent가 만들어 보낸 답이다"
+        );
+
+        // SDK가 응답 채널 취소 뒤에 스스로 만든 것 — 답이 아니다.
+        let mut no_answer = agent_client_protocol::Error::internal_error();
+        no_answer = no_answer.data(serde_json::json!(format!(
+            "response to `session/list` {NO_ANSWER_MARKER}: oneshot canceled"
+        )));
+        assert!(
+            !error_is_an_agent_answer(&no_answer),
+            "응답이 오지 않아 SDK가 지어낸 오류를 답으로 읽으면 죽은 연결이 \
+             살아 있다고 보고된다"
+        );
+
+        // EOF **뒤에** 보낸 요청 — SDK가 다른 모양의 표식을 붙인다.
+        // 위의 "never received"와 달리 `data`가 문자열이 아니라 객체라
+        // 그 검사에 걸리지 않으므로, 이 갈래가 따로 필요하다.
+        let mut after_eof = agent_client_protocol::Error::internal_error();
+        after_eof = after_eof.data(serde_json::json!({
+            "reason": agent_client_protocol::INCOMING_TRANSPORT_CLOSED_REASON,
+            "method": "session/list",
+        }));
+        assert!(
+            !error_is_an_agent_answer(&after_eof),
+            "EOF 뒤의 요청은 저쪽에 닿지도 않았다"
+        );
+
+        // 코드만으로는 갈리지 않는다는 것도 함께 못박는다 — 위 둘을 코드로
+        // 구분하려는 구현을 막는다. `-32603`은 Agent도 보낼 수 있다.
+        let agent_internal_error = agent_client_protocol::Error::internal_error();
+        assert!(
+            error_is_an_agent_answer(&agent_internal_error),
+            "Agent가 보낸 -32603은 답이다 — 판정 근거는 코드가 아니라 표식이다"
+        );
     }
 }

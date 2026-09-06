@@ -125,6 +125,27 @@ pub enum FailureObservation {
     ResultLost,
 }
 
+/// [`WorkerTransport::probe`]가 실제로 본 것.
+///
+/// **`Duration` 하나로 두지 않은 이유가 있다.** 그러면 이 함수의 반환형이
+/// [`WorkerTransport::ping`]과 같아지고, 그 순간 상수를 돌려주는 구현이
+/// 타입에 대해 정직해진다 — `ping`이 정확히 그렇게 되어 있다. 두 필드는
+/// 각각 그 자리에서 거짓말을 할 수 없게 만든다: [`round_trip`](Self::round_trip)은
+/// 재지 않으면 채울 수 없고, [`answered_with_error`](Self::answered_with_error)는
+/// 구현자에게 거절 경로를 어떻게 분류했는지 밝히기를 요구한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    /// 요청을 보낸 시점부터 답이 돌아온 시점까지 실제로 잰 시간.
+    pub round_trip: Duration,
+    /// Agent가 오류로 답했는가.
+    ///
+    /// `true`여도 probe는 성공이다 — [`WorkerTransport::probe`]의 독스트링
+    /// 참고. 이 값은 판정이 아니라 **진단**이다: 모든 probe가 오류로 답하는
+    /// 워커는 살아 있지만 이쪽이 고른 메서드를 모르는 것이므로, 운영자가
+    /// 그것을 구분할 수 있어야 한다.
+    pub answered_with_error: bool,
+}
+
 /// 워커 통신 trait. 각 워커 엔드포인트당 하나의 인스턴스가 아닌,
 /// 풀 전체를 관리하는 구현체를 가정합니다 (`register`/`unregister`).
 #[async_trait]
@@ -170,6 +191,37 @@ pub trait WorkerTransport: Send + Sync {
     /// probe처럼 보이는 것이 함정이라 여기 적어 둔다 — 그 게이트를 닫으려면
     /// 응답을 실제로 받는 수단을 **새로 만들어야 한다.**
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError>;
+
+    /// 워커가 **응답한다**는 것을 확인한다 (로드맵 `#70` 게이트 ⑤).
+    ///
+    /// [`ping`](Self::ping)이 되지 못한 그것이다. 위 독스트링이 적은 대로
+    /// `ping`은 연결 상태를 읽을 뿐이라 연결만 서 있고 응답하지 않는 워커를
+    /// 통과시킨다. 이쪽은 실제로 요청을 보내고 답이 돌아오기를 기다린다.
+    ///
+    /// ## 판정은 "답이 왔는가"이지 "성공했는가"가 아니다
+    ///
+    /// Agent가 요청을 **거절해도 probe는 성공이다** —
+    /// [`ProbeOutcome::answered_with_error`]가 그 경우다. 거절은 저쪽이
+    /// 요청을 받아 해석하고 답을 만들어 보냈다는 뜻이므로, 이 함수가 묻는
+    /// 것에 대해서는 성공한 응답과 똑같은 증거다. 여기서 "성공한 응답만
+    /// 살아 있음"으로 좁히면, 이 probe에 쓰는 메서드를 구현하지 않은
+    /// 워커가 **멀쩡한데도 영구히 배정 대상에서 빠진다.**
+    ///
+    /// 실패는 둘뿐이다: `timeout` 안에 아무것도 오지 않았거나, 연결 자체가
+    /// 죽어 있(었)거나. 후자를 앞의 거절과 갈라내는 것이 이 함수의 가장
+    /// 중요한 책임이다 — 그 둘이 구현에서 같은 `Err`로 도착하기 때문에,
+    /// 구분하지 않으면 **죽은 연결이 "거절했으니 살아 있다"로 보고된다.**
+    ///
+    /// ## 부작용이 없어야 한다
+    ///
+    /// dispatch 전에 불릴 것이므로 세션을 만들거나 상태를 바꾸는 요청을
+    /// 써서는 안 된다. 그런 것을 쓰면 probe 자체가 워커의 용량을 소모하고,
+    /// 실패한 probe가 정리되지 않은 세션을 남긴다.
+    async fn probe(
+        &self,
+        worker_id: WorkerId,
+        timeout: Duration,
+    ) -> Result<ProbeOutcome, TransportError>;
 
     /// 워커 이벤트 스트림을 구독.
     ///

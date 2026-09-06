@@ -45,6 +45,19 @@ struct MockState {
     /// 아예 읽지 못하고, 그러면 이 스위치를 쓰는 테스트가 검증하려는
     /// 바로 그것이 보이지 않는다.
     stall_prompt: Arc<AtomicBool>,
+    /// 켜면 `session/list`를 **아는 척** 하고 정상 결과로 답한다. 끄면
+    /// 아래 기본 arm의 `-32601`이 나간다 — grok이 이 메서드를 구현하지 않은
+    /// 경우를 그대로 재현한다.
+    knows_session_list: Arc<AtomicBool>,
+    /// 켜면 `session/list`에 응답하지 않는다(타임아웃 경로 재현).
+    /// `stall_prompt`와 같은 이유로 리더 루프는 계속 돈다.
+    stall_session_list: Arc<AtomicBool>,
+    /// 켜면 `session/list`를 받는 즉시 소켓을 닫는다 — Agent의 거절과
+    /// **연결의 죽음**이 갈리는지 보기 위한 스위치.
+    close_on_session_list: Arc<AtomicBool>,
+    /// `session/list`에 답하기 전 기다릴 밀리초. 왕복이 실제로 측정되는지를
+    /// 보기 위한 것이라 하한으로만 쓴다.
+    session_list_delay_ms: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +154,33 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": { "stopReason": "end_turn" },
+                });
+                let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+            }
+            "session/list" => {
+                if state.close_on_session_list.load(Ordering::SeqCst) {
+                    break;
+                }
+                if state.stall_session_list.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let delay = state.session_list_delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                if !state.knows_session_list.load(Ordering::SeqCst) {
+                    let resp = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32601, "message": "method not found" },
+                    });
+                    let _ = writer.send(WsMessage::Text(resp.to_string())).await;
+                    continue;
+                }
+                let resp = json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "sessions": [] },
                 });
                 let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
@@ -279,6 +319,142 @@ async fn ping_registered_worker_ok() {
         std::time::Duration::from_millis(1),
         "성공 값은 측정이 아니라 상수다"
     );
+}
+
+/// probe는 **실제로 왕복한다** (로드맵 `#70` 게이트 ⑤).
+///
+/// 바로 위 `ping_registered_worker_ok`가 상수를 못박은 것과 짝이다. 여기서
+/// mock이 답을 150ms 늦추면 그 지연이 측정값에 나타나야 한다 — 상수를
+/// 돌려주는 구현은 이 단정을 통과할 수 없다. 지연을 **하한으로만** 쓰는
+/// 이유는 상한이 부하에 따라 흔들리기 때문이고, 하한만으로도 "재는가"는
+/// 갈린다.
+#[tokio::test]
+async fn probe_measures_a_real_round_trip() {
+    let (state, addr) = start_mock_server().await;
+    state.knows_session_list.store(true, Ordering::SeqCst);
+    state.session_list_delay_ms.store(150, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let outcome = transport
+        .probe(worker, Duration::from_secs(5))
+        .await
+        .expect("probe");
+
+    assert!(
+        !outcome.answered_with_error,
+        "정상 결과로 답했으므로 오류 응답이 아니다"
+    );
+    assert!(
+        outcome.round_trip >= Duration::from_millis(150),
+        "지연이 측정값에 나타나야 한다 — 받은 값 {:?}",
+        outcome.round_trip
+    );
+    assert_ne!(
+        outcome.round_trip,
+        transport.ping(worker).await.expect("ping"),
+        "probe가 ping과 같은 값을 준다면 그것은 재지 않았다는 뜻이다"
+    );
+}
+
+/// **Agent가 거절해도 probe는 성공이다** (로드맵 `#70` 게이트 ⑤).
+///
+/// 이 단정이 이 게이트의 핵심이다. grok이 `session/list`를 구현하지 않으면
+/// `-32601`이 돌아오는데, 그것도 저쪽이 요청을 받아 해석하고 답을 만들어
+/// 보낸 것이므로 살아 있다는 증거로는 정상 응답과 같은 값이다. 여기서
+/// 실패로 접으면 이 probe는 liveness가 아니라 "grok의 이 버전이 이 메서드를
+/// 아는가"를 재는 것이 되고, 멀쩡한 워커가 영구히 배정 대상에서 빠진다.
+#[tokio::test]
+async fn an_agent_that_rejects_the_probe_is_still_alive() {
+    let (state, addr) = start_mock_server().await;
+    // 기본값 그대로 — mock은 `session/list`를 모른다.
+    assert!(!state.knows_session_list.load(Ordering::SeqCst));
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let outcome = transport
+        .probe(worker, Duration::from_secs(5))
+        .await
+        .expect("메서드를 모른다는 답도 답이다 — probe는 성공해야 한다");
+
+    assert!(
+        outcome.answered_with_error,
+        "거절이었다는 사실은 진단으로 남아야 한다"
+    );
+}
+
+/// 응답하지 않는 워커는 probe를 통과하지 못한다 (로드맵 `#70` 게이트 ⑤).
+///
+/// **연결은 그대로 서 있다** — 그래서 `ping`은 이 워커를 통과시킨다. 두
+/// 함수가 같은 워커에 대해 반대 답을 내는 것이 probe가 존재하는 이유
+/// 전부이므로, 한 시험 안에서 나란히 단정한다.
+#[tokio::test]
+async fn a_connected_but_silent_worker_fails_the_probe_though_ping_passes() {
+    let (state, addr) = start_mock_server().await;
+    state.stall_session_list.store(true, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    assert!(
+        transport.ping(worker).await.is_ok(),
+        "전제: 연결은 서 있으므로 ping은 통과한다"
+    );
+    let result = transport.probe(worker, Duration::from_millis(300)).await;
+    assert!(
+        result.is_err(),
+        "응답이 없으면 probe는 실패해야 한다 — 받은 값 {result:?}"
+    );
+}
+
+/// 죽은 연결을 "거절했으니 살아 있다"로 보고하지 않는다 (로드맵 `#70` 게이트 ⑤).
+///
+/// SDK는 EOF 뒤의 요청도 `Err`로 돌려주므로, 구분하지 않으면 연결이 끊긴
+/// 워커가 `answered_with_error = true`로 **살아 있다고 보고된다** — 이 probe가
+/// 막으려는 바로 그 일이다. `is_incoming_transport_closed`가 그 둘을 가른다.
+#[tokio::test]
+async fn a_connection_that_dies_during_the_probe_is_not_an_answer() {
+    let (state, addr) = start_mock_server().await;
+    state.close_on_session_list.store(true, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let result = transport.probe(worker, Duration::from_secs(5)).await;
+    assert!(
+        result.is_err(),
+        "끊긴 연결은 답이 아니다 — 받은 값 {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn probe_unknown_worker_errors() {
+    let transport = AcpTransport::new();
+    let result = transport
+        .probe(WorkerId::new(), Duration::from_secs(1))
+        .await;
+    assert!(matches!(
+        result,
+        Err(fleet_transport::TransportError::WorkerNotRegistered(_))
+    ));
 }
 
 #[tokio::test]
