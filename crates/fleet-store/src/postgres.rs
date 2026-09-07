@@ -2054,8 +2054,8 @@ impl Store for PgStore {
             r#"
             INSERT INTO audit_log
                 (id, actor_user_id, actor_label, action, target_type, target_id,
-                 outcome, ip_address, detail, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 outcome, ip_address, detail, created_at, control_epoch)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(event.id)
@@ -2068,6 +2068,7 @@ impl Store for PgStore {
         .bind(event.ip_address.as_ref())
         .bind(&event.detail)
         .bind(event.created_at)
+        .bind(event.control_epoch)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -2088,10 +2089,11 @@ impl Store for PgStore {
             Option<String>,
             serde_json::Value,
             DateTime<Utc>,
+            Option<i64>,
         )> = sqlx::query_as(
             r#"
             SELECT id, actor_user_id, actor_label, action, target_type, target_id,
-                   outcome, ip_address, detail, created_at
+                   outcome, ip_address, detail, created_at, control_epoch
               FROM audit_log
              WHERE ($1::uuid IS NULL OR actor_user_id = $1)
                AND ($2::text IS NULL OR action = $2)
@@ -2121,6 +2123,7 @@ impl Store for PgStore {
                 ip_address: r.7,
                 detail: r.8,
                 created_at: r.9,
+                control_epoch: r.10,
             })
             .collect())
     }

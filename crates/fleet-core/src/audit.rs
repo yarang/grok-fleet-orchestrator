@@ -97,6 +97,31 @@ pub mod action {
     /// HTTP capability 거절 (로드맵 #76). 인증까지 통과한 principal이
     /// 대상이다 — 미인증 요청은 이 이벤트 이전에 이미 401로 걸러진다.
     pub const HTTP_CAPABILITY_DENIED: &str = "http.capability_denied";
+
+    /// 이 인스턴스가 제어면 리스를 갖지 못해 dispatch를 거절했다
+    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// **이 행위의 주체는 사람이 아니라 오케스트레이터 자신이다.** 기존 35개
+    /// 감사 항목은 전부 운영자 행위였고, 이것이 제어면 결정으로는 처음이다.
+    /// 그래서 `actor_label`은 인스턴스를 가리킨다.
+    pub const CONTROL_DISPATCH_REFUSED: &str = "control.dispatch_refused";
+
+    /// 저장소가 이 인스턴스의 쓰기를 세대 불일치로 거절했다
+    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// [`CONTROL_DISPATCH_REFUSED`]와 **다른 사실이다.** 저쪽은 이 인스턴스가
+    /// 스스로 물러선 것이고(관측 시점에 리스가 없었다), 이쪽은 리스가 있다고
+    /// **믿고** 쓰러 갔다가 저장소에 막힌 것이다. 후자만이 "둘 이상의 owner"의
+    /// 직접 증거이며, 그래서 이 기록에는 그 순간 이 인스턴스가 들고 있던
+    /// epoch가 실린다.
+    pub const CONTROL_WRITE_FENCED: &str = "control.write_fenced";
+
+    /// 리스가 없어 워커 이벤트의 제어 처리를 건너뛰었다
+    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// 그 Task의 최종 상태를 **아무도 확정하지 않은 채** 창이 닫혔다는 뜻이라,
+    /// 새 리스 소유자의 재조정이 반드시 다시 봐야 하는 항목이다.
+    pub const CONTROL_OUTCOME_ABANDONED: &str = "control.outcome_abandoned";
     /// Project 생성 (로드맵 #48).
     pub const PROJECT_CREATE: &str = "project.create";
     /// Project archive 요청(`Active → Draining`) (로드맵 #48).
@@ -223,6 +248,18 @@ pub struct AuditEvent {
     /// 액션별 추가 맥락. **비밀 값 금지.**
     #[serde(default)]
     pub detail: serde_json::Value,
+    /// 이 결정을 내린 제어면 세대 (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// **`None`이 두 가지 서로 다른 정상을 뜻한다.** 하나는 운영자 행위 —
+    /// 사람이 API/대시보드에서 한 일에는 제어면 세대가 없다. 다른 하나는
+    /// **리스를 갖지 못한 채 내린 거절**이다(`LeaseStatus::Fenced`/`Stopped`
+    /// 에는 epoch 자체가 없다). 후자에서는 "epoch가 없었다"는 것 자체가
+    /// 증거이므로 [`detail`](Self::detail)의 `lease_status`가 그것을 나른다.
+    ///
+    /// 그래서 이 필드를 필수로 만들 수 없고, `None`을 "정보 없음"으로 읽어도
+    /// 안 된다 — 어느 쪽인지는 `action`이 가른다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_epoch: Option<i64>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -252,6 +289,7 @@ impl AuditEvent {
             outcome,
             ip_address: None,
             detail: serde_json::Value::Null,
+            control_epoch: None,
             created_at: Utc::now(),
         }
     }
@@ -272,6 +310,12 @@ impl AuditEvent {
     /// 요청 출처 IP 지정.
     pub fn ip(mut self, ip: impl Into<String>) -> Self {
         self.ip_address = Some(ip.into());
+        self
+    }
+
+    /// 이 결정을 내린 제어면 세대 지정 (로드맵 `#70` 게이트 ⑥ 선행).
+    pub fn control_epoch(mut self, epoch: i64) -> Self {
+        self.control_epoch = Some(epoch);
         self
     }
 

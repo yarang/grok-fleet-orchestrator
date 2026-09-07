@@ -141,6 +141,16 @@ impl Dispatcher {
                 "worker event dropped — this instance does not hold the control plane lease \
                  (breaker/task state left untouched; the new lease owner must reconcile it)"
             );
+            // 로드맵 `#70` 게이트 ⑥ 선행. 그 Task의 최종 상태를 **아무도
+            // 확정하지 않은 채** 창이 닫혔다는 뜻이라, 새 리스 소유자의
+            // 재조정이 반드시 다시 봐야 하는 항목이다.
+            self.state
+                .audit_control(
+                    fleet_core::audit::action::CONTROL_OUTCOME_ABANDONED,
+                    ("task", task_id.to_string()),
+                    serde_json::json!({ "lease_status": self.state.lease_status_label() }),
+                )
+                .await;
             return;
         }
 
@@ -550,6 +560,17 @@ impl Dispatcher {
         // 것조차 이 인스턴스가 하면 안 되는 상태 변경이다.
         if !self.state.lease_allows_control() {
             warn!(%task_id, "dispatch refused — this instance does not hold the control plane lease");
+            // 로드맵 `#70` 게이트 ⑥ 선행. `lease_status`를 함께 남기는 이유는
+            // 여기서 `control_epoch`가 반드시 `None`이기 때문이다 — 세대가
+            // 없다는 것이 이 기록의 내용이고, 그것이 `Fenced`(다른 owner가
+            // 있다)인지 `Stopped`(종료 중이다)인지는 조사의 방향을 가른다.
+            self.state
+                .audit_control(
+                    fleet_core::audit::action::CONTROL_DISPATCH_REFUSED,
+                    ("task", task_id.to_string()),
+                    serde_json::json!({ "lease_status": self.state.lease_status_label() }),
+                )
+                .await;
             return Err(DispatchError::ControlPlaneFenced);
         }
 
@@ -666,6 +687,18 @@ impl Dispatcher {
                 // 실행이 생긴다. 다만 원인이 다르므로 에러도 나눈다: 이건 이
                 // 인스턴스가 제어 기관이 아니라는 뜻이고, `lease_allows_control`
                 // 검사를 통과한 **뒤에** fenced됐을 때만 도달한다.
+                //
+                // 로드맵 `#70` 게이트 ⑥ 선행 — **이것이 "둘 이상의 owner"의
+                // 직접 증거다.** 위 거절과 달리 이 인스턴스는 리스가 있다고
+                // 믿고 쓰러 갔고, 저장소가 세대 불일치로 막았다. 그래서 이
+                // 기록에는 그 순간 들고 있던 epoch가 실린다.
+                self.state
+                    .audit_control(
+                        fleet_core::audit::action::CONTROL_WRITE_FENCED,
+                        ("task", task_id.to_string()),
+                        serde_json::json!({ "worker_id": worker_id.to_string() }),
+                    )
+                    .await;
                 return Err(DispatchError::ControlPlaneFenced);
             }
             TransitionOutcome::StaleDispatchEpoch { dispatched_under } => {
@@ -1588,11 +1621,243 @@ mod tests {
             Arc::new(fleet_transport::MockTransport::new());
         let state = Arc::new(
             FleetState::new(store, transport, CircuitBreakerConfig::default()).with_lease(
-                LeaseObserver::with_status("test-cluster", LeaseStatus::Fenced),
+                LeaseObserver::with_status("test-cluster", "inst-a", LeaseStatus::Fenced),
             ),
         );
         let dispatcher = Dispatcher::new(state.clone());
         (state, dispatcher)
+    }
+
+    /// 감사 기록에서 그 결정을 찾는다. 없으면 목록 전체를 보여 준다 —
+    /// "없다"는 실패에서 무엇이 있었는지가 곧 진단이다.
+    async fn audited(store: &dyn Store, action: &str) -> fleet_core::AuditEvent {
+        let events = store
+            .list_audit_events(&fleet_core::AuditFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        events
+            .iter()
+            .find(|e| e.action == action)
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{action}이 감사에 남아야 한다 — 받은 것 {:?}",
+                    events.iter().map(|e| &e.action).collect::<Vec<_>>()
+                )
+            })
+    }
+
+    /// 리스가 없어 거절한 dispatch가 **감사에 남는다** (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// 이 시험이 이 증분의 출발점이다. 그 전까지 `fleet-scheduler`는 감사
+    /// 기록을 하나도 내지 않았고(실측: emitter 35군데가 전부 API·대시보드·core),
+    /// 제어면 결정은 `warn!` 로그로만 남았다 — 관측성 정본의 alert 표가 요구하는
+    /// "fencing/epoch 증거 확인"에 조회할 원천이 없었다.
+    ///
+    /// **`control_epoch`가 `None`인 것이 결함이 아니라 내용이다.** 리스를 갖지
+    /// 못한 인스턴스에는 세대가 없고, 그 사실은 `lease_status`가 나른다.
+    #[tokio::test]
+    async fn a_dispatch_refused_without_the_lease_is_audited() {
+        let (state, dispatcher) = setup_fenced();
+        let task = sample_task();
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+
+        let err = dispatcher.dispatch_existing(task, false).await.unwrap_err();
+        assert!(matches!(err, DispatchError::ControlPlaneFenced));
+
+        let e = audited(
+            &*state.store,
+            fleet_core::audit::action::CONTROL_DISPATCH_REFUSED,
+        )
+        .await;
+        assert_eq!(e.target_id.as_deref(), Some(task_id.to_string().as_str()));
+        assert_eq!(
+            e.actor_label, "orchestrator:inst-a",
+            "행위자는 사람이 아니라 이 인스턴스다 — cluster_id로는 둘 이상의 \
+             owner를 구분할 수 없다"
+        );
+        assert_eq!(
+            e.control_epoch, None,
+            "세대를 갖지 못한 채 내린 거절이므로 epoch가 없는 것이 사실이다"
+        );
+        assert_eq!(
+            e.detail.get("lease_status").and_then(|v| v.as_str()),
+            Some("fenced"),
+            "epoch가 없는 이유는 detail이 날라야 한다: {:?}",
+            e.detail
+        );
+    }
+
+    /// 리스가 설정되지 않은 배포는 **아무것도 남기지 않는다**.
+    ///
+    /// 단일 인스턴스 배포에는 세대도 경합도 없으므로 남길 사실이 없다.
+    /// 이 단정이 없으면 "모든 경로에서 무조건 감사한다"는 구현이 통과하고,
+    /// 그러면 리스를 쓰지 않는 배포의 감사 로그가 의미 없는 행으로 찬다.
+    #[tokio::test]
+    async fn a_deployment_without_a_lease_records_no_control_audit() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(FleetState::new(
+            store.clone(),
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        let task = sample_task();
+        state.store.insert_task(&task).await.unwrap();
+        // 리스가 없으면 `lease_allows_control()`이 true라 거절 경로에 닿지
+        // 않는다. 그래서 워커 이벤트 경로로 확인한다 — 그쪽도 같은 함수를 쓴다.
+        state
+            .audit_control(
+                fleet_core::audit::action::CONTROL_DISPATCH_REFUSED,
+                ("task", task.id.to_string()),
+                serde_json::json!({}),
+            )
+            .await;
+        let _ = dispatcher;
+
+        let events = store
+            .list_audit_events(&fleet_core::AuditFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "리스 없는 배포에는 남길 제어면 사실이 없다: {:?}",
+            events.iter().map(|e| &e.action).collect::<Vec<_>>()
+        );
+    }
+
+    /// 리스를 잃은 채 도착한 워커 결과가 **버려졌다는 사실**이 남는다
+    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// 그 Task의 최종 상태를 아무도 확정하지 않은 채 창이 닫혔다는 뜻이라,
+    /// 새 리스 소유자의 재조정이 반드시 다시 봐야 하는 항목이다. 지금까지
+    /// 이 사실은 `warn!` 한 줄로만 남았다.
+    #[tokio::test]
+    async fn an_abandoned_worker_outcome_is_audited() {
+        let (state, dispatcher) = setup_fenced();
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+        let mut task = sample_task();
+        let task_id = task.id;
+        task.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now(),
+        };
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .handle_worker_event(WorkerEvent::Failed {
+                task_id,
+                error: "boom".into(),
+                observation: fleet_transport::FailureObservation::Reported,
+            })
+            .await;
+
+        let e = audited(
+            &*state.store,
+            fleet_core::audit::action::CONTROL_OUTCOME_ABANDONED,
+        )
+        .await;
+        assert_eq!(e.target_id.as_deref(), Some(task_id.to_string().as_str()));
+        assert_eq!(e.control_epoch, None);
+    }
+
+    /// 저장소가 막은 쓰기는 **들고 있던 epoch와 함께** 감사에 남는다
+    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// **이 시험이 `control_epoch` 컬럼의 존재 이유 전부다.** 다른 두 제어면
+    /// 감사(거절·유기)에서는 이 값이 항상 `None`이라, 그것들만 있으면 컬럼이
+    /// 영원히 비어 있어도 아무도 눈치채지 못한다.
+    ///
+    /// 그리고 이 경우가 관측성 정본의 alert 표가 말하는 **"둘 이상의 owner
+    /// 관측"의 직접 증거**다. 앞의 거절은 이 인스턴스가 스스로 물러선 것이지만,
+    /// 여기서는 리스가 있다고 **믿고** 쓰러 갔다가 저장소에 막혔다 — 즉 다른
+    /// 누군가가 그 사이에 세대를 가져갔다는 뜻이고, 조사에 필요한 것이 바로
+    /// 이 인스턴스가 그때 믿고 있던 세대다.
+    #[tokio::test]
+    async fn a_write_the_store_fenced_is_audited_with_the_epoch_we_held() {
+        let ttl = std::time::Duration::from_secs(60);
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let held = store
+            .acquire_control_lease("c70", "instance-a", ttl, None)
+            .await
+            .unwrap();
+        store
+            .release_control_lease("c70", "instance-a", held.epoch)
+            .await
+            .unwrap();
+        let taken = store
+            .acquire_control_lease("c70", "instance-b", ttl, None)
+            .await
+            .unwrap();
+        assert!(taken.epoch > held.epoch, "시험 전제: 세대가 넘어갔다");
+
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(
+            FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
+                LeaseObserver::with_status(
+                    "c70",
+                    "instance-a",
+                    // 낡았지만 본인은 Active로 믿는다 — bool 게이트는 열려 있다.
+                    LeaseStatus::Active { epoch: held.epoch },
+                ),
+            ),
+        );
+        let dispatcher = Dispatcher::new(state.clone());
+        assert!(
+            state.lease_allows_control(),
+            "관측이 아직 Active여야 이 시나리오가 성립한다"
+        );
+
+        // 후보 워커가 있어야 선택을 지나 CAS까지 간다.
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        store.upsert_worker(&worker).await.unwrap();
+        let task = sample_task();
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let err = dispatcher
+            .dispatch_existing(task, false)
+            .await
+            .expect_err("저장소가 새 epoch로 옮겨갔으면 dispatch는 거절돼야 한다");
+        assert!(matches!(err, DispatchError::ControlPlaneFenced));
+
+        let e = audited(&*store, fleet_core::audit::action::CONTROL_WRITE_FENCED).await;
+        assert_eq!(e.target_id.as_deref(), Some(task_id.to_string().as_str()));
+        assert_eq!(e.actor_label, "orchestrator:instance-a");
+        assert_eq!(
+            e.control_epoch,
+            Some(held.epoch),
+            "막힌 순간 이 인스턴스가 믿고 있던 세대가 실려야 한다 — 저장소가 \
+             이미 옮겨간 {}이 아니다",
+            taken.epoch
+        );
+        // 스스로 물러선 것과 저장소에 막힌 것은 **다른 사실**이므로 다른
+        // 행으로 남아야 한다. 둘을 한 이름으로 접으면 조사가 갈리지 않는다.
+        let all = store
+            .list_audit_events(&fleet_core::AuditFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            !all.iter()
+                .any(|a| a.action == fleet_core::audit::action::CONTROL_DISPATCH_REFUSED),
+            "bool 게이트는 통과했으므로 거절 기록은 없어야 한다: {:?}",
+            all.iter().map(|a| &a.action).collect::<Vec<_>>()
+        );
     }
 
     /// 로드맵 #62 3단계. 위의 `setup_fenced` 계열과 **다른 창**을 다룬다.
@@ -1627,6 +1892,7 @@ mod tests {
             FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
                 LeaseObserver::with_status(
                     "c62",
+                    "inst-a",
                     LeaseStatus::Active {
                         epoch: held.epoch, // 낡았지만 본인은 Active로 믿는다
                     },

@@ -131,6 +131,10 @@ pub struct LeaseManagerHandle {
     /// [`LeaseManagerHandle::observer`]가 넘겨줄 값. handle 자신은 쓰지 않지만,
     /// observer가 fence를 만들려면 epoch와 짝이 되는 cluster를 알아야 한다.
     cluster_id: Arc<str>,
+    /// 같은 이유로 observer에 넘겨줄 값 (로드맵 `#70` 게이트 ⑥ 선행).
+    /// 제어면 결정의 감사 기록에서 **어느 인스턴스가 그 결정을 내렸는지**를
+    /// 가르는 유일한 필드다 — cluster_id는 둘 이상의 owner를 구분하지 못한다.
+    instance_id: Arc<str>,
     status: Arc<Mutex<LeaseStatus>>,
     shutdown: CancellationToken,
     shutdown_grace: Duration,
@@ -148,6 +152,7 @@ impl LeaseManagerHandle {
     pub fn observer(&self) -> LeaseObserver {
         LeaseObserver {
             cluster_id: self.cluster_id.clone(),
+            instance_id: self.instance_id.clone(),
             status: self.status.clone(),
         }
     }
@@ -208,6 +213,7 @@ pub struct LeaseObserver {
     /// ([`ControlFence`]의 주석 참고). `Arc<str>`인 이유는 이 handle이
     /// 값으로 복제되어 여러 소비자에게 뿌려지기 때문이다.
     cluster_id: Arc<str>,
+    instance_id: Arc<str>,
     status: Arc<Mutex<LeaseStatus>>,
 }
 
@@ -220,6 +226,16 @@ impl LeaseObserver {
     /// 수행해도 되는지 (로드맵 #63 불변식 2).
     pub fn allows_control(&self) -> bool {
         self.status().is_active()
+    }
+
+    /// 이 프로세스의 instance_id (로드맵 `#70` 게이트 ⑥ 선행).
+    ///
+    /// 제어면 결정의 감사 기록에서 행위자를 가리키는 값이다. `cluster_id`가
+    /// 아니라 이것이어야 하는 이유: alert 표가 요구하는 증거가 "둘 이상의
+    /// owner 관측"인데, 같은 cluster의 두 인스턴스는 cluster_id로 구분되지
+    /// 않는다.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     /// 지금 상태를 Task 상태 쓰기에 걸 수 있는 술어로 변환한다
@@ -245,9 +261,14 @@ impl LeaseObserver {
     /// `LeaseManager` 없이 "지금 lease가 Active/Fenced/Stopped라면
     /// dispatch/cancel/reconcile이 어떻게 반응하는가"를 검증해야 하는
     /// 상위 크레이트(fleet-scheduler 자신을 포함) 테스트를 위한 것이다.
-    pub fn with_status(cluster_id: impl Into<Arc<str>>, status: LeaseStatus) -> Self {
+    pub fn with_status(
+        cluster_id: impl Into<Arc<str>>,
+        instance_id: impl Into<Arc<str>>,
+        status: LeaseStatus,
+    ) -> Self {
         Self {
             cluster_id: cluster_id.into(),
+            instance_id: instance_id.into(),
             status: Arc::new(Mutex::new(status)),
         }
     }
@@ -386,12 +407,14 @@ impl LeaseManager {
         let shutdown = self.shutdown.clone();
         let shutdown_grace = self.config.shutdown_grace;
         let cluster_id: Arc<str> = self.cluster_id.as_str().into();
+        let instance_id: Arc<str> = self.instance_id.as_str().into();
         let inner = tokio::spawn(async move {
             self.run().await;
         });
         LeaseManagerHandle {
             inner,
             cluster_id,
+            instance_id,
             status,
             shutdown,
             shutdown_grace,

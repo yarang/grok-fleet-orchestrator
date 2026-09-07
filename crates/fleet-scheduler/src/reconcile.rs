@@ -783,6 +783,7 @@ mod tests {
             FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
                 crate::lease::LeaseObserver::with_status(
                     "test-cluster",
+                    "inst-a",
                     crate::lease::LeaseStatus::Fenced,
                 ),
             ),

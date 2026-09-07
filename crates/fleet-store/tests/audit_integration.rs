@@ -256,3 +256,80 @@ async fn audit_pagination_with_limit_and_offset() {
     dedup.dedup();
     assert_eq!(all.len(), dedup.len(), "페이지 간 중복이 없어야 한다");
 }
+
+/// 제어면 세대가 Postgres를 왕복한다 (로드맵 `#70` 게이트 ⑥ 선행, 마이그레이션 038).
+///
+/// `fleet-scheduler`의 단위 시험은 `MemStore`로 돌기 때문에 **컬럼이 실제로
+/// 있는지, INSERT/SELECT가 그것을 싣는지는 한 줄도 검증하지 않는다.** 그쪽이
+/// 전부 초록인 채로 이 컬럼을 빠뜨린 배포가 나올 수 있고, 그때 증상은
+/// "감사에 epoch가 없다"는 조용한 형태다 — 조회는 성공하고 값만 비어 있다.
+#[tokio::test]
+async fn a_control_epoch_survives_the_round_trip() {
+    require_db!(store);
+
+    let with_epoch = AuditEvent::failure("orchestrator:instance-a", action::CONTROL_WRITE_FENCED)
+        .target("task", "t-1")
+        .control_epoch(7);
+    store.record_audit_event(&with_epoch).await.unwrap();
+
+    // 세대가 **없는** 것도 같은 컬럼의 정상 값이다. 둘을 함께 넣어야
+    // "항상 7을 돌려주는" 구현이 걸린다.
+    let without = AuditEvent::failure("orchestrator:instance-a", action::CONTROL_DISPATCH_REFUSED)
+        .target("task", "t-2");
+    store.record_audit_event(&without).await.unwrap();
+
+    let events = store
+        .list_audit_events(&AuditFilter {
+            limit: 50,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let fenced = events
+        .iter()
+        .find(|e| e.action == action::CONTROL_WRITE_FENCED)
+        .expect("fenced 기록이 있어야 한다");
+    assert_eq!(
+        fenced.control_epoch,
+        Some(7),
+        "저장한 세대가 그대로 돌아와야 한다"
+    );
+
+    let refused = events
+        .iter()
+        .find(|e| e.action == action::CONTROL_DISPATCH_REFUSED)
+        .expect("거절 기록이 있어야 한다");
+    assert_eq!(
+        refused.control_epoch, None,
+        "세대가 없던 결정은 없는 채로 돌아와야 한다 — NULL을 0으로 접으면 \
+         '0번 세대'라는 없는 사실을 만든다"
+    );
+}
+
+/// 기존 감사 항목은 이 컬럼을 비운 채로 남는다.
+///
+/// 감사 emitter 35군데는 전부 운영자 행위이고 그 결정에는 제어면 세대가
+/// 없다. 마이그레이션 038이 `NOT NULL`이나 기본값을 걸었다면 그 행들이
+/// **없던 세대를 가진 것처럼** 보였을 것이다.
+#[tokio::test]
+async fn an_operator_action_keeps_the_column_empty() {
+    require_db!(store);
+
+    let human = AuditEvent::success("admin@example.com", action::USER_CREATE).target("user", "u-1");
+    assert_eq!(
+        human.control_epoch, None,
+        "생성자가 기본으로 채우면 안 된다"
+    );
+    store.record_audit_event(&human).await.unwrap();
+
+    let events = store
+        .list_audit_events(&AuditFilter {
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].control_epoch, None);
+}
