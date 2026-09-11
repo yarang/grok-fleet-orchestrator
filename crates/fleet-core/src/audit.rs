@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::UserId;
+use crate::ids::ProjectId;
 
 /// 감사 이벤트의 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,9 +98,21 @@ pub mod action {
     /// HTTP capability 거절 (로드맵 #76). 인증까지 통과한 principal이
     /// 대상이다 — 미인증 요청은 이 이벤트 이전에 이미 401로 걸러진다.
     pub const HTTP_CAPABILITY_DENIED: &str = "http.capability_denied";
-
+    /// Dashboard `/api` 권한 거절 (로드맵 #95 2단계).
+    ///
+    /// [`HTTP_CAPABILITY_DENIED`]와 **일부러 다른 액션**이다. 둘 다 "인증은
+    /// 됐지만 권한이 없다"를 뜻하지만 어휘가 다르다 — 저쪽은 capability
+    /// 토큰이 route 행렬에 걸린 것이고, 이쪽은 세션 principal이
+    /// `PermissionKind` 하나를 갖지 못한 것이다. 한 액션으로 합치면
+    /// `GET /api/audit`에서 두 표면을 분리해 세는 질의가 불가능해진다.
+    ///
+    /// `detail.required_permission`에 어떤 권한이 없었는지가 들어간다.
+    /// **`project_id`는 항상 `None`이다** — 이 이벤트는 대상 엔티티를
+    /// 적재하기 *전에* 발생하므로 어느 Project 소속인지 알 수 있는 시점이
+    /// 아니다. 이것은 누락이 아니라 단정이다.
+    pub const DASHBOARD_PERMISSION_DENIED: &str = "dashboard.permission_denied";
     /// 이 인스턴스가 제어면 리스를 갖지 못해 dispatch를 거절했다
-    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    /// (로드맵 `#70` 게이트 6 선행).
     ///
     /// **이 행위의 주체는 사람이 아니라 오케스트레이터 자신이다.** 기존 35개
     /// 감사 항목은 전부 운영자 행위였고, 이것이 제어면 결정으로는 처음이다.
@@ -107,7 +120,7 @@ pub mod action {
     pub const CONTROL_DISPATCH_REFUSED: &str = "control.dispatch_refused";
 
     /// 저장소가 이 인스턴스의 쓰기를 세대 불일치로 거절했다
-    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    /// (로드맵 `#70` 게이트 6 선행).
     ///
     /// [`CONTROL_DISPATCH_REFUSED`]와 **다른 사실이다.** 저쪽은 이 인스턴스가
     /// 스스로 물러선 것이고(관측 시점에 리스가 없었다), 이쪽은 리스가 있다고
@@ -117,7 +130,7 @@ pub mod action {
     pub const CONTROL_WRITE_FENCED: &str = "control.write_fenced";
 
     /// 리스가 없어 워커 이벤트의 제어 처리를 건너뛰었다
-    /// (로드맵 `#70` 게이트 ⑥ 선행).
+    /// (로드맵 `#70` 게이트 6 선행).
     ///
     /// 그 Task의 최종 상태를 **아무도 확정하지 않은 채** 창이 닫혔다는 뜻이라,
     /// 새 리스 소유자의 재조정이 반드시 다시 봐야 하는 항목이다.
@@ -224,6 +237,60 @@ pub mod action {
     /// "언제 누구에 의해 지워졌는가"이며, `actor`/`target`이 인덱스가 있는
     /// 자리에 남는 조회 가능한 유일한 경로라는 뜻이다.
     pub const TASK_DELETE: &str = "task.delete";
+    /// Task 제출 (로드맵 #95 3단계).
+    ///
+    /// `detail`에 **prompt를 넣지 않는다.** prompt는 사용자가 붙여 넣은 임의
+    /// 텍스트라 자격증명이 섞여 들어올 수 있고, 감사 로그는 보관 기간이 길고
+    /// 열람 범위가 넓다. 무엇이 제출됐는지는 `target_id`가 가리키는 Task 행이
+    /// 이미 보존하므로, 이 이벤트가 더할 것은 "누가·어느 Project로" 뿐이다.
+    pub const TASK_SUBMIT: &str = "task.submit";
+    /// Issue 필드 수정 (로드맵 #95 3단계). `detail.fields`에 바뀐 필드 **이름**만
+    /// 들어간다 — 값은 Issue 행에 이미 있고, 본문은 임의 사용자 텍스트다.
+    pub const ISSUE_UPDATE: &str = "issue.update";
+    /// Issue 코멘트 추가 (로드맵 #95 3단계). `detail.comment_id`만 남기고 본문은
+    /// 넣지 않는다 — [`TASK_SUBMIT`]과 같은 이유다.
+    pub const ISSUE_COMMENT: &str = "issue.comment";
+    /// Issue ↔ Task 연관 추가 (로드맵 #95 3단계).
+    ///
+    /// 이 연산은 멱등이라 이미 있는 링크를 다시 걸면 아무것도 바뀌지 않는다.
+    /// **실제로 생성된 경우에만 기록한다** — 멱등 no-op까지 남기면 감사
+    /// 행 수가 "몇 번 연결했는가"가 아니라 "몇 번 요청했는가"를 세게 된다.
+    pub const ISSUE_LINK: &str = "issue.link";
+    /// Issue ↔ Task 연관 해제 (로드맵 #95 3단계). [`ISSUE_LINK`]과 같은 이유로
+    /// 실제로 제거된 경우에만 기록한다.
+    pub const ISSUE_UNLINK: &str = "issue.unlink";
+    /// SSH 비밀키 업로드 (로드맵 #95 3단계).
+    ///
+    /// `detail`에는 fingerprint와 키 타입만 넣는다 — 비밀키 원문은 물론이고
+    /// 그 어떤 파생 평문도 넣지 않는다. fingerprint는 공개키 해시라 비밀이
+    /// 아니면서, 나중에 "그때 올라간 키가 이 키인가"를 대조할 수 있는
+    /// 유일한 값이다.
+    pub const SSH_KEY_CREATE: &str = "ssh_key.create";
+    /// SSH 비밀키 삭제 (로드맵 #95 3단계).
+    pub const SSH_KEY_DELETE: &str = "ssh_key.delete";
+    /// 원격 호스트 프로비저닝 (로드맵 #95 3단계).
+    ///
+    /// [`HOST_REGISTER`]와 다르다 — 저쪽은 Worker가 스스로 등록하는 것이고,
+    /// 이쪽은 대시보드 사용자가 원격 호스트에 SSH로 들어가 소프트웨어를
+    /// 설치하는 것이다. `detail.succeeded`가 playbook 결과이며, 실패한
+    /// playbook도 HTTP 200으로 끝나므로 **응답 코드로는 성패를 알 수 없다**.
+    ///
+    /// `detail`에 `grok_secret`·`api_token`을 넣지 않는다. 요청 구조체를
+    /// 통째로 직렬화하면 둘 다 딸려 들어간다.
+    pub const HOST_PROVISION: &str = "host.provision";
+    /// 비밀번호 재설정 링크 요청 (로드맵 #95 3단계).
+    ///
+    /// [`AUTH_PASSWORD_RESET`]은 재설정이 *완료*된 것이고 이쪽은 토큰이
+    /// *발급*된 것이다. 계정 열거 방지를 위해 응답이 항상 동일하므로,
+    /// "요청이 실제로 토큰을 만들었는가"를 아는 유일한 경로가 이 기록이다.
+    ///
+    /// 존재하지 않는 이메일에 대해서는 **기록하지 않는다.** 그 경로는 아무것도
+    /// 바꾸지 않으며, 기록하려면 `actor_label`에 공격자가 넣은 문자열을 실어야
+    /// 한다(`actor_user_id`는 FK라 채울 수 없다).
+    pub const AUTH_PASSWORD_RESET_REQUESTED: &str = "auth.password_reset_requested";
+    /// 이메일 인증 메일 재발송 (로드맵 #95 3단계). [`AUTH_PASSWORD_RESET_REQUESTED`]와
+    /// 같은 이유로 실재하는 미인증 사용자에 대해서만 기록한다.
+    pub const AUTH_VERIFICATION_RESENT: &str = "auth.verification_resent";
 }
 
 /// 감사 로그 한 건.
@@ -245,10 +312,22 @@ pub struct AuditEvent {
     pub outcome: AuditOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_address: Option<String>,
+    /// 이 이벤트가 속한 Project (로드맵 #95 1단계).
+    ///
+    /// `detail` JSONB가 아니라 컬럼인 이유는 **질의 가능성**이다 — Project
+    /// 범위 감사 읽기는 이 축으로 거르는 질의를 전제하는데, 자유 형식 JSON에는
+    /// [`AuditFilter`]의 술어를 걸 자리가 없다. 일급 필드로 옮기면 값을 싣는
+    /// 일이 "저자가 기억했는가"에서 "필드를 채웠는가"로 바뀌기도 한다.
+    ///
+    /// `None`은 **"이 이벤트는 어떤 Project에도 속하지 않는다"**는 단정이다
+    /// (`auth.*`, `user.*`, `worker.*`, `token.*`). 글로벌 AgentTemplate처럼
+    /// 엔티티 자신의 `project_id`가 `NULL`인 경우도 같다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
     /// 액션별 추가 맥락. **비밀 값 금지.**
     #[serde(default)]
     pub detail: serde_json::Value,
-    /// 이 결정을 내린 제어면 세대 (로드맵 `#70` 게이트 ⑥ 선행).
+    /// 이 결정을 내린 제어면 세대 (로드맵 `#70` 게이트 6 선행).
     ///
     /// **`None`이 두 가지 서로 다른 정상을 뜻한다.** 하나는 운영자 행위 —
     /// 사람이 API/대시보드에서 한 일에는 제어면 세대가 없다. 다른 하나는
@@ -288,6 +367,7 @@ impl AuditEvent {
             target_id: None,
             outcome,
             ip_address: None,
+            project_id: None,
             detail: serde_json::Value::Null,
             control_epoch: None,
             created_at: Utc::now(),
@@ -313,7 +393,28 @@ impl AuditEvent {
         self
     }
 
-    /// 이 결정을 내린 제어면 세대 지정 (로드맵 `#70` 게이트 ⑥ 선행).
+    /// 요청 출처 IP를 `Option`으로 지정. 값을 미들웨어가 확정해 주는
+    /// 자리(`AuthPrincipal::client_ip`)에서 분기 없이 쓰기 위한 형태다 —
+    /// [`Self::project_opt`]와 같은 이유다.
+    pub fn ip_opt(mut self, ip: Option<String>) -> Self {
+        self.ip_address = ip;
+        self
+    }
+
+    /// 소속 Project 지정 (로드맵 #95). Project 범위가 아닌 액션은 부르지 않는다.
+    pub fn project(mut self, project_id: ProjectId) -> Self {
+        self.project_id = Some(project_id);
+        self
+    }
+
+    /// 소속 Project를 `Option`으로 지정. 글로벌 AgentTemplate처럼 엔티티
+    /// 자신의 `project_id`가 `Option`인 자리에서 분기 없이 쓰기 위한 형태다.
+    pub fn project_opt(mut self, project_id: Option<ProjectId>) -> Self {
+        self.project_id = project_id;
+        self
+    }
+
+    /// 이 결정을 내린 제어면 세대 지정 (로드맵 `#70` 게이트 6 선행).
     pub fn control_epoch(mut self, epoch: i64) -> Self {
         self.control_epoch = Some(epoch);
         self
@@ -333,6 +434,11 @@ pub struct AuditFilter {
     pub actor_user_id: Option<UserId>,
     /// 특정 액션만 (정확히 일치).
     pub action: Option<String>,
+    /// 특정 Project의 이벤트만 (로드맵 #95 1단계).
+    ///
+    /// `None`은 "Project로 거르지 않는다"이지 "Project 없는 이벤트만"이
+    /// 아니다 — 후자를 표현할 필요가 생기면 별도 술어를 만든다.
+    pub project_id: Option<ProjectId>,
     pub limit: usize,
     pub offset: usize,
 }
@@ -342,6 +448,7 @@ impl Default for AuditFilter {
         Self {
             actor_user_id: None,
             action: None,
+            project_id: None,
             limit: 100,
             offset: 0,
         }

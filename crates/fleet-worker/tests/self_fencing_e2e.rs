@@ -113,6 +113,7 @@ async fn self_fenced_events(store: &Arc<dyn Store>) -> Vec<fleet_core::AuditEven
         .list_audit_events(&fleet_core::AuditFilter {
             actor_user_id: None,
             action: Some(fleet_core::audit::action::AGENT_SELF_FENCED.to_string()),
+            project_id: None,
             limit: 100,
             offset: 0,
         })
@@ -132,6 +133,7 @@ async fn orphan_events(store: &Arc<dyn Store>) -> Vec<fleet_core::AuditEvent> {
         .list_audit_events(&fleet_core::AuditFilter {
             actor_user_id: None,
             action: Some(fleet_core::audit::action::AGENT_ORPHAN_TERMINATED.to_string()),
+            project_id: None,
             limit: 100,
             offset: 0,
         })
@@ -368,7 +370,7 @@ async fn a_partition_fences_the_agent_and_reconnecting_frees_it_for_another_work
 }
 
 /// 워커가 SIGKILL로 죽어 살아남은 Agent 프로세스를, 다음 incarnation이 걷어
-/// 오케스트레이터에 신고한다 (로드맵 `#70` 게이트 ③ · `#67` 게이트 ⑥의 나머지 절반).
+/// 오케스트레이터에 신고한다 (로드맵 `#70` 게이트 3 · `#67` 게이트 ⑥의 나머지 절반).
 ///
 /// 위 시험이 덮은 self-fencing과 **다른 실패**다. 저쪽은 워커가 살아서 스스로
 /// 멈추는 경로이고, 이쪽은 워커가 멈출 기회조차 없이 죽은 뒤의 잔해다.

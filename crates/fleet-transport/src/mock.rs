@@ -63,7 +63,7 @@ struct Inner {
     /// 이벤트 브로드캐스트 채널 (subscribe()가 호출될 때마다 새 receiver 생성).
     /// 모든 WorkerEvent는 여기로 송출됨.
     event_tx: broadcast::Sender<WorkerEvent>,
-    /// probe가 실패해야 하는 워커와 그 사유 (로드맵 `#70` 게이트 ⑤).
+    /// probe가 실패해야 하는 워커와 그 사유 (로드맵 `#70` 게이트 5).
     probe_failures: HashMap<WorkerId, String>,
     /// probe가 "오류로 답함"을 보고해야 하는 워커. **실패가 아니다** —
     /// [`WorkerTransport::probe`]의 독스트링대로 거절도 살아 있다는 증거다.
@@ -96,7 +96,7 @@ impl MockTransport {
         }
     }
 
-    /// 이 워커의 probe를 실패시킨다 (로드맵 `#70` 게이트 ⑤). `None`이면 해제.
+    /// 이 워커의 probe를 실패시킨다 (로드맵 `#70` 게이트 5). `None`이면 해제.
     pub async fn set_probe_failure(&self, worker_id: WorkerId, reason: Option<String>) {
         let mut guard = self.inner.lock().await;
         match reason {

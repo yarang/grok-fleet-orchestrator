@@ -28,8 +28,13 @@ pub async fn create_ssh_key_api(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<CreateSshKeyRequest>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
     let master_key = state
@@ -86,6 +91,26 @@ pub async fn create_ssh_key_api(
         "SSH key uploaded"
     );
 
+    // `detail`에는 fingerprint와 키 타입만 넣는다. `req.private_key`는 물론이고
+    // 그로부터 파생된 어떤 평문도 넣지 않는다 — fingerprint는 공개키 해시라
+    // 비밀이 아니면서, 나중에 "그때 올라간 키가 이 키인가"를 대조할 수 있는
+    // 유일한 값이다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::SSH_KEY_CREATE,
+        )
+        .actor(principal.user.id)
+        .target("ssh_key", key.name.clone())
+        .ip_opt(principal.client_ip.clone())
+        .detail(serde_json::json!({
+            "fingerprint": key.fingerprint,
+            "key_type": key.key_type,
+        })),
+    )
+    .await;
+
     Ok(StatusCode::CREATED)
 }
 
@@ -94,7 +119,12 @@ pub async fn list_ssh_keys_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<SshKeySummary>>, StatusCode> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await?;
 
     let keys = state.store.list_ssh_keys().await.map_err(|e| {
         tracing::error!(error = %e, "list_ssh_keys failed");
@@ -120,8 +150,13 @@ pub async fn delete_ssh_key_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     let deleted = state.store.delete_ssh_key(&name).await.map_err(|e| {
         tracing::error!(error = %e, "delete_ssh_key failed");
@@ -138,6 +173,18 @@ pub async fn delete_ssh_key_api(
         "SSH key deleted"
     );
 
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::SSH_KEY_DELETE,
+        )
+        .actor(principal.user.id)
+        .target("ssh_key", name.clone())
+        .ip_opt(principal.client_ip.clone()),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -149,8 +196,13 @@ pub async fn provision_host_api(
     Extension(principal): Extension<AuthPrincipal>,
     Json(req): Json<ProvisionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, fleet_core::PermissionKind::HostProvision)
-        .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
+    require_permission(
+        &state,
+        &principal,
+        fleet_core::PermissionKind::HostProvision,
+    )
+    .await
+    .map_err(|_| ApiError::Forbidden("Insufficient permissions".into()))?;
 
     // MasterKey 필수.
     let master_key = state
@@ -382,6 +434,34 @@ async fn run_provisioning(
                 username = %principal.user.username,
                 "provisioning completed"
             );
+
+            // 감사 기록은 이 분기에만 둔다 — 여기가 Host를 upsert하는 유일한
+            // mutation 지점이다. playbook이 실패해도 이 분기로 오므로
+            // (`succeeded: false` + HTTP 200) **응답 코드로는 성패를 알 수 없고**
+            // `detail.succeeded`가 유일한 근거다.
+            //
+            // `req`를 통째로 직렬화하지 않는다: `ProvisionRequest`는
+            // `grok_secret`과 `api_token`을 품고 있다.
+            crate::audit::record(
+                state,
+                fleet_core::AuditEvent::success(
+                    &principal.user.username,
+                    fleet_core::audit::action::HOST_PROVISION,
+                )
+                .actor(principal.user.id)
+                .target("host", host.id.to_string())
+                .ip_opt(principal.client_ip.clone())
+                .detail(serde_json::json!({
+                    "worker_name": req.worker_name,
+                    "ssh_host": req.host,
+                    "ssh_port": req.ssh_port,
+                    "ssh_user": req.ssh_user,
+                    "ssh_key_name": req.ssh_key_name,
+                    "succeeded": succeeded,
+                    "steps": report.steps.len(),
+                })),
+            )
+            .await;
 
             Ok(Json(serde_json::json!({
                 "worker_name": &req.worker_name,

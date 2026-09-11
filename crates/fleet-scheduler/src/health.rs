@@ -145,7 +145,7 @@ impl HealthChecker {
             // 계약이므로, 여기서 heartbeat-timeout 기준으로 Offline 판정하면
             // idle 상태인 정상 Worker를 잘못 오프라인 처리하게 된다
             // (docs/architecture/worker-liveness-policy.md "모드 계약" 참고).
-            // dispatch 전 ACP probe(로드맵 #67 의존)가 없는 이 증분에서는
+            // dispatch 전 ACP probe(로드맵 #70 게이트 5)가 없는 이 증분에서는
             // on_demand Worker의 실제 liveness를 다른 방법으로 확인할 수
             // 없으므로, 이 스캔에서는 그냥 skip한다 — Online도 Offline도
             // 아니라 "판단하지 않음".

@@ -243,7 +243,7 @@ pub enum SelectionError {
 pub struct WorkerSelector {
     store: Arc<dyn Store>,
     breakers: Arc<BreakerRegistry>,
-    /// `on_demand` 워커의 응답을 확인하는 수단 (로드맵 `#70` 게이트 ⑤).
+    /// `on_demand` 워커의 응답을 확인하는 수단 (로드맵 `#70` 게이트 5).
     ///
     /// **`Option`이 아니다.** 없으면 `on_demand` 워커를 통째로 빼는 예전
     /// 동작으로 조용히 돌아가는데, 그것은 "기능이 꺼졌다"가 아니라 "기능이
@@ -274,7 +274,7 @@ impl WorkerSelector {
         }
     }
 
-    /// 이 워커가 지금 응답하는가 (로드맵 `#70` 게이트 ⑤).
+    /// 이 워커가 지금 응답하는가 (로드맵 `#70` 게이트 5).
     ///
     /// `periodic` 워커는 **묻지 않는다.** 그쪽은 heartbeat이 같은 사실을 이미
     /// 주기적으로 말하고 있어, dispatch마다 왕복을 더하면 비용만 늘고 얻는

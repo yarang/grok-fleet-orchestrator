@@ -30,7 +30,7 @@ pub async fn events_stream(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    require_permission(&principal, PermissionKind::EventsList)?;
+    require_permission(&state, &principal, PermissionKind::EventsList).await?;
 
     // 출력 열람 권한은 연결 시점에 한 번만 평가한다.
     let may_see_output = may_see_task_output(&principal);

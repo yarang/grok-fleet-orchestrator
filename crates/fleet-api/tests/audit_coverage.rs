@@ -56,10 +56,9 @@ async fn spawn_with_admin(store: Arc<dyn Store>, token: &str) -> Server {
 async fn find_events(store: &Arc<dyn Store>, action: &str) -> Vec<fleet_core::AuditEvent> {
     store
         .list_audit_events(&fleet_core::AuditFilter {
-            actor_user_id: None,
             action: Some(action.to_string()),
             limit: 100,
-            offset: 0,
+            ..Default::default()
         })
         .await
         .expect("list_audit_events")

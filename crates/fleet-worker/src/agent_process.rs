@@ -61,7 +61,7 @@ struct AgentProc {
 }
 
 /// 자식 하나가 자기 workspace에 남기는 디스크 기록의 파일 이름
-/// (로드맵 `#70` 게이트 ③).
+/// (로드맵 `#70` 게이트 3).
 const SPAWN_RECORD: &str = ".fleet-agent.json";
 
 /// [`SPAWN_RECORD`]의 내용.
@@ -183,7 +183,7 @@ fn read_spawn_records_blocking(workspace_root: &Path) -> Vec<SpawnRecord> {
         .collect()
 }
 
-/// [`AgentProcessManager::reconcile`]이 이번 beat에 만든 것 (로드맵 `#70` 게이트 ③).
+/// [`AgentProcessManager::reconcile`]이 이번 beat에 만든 것 (로드맵 `#70` 게이트 3).
 ///
 /// 두 목록을 **한 구조체로 함께** 돌려주는 이유는 둘 다 같은 한 번의 순회에서
 /// 나오기 때문이다. 따로 돌면 그 사이에 프로세스 표가 바뀔 수 있고, 그러면
@@ -316,7 +316,7 @@ impl AgentProcessManager {
     }
 
     /// 이전 incarnation이 남긴 Agent 프로세스를 찾아 종료하고, 그것을 사건으로
-    /// 돌려준다 (로드맵 `#70` 게이트 ③).
+    /// 돌려준다 (로드맵 `#70` 게이트 3).
     ///
     /// **재조정 루프로는 원리적으로 찾을 수 없는 고아를 다룬다.**
     /// [`reconcile`](Self::reconcile)은 자기 [`procs`](Self::procs)에 있는 것만
@@ -460,7 +460,7 @@ impl AgentProcessManager {
     /// 충분하다 — 오케스트레이터는 목록에 없는 것의 관측을 지운다.
     ///
     /// 그런데 그 "지운다"가 닿지 못하는 경우가 하나 있고, 그것이
-    /// [`ReconcileOutcome::orphans`]가 있는 이유다 (로드맵 `#70` 게이트 ③).
+    /// [`ReconcileOutcome::orphans`]가 있는 이유다 (로드맵 `#70` 게이트 3).
     /// 명령 목록에서 **사라진** Agent의 프로세스를 아래 2단계가 종료하는데,
     /// 그 Agent는 이미 다른 Worker에 배정됐을 수 있어 관측을 적을 자리가
     /// 이 Worker에는 없다(`036`의 CHECK). 그래서 종료 사실이 지금까지
@@ -744,7 +744,7 @@ impl AgentProcessManager {
         apply_llm_proxy_envs(&mut cmd, &self.config.llm_proxy);
         let child = cmd.spawn()?;
 
-        // 기록은 spawn **직후**에 쓴다 (로드맵 `#70` 게이트 ③). 순서가 뒤집혀
+        // 기록은 spawn **직후**에 쓴다 (로드맵 `#70` 게이트 3). 순서가 뒤집혀
         // 프로세스가 먼저 뜨고 기록이 나중이면, 그 사이에 Worker가 죽었을 때
         // 아무 흔적도 남기지 않은 고아가 생긴다 — 이 기록이 막으려는 바로 그
         // 상태다.

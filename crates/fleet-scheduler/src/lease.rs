@@ -131,7 +131,7 @@ pub struct LeaseManagerHandle {
     /// [`LeaseManagerHandle::observer`]가 넘겨줄 값. handle 자신은 쓰지 않지만,
     /// observer가 fence를 만들려면 epoch와 짝이 되는 cluster를 알아야 한다.
     cluster_id: Arc<str>,
-    /// 같은 이유로 observer에 넘겨줄 값 (로드맵 `#70` 게이트 ⑥ 선행).
+    /// 같은 이유로 observer에 넘겨줄 값 (로드맵 `#70` 게이트 6 선행).
     /// 제어면 결정의 감사 기록에서 **어느 인스턴스가 그 결정을 내렸는지**를
     /// 가르는 유일한 필드다 — cluster_id는 둘 이상의 owner를 구분하지 못한다.
     instance_id: Arc<str>,
@@ -228,7 +228,7 @@ impl LeaseObserver {
         self.status().is_active()
     }
 
-    /// 이 프로세스의 instance_id (로드맵 `#70` 게이트 ⑥ 선행).
+    /// 이 프로세스의 instance_id (로드맵 `#70` 게이트 6 선행).
     ///
     /// 제어면 결정의 감사 기록에서 행위자를 가리키는 값이다. `cluster_id`가
     /// 아니라 이것이어야 하는 이유: alert 표가 요구하는 증거가 "둘 이상의

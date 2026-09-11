@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/security/authorization-and-audit.md"
-last_verified: "2026-08-28"
+last_verified: "2026-09-03"
 last_verified_commit: "working-tree"
 owners: ["security", "api-contracts", "agent-platform"]
 ---
@@ -267,7 +267,9 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 ### 현재 감사 범위
 
 위 규칙은 목표 계약이다. **`#76`(2026-08-23, 1단계)로 HTTP `/v1` 표면의 mutation과 capability 거절은
-대부분 감사된다.** Dashboard·MCP 표면과 상관관계 필드는 아직이다(`#95`).
+대부분 감사된다.** `#95` 1단계(2026-09-02)가 `project_id` 상관 필드를, 2단계(2026-09-03)가 Dashboard
+`/api`의 **권한 거절**을, 3단계(2026-09-04)가 Dashboard의 **non-GET route 31개 전부와 상태를 바꾸는 GET 1개**를 각각 닫았다. MCP
+표면은 아직이다.
 
 | 경로 | 현재 감사 | 비고 |
 |---|---|---|
@@ -278,13 +280,207 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | admin token 생성·회전·회수 | **기록함 (`#76`)** | `admin_token.create`/`.rotate`/`.revoke`. 생성·회전은 fail-closed, 회수는 log-only |
 | Worker 등록·등록해제, Host 등록 | **기록함 (`#76`)** | `worker.register`/`.deregister`/`host.register`, 전부 log-only. heartbeat(고빈도)는 제외 |
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
-| Dashboard·MCP mutation/거절 | **없음** | Dashboard는 중앙 capability 행렬 자체가 없다(`#92`가 다룸). MCP tool별 감사도 착수 전 |
+| Dashboard `/api` 권한 거절 | **기록함 (`#95` 2단계)** | `dashboard.permission_denied`, log-only. `require_permission`이 유일한 판단 지점이므로 그 안에서 기록한다 — 아래 참조 |
+| Dashboard `/api`·폼 mutation | **기록함 (`#95` 3단계)** | non-GET route 31개 전부, 여기에 상태를 바꾸는 GET(`/verify-email`) 1개. 라우터 원문을 읽는 계약 테스트가 분류 누락을 테스트 시점에 깨뜨린다 — 아래 참조 |
+| MCP mutation/거절 | **없음** | MCP tool별 감사는 `ToolContext`에 호출 principal이 없어 착수 전. Dashboard의 중앙 capability 행렬도 여전히 없다(`#92`가 다룸) |
 
-또한 현재 `AuditEvent`에는 `request_id`, `project_id`, `policy_revision` 상관관계 필드가 없어 구현
-게이트 6을 완전히 만족하지 못한다(`#95`). `project_id`는 대응하는 Project 엔티티가 아직 없어
-(`#48` 계열 선행) 상관시킬 대상이 없다. **실행 상관 필드는 `attempt_id`가 아니라 `task_id`이며
-그것은 이미 있다** — `TaskAttempt`를 만들지 않기로 한 [흡수 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)에
-따라, "Attempt 엔티티가 생기면 상관시킨다"는 대기 사유는 성립하지 않는다.
+#### Dashboard 권한 거절 감사 (`#95` 2단계, 2026-09-03)
+
+`crates/fleet-dashboard/src/auth.rs`의 `require_permission`이 거절을 기록한다. **거절을 기록할 수
+있는 자리가 그곳뿐이다** — 이 함수는 `StatusCode::FORBIDDEN`만 돌려주고, `error.rs`의
+`impl From<StatusCode> for ApiError`가 그것을 `ApiError`로 바꾸는 시점에는 *어떤* `PermissionKind`가
+없었는지가 이미 사라져 있다. 따라서 하류의 어떤 오류 변환 계층도 이 사실을 복원할 수 없다.
+
+| 항목 | 값 | 이유 |
+|---|---|---|
+| action | `dashboard.permission_denied` | `http.capability_denied`와 **일부러 다른 어휘**다. 저쪽은 capability 토큰이 route 행렬에 걸린 것이고 이쪽은 세션 principal이 `PermissionKind` 하나를 갖지 못한 것이라, 한 액션으로 합치면 `GET /api/audit`에서 두 표면을 분리해 세는 질의가 불가능해진다 |
+| 방향 | **log-only** | 거절은 권한을 *주지 않는* 쪽이라 기록 실패가 응답을 바꿔야 할 위험이 없다. `worker.llm_credential.export` 같은 발급 계열의 fail-closed와 방향이 반대다 |
+| `detail.required_permission` | 없던 권한 이름 | 이 값이 없으면 기록이 “무언가 막혔다” 이상을 말하지 못한다 |
+| `ip_address` | 요청 출처 IP | `AuthPrincipal.client_ip`에서 온다 — `require_session`이 세션 IP 대조에 쓰던 계산을 principal 구성 **위로** 끌어올려 모든 호출부가 조건 없이 갖게 했다. 호출부 53곳에 `ConnectInfo`·`HeaderMap` 추출자를 붙이는 대안은 값을 싣는 일을 다시 “저자가 기억했는가”로 만든다 |
+| `project_id` | **항상 `None`** | 거절은 대상 엔티티를 적재하기 *전에* 일어난다. 누락이 아니라 단정이다 |
+
+**시그니처를 53곳에서 바꾼 이유**는 계약과 관례의 차이다. `require_permission_audited` 같은 병렬
+헬퍼를 두면 “감사되는 거절”이 규칙이 아니라 관례가 되고, 그것은 `#95` 1단계가 `project_id`에서
+진단한 바로 그 실패 모양이다(감사 지점 11곳 중 5곳만 값을 싣고 있었다). 시그니처를 바꾸면 **감사
+없이 거절하는 코드가 컴파일되지 않는다.**
+
+**알려진 노출**: 억제(suppression)를 넣지 않아 거절 1건이 감사 행 1건이 되고, `/api`에는 로그인과
+달리 rate limit이 없다 — 인증된 저권한 사용자가 쓰기 볼륨을 정할 수 있다. 그럼에도 전건 기록을
+고른 이유는 (1) 이 기록의 목적이 권한 열거 탐지인데 반복을 접으면 열거와 오조작을 가르는 *빈도*가
+사라지고, (2) `fleet-api`의 `record_capability_denial`도 전건 기록이라 여기만 접으면 두 표면의
+카운트를 같은 기준으로 비교할 수 없어서다. 실제 남용이 관측되기 전에는 억제를 만들지 않는다.
+
+#### Dashboard mutation 감사 (`#95` 3단계, 2026-09-04)
+
+2단계 직후의 상태는 **31개 mutation route 중 20개만 감사**였다. 빠진 11개는 무작위가 아니라
+나중에 추가된 표면들이다 — Issue의 수정·코멘트·링크, Task 제출, SSH 키, 호스트 프로비저닝,
+비밀번호 재설정 요청과 인증 메일 재발송. 원인이 여기 있다: **거절은 `require_permission`이라는
+한 지점을 지나므로 계약이지만, mutation 감사는 핸들러마다 `audit::record`를 부르는 관례였다.**
+관례는 표면이 늘어날 때마다 저자의 기억에 의존하고, 기억은 골고루 실패하지 않는다.
+
+관례를 계약으로 바꾸는 자리가 타입 시스템이 아니라는 점이 이 단계의 핵심이다. 2단계는 시그니처를
+바꿔 “감사 없이 거절하는 코드가 컴파일되지 않게” 만들 수 있었지만, mutation은 저장소 호출의
+성공 분기 안에서 일어나므로 강제할 시그니처가 없다. 그래서 `crates/fleet-dashboard/tests/audit_contract.rs`가
+**`app.rs`의 라우터 원문을 읽어** 모든 non-GET route가 표에 분류돼 있는지 확인한다. 새 mutation route를
+추가하고 표를 갱신하지 않으면 그 테스트가 깨진다.
+
+| route | action |
+|---|---|
+| `POST /login`, `POST /logout`, `POST /bootstrap` | `auth.login`, `auth.logout`, `auth.bootstrap` |
+| `POST /forgot-password`, `POST /reset-password` | `auth.password_reset_requested`, `auth.password_reset` |
+| `POST /resend-verification`, `POST /api/users/resend-verification` | `auth.verification_resent` |
+| `POST /api/users`, `POST /api/users/:id/toggle`, `POST /api/users/:id/delete` | `user.create`, `user.toggle`, `user.delete` |
+| `POST /api/projects`, `DELETE /api/projects/:id` | `project.create`, `project.archive_requested`·`project.archived` |
+| `POST /api/agents`, `POST /api/agents/:id/place`, `POST /api/agents/:id/start`, `DELETE /api/agents/:id` | `agent.create`, `agent.assign`, `agent.start`, `agent.stop` |
+| `POST /api/agent-templates` 계열 4개 | `agent_template.create`·`.revision_create`·`.revision_revoke`·`.status_change` |
+| `POST /api/issues`, `PATCH /api/issues/:id`, `POST …/comments`, `POST …/transition` | `issue.create`, `issue.update`, `issue.comment`, `issue.transition` |
+| `POST /api/issues/:id/links`, `DELETE /api/issues/:id/links/:task_id` | `issue.link`, `issue.unlink` |
+| `POST /api/tasks`, `DELETE /api/tasks/:id` | `task.submit`, `task.delete` |
+| `POST /api/ssh-keys`, `DELETE /api/ssh-keys/:name` | `ssh_key.create`, `ssh_key.delete` |
+| `POST /api/hosts/provision` | `host.provision` |
+
+**route 하나가 행 하나가 아니다.** `DELETE /api/projects/:id`는 `advance_project_archive`가 돌려준
+상태 전이를 순회하며 기록하므로 한 요청이 `project.archive_requested`와 `project.archived`를 연달아
+낼 수 있다. 그래서 계약 표는 route를 action **집합**에 대응시킨다.
+
+##### `detail`에 무엇을 넣지 않는가
+
+| 경로 | 넣는 것 | 넣지 않는 것 | 이유 |
+|---|---|---|---|
+| `issue.update` | 바뀐 **필드 이름** 목록 | 필드 값 | title/body는 임의 텍스트라 자격증명이 섞일 수 있고, 바뀐 값은 Issue 행이 이미 보존한다 |
+| `issue.comment` | `comment_id` | 코멘트 본문 | 같은 이유. 본문은 `issue_comments`에서 찾는다 |
+| `host.provision` | 호스트 이름, `succeeded`, 단계 요약 | `ProvisionRequest` 전체 | 이 구조체는 `grok_secret`과 `api_token`을 들고 있다 — 통째로 직렬화하면 비밀이 감사 표에 영구 보존된다 |
+| `auth.password_reset_requested` | `unauthenticated: true` | 재설정 토큰 | `audit.rs` 모듈 문서의 금지 규칙 |
+
+##### 기록하지 *않는* 경우가 계약의 절반이다
+
+- 멱등 재연결(`POST …/links`를 두 번)은 행을 1건만 남긴다. 요청 수가 아니라 **실제로 만들어진
+  링크 수**를 세지 않으면 감사 행 수가 사실을 말하지 않는다.
+- 걸려 있지 않은 링크의 해제는 HTTP 200 `removed: false`로 조용히 성공하며, 행을 남기지 않는다.
+- `POST /forgot-password`는 **토큰이 실제로 발급된 경우에만** 기록한다. 계정 열거 방지 때문에
+  응답이 항상 같으므로, 미존재 계정까지 기록하면 `actor_label`에 공격자가 넣은 임의 문자열이
+  실린다(`actor_user_id`는 FK라 채울 수 없다). 감사 표는 보관 기간이 길고 회수 수단이 없다.
+  기록 지점을 `if let Ok(Some(user))` 안에 둔 결과로 FK 안전성이 **따라 나온다** — 별도 검증을
+  붙인 것이 아니다.
+
+##### IP는 관례가 아니라 전건이다
+
+2단계가 `AuthPrincipal.client_ip`를 만들었지만 실제로 쓰던 곳은 거절 감사 하나였다. 3단계에서
+principal이 잡히는 mutation 감사 전부(16곳)에 `.ip_opt(principal.client_ip.clone())`를 붙였다.
+예외는 principal이 없는 두 곳(`verify_email_page`, `resend_verification_api`)이며, 이들은
+`.actor(user.id)`를 쓰므로 자연히 제외된다.
+
+##### 메서드는 상태 변경의 근사값이다
+
+계약 테스트의 스캐너는 **non-GET을 mutation으로** 센다. 값싸고 대부분 맞지만 하나를 빗나간다 —
+메일 링크로 도달하는 `GET /verify-email`은 토큰을 소비하고 `users.email_verified`를 세운다.
+링크는 GET일 수밖에 없다. 메일 클라이언트는 POST를 만들지 못한다.
+
+이 자리를 그냥 두면 `#95` 3단계가 닫으려던 결함이 정확히 한 곳에 살아남는다. `AUTH_EMAIL_VERIFIED`를
+남기는 `audit::record` 호출을 지워도 두 계약 테스트가 **모두 초록**이기 때문이다 — 스캐너는 GET을
+걸러내고, action 검증은 표를 순회하는데 그 route가 표에 없다.
+
+정의를 "본문이 상태를 바꾸는 route"로 넓히는 것은 답이 아니다. 소스 스캔으로는 그것을 판정할 수
+없고, 판정하려 들면 아래 *검증 한계*가 말하는 본문 해석의 함정으로 들어간다. 그래서 정의는 값싸게
+두고 **예외를 눈에 보이는 표로** 옮겼다 — `audit_contract.rs`의 `STATE_CHANGING_GET_ROUTES`가 항목
+하나(`GET /verify-email` → `auth.email_verified`)를 담고, 그 경로가 사라지거나 action이 지워지면
+깨진다. 다만 이 표는 사람이 적는 것이라 **새로 생긴 상태 변경 GET은 잡지 못한다**.
+
+##### 검증 한계
+
+- `host.provision`과 SSH 키 두 handler는 **런타임 테스트가 없다.** 전자는 실제 SSH 연결을,
+  후자는 키 픽스처를 요구하는데 둘 다 이 단계의 범위에 비해 과하다. 계약 테스트가 “분류돼
+  있는가”까지는 잠그지만 “실제로 행이 남는가”는 코드 읽기로만 확인했다.
+- 계약 테스트는 route 분류만 본다. 어느 핸들러가 어느 action을 내는지는 **본문을 파싱하지
+  않는다** — `provision_host_api`는 헬퍼 안에서 기록하고 `delete_project_api`는 action을 변수로
+  계산하므로, 본문 스캔은 첫날부터 예외 두 개를 안고 시작한다. 예외는 쌓이고, 쌓이면 테스트가
+  점점 더 틀린 말을 한다.
+- `STATE_CHANGING_GET_ROUTES`는 자동으로 채워지지 않는다. 지금 항목이 하나뿐인 것은 감사 호출
+  38곳의 감싸는 함수를 전부 뽑아 GET 핸들러가 `verify_email_page` 하나임을 확인한 결과이지,
+  테스트가 그것을 보장하기 때문이 아니다. 새 상태 변경 GET이 생기면 이 표는 침묵한다.
+- 계약 테스트가 `.route()` 인자에서 메서드를 하나도 인식하지 못하면 **실패하도록** 했다.
+  0개는 route가 없다는 뜻이 아니라 파서가 새 표기를 못 읽는다는 뜻인데, 그것을 통과로
+  처리하면 route가 계약에서 조용히 사라진다. 실제로 개발 중 `axum::routing::delete(...)`
+  표기를 놓쳐 31개 중 29개만 인식한 적이 있고, 그때 테스트는 **초록이었다**.
+
+### 상관관계 필드 (`#95` 1단계, 2026-09-02)
+
+**실행 상관 필드는 `attempt_id`가 아니라 `task_id`이며 그것은 이미 있다** — `TaskAttempt`를 만들지
+않기로 한 [흡수 판정](../architecture/project-task-agent-lifecycle.md#attempt-흡수-판정)에 따라,
+"Attempt 엔티티가 생기면 상관시킨다"는 대기 사유는 성립하지 않는다.
+
+나머지 세 필드는 착수 가능 여부가 서로 다르므로 한 덩어리로 다루지 않는다.
+
+| 필드 | 판정 | 근거 |
+|---|---|---|
+| `project_id` | **1단계에서 추가한다** | 대기 사유(“Project 엔티티가 아직 없다”)가 낡았다 — `#48` 1·2·3단계(2026-08-24)가 `022_projects.sql`로 `projects` 테이블을 만들었다 |
+| `request_id` | **보류 — 묶을 것이 없다** | 용도가 “한 HTTP 요청의 여러 감사 이벤트를 묶는 것”인데 **한 요청이 감사 이벤트를 2건 이상 내는 경로가 코드베이스에 없다**(아래) |
+| `policy_revision` | **보류 — 생산자가 없다** | policy revision 개념 자체가 아직 없다 |
+
+`request_id`를 보류하는 근거는 실측이다. Dashboard의 `login`만 `audit::record`를 4회 부르지만 전부
+`return Err(...)`로 끝나는 **상호 배타 분기**다. `/v1`의 fail-closed 발급 경로(`#76`)에서 감사 실패 뒤
+따라오는 revoke는 **보상 동작**이지 두 번째 감사 이벤트가 아니다. `fleet-mcp`·`fleet-worker`·
+`fleet-scheduler`에는 감사 기록이 0건이다. 묶을 대상이 없는 그룹핑 키는 매 행이 유일한 컬럼이며,
+“채울 방법이 없는 것은 미리 만들지 않는다”에 걸린다. `request_id`는 **생산자(HTTP ingress
+미들웨어)와 소비자(한 요청의 복수 감사 이벤트)가 함께 생길 때** 착수한다. W3C traceparent 전파는
+이미 있으므로(`fleet-api/src/handlers.rs`의 `continue_trace_from_headers`) 그때 `trace_id`에서
+파생시킬지 새 UUID로 할지를 함께 정한다.
+
+#### `project_id`가 컬럼이어야 하는 이유
+
+`detail` JSONB에 이미 값이 있는데 컬럼을 따로 두는 이유는 두 가지다.
+
+첫째, **JSON 안의 값은 저장돼 있지만 색인되지 않는다.** Project 범위 감사 읽기(위 “감사 규칙”)는
+`project_id`로 거르는 질의를 전제하는데, 자유 형식 JSON에 대한 필터는 `AuditFilter`에 술어를 만들
+자리가 없다.
+
+둘째, **현재 `project_id`는 규약이 아니라 관행이다.** Project 범위 감사 지점 11곳 중 값을 싣는 곳은
+5곳뿐이고, 자유 형식이라 키 오타가 나도 컴파일이 통과한 뒤 질의만 조용히 빈 결과를 낸다. 특히
+`agent_template.*` 세 지점은 `authorize_template_scope(&principal, template.project_id)`로 **인가
+판단에 이미 `project_id`를 쓰면서** 그 판단의 감사 기록에서는 그 값을 버린다.
+
+| 액션 | Project 범위 | 값의 출처 | 1단계 이전 |
+|---|---|---|---|
+| `project.create`, `project.archive_requested`, `project.archived` | 예 | `target_id`가 곧 Project id | 컬럼 없음(`detail`에도 없음) |
+| `agent.create` | 예 | `agent.project_id` | `detail`에 있음 |
+| `agent.assign` | 예 | `placed.project_id` | **없음** |
+| `agent.start`, `agent.stop` | 예 | `agent.project_id` | `detail`에 있음 |
+| `agent_template.create` | 예(글로벌 템플릿은 `NULL`) | `template.project_id` | `detail`에 있음 |
+| `agent_template.revision_create`, `.revision_revoke`, `.status_change` | 예(글로벌은 `NULL`) | `template.project_id` | **없음** |
+| `issue.create` | 예 | `issue.project_id` | `detail`에 있음 |
+| `issue.transition` | 예 | `issue.project_id` | **없음** |
+| `user.*`, `auth.*` | 아니오 | — | 해당 없음 |
+| `token.*`, `admin_token.*`, `worker.*`, `host.*`, `http.capability_denied` | 아니오 | — | 해당 없음 |
+| `dashboard.permission_denied` | **알 수 없음** | — | 거절은 대상 엔티티를 적재하기 *전에* 일어난다 — `None`은 누락이 아니라 단정이다 |
+
+빠져 있던 6곳은 모두 해당 엔티티를 **이미 손에 쥔 상태**라 추가 조회 없이 채울 수 있다. 채울 방법이
+없어 유예하는 항목은 없다.
+
+`AgentTemplate::project_id`가 `Option<ProjectId>`(글로벌 템플릿은 `NULL`)이므로 컬럼도 nullable이며,
+Project 범위가 아닌 액션에서도 `NULL`이다. 즉 `NULL`은 “값을 빠뜨렸다”가 아니라 **“이 이벤트는 어떤
+Project에도 속하지 않는다”**는 단정이다.
+
+#### FK를 걸지 않는다
+
+`project_id`에 `REFERENCES projects(id)`를 걸지 않는다. `projects`에 hard-delete 경로가 없다는 것은
+근거가 아니다(실제로 없지만 그건 우연히 성립하는 사실이다). 근거는 **감사가 “시도”의 사실을 기록하기
+때문**이다 — 존재하지 않는 Project를 지목한 거절된 요청의 실패 감사는 FK를 위반한다. FK를 걸면
+**감사가 가장 필요한 순간에 감사 쓰기가 실패한다.** 이는 `011_audit_log.sql`이 `actor_user_id`에
+`ON DELETE SET NULL`을 고른 것과 같은 계열의 판단이되 근거가 다르다: 거기서는 대상이 사라져도 기록이
+남아야 해서, 여기서는 대상이 애초에 없었어도 기록이 남아야 해서다.
+
+#### 1단계가 닫지 **못하는** 것
+
+위 “감사 규칙”은 Project 범위 읽기를 “자신의 Project event만”으로 규정하고, 상관관계 필드가 그
+**선행 조건**이라고 적는다. 1단계는 그 선행 조건만 만든다 — `GET /api/audit`는 여전히
+`PermissionKind::AuditRead` 하나로만 게이트되므로, 그 권한을 가진 principal은 **아무 Project의
+이벤트나 조회할 수 있다.** 범위 강제는 미착수이고 **구현 게이트 6은 여전히 미충족이다**(`request_id`·
+`policy_revision`도 마찬가지). Dashboard·MCP 표면의 감사 확대 역시 `#95`의 남은 범위다.
+
+이 문서가 되풀이하지 말아야 할 실패 양식이 이미 하나 있다: `AuditFilter::actor_user_id`는 필드가
+있는데 `ListAuditQuery`가 노출하지 않아 **아무도 그 축으로 조회할 수 없다.** 필드 추가와 질의
+가능성은 다른 작업이며, `project_id`는 컬럼·`AuditFilter` 술어·`ListAuditQuery` 파라미터를 한
+변경으로 함께 넣어 그 전철을 밟지 않는다.
 
 ## 구현 게이트
 

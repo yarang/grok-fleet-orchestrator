@@ -255,7 +255,7 @@ impl AgentObservation {
 }
 
 /// Worker가 이번 beat에 **정리한**, 오케스트레이터가 배정하지 않은 Agent
-/// 프로세스 하나에 대한 보고 (로드맵 `#70` 게이트 ③).
+/// 프로세스 하나에 대한 보고 (로드맵 `#70` 게이트 3).
 ///
 /// [`AgentAck`]·[`AgentObservation`]과 형제 필드로 따로 싣는다. 셋의 차이가
 /// 이 타입이 따로 있는 이유 전부다:
@@ -281,7 +281,7 @@ pub struct AgentOrphan {
     pub reason: AgentOrphanReason,
 }
 
-/// [`AgentOrphan`]이 왜 orphan인지 (로드맵 `#70` 게이트 ③).
+/// [`AgentOrphan`]이 왜 orphan인지 (로드맵 `#70` 게이트 3).
 ///
 /// 두 값은 생산자가 서로 다른 곳에 있고 **운영자의 처방도 다르다**. 그래서
 /// [`AgentObservationReason`]처럼 하나의 상태에 붙는 필드가 아니라, 이 타입

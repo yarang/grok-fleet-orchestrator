@@ -134,7 +134,7 @@ enum SessionMsg {
     /// 루프가 보장하므로, 이 배리어는 오직 "컨슈머가 실제로 다 처리했는지"만
     /// 확인한다.
     Flush(oneshot::Sender<()>),
-    /// `session/update`에서 추출한 도구 호출 관측 (로드맵 `#70` 게이트 ④ 선행).
+    /// `session/update`에서 추출한 도구 호출 관측 (로드맵 `#70` 게이트 4 선행).
     ///
     /// `Chunk`와 같은 큐를 타는 이유는 **순서 때문이다.** 도구 호출과 그것이
     /// 만든 출력은 인과 관계가 있고, 별도 경로로 보내면 그 순서가 소비자에게
@@ -713,7 +713,7 @@ impl WorkerTransport for AcpTransport {
         Ok(Duration::from_millis(1))
     }
 
-    /// `session/list` 한 번을 실제로 왕복시킨다 (로드맵 `#70` 게이트 ⑤).
+    /// `session/list` 한 번을 실제로 왕복시킨다 (로드맵 `#70` 게이트 5).
     ///
     /// **`session/list`를 고른 이유는 부작용이 없기 때문이다.** ACP에서
     /// 이쪽(client)이 agent에게 보낼 수 있는 요청 중 상태를 바꾸지 않는 것은
@@ -993,7 +993,7 @@ async fn handle_session_notification(
     sessions_map: &Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
     notification: SessionNotification,
 ) {
-    // `_ => None`으로 전부 버리던 자리다 (로드맵 `#70` 게이트 ④ 선행).
+    // `_ => None`으로 전부 버리던 자리다 (로드맵 `#70` 게이트 4 선행).
     // 도구 호출 알림은 Task가 실제로 무엇을 했는지에 대해 오케스트레이터가
     // 가질 수 있는 **유일한** 증거인데, 그것이 매번 폐기되고 있었다.
     let msg = match &notification.update {
@@ -1203,7 +1203,7 @@ fn build_ws_client(session: &Arc<WorkerSession>) -> Result<HttpClient, String> {
 /// 않았다는 뜻이다.
 const NO_ANSWER_MARKER: &str = "never received";
 
-/// 이 오류가 **Agent가 만들어 보낸 답**의 모양인가 (로드맵 `#70` 게이트 ⑤).
+/// 이 오류가 **Agent가 만들어 보낸 답**의 모양인가 (로드맵 `#70` 게이트 5).
 ///
 /// 이 판정이 필요한 이유는 Agent의 거절과 연결의 죽음이 SDK에서 같은 `Err`로
 /// 도착하기 때문이다. 구분하지 않으면 끊긴 연결이 "거절했으니 살아 있다"로
@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     /// [`error_is_an_agent_answer`]의 두 갈래를 독립적으로 못박는다
-    /// (로드맵 `#70` 게이트 ⑤).
+    /// (로드맵 `#70` 게이트 5).
     ///
     /// **통합 시험만으로는 이 신호가 살아 있는지 알 수 없다.** `probe`는 이것과
     /// 연결 상태를 AND로 묶으므로, 이쪽이 통째로 고장 나도 상태 신호가 혼자
@@ -1378,7 +1378,7 @@ mod tests {
         );
     }
 
-    /// **관측이 자유 서술을 옮기지 않는다** (로드맵 `#70` 게이트 ④ 선행).
+    /// **관측이 자유 서술을 옮기지 않는다** (로드맵 `#70` 게이트 4 선행).
     ///
     /// 이 시험이 이 증분에서 가장 중요한 단정이다. ACP의 `ToolCall`은
     /// `title`·`raw_input`·`raw_output`·`content`·`locations`를 함께 주는데,

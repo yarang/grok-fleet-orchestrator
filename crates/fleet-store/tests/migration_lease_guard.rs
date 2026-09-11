@@ -101,15 +101,15 @@ fn migrator_up_to(max_version: i64) -> Migrator {
     }
 }
 
-/// 리스 행을 **037 이전 컬럼만으로** 직접 넣는다.
+/// 리스 행을 **039 이전 컬럼만으로** 직접 넣는다.
 ///
-/// `PgStore::acquire_control_lease`를 쓸 수 없다. 그 함수는 037이 만든
+/// `PgStore::acquire_control_lease`를 쓸 수 없다. 그 함수는 039가 만든
 /// `binary_version`에 값을 쓰므로, 이 파일이 일부러 만드는 **부분 마이그레이션**
 /// DB(마지막 하나를 뺀 상태)에서는 `UndefinedColumn`으로 깨진다. 프로덕션은 이
 /// 상황을 만들지 않는다 — 리스 획득은 항상 migration **뒤에** 일어난다
 /// (`fleet-cli`의 `runtime.rs`) — 그러나 이 시험의 전제가 정확히 "바이너리가
 /// DB보다 앞선 상태"이므로 여기서는 store API를 우회한다.
-async fn insert_pre_037_lease(
+async fn insert_pre_039_lease(
     pool: &PgPool,
     cluster_id: &str,
     instance_id: &str,
@@ -232,7 +232,7 @@ async fn migration_is_refused_while_another_instance_holds_a_live_lease() {
 
     let store = PgStore::from_pool(pool.clone());
     // 살아 있는 primary.
-    let _ = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
+    let _ = insert_pre_039_lease(&pool, "guard-cluster", "primary-1", 60).await;
 
     let err = store
         .migrate()
@@ -281,7 +281,7 @@ async fn migration_proceeds_immediately_after_the_holder_releases() {
         .expect("partial migration must succeed");
 
     let store = PgStore::from_pool(pool.clone());
-    let epoch = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
+    let epoch = insert_pre_039_lease(&pool, "guard-cluster", "primary-1", 60).await;
     assert!(store.migrate().await.is_err(), "live lease must block");
 
     let released = store
@@ -318,7 +318,7 @@ async fn a_live_lease_does_not_block_a_migration_that_changes_nothing() {
         .await
         .expect("initial migration must succeed");
 
-    let _ = insert_pre_037_lease(&pool, "guard-cluster", "primary-1", 60).await;
+    let _ = insert_pre_039_lease(&pool, "guard-cluster", "primary-1", 60).await;
 
     // 같은 바이너리의 standby가 기동하는 상황 — pending이 없으므로 통과.
     store

@@ -11,7 +11,7 @@
 
 use chrono::{Duration, Utc};
 use fleet_core::audit::action;
-use fleet_core::{AuditEvent, AuditFilter, AuditOutcome, User, UserId};
+use fleet_core::{AuditEvent, AuditFilter, AuditOutcome, ProjectId, User, UserId};
 use fleet_store::{PgStore, Store};
 use sqlx::postgres::PgPoolOptions;
 
@@ -257,7 +257,91 @@ async fn audit_pagination_with_limit_and_offset() {
     assert_eq!(all.len(), dedup.len(), "페이지 간 중복이 없어야 한다");
 }
 
-/// 제어면 세대가 Postgres를 왕복한다 (로드맵 `#70` 게이트 ⑥ 선행, 마이그레이션 038).
+#[tokio::test]
+async fn audit_filter_by_project_selects_only_that_project() {
+    require_db!(store);
+
+    let alpha = ProjectId::new();
+    let beta = ProjectId::new();
+
+    store
+        .record_audit_event(&AuditEvent::success("alice", action::AGENT_CREATE).project(alpha))
+        .await
+        .unwrap();
+    store
+        .record_audit_event(&AuditEvent::success("alice", action::AGENT_START).project(alpha))
+        .await
+        .unwrap();
+    store
+        .record_audit_event(&AuditEvent::success("bob", action::ISSUE_CREATE).project(beta))
+        .await
+        .unwrap();
+    // Project에 속하지 않는 이벤트. 어떤 Project 필터에도 걸리면 안 된다.
+    store
+        .record_audit_event(&AuditEvent::success("alice", action::AUTH_LOGIN))
+        .await
+        .unwrap();
+
+    let by = |p: ProjectId| AuditFilter {
+        project_id: Some(p),
+        ..Default::default()
+    };
+
+    let a = store.list_audit_events(&by(alpha)).await.unwrap();
+    assert_eq!(a.len(), 2, "alpha의 이벤트 2건: {a:?}");
+    assert!(a.iter().all(|e| e.project_id == Some(alpha)));
+
+    let b = store.list_audit_events(&by(beta)).await.unwrap();
+    assert_eq!(b.len(), 1, "beta의 이벤트 1건: {b:?}");
+    assert_eq!(b[0].action, action::ISSUE_CREATE);
+
+    // `project_id: None`은 "Project로 거르지 않는다"이지 "Project 없는
+    // 이벤트만"이 아니다. 이 단정이 그 둘을 구분한다 — 후자로 구현했다면
+    // 여기서 4가 아니라 1이 나온다.
+    let all = store
+        .list_audit_events(&AuditFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4, "필터 없음은 전체다: {all:?}");
+    assert_eq!(
+        all.iter().filter(|e| e.project_id.is_none()).count(),
+        1,
+        "auth.login만 Project가 없다"
+    );
+}
+
+#[tokio::test]
+async fn audit_records_a_project_that_does_not_exist() {
+    require_db!(store);
+
+    // `projects`에 없는 id다. FK가 있었다면 이 쓰기가 실패한다.
+    //
+    // 감사는 **시도**에 대한 사실을 남기며, 존재한 적 없는 Project를 지목한
+    // 거부도 그 사실에 포함된다. FK를 걸면 감사 기록이 실패하는 시점이
+    // 하필 "기록할 가치가 가장 큰 순간"과 겹친다 — 그래서 걸지 않는다.
+    let ghost = ProjectId::new();
+    store
+        .record_audit_event(
+            &AuditEvent::failure("alice", action::AGENT_CREATE)
+                .project(ghost)
+                .target("project", ghost.to_string()),
+        )
+        .await
+        .unwrap();
+
+    let found = store
+        .list_audit_events(&AuditFilter {
+            project_id: Some(ghost),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].outcome, AuditOutcome::Failure);
+    assert_eq!(found[0].project_id, Some(ghost));
+}
+
+/// 제어면 세대가 Postgres를 왕복한다 (로드맵 `#70` 게이트 6 선행, 마이그레이션 040).
 ///
 /// `fleet-scheduler`의 단위 시험은 `MemStore`로 돌기 때문에 **컬럼이 실제로
 /// 있는지, INSERT/SELECT가 그것을 싣는지는 한 줄도 검증하지 않는다.** 그쪽이
@@ -310,7 +394,7 @@ async fn a_control_epoch_survives_the_round_trip() {
 /// 기존 감사 항목은 이 컬럼을 비운 채로 남는다.
 ///
 /// 감사 emitter 35군데는 전부 운영자 행위이고 그 결정에는 제어면 세대가
-/// 없다. 마이그레이션 038이 `NOT NULL`이나 기본값을 걸었다면 그 행들이
+/// 없다. 마이그레이션 040이 `NOT NULL`이나 기본값을 걸었다면 그 행들이
 /// **없던 세대를 가진 것처럼** 보였을 것이다.
 #[tokio::test]
 async fn an_operator_action_keeps_the_column_empty() {

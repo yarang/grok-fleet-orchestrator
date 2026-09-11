@@ -33,7 +33,7 @@ pub async fn overview(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<OverviewResponse>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let workers = state
         .store
         .list_workers(&WorkerFilter::default())
@@ -125,7 +125,7 @@ pub async fn list_workers(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListWorkersQuery>,
 ) -> Result<Json<Vec<WorkerSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::WorkerList)?;
+    require_permission(&state, &principal, PermissionKind::WorkerList).await?;
     let mut filter = WorkerFilter::default();
     if let Some(s) = &q.status {
         filter.status = parse_worker_status(s);
@@ -168,7 +168,7 @@ pub async fn list_tasks(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<Vec<TaskSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskList)?;
+    require_permission(&state, &principal, PermissionKind::TaskList).await?;
     let filter = TaskFilter {
         limit: q.limit,
         offset: q.offset,
@@ -197,7 +197,7 @@ pub async fn list_task_threads_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListTasksQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskList)?;
+    require_permission(&state, &principal, PermissionKind::TaskList).await?;
 
     let thread_ids = state
         .store
@@ -254,7 +254,7 @@ pub async fn list_events(
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListEventsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::EventsList)?;
+    require_permission(&state, &principal, PermissionKind::EventsList).await?;
     let events = state
         .store
         .list_events(q.after_seq, q.limit)
@@ -542,7 +542,7 @@ pub async fn submit_task_api(
     jar: CookieJar,
     Form(form): Form<SubmitTaskForm>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskCreate)?;
+    require_permission(&state, &principal, PermissionKind::TaskCreate).await?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
     if !csrf_valid(cookie_csrf.as_deref(), &form.csrf_token) {
@@ -684,6 +684,8 @@ pub async fn submit_task_api(
         .map_err(|e| ApiError::BadRequest(format!("cwd: {e}")))?;
 
     let task_id = task.id;
+    // `submit()`이 소유권을 가져가므로 감사에 쓸 값은 미리 꺼내 둔다.
+    let task_project_id = task.project_id;
 
     match dispatcher.submit(task).await {
         Ok(id) => {
@@ -709,6 +711,25 @@ pub async fn submit_task_api(
                 .flatten()
                 .map(|t| matches!(t.status, fleet_core::TaskStatus::Dispatched { .. }))
                 .unwrap_or(true);
+            // 멱등 흡수(`deduplicated`)는 Task 행을 만들지 않았으므로 기록하지
+            // 않는다 — `issue.link`와 같은 규칙이다. 그래서 `detail`에
+            // `deduplicated` 필드를 두지 않는다: 이 자리에서는 항상 false이고,
+            // 항상 같은 값인 필드는 읽는 사람을 오도한다.
+            if !deduplicated {
+                crate::audit::record(
+                    &state,
+                    fleet_core::AuditEvent::success(
+                        &principal.user.username,
+                        fleet_core::audit::action::TASK_SUBMIT,
+                    )
+                    .actor(principal.user.id)
+                    .project_opt(task_project_id)
+                    .target("task", id.to_string())
+                    .ip_opt(principal.client_ip.clone())
+                    .detail(serde_json::json!({ "dispatched": actually_dispatched })),
+                )
+                .await;
+            }
             Ok(Json(serde_json::json!({
                 "task_id": id,
                 "dispatched": actually_dispatched,
@@ -748,7 +769,7 @@ pub async fn get_task_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskRead)?;
+    require_permission(&state, &principal, PermissionKind::TaskRead).await?;
 
     let task_id: fleet_core::TaskId = id
         .parse()
@@ -790,7 +811,7 @@ pub async fn get_task_thread_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::TaskRead)?;
+    require_permission(&state, &principal, PermissionKind::TaskRead).await?;
 
     let task_id: fleet_core::TaskId = id
         .parse()
@@ -829,7 +850,7 @@ pub async fn delete_task_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::TaskDelete)?;
+    require_permission(&state, &principal, PermissionKind::TaskDelete).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let task_id: fleet_core::TaskId = id
@@ -889,7 +910,7 @@ pub async fn get_worker_detail(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkerDetail>, ApiError> {
-    require_permission(&principal, PermissionKind::WorkerList)?;
+    require_permission(&state, &principal, PermissionKind::WorkerList).await?;
     let worker_id: fleet_core::WorkerId = id
         .parse()
         .map_err(|_| ApiError::BadRequest(format!("invalid worker id: {id}")))?;
@@ -943,7 +964,7 @@ pub async fn list_users_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<UserSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::UserRead)?;
+    require_permission(&state, &principal, PermissionKind::UserRead).await?;
     let users = state.store.list_users().await.map_err(|e| {
         tracing::error!(error = %e, "list_users failed");
         ApiError::Store(e.to_string())
@@ -984,7 +1005,8 @@ pub async fn create_user_api(
     jar: CookieJar,
     Form(form): Form<CreateUserForm>,
 ) -> Result<(StatusCode, CookieJar), ApiError> {
-    require_permission(&principal, PermissionKind::UserCreate)
+    require_permission(&state, &principal, PermissionKind::UserCreate)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     // CSRF 검증.
@@ -1073,6 +1095,7 @@ pub async fn create_user_api(
             fleet_core::audit::action::USER_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user.id.as_uuid().to_string())
         .detail(serde_json::json!({ "email": form.email })),
     )
@@ -1094,7 +1117,8 @@ pub async fn toggle_user_api(
     Path(id): Path<String>,
     Form(form): Form<ToggleUserForm>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::UserCreate)
+    require_permission(&state, &principal, PermissionKind::UserCreate)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1132,6 +1156,7 @@ pub async fn toggle_user_api(
             fleet_core::audit::action::USER_TOGGLE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user_id.as_uuid().to_string())
         .detail(serde_json::json!({
             "target_username": user.username,
@@ -1150,7 +1175,8 @@ pub async fn delete_user_api(
     Path(id): Path<String>,
     Form(form): Form<ToggleUserForm>,
 ) -> Result<StatusCode, ApiError> {
-    require_permission(&principal, PermissionKind::UserDelete)
+    require_permission(&state, &principal, PermissionKind::UserDelete)
+        .await
         .map_err(|_| ApiError::Forbidden("Permission denied".into()))?;
 
     let cookie_csrf = jar.get(CSRF_COOKIE).map(|c| c.value().to_string());
@@ -1190,6 +1216,7 @@ pub async fn delete_user_api(
             fleet_core::audit::action::USER_DELETE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("user", user_id.as_uuid().to_string())
         .detail(serde_json::json!({ "target_username": user.username })),
     )
@@ -1288,7 +1315,7 @@ pub async fn list_hosts_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<HostSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let hosts = state.store.list_hosts().await.map_err(|e| {
         tracing::error!(error = %e, "list_hosts failed");
         ApiError::Store(e.to_string())
@@ -1331,7 +1358,7 @@ pub async fn list_projects_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<Vec<crate::schema::ProjectSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectRead)?;
+    require_permission(&state, &principal, PermissionKind::ProjectRead).await?;
     let projects = state
         .store
         .list_projects(&fleet_core::ProjectFilter {
@@ -1364,7 +1391,7 @@ pub async fn create_project_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateProjectRequest>,
 ) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectCreate)?;
+    require_permission(&state, &principal, PermissionKind::ProjectCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let name = body.name.trim();
@@ -1395,6 +1422,7 @@ pub async fn create_project_api(
             fleet_core::audit::action::PROJECT_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
         .target("project", project.id.to_string())
         .detail(serde_json::json!({ "name": project.name })),
     )
@@ -1409,7 +1437,7 @@ pub async fn get_project_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::ProjectSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectRead)?;
+    require_permission(&state, &principal, PermissionKind::ProjectRead).await?;
     let project_id = parse_project_id(&id)?;
     let project = state
         .store
@@ -1441,7 +1469,7 @@ pub async fn delete_project_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::ProjectArchiveResponse>, ApiError> {
-    require_permission(&principal, PermissionKind::ProjectDelete)?;
+    require_permission(&state, &principal, PermissionKind::ProjectDelete).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = parse_project_id(&id)?;
@@ -1477,6 +1505,8 @@ pub async fn delete_project_api(
             &state,
             fleet_core::AuditEvent::success(&principal.user.username, action)
                 .actor(principal.user.id)
+                .ip_opt(principal.client_ip.clone())
+                .project(project.id)
                 .target("project", project.id.to_string()),
         )
         .await;
@@ -1535,7 +1565,7 @@ pub async fn list_agents_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListAgentsQuery>,
 ) -> Result<Json<Vec<crate::schema::AgentSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentRead).await?;
     let project_id = match query.project_id.as_deref() {
         Some(raw) => Some(parse_project_id(raw)?),
         None => None,
@@ -1574,7 +1604,7 @@ pub async fn create_agent_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateAgentRequest>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = parse_project_id(&body.project_id)?;
@@ -1672,6 +1702,8 @@ pub async fn create_agent_api(
             fleet_core::audit::action::AGENT_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project(agent.project_id)
         .target("agent", agent.id.to_string())
         .detail(serde_json::json!({
             "name": agent.name,
@@ -1706,7 +1738,7 @@ pub async fn place_agent_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::PlaceAgentRequest>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -1821,6 +1853,8 @@ pub async fn place_agent_api(
             fleet_core::audit::action::AGENT_ASSIGN,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project(placed.project_id)
         .target("agent", agent_id.to_string())
         .detail(serde_json::json!({
             "worker_id": worker_id.to_string(),
@@ -1857,7 +1891,7 @@ pub async fn start_agent_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -1927,6 +1961,8 @@ pub async fn start_agent_api(
                 fleet_core::audit::action::AGENT_START,
             )
             .actor(principal.user.id)
+            .ip_opt(principal.client_ip.clone())
+            .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
                 "project_id": agent.project_id.to_string(),
@@ -1956,7 +1992,7 @@ pub async fn stop_agent_api(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentManage)?;
+    require_permission(&state, &principal, PermissionKind::AgentManage).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let agent_id = id
@@ -1998,6 +2034,8 @@ pub async fn stop_agent_api(
                 fleet_core::audit::action::AGENT_STOP,
             )
             .actor(principal.user.id)
+            .ip_opt(principal.client_ip.clone())
+            .project(agent.project_id)
             .target("agent", agent.id.to_string())
             .detail(serde_json::json!({
                 "project_id": agent.project_id.to_string(),
@@ -2036,12 +2074,13 @@ pub async fn stop_agent_api(
 /// 전체에 영향을 주는 편집을 허용하면 범위가 조용히 새어 나간다. Project
 /// 범위 템플릿은 이 검사를 통과시키고, Project별 세분화는 `#48`의 정책
 /// 컬럼이 생긴 뒤에 붙인다(그 전에는 검사할 대상이 없다).
-fn authorize_template_scope(
+async fn authorize_template_scope(
+    state: &DashboardState,
     principal: &AuthPrincipal,
     project_id: Option<fleet_core::ProjectId>,
 ) -> Result<(), ApiError> {
     if project_id.is_none() {
-        require_permission(principal, PermissionKind::AgentTemplateManageGlobal)?;
+        require_permission(state, principal, PermissionKind::AgentTemplateManageGlobal).await?;
     }
     Ok(())
 }
@@ -2084,7 +2123,7 @@ pub async fn list_agent_templates_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListAgentTemplatesQuery>,
 ) -> Result<Json<Vec<crate::schema::AgentTemplateSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
 
     // `project_scope`는 3상태다: `None`=전부, `Some(None)`=전역만,
     // `Some(Some(p))`=그 Project만. 쿼리 문자열은 그것을 직접 표현할 수
@@ -2141,14 +2180,14 @@ pub async fn create_agent_template_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateAgentTemplateRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateCreate)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let project_id = match body.project_id.as_deref() {
         Some(raw) => Some(parse_project_id(raw)?),
         None => None,
     };
-    authorize_template_scope(&principal, project_id)?;
+    authorize_template_scope(&state, &principal, project_id).await?;
 
     let name = body.name.trim();
     if name.is_empty() {
@@ -2182,6 +2221,8 @@ pub async fn create_agent_template_api(
             fleet_core::audit::action::AGENT_TEMPLATE_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project_opt(template.project_id)
         .target("agent_template", template.id.to_string())
         .detail(serde_json::json!({
             "name": template.name,
@@ -2204,7 +2245,7 @@ pub async fn get_agent_template_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
     Ok(Json(crate::schema::AgentTemplateSummary::from(&template)))
@@ -2216,7 +2257,7 @@ pub async fn list_agent_template_revisions_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::AgentTemplateRevisionSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     // 없는 템플릿과 revision이 0건인 템플릿을 구분한다 — 전자는 404여야
     // 하고, 빈 배열은 후자만을 뜻해야 한다.
@@ -2257,12 +2298,12 @@ pub async fn create_agent_template_revision_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::CreateAgentTemplateRevisionRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateUpdate)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateUpdate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let next = fleet_core::AgentTemplateBody::new(body.role_prompt.clone())
         .with_tools(body.tools.clone())
@@ -2282,7 +2323,7 @@ pub async fn create_agent_template_revision_api(
         .unwrap_or_else(|| fleet_core::AgentTemplateBody::new(""));
 
     for needed in current.required_permissions_for_change(&next) {
-        require_permission(&principal, needed)?;
+        require_permission(&state, &principal, needed).await?;
     }
 
     let revision = state
@@ -2304,6 +2345,8 @@ pub async fn create_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "revision_id": revision.id.to_string(),
@@ -2329,12 +2372,17 @@ pub async fn revoke_agent_template_revision_api(
     headers: axum::http::HeaderMap,
     Path((id, revision_id)): Path<(String, String)>,
 ) -> Result<Json<crate::schema::AgentTemplateRevisionSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRevisionRevoke)?;
+    require_permission(
+        &state,
+        &principal,
+        PermissionKind::AgentTemplateRevisionRevoke,
+    )
+    .await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let revision_id = revision_id
         .parse::<fleet_core::AgentTemplateRevisionId>()
@@ -2377,6 +2425,8 @@ pub async fn revoke_agent_template_revision_api(
             fleet_core::audit::action::AGENT_TEMPLATE_REVISION_REVOKE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "revision_id": revision_id.to_string(),
@@ -2410,7 +2460,7 @@ pub async fn agent_template_dependents_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::AgentTemplateDependents>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateRead)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateRead).await?;
     let template_id = parse_agent_template_id(&id)?;
     load_agent_template(&state, template_id).await?;
 
@@ -2445,12 +2495,12 @@ pub async fn change_agent_template_status_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::AgentTemplateStatusRequest>,
 ) -> Result<Json<crate::schema::AgentTemplateSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::AgentTemplateLifecycle)?;
+    require_permission(&state, &principal, PermissionKind::AgentTemplateLifecycle).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let template_id = parse_agent_template_id(&id)?;
     let template = load_agent_template(&state, template_id).await?;
-    authorize_template_scope(&principal, template.project_id)?;
+    authorize_template_scope(&state, &principal, template.project_id).await?;
 
     let next = fleet_core::AgentTemplateStatus::parse_str(&body.status)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown status: {}", body.status)))?;
@@ -2502,6 +2552,8 @@ pub async fn change_agent_template_status_api(
             fleet_core::audit::action::AGENT_TEMPLATE_STATUS_CHANGE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project_opt(template.project_id)
         .target("agent_template", template_id.to_string())
         .detail(serde_json::json!({
             "from": template.status.as_str(),
@@ -2588,7 +2640,7 @@ pub async fn list_issues_api(
     Extension(principal): Extension<AuthPrincipal>,
     Query(query): Query<ListIssuesQuery>,
 ) -> Result<Json<Vec<crate::schema::IssueSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
 
     let project_id = match query.project_id.as_deref().filter(|s| !s.is_empty()) {
         Some(raw) => Some(parse_project_id(raw)?),
@@ -2629,7 +2681,7 @@ pub async fn create_issue_api(
     headers: axum::http::HeaderMap,
     Json(body): Json<crate::schema::CreateIssueRequest>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueCreate)?;
+    require_permission(&state, &principal, PermissionKind::IssueCreate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let title = body.title.trim();
@@ -2678,6 +2730,8 @@ pub async fn create_issue_api(
             fleet_core::audit::action::ISSUE_CREATE,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({ "project_id": project_id.to_string() })),
     )
@@ -2692,7 +2746,7 @@ pub async fn get_issue_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let issue = load_issue(&state, parse_issue_id(&id)?).await?;
     Ok(Json(issue_summary(&state, &issue).await?))
 }
@@ -2710,16 +2764,22 @@ pub async fn update_issue_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::UpdateIssueRequest>,
 ) -> Result<Json<crate::schema::IssueSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueUpdate)?;
+    require_permission(&state, &principal, PermissionKind::IssueUpdate).await?;
     verify_csrf_header(&jar, &headers)?;
 
     // assignee를 건드리는 요청만 추가 권한을 요구한다 — 나머지 필드 수정에
     // assign 권한을 함께 요구하면 계약의 capability 분리가 무의미해진다.
     if body.assignee.is_some() {
-        require_permission(&principal, PermissionKind::IssueAssign)?;
+        require_permission(&state, &principal, PermissionKind::IssueAssign).await?;
     }
 
     let mut issue = load_issue(&state, parse_issue_id(&id)?).await?;
+
+    // 감사 `detail`에 실을 "무엇이 바뀌었는가". **값이 아니라 필드 이름만**
+    // 모은다 — title/body는 임의 사용자 텍스트이고, 바뀐 뒤의 값은 Issue 행이
+    // 이미 보존한다. 각 분기 안에서 push하는 이유는 아래 `if let`들이 `body`의
+    // 필드를 소유권째 가져가기 때문이다(뒤에서 다시 볼 수 없다).
+    let mut changed: Vec<&'static str> = Vec::new();
 
     if let Some(title) = body.title.as_deref() {
         let title = title.trim();
@@ -2727,18 +2787,23 @@ pub async fn update_issue_api(
             return Err(ApiError::BadRequest("title must not be empty".into()));
         }
         issue.title = title.to_string();
+        changed.push("title");
     }
     if let Some(b) = body.body {
         issue.body = b;
+        changed.push("body");
     }
     if let Some(sev) = body.severity.as_deref().filter(|s| !s.is_empty()) {
         issue.severity = parse_severity(sev)?;
+        changed.push("severity");
     }
     if let Some(labels) = body.labels {
         issue.labels = labels;
+        changed.push("labels");
     }
     if let Some(assignee) = body.assignee {
         issue.assignee = assignee.filter(|s| !s.trim().is_empty());
+        changed.push("assignee");
     }
 
     state
@@ -2746,6 +2811,20 @@ pub async fn update_issue_api(
         .update_issue_fields(&issue)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_UPDATE,
+        )
+        .actor(principal.user.id)
+        .project(issue.project_id)
+        .target("issue", issue.id.to_string())
+        .ip_opt(principal.client_ip.clone())
+        .detail(serde_json::json!({ "fields": changed })),
+    )
+    .await;
 
     let issue = load_issue(&state, issue.id).await?;
     Ok(Json(issue_summary(&state, &issue).await?))
@@ -2767,7 +2846,7 @@ pub async fn transition_issue_api(
 
     let to = fleet_core::IssueStatus::parse_str(&body.status)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown issue status: {}", body.status)))?;
-    require_permission(&principal, required_capability_for_transition(to))?;
+    require_permission(&state, &principal, required_capability_for_transition(to)).await?;
 
     let close_reason = match body.close_reason.as_deref().filter(|s| !s.is_empty()) {
         Some(raw) => Some(
@@ -2798,6 +2877,8 @@ pub async fn transition_issue_api(
             fleet_core::audit::action::ISSUE_TRANSITION,
         )
         .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone())
+        .project(issue.project_id)
         .target("issue", issue.id.to_string())
         .detail(serde_json::json!({
             "to": to.as_str(),
@@ -2816,7 +2897,7 @@ pub async fn list_issue_comments_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::IssueCommentSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let issue_id = parse_issue_id(&id)?;
     let comments = state
         .store
@@ -2845,7 +2926,7 @@ pub async fn add_issue_comment_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::AddIssueCommentRequest>,
 ) -> Result<Json<crate::schema::IssueCommentSummary>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueComment)?;
+    require_permission(&state, &principal, PermissionKind::IssueComment).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let text = body.body.trim();
@@ -2865,6 +2946,22 @@ pub async fn add_issue_comment_api(
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
 
+    // 본문은 넣지 않는다 — 코멘트 원문은 `issue_comments` 행이 보존하고,
+    // 감사가 더할 것은 "누가 언제 어느 Issue에 달았는가"뿐이다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &principal.user.username,
+            fleet_core::audit::action::ISSUE_COMMENT,
+        )
+        .actor(principal.user.id)
+        .project(issue.project_id)
+        .target("issue", issue.id.to_string())
+        .ip_opt(principal.client_ip.clone())
+        .detail(serde_json::json!({ "comment_id": comment.id.to_string() })),
+    )
+    .await;
+
     Ok(Json(crate::schema::IssueCommentSummary {
         id: comment.id.to_string(),
         author: comment.author,
@@ -2879,7 +2976,7 @@ pub async fn list_issue_links_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::schema::IssueTaskLinkSummary>>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueRead)?;
+    require_permission(&state, &principal, PermissionKind::IssueRead).await?;
     let links = state
         .store
         .list_issue_task_links(parse_issue_id(&id)?)
@@ -2907,7 +3004,7 @@ pub async fn link_issue_task_api(
     Path(id): Path<String>,
     Json(body): Json<crate::schema::LinkIssueTaskRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueLink)?;
+    require_permission(&state, &principal, PermissionKind::IssueLink).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let issue = load_issue(&state, parse_issue_id(&id)?).await?;
@@ -2950,6 +3047,25 @@ pub async fn link_issue_task_api(
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
 
+    // 멱등 no-op은 기록하지 않는다 — 이미 있는 링크를 다시 걸어도 아무것도
+    // 바뀌지 않으므로, 기록하면 감사 행 수가 "몇 번 연결했는가"가 아니라
+    // "몇 번 요청했는가"를 세게 된다.
+    if created {
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::ISSUE_LINK,
+            )
+            .actor(principal.user.id)
+            .project(issue.project_id)
+            .target("issue", issue.id.to_string())
+            .ip_opt(principal.client_ip.clone())
+            .detail(serde_json::json!({ "task_id": task_id.to_string() })),
+        )
+        .await;
+    }
+
     Ok(Json(serde_json::json!({
         "issue_id": issue.id.to_string(),
         "task_id": task_id.to_string(),
@@ -2965,7 +3081,7 @@ pub async fn unlink_issue_task_api(
     headers: axum::http::HeaderMap,
     Path((id, task_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::IssueLink)?;
+    require_permission(&state, &principal, PermissionKind::IssueLink).await?;
     verify_csrf_header(&jar, &headers)?;
 
     let issue_id = parse_issue_id(&id)?;
@@ -2978,6 +3094,32 @@ pub async fn unlink_issue_task_api(
         .unlink_issue_task(issue_id, task_id)
         .await
         .map_err(|e| ApiError::Store(e.to_string()))?;
+
+    // `link`와 달리 이 핸들러는 Issue를 적재하지 않는다(미존재 Issue에 대한
+    // 해제는 `removed: false`로 조용히 성공한다 — 기존 동작이다). 따라서
+    // `project_id`는 실제로 제거된 경우에만, 그 시점에 조회해서 채운다.
+    // 조회가 실패하면 `None`이 되는데, 여기서의 `None`은 다른 이벤트에서와
+    // 달리 "Project가 없다"는 단정이 아니라 **알아내지 못했다**는 뜻이다.
+    if removed {
+        let project_id = load_issue(&state, issue_id)
+            .await
+            .ok()
+            .map(|i| i.project_id);
+        crate::audit::record(
+            &state,
+            fleet_core::AuditEvent::success(
+                &principal.user.username,
+                fleet_core::audit::action::ISSUE_UNLINK,
+            )
+            .actor(principal.user.id)
+            .project_opt(project_id)
+            .target("issue", issue_id.to_string())
+            .ip_opt(principal.client_ip.clone())
+            .detail(serde_json::json!({ "task_id": task_id.to_string() })),
+        )
+        .await;
+    }
+
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -3001,7 +3143,7 @@ pub async fn get_host_detail_api(
     Extension(principal): Extension<AuthPrincipal>,
     Path(hostname): Path<String>,
 ) -> Result<Json<HostDetail>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     let host = state
         .store
         .get_host_by_hostname(&hostname)
@@ -3093,8 +3235,8 @@ fn host_to_summary(h: &fleet_core::Host, worker_name: Option<String>) -> HostSum
 /// 권한으로 맞춘다 — 이전에는 `audit:read`(admin 전용)로 잠겨 있었는데,
 /// 정작 내용은 전 역할이 `/api/events`로 볼 수 있는 이벤트라 의미가 어긋났다.
 ///
-/// 인증/권한 감사 로그는 이 페이지가 아니라 `/api/audit`가 담당한다
-/// (전용 화면은 아직 없음).
+/// 감사 로그는 이 페이지가 아니라 `/api/audit`가 담당한다 (전용 화면은
+/// 아직 없음).
 pub async fn admin_activity_page(Extension(principal): Extension<AuthPrincipal>) -> Response {
     serve_page_if_permitted(
         &principal,
@@ -3108,26 +3250,51 @@ pub async fn admin_activity_page(Extension(principal): Extension<AuthPrincipal>)
 pub struct ListAuditQuery {
     /// 액션명으로 필터 (예: `auth.login`).
     pub action: Option<String>,
+    /// Project로 필터 (로드맵 #95 1단계).
+    ///
+    /// 컬럼만 추가하고 이 파라미터를 빼면 값이 저장되기만 하고 아무도 그
+    /// 축으로 조회할 수 없다 — `AuditFilter::actor_user_id`가 이미 그
+    /// 상태다(필드는 있으나 여기서 노출하지 않아 항상 `None`).
+    pub project_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
     #[serde(default)]
     pub offset: usize,
 }
 
-/// GET /api/audit — 인증/권한 감사 로그 JSON API.
+/// GET /api/audit — 감사 로그 JSON API.
 ///
-/// `audit_log` 테이블의 인증/권한 이벤트를 반환한다. 작업·워커 생명주기
-/// 이벤트는 별개로 `/api/events`가 담당한다.
+/// `audit_log` 테이블의 이벤트를 반환한다. 이름은 `list_auth_audit_api`지만
+/// **인증/권한 이벤트만 반환하지 않는다** — `agent.*`, `agent_template.*`,
+/// `issue.*`, `project.*`, `worker.*`도 같은 테이블에 쌓이고 여기로 나온다.
+/// 이 문장은 `#95` 1단계에서 붙인 테스트가 반증하기 전까지 "인증/권한
+/// 로그"라고 잘못 적혀 있었다. 함수명은 호출부가 많아 그대로 두되, 계약은
+/// 이름이 아니라 이 주석과 `docs/contracts/dashboard-api.md`가 정한다.
+///
+/// 작업·워커 생명주기 **이벤트 스트림**(`events` 테이블)은 별개이며
+/// `/api/events`가 담당한다 — 감사(audit)와 이벤트(event)는 다른 저장소다.
 pub async fn list_auth_audit_api(
     State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
     Query(q): Query<ListAuditQuery>,
 ) -> Result<Json<Vec<fleet_core::AuditEvent>>, ApiError> {
-    require_permission(&principal, PermissionKind::AuditRead)?;
+    require_permission(&state, &principal, PermissionKind::AuditRead).await?;
+
+    // 형식이 깨진 id는 400이다. 조용히 `None`으로 떨어뜨리면 "그 Project에
+    // 아무 일도 없었다"가 아니라 **필터가 통째로 무시된 전체 목록**이
+    // 돌아간다 — 감사 표면에서 그 실패 양식은 과소 보고보다 위험하다.
+    let project_id = match q.project_id.as_deref() {
+        Some(raw) => Some(
+            raw.parse::<fleet_core::ProjectId>()
+                .map_err(|_| ApiError::BadRequest("invalid project_id".into()))?,
+        ),
+        None => None,
+    };
 
     let filter = fleet_core::AuditFilter {
         actor_user_id: None,
         action: q.action,
+        project_id,
         limit: q.limit,
         offset: q.offset,
     };
@@ -3155,9 +3322,10 @@ pub async fn admin_tools_page(Extension(principal): Extension<AuthPrincipal>) ->
 
 /// GET /api/tools — MCP 도구 목록 JSON API.
 pub async fn list_tools_api(
+    State(state): State<Arc<DashboardState>>,
     Extension(principal): Extension<AuthPrincipal>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_permission(&principal, PermissionKind::DashboardView)?;
+    require_permission(&state, &principal, PermissionKind::DashboardView).await?;
     // 단일 출처: fleet-mcp의 실제 도구 카탈로그를 그대로 노출한다.
     // 하드코딩 목록을 두면 MCP에 도구가 추가/삭제될 때 조용히 어긋난다.
     let tools: Vec<serde_json::Value> = fleet_mcp::schema::all_tools()
@@ -3459,7 +3627,8 @@ pub async fn logout(
             &principal.user.username,
             fleet_core::audit::action::AUTH_LOGOUT,
         )
-        .actor(principal.user.id),
+        .actor(principal.user.id)
+        .ip_opt(principal.client_ip.clone()),
     )
     .await;
     let removed = Cookie::from(SESSION_COOKIE);
@@ -3588,6 +3757,22 @@ pub async fn resend_verification_api(
         .create_email_verification_token(&verification)
         .await
         .map_err(|_| ApiError::Internal("DB error".into()))?;
+
+    // 감사: 이 엔드포인트는 **미인증**이다. 따라서 `actor_*`는 요청자가 증명된
+    // 신원이 아니라 *대상 계정*을 가리킨다 — `detail.unauthenticated`가 그
+    // 사실을 표시한다. 이 표시가 없으면 나중에 읽는 사람이 "이 사용자가 직접
+    // 재발송했다"로 오독한다. raw 토큰은 넣지 않는다.
+    crate::audit::record(
+        &state,
+        fleet_core::AuditEvent::success(
+            &user.username,
+            fleet_core::audit::action::AUTH_VERIFICATION_RESENT,
+        )
+        .actor(user.id)
+        .target("user", user.id.to_string())
+        .detail(serde_json::json!({ "unauthenticated": true, "via": "api" })),
+    )
+    .await;
 
     // 이메일 발송 (SMTP 미설정 시 로그 출력).
     let base_url =
@@ -3767,6 +3952,22 @@ pub async fn resend_verification_form(
                 .await
             {
                 tracing::error!(error = %e, "create_email_verification_token failed");
+            } else {
+                // 토큰이 실제로 만들어졌을 때만 기록한다. 미인증 엔드포인트라
+                // `actor_*`는 대상 계정을 가리킨다(`resend_verification_api`
+                // 주석 참고).
+                crate::audit::record(
+                    &state,
+                    fleet_core::AuditEvent::success(
+                        &user.username,
+                        fleet_core::audit::action::AUTH_VERIFICATION_RESENT,
+                    )
+                    .actor(user.id)
+                    .target("user", user.id.to_string())
+                    .ip(&ip)
+                    .detail(serde_json::json!({ "unauthenticated": true, "via": "form" })),
+                )
+                .await;
             }
 
             let base_url =
@@ -3914,6 +4115,24 @@ pub async fn forgot_password(
         };
         if let Err(e) = state.store.create_password_reset_token(&reset_token).await {
             tracing::error!(error = %e, "create_password_reset_token failed");
+        } else {
+            // 응답은 계정 존재 여부와 무관하게 동일하므로(열거 방지), "요청이
+            // 실제로 재설정 토큰을 만들었는가"를 아는 경로는 이 기록뿐이다.
+            // 존재하지 않는 이메일에서는 아무것도 만들어지지 않으므로 기록도
+            // 없다 — 덕분에 공격자가 넣은 문자열이 감사에 들어갈 길이 없다.
+            // raw 토큰과 재설정 URL은 절대 넣지 않는다.
+            crate::audit::record(
+                &state,
+                fleet_core::AuditEvent::success(
+                    &user.username,
+                    fleet_core::audit::action::AUTH_PASSWORD_RESET_REQUESTED,
+                )
+                .actor(user.id)
+                .target("user", user.id.to_string())
+                .ip(&ip)
+                .detail(serde_json::json!({ "unauthenticated": true })),
+            )
+            .await;
         }
 
         let base_url =
@@ -4573,6 +4792,8 @@ mod tests {
             user,
             permissions: role.permissions(),
             session_id: fleet_core::SessionId::new(),
+            // 미들웨어를 거치지 않고 만든 principal이므로 IP가 없다.
+            client_ip: None,
         }
     }
 

@@ -44,7 +44,7 @@ pub enum FleetEvent {
     },
 
     /// Agent가 Task 실행 중 도구를 호출했다고 알려 왔다
-    /// (로드맵 `#70` 게이트 ④ 선행).
+    /// (로드맵 `#70` 게이트 4 선행).
     ///
     /// **이것은 effect가 적용됐다는 증거가 아니다.** Agent의 보고이며,
     /// [실행 일관성](../../../docs/architecture/tasks/execution-consistency.md)이
@@ -264,7 +264,7 @@ impl FleetEvent {
         }
     }
 
-    /// Agent가 알려 온 도구 호출 하나 (로드맵 `#70` 게이트 ④ 선행).
+    /// Agent가 알려 온 도구 호출 하나 (로드맵 `#70` 게이트 4 선행).
     pub fn task_tool_call(
         task_id: TaskId,
         worker_id: WorkerId,

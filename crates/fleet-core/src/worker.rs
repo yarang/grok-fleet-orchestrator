@@ -64,7 +64,7 @@ pub struct Worker {
     /// 하위 호환을 위해 필드가 없는 구 페이로드/행은 이 값으로 취급한다.
     /// `OnDemand`의 dispatch 경로는 2026-09-06에 열렸다 — `WorkerSelector`가
     /// 고른 워커가 이 모드면 dispatch 직전에 ACP probe로 응답을 확인한다
-    /// (로드맵 `#70` 게이트 ⑤). Agent **배치**는 여전히 이 모드를 받지
+    /// (로드맵 `#70` 게이트 5). Agent **배치**는 여전히 이 모드를 받지
     /// 않는다: Agent 프로세스를 띄우는 것은 워커의 heartbeat 루프인데 이
     /// 모드는 그 루프를 시작하지 않기 때문이며, 그 제외는 probe로 풀리지
     /// 않는다 — [`docs/architecture/worker-liveness-policy.md`] 참고.
@@ -172,7 +172,7 @@ pub enum WorkerStatus {
 ///   fleet-scheduler의 HealthChecker가 누락 시 Offline으로 전이.
 /// - `OnDemand`: idle 시 트래픽 없음. HealthChecker는 이 모드를 강등하지
 ///   않으므로 저장된 `Online`은 생존을 뜻하지 않고, 그래서 `WorkerSelector`가
-///   dispatch 직전에 ACP probe로 응답을 확인한다(로드맵 `#70` 게이트 ⑤,
+///   dispatch 직전에 ACP probe로 응답을 확인한다(로드맵 `#70` 게이트 5,
 ///   2026-09-06). Agent 배치(`placement.rs`)는 여전히 이 모드를 제외한다 —
 ///   근거가 liveness가 아니라 `#61`의 모드 계약이라 probe로 풀리지 않는다.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

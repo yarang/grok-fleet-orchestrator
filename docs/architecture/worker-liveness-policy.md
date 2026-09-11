@@ -40,7 +40,7 @@ flowchart TD
 **2026-09-06: 위 표의 `on_demand` 행이 설계에서 구현으로 넘어왔다.** "dispatch 직전
 ACP probe"가 실제로 존재한다 — `WorkerTransport::probe`가 `session/list`를 왕복시키고,
 `WorkerSelector`가 고른 워커의 `liveness_mode`가 `on_demand`이면 dispatch 전에 그것을
-건다(로드맵 `#70` 게이트 ⑤). 표의 "첫 작업의 probe 지연"은 그 왕복 한 번이며 상한은
+건다(로드맵 `#70` 게이트 5). 표의 "첫 작업의 probe 지연"은 그 왕복 한 번이며 상한은
 `selector.rs`의 `PROBE_TIMEOUT`(5초)이다.
 
 두 가지를 함께 적어 둔다.

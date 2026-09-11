@@ -354,7 +354,7 @@ async fn the_binary_version_of_the_current_holder_is_recorded_and_replaced() {
         "인수인계는 버전도 함께 옮긴다"
     );
 
-    // 조회 경로도 같은 값을 준다 — 037의 값이 `RETURNING`에만 있고 `SELECT`에
+    // 조회 경로도 같은 값을 준다 — 039의 값이 `RETURNING`에만 있고 `SELECT`에
     // 빠지면 획득한 인스턴스만 알고 다른 아무도 못 읽는다.
     let fetched = store
         .get_control_lease(&cluster_id)
@@ -366,7 +366,7 @@ async fn the_binary_version_of_the_current_holder_is_recorded_and_replaced() {
 
 /// 버전을 주지 않는 호출자는 `None`으로 남는다 — "다르다"가 아니라 "모른다".
 ///
-/// 이 갈래가 필요한 이유는 037 이전에 만들어진 행과 이 컬럼을 쓰지 않는 옛
+/// 이 갈래가 필요한 이유는 039 이전에 만들어진 행과 이 컬럼을 쓰지 않는 옛
 /// 바이너리 때문이다. `NOT NULL`이었다면 둘 다 곧바로 깨진다.
 #[tokio::test]
 async fn a_holder_that_reports_no_version_stays_unknown() {

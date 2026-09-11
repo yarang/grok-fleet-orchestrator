@@ -112,7 +112,7 @@ pub struct HeartbeatRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_observations: Option<Vec<AgentObservation>>,
     /// Worker가 종료한, 이 오케스트레이터가 배정하지 않은 Agent 프로세스들
-    /// (로드맵 `#70` 게이트 ③).
+    /// (로드맵 `#70` 게이트 3).
     ///
     /// `agent_observations`와 달리 **`Vec`이다.** 저쪽이 `Option`인 이유는 빈
     /// 목록이 "전부 지워라"라는 주장이어서 "말할 것이 없음"과 구분해야 하기

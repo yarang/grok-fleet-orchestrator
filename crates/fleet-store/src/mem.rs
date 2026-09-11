@@ -1401,6 +1401,10 @@ impl Store for MemStore {
                 Some(action) => &e.action == action,
                 None => true,
             })
+            .filter(|e| match filter.project_id {
+                Some(pid) => e.project_id == Some(pid),
+                None => true,
+            })
             .cloned()
             .collect();
         out.sort_by_key(|t| std::cmp::Reverse(t.created_at));
