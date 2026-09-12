@@ -1485,12 +1485,17 @@ pub async fn delete_project_api(
     // 동작을 요구하므로 규칙을 각자 구현하지 않는다. 상태 전이는 콜백으로
     // 받아 이 표면의 감사 파이프라인에 기록한다.
     let mut transitions = Vec::new();
-    let progress =
-        fleet_store::advance_project_archive(state.store.as_ref(), &mut project, |status| {
-            transitions.push(status)
-        })
-        .await
-        .map_err(|e| ApiError::Store(e.to_string()))?;
+    // archive는 제어면 결정이므로 lease를 잃은 인스턴스가 수행하면 안 된다
+    // (로드맵 `#70`). fence 획득은 이 파일의 다른 제어 경로와 같은 관용구다.
+    let fence = state.dispatcher.as_ref().and_then(|d| d.control_fence());
+    let progress = fleet_store::advance_project_archive(
+        state.store.as_ref(),
+        &mut project,
+        fence.as_ref(),
+        |status| transitions.push(status),
+    )
+    .await
+    .map_err(|e| ApiError::Store(e.to_string()))?;
 
     for status in transitions {
         let action = match status {
@@ -1517,6 +1522,14 @@ pub async fn delete_project_api(
             blockers.labels().into_iter().map(str::to_string).collect()
         }
         fleet_store::ArchiveProgress::Archived => Vec::new(),
+        // fenced는 "아직 막는 것이 있다"가 아니라 "이 인스턴스가 더는 제어
+        // 주체가 아니다"이므로 blockers 목록으로 접지 않는다 — 접으면 운영자가
+        // 재시도하면 된다고 읽는다.
+        fleet_store::ArchiveProgress::Fenced => {
+            return Err(ApiError::Store(
+                "control-plane lease lost: this instance no longer owns archive".to_string(),
+            ));
+        }
     };
 
     Ok(Json(crate::schema::ProjectArchiveResponse {

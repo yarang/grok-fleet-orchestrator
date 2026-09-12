@@ -1708,7 +1708,13 @@ impl Store for MemStore {
         &self,
         id: ProjectId,
         status: ProjectStatus,
+        fence: Option<&ControlFence>,
     ) -> Result<bool, StoreError> {
+        // Postgres 쪽과 마찬가지로 fenced를 다른 어떤 판정보다 먼저 본다.
+        // 판정을 projects 락 **밖에서** 끝내는 것도 같다.
+        if !self.control_fence_holds(fence) {
+            return Ok(false);
+        }
         let mut projects = self.projects.lock().unwrap();
         match projects.get_mut(&id) {
             Some(p) => {

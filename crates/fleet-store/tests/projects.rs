@@ -14,7 +14,7 @@
 
 use chrono::Duration;
 use fleet_core::{Project, ProjectFilter, ProjectStatus, Task, TaskRequest, TaskStatus};
-use fleet_store::{PgStore, Store, StoreError};
+use fleet_store::{ControlFence, PgStore, Store, StoreError};
 use sqlx::postgres::PgPoolOptions;
 
 fn database_url() -> Option<String> {
@@ -208,7 +208,7 @@ async fn update_project_status_transitions_and_bumps_updated_at() {
     store.create_project(&project).await.unwrap();
 
     let updated = store
-        .update_project_status(project.id, ProjectStatus::Draining)
+        .update_project_status(project.id, ProjectStatus::Draining, None)
         .await
         .unwrap();
     assert!(updated);
@@ -226,7 +226,7 @@ async fn update_project_status_for_unknown_id_returns_false() {
     require_db!(store);
     let bogus = Project::new("throwaway").id;
     let updated = store
-        .update_project_status(bogus, ProjectStatus::Archived)
+        .update_project_status(bogus, ProjectStatus::Archived, None)
         .await
         .unwrap();
     assert!(!updated);
@@ -264,5 +264,126 @@ async fn project_has_active_tasks_reflects_pending_and_dispatched_but_not_termin
     assert!(
         store.project_has_active_tasks(project.id).await.unwrap(),
         "a pending task referencing the project must count as active"
+    );
+}
+
+/// lease를 만료시켜 다른 instance가 가져가게 하고 `(살아 있는, 낡은)` fence를
+/// 돌려준다. cluster_id는 테스트마다 유일하다.
+async fn fences(store: &PgStore, label: &str) -> (ControlFence, ControlFence) {
+    let cluster = format!("projects-fence-{label}-{}", uuid::Uuid::new_v4());
+    let first = store
+        .acquire_control_lease(
+            &cluster,
+            "instance-a",
+            std::time::Duration::from_millis(1),
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let second = store
+        .acquire_control_lease(
+            &cluster,
+            "instance-b",
+            std::time::Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");
+    (
+        ControlFence {
+            cluster_id: cluster.clone(),
+            epoch: second.epoch,
+        },
+        ControlFence {
+            cluster_id: cluster,
+            epoch: first.epoch,
+        },
+    )
+}
+
+/// 제어권을 잃은 인스턴스는 Project를 archive하지 못한다 (로드맵 `#70`).
+///
+/// **이 경로에는 2026-09-12까지 fence도 `lease_allows_control()` 검사도 없었다.**
+/// `update_project_status`는 조건 없는 `UPDATE`였고, MCP·Dashboard 어느 핸들러도
+/// lease를 묻지 않았다 — 즉 fenced 인스턴스가 Project를 archive할 수 있었다.
+/// dispatch/cancel은 `#62`·`#63`에서 막혔는데 archive만 남아 있었다.
+///
+/// 시험을 실제 Postgres로 두는 이유는 fence가 **SQL 술어**이기 때문이다.
+/// 스케줄러 단위 시험은 `MemStore`로 돌아 이 `AND EXISTS`를 한 줄도 검증하지
+/// 않는다.
+#[tokio::test]
+async fn a_fenced_instance_cannot_archive_a_project() {
+    require_db!(store);
+
+    let (live, stale) = fences(&store, "archive").await;
+
+    let project = Project::new(format!("fenced-{}", uuid::Uuid::new_v4()));
+    store.create_project(&project).await.unwrap();
+
+    // 낡은 fence로는 Active → Draining 전이조차 적용되지 않는다.
+    assert!(
+        !store
+            .update_project_status(project.id, ProjectStatus::Draining, Some(&stale))
+            .await
+            .unwrap(),
+        "제어권을 잃은 인스턴스의 쓰기는 0행이어야 한다"
+    );
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().status,
+        ProjectStatus::Active,
+        "거절된 쓰기가 상태를 바꿨다면 fence가 술어로 걸리지 않은 것이다"
+    );
+
+    // 살아 있는 fence로는 같은 전이가 적용된다 — 술어가 전이 자체를 막는
+    // 것이 아니라 **누가 하느냐**를 가른다는 것을 이 대조가 보인다.
+    assert!(
+        store
+            .update_project_status(project.id, ProjectStatus::Draining, Some(&live))
+            .await
+            .unwrap(),
+        "lease를 쥔 인스턴스는 통과해야 한다"
+    );
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().status,
+        ProjectStatus::Draining
+    );
+
+    // fence가 `None`인 배포(HA lease 미사용)는 그대로 통과한다.
+    assert!(
+        store
+            .update_project_status(project.id, ProjectStatus::Archived, None)
+            .await
+            .unwrap(),
+        "lease를 켜지 않은 단일 인스턴스 배포는 막히면 안 된다"
+    );
+}
+
+/// `advance_project_archive`가 fenced를 `Draining`과 **다른 값**으로 보고한다.
+///
+/// 둘을 뭉개면 호출부가 "아직 막는 것이 있다"로 읽고 재시도하는데, fenced
+/// 인스턴스의 재시도는 영원히 성공하지 않는다.
+#[tokio::test]
+async fn archive_reports_fenced_separately_from_blocked() {
+    require_db!(store);
+
+    let (_live, stale) = fences(&store, "progress").await;
+
+    let mut project = Project::new(format!("fenced-prog-{}", uuid::Uuid::new_v4()));
+    store.create_project(&project).await.unwrap();
+
+    let progress = fleet_store::advance_project_archive(&store, &mut project, Some(&stale), |_| {})
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(progress, fleet_store::ArchiveProgress::Fenced),
+        "fenced는 Draining이 아니라 Fenced로 보고되어야 한다 (got {progress:?})"
+    );
+    assert_eq!(
+        project.status,
+        ProjectStatus::Active,
+        "거절됐으면 메모리 상태도 전이되면 안 된다"
     );
 }

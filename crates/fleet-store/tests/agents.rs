@@ -339,7 +339,7 @@ async fn a_live_agent_holds_the_project_in_draining() {
     let agent = Agent::new(project.id, "blocker");
     store.create_agent(&agent).await.unwrap();
 
-    let progress = fleet_store::advance_project_archive(&store, &mut project, |_| {})
+    let progress = fleet_store::advance_project_archive(&store, &mut project, None, |_| {})
         .await
         .unwrap();
     assert_eq!(
@@ -362,7 +362,7 @@ async fn a_live_agent_holds_the_project_in_draining() {
         .update_agent_status(agent.id, AgentStatus::Stopped)
         .await
         .unwrap();
-    fleet_store::advance_project_archive(&store, &mut project, |_| {})
+    fleet_store::advance_project_archive(&store, &mut project, None, |_| {})
         .await
         .unwrap();
     assert_eq!(project.status, ProjectStatus::Archived);
@@ -382,7 +382,7 @@ async fn archived_project_survives_agent_rows() {
         .await
         .unwrap();
 
-    fleet_store::advance_project_archive(&store, &mut project, |_| {})
+    fleet_store::advance_project_archive(&store, &mut project, None, |_| {})
         .await
         .unwrap();
     assert_eq!(project.status, ProjectStatus::Archived);

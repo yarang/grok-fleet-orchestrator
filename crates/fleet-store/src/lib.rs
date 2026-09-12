@@ -1162,10 +1162,22 @@ pub trait Store: Send + Sync {
     /// 곧바로 `Draining`으로 못 감)은 이 메서드가 아니라 호출부(`fleet-api`
     /// 핸들러)가 검사한다 — Store는 CAS 없는 단순 쓰기다. 존재하지 않는
     /// id면 `false`.
+    ///
+    /// `fence`가 주어지면 그 epoch를 **쓰기 술어로** 건다(로드맵 `#70`). Project
+    /// archive는 제어면 결정이므로 lease를 잃은 인스턴스가 수행하면 안 된다 —
+    /// 그런데 2026-09-12까지 이 경로에는 fence도 `lease_allows_control()` 검사도
+    /// 없어서, fenced 인스턴스가 Project를 archive할 수 있었다. `None`이면 술어를
+    /// 걸지 않는다(HA lease를 켜지 않은 단일 인스턴스 배포 — `lease_allows_control()`이
+    /// 같은 경우에 `true`를 주는 것과 짝을 이룬다).
+    ///
+    /// fence가 막아서 0행이면 `false`를 준다. 존재하지 않는 id와 같은 값인 것은
+    /// 호출부가 그 둘을 구분할 필요가 없기 때문이다 — 어느 쪽이든 "이 인스턴스는
+    /// 이 전이를 적용하지 못했다"이고, 재시도가 아니라 중단이 옳다.
     async fn update_project_status(
         &self,
         _id: ProjectId,
         _status: ProjectStatus,
+        _fence: Option<&ControlFence>,
     ) -> Result<bool, StoreError> {
         Err(StoreError::Unsupported("update_project_status"))
     }

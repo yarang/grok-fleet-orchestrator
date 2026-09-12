@@ -1099,10 +1099,23 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
     // archive 절차는 Dashboard `DELETE /api/projects/{id}`와 공유한다
     // (`fleet_store::advance_project_archive`). MCP 표면에는 아직 감사
     // 파이프라인이 없어 상태 전이 콜백은 무시한다 — 감사 확장은 `#95`.
-    let progress =
-        fleet_store::advance_project_archive(ctx.state.store.as_ref(), &mut project, |_| {})
-            .await
-            .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+    // archive는 제어면 결정이므로 lease를 잃은 인스턴스가 수행하면 안 된다
+    // (로드맵 `#70`). 이 표면의 다른 제어 경로와 같은 관용구를 쓴다.
+    let fence = ctx.state.control_fence();
+    let progress = fleet_store::advance_project_archive(
+        ctx.state.store.as_ref(),
+        &mut project,
+        fence.as_ref(),
+        |_| {},
+    )
+    .await
+    .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    if matches!(progress, fleet_store::ArchiveProgress::Fenced) {
+        return Err(JsonRpcError::internal(
+            "control-plane lease lost: this instance no longer owns archive".to_string(),
+        ));
+    }
 
     // 게이트가 막았으면 사유도 함께 싣는다 — Dashboard와 **같은 어휘**를
     // 쓴다(`ArchiveBlockers::labels`). 여기서 문자열을 따로 지으면 같은 사유가

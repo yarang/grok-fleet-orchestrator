@@ -2432,7 +2432,7 @@ async fn reply_is_rejected_when_the_parents_project_has_since_been_archived() {
     // 부모 제출 이후 Project가 archive됐다.
     project.status = fleet_core::ProjectStatus::Archived;
     store
-        .update_project_status(project.id, fleet_core::ProjectStatus::Archived)
+        .update_project_status(project.id, fleet_core::ProjectStatus::Archived, None)
         .await
         .unwrap();
 

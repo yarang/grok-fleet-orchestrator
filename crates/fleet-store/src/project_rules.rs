@@ -11,7 +11,7 @@
 
 use fleet_core::{Project, ProjectId, ProjectStatus};
 
-use crate::{Store, StoreError};
+use crate::{ControlFence, Store, StoreError};
 
 /// [`ensure_project_accepts_new_tasks`]와 [`ensure_project_accepts_new_agents`]의
 /// 거절 사유.
@@ -166,6 +166,15 @@ pub enum ArchiveProgress {
     Draining(ArchiveBlockers),
     /// 게이트를 통과해 `Archived`에 도달했다(또는 이미 `Archived`였다).
     Archived,
+    /// 제어면 fence가 쓰기를 거절했다 — 이 인스턴스는 lease를 잃었다
+    /// (로드맵 `#70`).
+    ///
+    /// [`Draining`](Self::Draining)과 **구분해야 하는 이유**는 호출부가 해야 할
+    /// 일이 정반대이기 때문이다. `Draining`은 "아직 막는 것이 있다"이므로
+    /// 나중에 다시 부르는 것이 맞지만, `Fenced`는 "이 인스턴스가 더는 제어
+    /// 주체가 아니다"이므로 재시도가 아니라 **중단**이 옳다. 하나로 뭉개면
+    /// fenced 인스턴스가 영원히 재시도하는 루프가 된다.
+    Fenced,
 }
 
 /// Project archive 요청을 한 단계 진행시킨다 (로드맵 #48 1단계 축소판).
@@ -199,12 +208,16 @@ pub enum ArchiveProgress {
 pub async fn advance_project_archive(
     store: &dyn Store,
     project: &mut Project,
+    fence: Option<&ControlFence>,
     mut on_transition: impl FnMut(ProjectStatus),
 ) -> Result<ArchiveProgress, StoreError> {
     if project.status == ProjectStatus::Active {
-        store
-            .update_project_status(project.id, ProjectStatus::Draining)
-            .await?;
+        if !store
+            .update_project_status(project.id, ProjectStatus::Draining, fence)
+            .await?
+        {
+            return Ok(ArchiveProgress::Fenced);
+        }
         project.status = ProjectStatus::Draining;
         on_transition(ProjectStatus::Draining);
     }
@@ -221,9 +234,12 @@ pub async fn advance_project_archive(
         if blockers.any() {
             return Ok(ArchiveProgress::Draining(blockers));
         }
-        store
-            .update_project_status(project.id, ProjectStatus::Archived)
-            .await?;
+        if !store
+            .update_project_status(project.id, ProjectStatus::Archived, fence)
+            .await?
+        {
+            return Ok(ArchiveProgress::Fenced);
+        }
         project.status = ProjectStatus::Archived;
         on_transition(ProjectStatus::Archived);
     }
@@ -313,7 +329,7 @@ mod tests {
 
         let mut transitions = Vec::new();
         let progress =
-            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+            advance_project_archive(store.as_ref(), &mut project, None, |s| transitions.push(s))
                 .await
                 .unwrap();
 
@@ -342,7 +358,7 @@ mod tests {
 
         let mut transitions = Vec::new();
         let progress =
-            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+            advance_project_archive(store.as_ref(), &mut project, None, |s| transitions.push(s))
                 .await
                 .unwrap();
 
@@ -367,7 +383,7 @@ mod tests {
             .await
             .unwrap();
 
-        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+        let progress = advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
         assert_eq!(progress, ArchiveProgress::Archived);
@@ -416,7 +432,7 @@ mod tests {
         // Task는 하나도 없다 — 막는 것은 오직 Agent다. 게이트가 그렇게
         // **말하는지**까지 확인한다: 이 단정이 없으면 사유가 "tasks"로
         // 잘못 붙어도 테스트는 통과한다(2026-08-28에 실제로 그랬다).
-        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+        let progress = advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
         assert_eq!(
@@ -433,7 +449,7 @@ mod tests {
             .update_agent_status(agent.id, AgentStatus::Stopped)
             .await
             .unwrap();
-        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+        let progress = advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
         assert_eq!(progress, ArchiveProgress::Archived);
@@ -457,7 +473,7 @@ mod tests {
             .await
             .unwrap();
 
-        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+        let progress = advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
 
@@ -494,7 +510,7 @@ mod tests {
             .await
             .unwrap();
 
-        let progress = advance_project_archive(store.as_ref(), &mut project, |_| {})
+        let progress = advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
         assert_eq!(progress, ArchiveProgress::Archived);
@@ -506,13 +522,13 @@ mod tests {
         let mut project = Project::new("twice");
         store.create_project(&project).await.unwrap();
 
-        advance_project_archive(store.as_ref(), &mut project, |_| {})
+        advance_project_archive(store.as_ref(), &mut project, None, |_| {})
             .await
             .unwrap();
 
         let mut transitions = Vec::new();
         let progress =
-            advance_project_archive(store.as_ref(), &mut project, |s| transitions.push(s))
+            advance_project_archive(store.as_ref(), &mut project, None, |s| transitions.push(s))
                 .await
                 .unwrap();
 

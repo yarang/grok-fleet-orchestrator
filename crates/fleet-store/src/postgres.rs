@@ -2851,13 +2851,34 @@ impl Store for PgStore {
         &self,
         id: ProjectId,
         status: ProjectStatus,
+        fence: Option<&ControlFence>,
     ) -> Result<bool, StoreError> {
-        let result =
-            sqlx::query("UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1")
+        // fence 술어는 `UPDATE`와 **같은 문장 안에** 있어야 한다. lease를 먼저
+        // SELECT해서 분기하면 SELECT와 UPDATE 사이에 fenced되어도 이미 떠난
+        // 쓰기가 그대로 도착한다 — `transition_task_status`가 같은 이유로 같은
+        // 모양을 쓴다.
+        let result = match fence {
+            Some(f) => {
+                sqlx::query(
+                    "UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1 \
+                     AND EXISTS (SELECT 1 FROM control_plane_lease \
+                                 WHERE cluster_id = $3 AND epoch = $4)",
+                )
                 .bind(id.0)
                 .bind(status.as_str())
+                .bind(f.cluster_id.as_str())
+                .bind(f.epoch)
                 .execute(&self.pool)
-                .await?;
+                .await?
+            }
+            None => {
+                sqlx::query("UPDATE projects SET status = $2, updated_at = NOW() WHERE id = $1")
+                    .bind(id.0)
+                    .bind(status.as_str())
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
         Ok(result.rows_affected() > 0)
     }
 
