@@ -175,6 +175,51 @@ Worker 자신이 이미 쥐고 있던 두 근거였다 — 명령 목록에서�
 | 6. audit 상관관계 필드로 경로 재구성 | 차단 | **일부는 들어왔다** — `project_id`는 `037`로 `audit_log`의 1급 컬럼이 되어 `AuditFilter` 술어와 인덱스를 갖고(`#95` 1단계), Agent 배정·회수의 `generation`은 `detail`에 실린다(`#67`, provisioning.md 「구현 게이트」 4). 없는 것은 **effect 경로**다: effect ledger가 없으므로(게이트 4) 감사는 "누가 언제 무엇을 시켰는가"까지만 말하고 "그 시킴이 어디까지 적용됐는가"를 말하지 못한다. `lease_generation`·`fencing_token`은 요구에서 빠진다 — `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01). `control_epoch`는 `026`·`035`로 이미 저장소에 있으나, 감사 필드로 승격할지는 effect 경로가 생긴 뒤에 판단한다 **2026-09-06 — 이 행의 근거는 `claude/pam-phase2-task5` 병합 전 트리에서 재도출된 것이라, 아래 사실이 그 뒤에 들어왔다.** **막힌 자리가 필드가 아니라는 것이 드러났고, 그 선행이 들어왔다.** 실측: 감사 emitter 35군데가 전부 `fleet-api`·`fleet-dashboard`·`fleet-core`이고 `fleet-scheduler`는 **0건**이라 dispatch·펜싱 같은 제어면 결정이 감사에 아무것도 남기지 않았다. 컬럼만 먼저 만들었다면 모든 emitter에서 항상 NULL이었을 것이다. `FleetState::audit_control`이 그 경로를 열어 셋을 남긴다: `control.dispatch_refused`(리스가 없어 스스로 물러섬), `control.write_fenced`(리스가 있다고 믿고 쓰러 갔다가 저장소가 세대 불일치로 막음 — **"둘 이상의 owner"의 직접 증거이며 `control_epoch`가 실제로 채워지는 유일한 경우다**), `control.outcome_abandoned`(리스를 잃어 워커 결과의 제어 처리를 건너뜀). 마이그레이션 040이 `audit_log.control_epoch`를 더한다; NULL이 두 가지 정상을 뜻하므로(운영자 행위, 세대를 갖지 못한 채 내린 거절) nullable이다. 행위자는 `cluster_id`가 아니라 `instance_id`다 — 같은 cluster의 두 인스턴스는 구분되지 않는다. **게이트는 여전히 차단이다 — 다만 남은 것은 필드가 아니라 `effect` 경로 하나다**. `lease_generation`·`fencing_token`의 grep 0건은 차단 근거가 **아니다**: [제어면 권한과 failover](control-plane-authority-and-failover.md)의 2026-09-01 처분표가 그 둘을 `agents.command_generation`으로 **충족 처리**했다(031이 이미 DB가 발행하는 Agent별 단조 증가 값을 만들었고 이름만 다르다). 이 칸이 요구하는 `Project·Task·lease·effect` 네 경로 중 Project(`037`)·Task·lease(`040`과 `control.*` 감사 셋)는 필드와 실제 Postgres 왕복 시험(`crates/fleet-store/tests/audit_integration.rs`의 `a_control_epoch_survives_the_round_trip`)까지 갖췄다. 없는 것은 effect ledger뿐이고, 따라서 이 칸의 선행은 이제 **게이트 4 단 하나**다 (2026-09-12 정정: 이 자리에 있던 `lease_generation`·`fencing_token` 사유는 `da523a6`이 이미 걷어낸 폐기 사유가 되살아난 것이었다) |
 | 7. `CancelUnconfirmed` 전 archive 차단 | 차단 | `CancelUnconfirmed` 상태가 코드에 존재하지 않는다(grep 0건). 선행 `#67`·`#91` |
 
+### 실행 신원의 내구화 (2026-09-13) — 게이트 2·4·6·7의 공통 선행
+
+차단된 네 게이트가 전부 같은 하나를 기다리고 있었다: **이 Task의 실행을 가리킬
+이름**. ACP `session_id`는 `fleet-transport`의 인메모리 맵에만 있었고
+`fleet-store`·`fleet-core`에 grep 0건이라, 오케스트레이터가 재시작하면 자기가
+무엇을 띄웠는지 지목할 수단이 사라졌다.
+
+**별도 `task_attempts` 테이블을 만들지 않았다.** 2026-08-26의
+[Attempt 흡수 판정](project-task-agent-lifecycle.md#attempt-흡수-판정)(로드맵 `#97`)이
+`TaskAttempt`를 `Task`에 흡수시켰고, 그 판정은 문서가 아니라 **코드에서 참**이다 —
+`Task::allowed_predecessors(Pending)`이 빈 배열이라 `Dispatched → Pending`이 없고,
+한 번 dispatch된 Task는 영원히 한 번만 dispatch된다. 재시도는
+`NoWorker`/`CircuitOpen`에만 걸려 Task를 `Pending`에 남기므로 실행을 둘로 만들지
+않는다. 따라서 `task_id`가 곧 실행 신원이고, 세션은 그 행에 1:1로 얹힌다.
+
+마이그레이션 041이 `tasks.acp_session_id`를 더한다(nullable — 세션이 열리기 전,
+열리지 못한 채 실패한 Task, 이 컬럼 이전의 모든 행은 세션이 **없는** 것이지 "빈
+세션"이 아니다). 쓰기는 `Store::record_task_acp_session`이고 술어가 둘이다:
+`acp_session_id IS NULL`과 fence. 전자는 낙관적 최적화가 아니라 **흡수 판정의
+불변식을 DB에서 강제**하는 것이다 — 서로 다른 두 세션 id가 같은 행에 도착하면
+그것은 덮어쓸 일이 아니라 위반이고, 덮어쓰기를 허용하면 먼저 열린 세션이
+추적 불가능한 고아가 된다. 후자는 세션을 연 인스턴스가 이미 제어권을 잃었다면
+그 기록도 그 인스턴스의 것이 아니기 때문이다. 둘 다 `UPDATE`와 같은 문장 안에 있다.
+
+경로는 `WorkerEvent::SessionOpened`다. `session/new` 성공 직후 — 세션을 맵에 넣는
+그 줄의 옆에서 — 발행되고, dispatcher가 fence를 걸어 기록한다. `Output`/`ToolCall`을
+lease와 무관하게 흘려보내는 것과 갈리는 자리인데, **그 둘은 관측이고 이것은
+신원**이기 때문이다: 관측은 틀려도 나중에 버리면 되지만 신원이 틀리면 재시작 뒤의
+cleanup이 남의 세션을 지목한다.
+
+**창을 닫지 않고 좁혔다.** `session_id`는 `Pending → Dispatched` CAS보다 늦게 생기므로
+같은 문장에 실을 수 없다. 그 사이에 크래시하면 세션은 열렸는데 이름이 없는 창이
+그대로 있고, 남은 폭은 `session/new` 왕복이다. 이것을 "닫았다"고 적으면 이 저장소가
+반복해 온 바로 그 오류다.
+
+시험은 `crates/fleet-store/tests/task_cas.rs`의 셋이며 `both_backends!`로 `MemStore`와
+실제 Postgres 양쪽에서 돈다. 낡은 fence의 거절만 보면 "항상 거절한다"는 구현으로도
+통과하므로 **살아 있는 fence로 같은 기록이 통과하는 대조**를 함께 뒀다. 전송 계층
+쪽은 `acp_transport_integration.rs`가 실제 `session/new` 왕복에서 `SessionOpened`가
+나오는지 단정한다 — 그 단정이 없으면 이벤트가 발행되지 않아도 그 시험은 통과한다.
+
+**아직 소비자가 없다**: cancel의 재시작 후 폴백과 Reconciler의 inventory 대조가
+다음이다. 게이트 2의 오른쪽 절반(`session/list` 응답)은 여전히 grok의 지원 여부에
+달려 있고 그것은 아직 실측되지 않았다.
+
 ### 어느 게이트에도 귀속되지 않았던 archive의 제어 구멍 (2026-09-12, 닫음)
 
 게이트 4·7이 archive를 다루지만, 둘 다 **무엇이 archive를 막아야 하는가**(effect, 미확인

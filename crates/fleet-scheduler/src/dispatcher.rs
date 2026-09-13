@@ -132,7 +132,9 @@ impl Dispatcher {
                 WorkerEvent::Completed { task_id, .. } | WorkerEvent::Failed { task_id, .. } => {
                     *task_id
                 }
-                WorkerEvent::Output { .. } | WorkerEvent::ToolCall { .. } => {
+                WorkerEvent::Output { .. }
+                | WorkerEvent::ToolCall { .. }
+                | WorkerEvent::SessionOpened { .. } => {
                     unreachable!("filtered by the matches! guard above")
                 }
             };
@@ -340,6 +342,41 @@ impl Dispatcher {
 
                 // 전이 결과와 무관하게 감소 — 위 Completed 핸들러의 주석 참조.
                 dec_running();
+            }
+            WorkerEvent::SessionOpened {
+                task_id,
+                session_id,
+            } => {
+                // **fence를 건다.** 세션을 연 것은 dispatch한 인스턴스이고,
+                // 그 인스턴스가 이미 제어권을 잃었다면 이 기록도 그
+                // 인스턴스의 것이 아니다. `Output`/`ToolCall`을 lease와 무관하게
+                // 흘려보내는 것과 갈리는 자리인데, 그 둘은 관측이고 이것은
+                // **신원**이기 때문이다 — 관측은 틀려도 나중에 버리면 되지만
+                // 신원이 틀리면 재시작 뒤의 cleanup이 남의 세션을 지목한다.
+                let fence = self.state.control_fence();
+                match self
+                    .state
+                    .store
+                    .record_task_acp_session(task_id, &session_id, fence.as_ref())
+                    .await
+                {
+                    Ok(true) => {
+                        tracing::debug!(%task_id, "acp session recorded");
+                    }
+                    // 셋 중 어느 이유든(이미 값이 있음 · fenced · 없는 id)
+                    // 재시도가 아니라 기록이 옳다. 특히 "이미 값이 있음"은
+                    // 한 Task에 실행이 둘이라는 뜻이라 흡수 판정(`#97`)의
+                    // 불변식 위반이고, 조용히 지나가면 안 된다.
+                    Ok(false) => {
+                        tracing::warn!(
+                            %task_id,
+                            "acp session not recorded — already set, fenced, or unknown task"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(%task_id, error = %e, "failed to record acp session");
+                    }
+                }
             }
             WorkerEvent::Output {
                 task_id,

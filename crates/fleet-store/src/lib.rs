@@ -332,6 +332,31 @@ pub trait Store: Send + Sync {
     /// `CircuitOpen`으로 실패할 때마다 호출된다.
     async fn increment_task_retry_count(&self, id: TaskId) -> Result<u32, StoreError>;
 
+    /// 실행 중인 ACP 세션의 id를 Task 행에 기록한다 (로드맵 `#70` 게이트 2·7 선행).
+    ///
+    /// **비어 있을 때만 쓴다.** `WHERE acp_session_id IS NULL`을 술어로 걸어
+    /// 이미 있는 값을 덮지 않는다. 이것이 낙관적 최적화가 아니라 **불변식의
+    /// 강제**인 이유는 Attempt 흡수 판정(로드맵 `#97`) 때문이다 — 한 Task에는
+    /// 실행이 하나뿐이므로 서로 다른 두 세션 id가 같은 행에 도착하는 일은
+    /// 일어나면 안 된다. 덮어쓰기를 허용하면 그 위반이 조용히 지나가고, 마지막
+    /// 하나만 남아 나머지 세션이 추적 불가능한 고아가 된다.
+    ///
+    /// `fence`가 주어지면 그 epoch를 **같은 문장 안에서** 함께 건다. 세션을 연
+    /// 것은 dispatch한 인스턴스이고, 그 인스턴스가 이미 제어권을 잃었다면 이
+    /// 기록도 그 인스턴스의 것이 아니다.
+    ///
+    /// 반환값은 **행을 실제로 바꿨는지**다. `false`인 경우가 셋이고 호출부가
+    /// 그 셋을 구분할 필요는 없다 — 이미 값이 있었거나, fence가 막았거나,
+    /// 그런 id가 없거나. 어느 쪽이든 재시도가 아니라 기록(log)이 옳은 처분이다.
+    async fn record_task_acp_session(
+        &self,
+        _id: TaskId,
+        _session_id: &str,
+        _fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("record_task_acp_session"))
+    }
+
     /// 작업 마이그레이션 이관용 Git 임시 브랜치명을 업데이트합니다.
     async fn update_task_checkpoint(
         &self,

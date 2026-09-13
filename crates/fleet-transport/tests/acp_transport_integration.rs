@@ -601,6 +601,7 @@ async fn dispatch_streams_output_and_completes() {
 
     let mut output = String::new();
     let mut completed = false;
+    let mut session_opened = false;
     let mut duration_secs = 0.0_f64;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -615,6 +616,20 @@ async fn dispatch_streams_output_and_completes() {
             // 결함이므로 조용히 넘기지 않는다.
             Ok(Some(WorkerEvent::ToolCall { invocation, .. })) => {
                 panic!("unexpected tool call: {invocation:?}")
+            }
+            // 실제 `session/new` 왕복에서 신원이 나오는지를 여기서 확인한다
+            // (로드맵 `#70` 게이트 2·7 선행). 이 단정이 없으면 `SessionOpened`가
+            // 발행되지 않아도 이 시험은 그대로 통과한다.
+            Ok(Some(WorkerEvent::SessionOpened {
+                task_id: t,
+                session_id,
+            })) => {
+                assert_eq!(t, task_id);
+                assert!(
+                    !session_id.is_empty(),
+                    "빈 세션 id는 신원이 아니다 — 없는 것과 구분되지 않는다"
+                );
+                session_opened = true;
             }
             Ok(Some(WorkerEvent::Completed { task_id: t, result })) => {
                 assert_eq!(t, task_id);
@@ -632,6 +647,11 @@ async fn dispatch_streams_output_and_completes() {
         }
     }
     assert!(completed, "should receive Completed");
+    assert!(
+        session_opened,
+        "session/new가 성공했는데 SessionOpened가 오지 않았다 — 그러면 이 실행은 \
+         오케스트레이터가 재시작하는 순간 이름 없는 세션이 된다"
+    );
     assert_eq!(output, "Hello world");
     assert!(
         duration_secs >= 0.0,

@@ -95,6 +95,22 @@ pub enum WorkerEvent {
         invocation: fleet_core::ToolInvocation,
     },
 
+    /// `session/new`가 성공해 이 Task의 ACP 세션이 열렸다
+    /// (로드맵 `#70` 게이트 2·7 선행).
+    ///
+    /// **`ToolCall`과 달리 이것은 관측이 아니라 신원이다.** 이 id가 도착하기
+    /// 전까지 오케스트레이터는 자기가 무엇을 띄웠는지 가리킬 이름이 없고,
+    /// 재시작하면 그 이름은 인메모리 맵과 함께 사라진다. 소비자는 이것을
+    /// Task 행에 내구화해서 재시작 뒤에도 세션을 지목할 수 있게 한다.
+    ///
+    /// dispatch 확정(`Pending → Dispatched` CAS)보다 **늦게** 온다 — 세션은
+    /// 그 CAS 뒤에 열리기 때문이다. 그 사이의 창은 이 이벤트로 닫히지 않고
+    /// `session/new` 왕복 폭으로 좁혀질 뿐이다.
+    SessionOpened {
+        task_id: TaskId,
+        session_id: String,
+    },
+
     Completed {
         task_id: TaskId,
         result: TaskResult,

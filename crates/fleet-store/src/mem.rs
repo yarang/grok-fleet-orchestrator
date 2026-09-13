@@ -350,6 +350,28 @@ impl Store for MemStore {
         Ok(task.retry_count)
     }
 
+    async fn record_task_acp_session(
+        &self,
+        id: TaskId,
+        session_id: &str,
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // Postgres 쪽과 마찬가지로 fenced를 다른 어떤 판정보다 먼저 보고,
+        // 그 판정을 tasks 락 **밖에서** 끝낸다.
+        if !self.control_fence_holds(fence) {
+            return Ok(false);
+        }
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.get_mut(&id) else {
+            return Ok(false);
+        };
+        if task.acp_session_id.is_some() {
+            return Ok(false);
+        }
+        task.acp_session_id = Some(session_id.to_string());
+        Ok(true)
+    }
+
     async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
         if self.is_failing("count_dispatched_tasks_by_worker") {
             return Err(StoreError::Unsupported("count_dispatched_tasks_by_worker"));

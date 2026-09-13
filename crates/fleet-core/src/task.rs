@@ -271,6 +271,27 @@ pub struct Task {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dispatched_at: Option<DateTime<Utc>>,
+    /// 이 Task를 실행 중인 ACP 세션의 id (로드맵 `#70` 게이트 2·7 선행).
+    ///
+    /// **이것이 이 Task의 실행 신원이다.** 별도 `TaskAttempt` 엔티티를 두지
+    /// 않는 것은 2026-08-26의 [흡수 판정](로드맵 `#97`) 때문이고, 그 판정은
+    /// 이 파일에서 코드로 참이다 — [`Task::allowed_predecessors`]가
+    /// `Pending`에 대해 빈 배열을 돌려주므로 `Dispatched → Pending`이 없고,
+    /// 한 번 dispatch된 Task는 영원히 한 번만 dispatch된다. 그래서 세션은
+    /// Task와 1:1이고 이 자리에 얹힌다.
+    ///
+    /// `None`은 정상 상태이며 **세 가지를 함께 뜻한다**: 아직 dispatch되지
+    /// 않았거나, 세션이 열리기 전에 실패했거나(`session/new` 타임아웃 —
+    /// 그 경우 실행은 시작되지 않은 것이 확정이다), 이 필드가 생기기 전의
+    /// Task이거나. 셋 다 "세션이 없다"이지 "빈 세션이 있다"가 아니다.
+    ///
+    /// **값이 채워지는 시점은 dispatch 확정보다 늦다.** `session/new`가
+    /// 성공해야 id가 생기기 때문에, `Pending → Dispatched` CAS와 같은 문장에
+    /// 실을 수 없다. 그 사이에 크래시하면 세션은 열렸는데 이름이 남지 않는
+    /// 창이 그대로 있다 — 이 필드는 그 창을 **닫지 않고 session/new 왕복
+    /// 폭으로 좁힌다.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session_id: Option<String>,
     /// 스레드(연속 대화) 전체를 한 번에 조회하기 위한 평평한 키.
     /// 스레드 루트 태스크는 자기 자신의 `id`를 그대로 갖고, 이어지는 모든
     /// 자식 태스크는 부모의 `thread_id`를 그대로 물려받는다 — `parent_task_id`를
@@ -377,6 +398,7 @@ impl Task {
             priority: req.priority,
             status: TaskStatus::Pending,
             dispatched_at: None,
+            acp_session_id: None,
             thread_id: id,
             parent_task_id: req.parent_task_id,
             project_id: req.project_id,

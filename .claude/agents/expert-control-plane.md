@@ -33,6 +33,16 @@ tools: Bash, Read, Grep, Glob
 - **없는 것은 진짜로 없다**(grep 0건): `EffectLedger`, `PartiallyApplied`, `CancelUnconfirmed`,
   `fencing_token`, `lease_generation`, `worker_execution_lease`. 문서가 "미구현"이라 적은
   것들이며, 있다고 가정하고 설계하지 않는다.
+- **그러나 부재에는 두 종류가 있고 grep은 그것을 구분하지 못한다.** "아직 안 만든 것"과
+  "안 만들기로 **결정한** 것"이 똑같이 0건으로 보인다. 후자를 모르고 설계하면 닫힌 판정을
+  되돌리는 제안을 내게 된다. **없는 것을 만들자고 제안하기 전에 로드맵에서 그 이름을
+  검색해 판정 이력을 확인한다.** 실제로 걸린 사례 둘:
+  - `TaskAttempt` — 2026-08-26 **흡수 판정**(`#97`). `Task`가 그 역할을 겸하며 26개 파일이
+    그에 맞춰 고쳐졌다. 근거는 무재시도 아래 Task:실행 = 1:0..1이고, 그것은 코드에서 참이다
+    (`Task::allowed_predecessors(Pending)`이 빈 배열 → `Dispatched → Pending` 불가).
+    2026-09-13에 이 에이전트가 이것을 모르고 `task_attempts` 신설을 권고했다.
+  - `lease_generation`·`fencing_token` — 2026-09-01 처분표가 `agents.command_generation`으로
+    **충족 처리**했다. 만들 대상이 아니다.
 - **`Reconciler`는 있다** — `fleet-scheduler/src/reconcile.rs:175`. lease를 잃은 인스턴스의
   sweep **전체를 건너뛴다**(`lease_allows_control()`). 즉 reconciliation은 fail-closed지만
   fence 술어로 보호되는 것이 아니라 관측으로 보호된다.

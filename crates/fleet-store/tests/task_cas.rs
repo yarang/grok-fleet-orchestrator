@@ -20,6 +20,7 @@
 //! `--all-features` 없이 돌리면 `MemStore`(`test-support` 피처)가 사라진다.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use fleet_core::{
@@ -936,6 +937,139 @@ both_backends!(
             TransitionOutcome::StaleDispatchEpoch {
                 dispatched_under: dispatch_fence.epoch
             }
+        );
+    }
+);
+
+// ── ACP 세션 신원의 내구화 (로드맵 `#70` 게이트 2·7 선행) ──────────────
+//
+// 이 세 시험이 지키는 것은 Attempt 흡수 판정(`#97`)의 불변식이다: 한 Task에는
+// 실행이 하나뿐이므로 세션 id도 하나뿐이고, 두 번째 값은 덮어쓰기가 아니라
+// **위반**이다.
+
+both_backends!(
+    an_acp_session_is_recorded_once_and_read_back,
+    |store| async move {
+        let task = seed_task(&store, "session identity", TaskStatus::Pending).await;
+
+        assert!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acp_session_id
+                .is_none(),
+            "dispatch 전에는 세션이 **없다** — 빈 문자열이 아니라 없는 것이다"
+        );
+
+        assert!(
+            store
+                .record_task_acp_session(task.id, "sess-abc", None)
+                .await
+                .unwrap(),
+            "비어 있던 자리에는 기록된다"
+        );
+
+        assert_eq!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acp_session_id
+                .as_deref(),
+            Some("sess-abc"),
+            "왕복해야 재시작 뒤에도 세션을 지목할 수 있다 — 그것이 이 컬럼의 존재 이유다"
+        );
+    }
+);
+
+both_backends!(
+    a_second_session_does_not_overwrite_the_first,
+    |store| async move {
+        let task = seed_task(&store, "one execution only", TaskStatus::Pending).await;
+        store
+            .record_task_acp_session(task.id, "sess-first", None)
+            .await
+            .unwrap();
+
+        assert!(
+            !store
+                .record_task_acp_session(task.id, "sess-second", None)
+                .await
+                .unwrap(),
+            "한 Task에 실행이 둘일 수 없다(`#97` 흡수 판정) — 두 번째는 거절되어야 한다"
+        );
+
+        assert_eq!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acp_session_id
+                .as_deref(),
+            Some("sess-first"),
+            "덮어쓰면 먼저 열린 세션이 추적 불가능한 고아가 된다"
+        );
+    }
+);
+
+both_backends!(
+    a_fenced_instance_cannot_record_a_session,
+    |store| async move {
+        let cluster = unique_cluster();
+        // 아주 짧은 TTL로 잡고 만료시킨 뒤 다른 instance가 가져가게 한다 —
+        // 그 순간 첫 fence는 낡은 것이 된다. `acquire_fence`를 두 번 부르면
+        // 안 되는 이유는 그 헬퍼가 **새 cluster id**를 전제하기 때문이다.
+        let first = store
+            .acquire_control_lease(&cluster, "instance-a", Duration::from_millis(1), None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let second = store
+            .acquire_control_lease(&cluster, "instance-b", TTL, None)
+            .await
+            .unwrap();
+        assert!(second.epoch > first.epoch, "가로채면 epoch이 오른다");
+        let stale = ControlFence {
+            cluster_id: cluster.clone(),
+            epoch: first.epoch,
+        };
+        let live = ControlFence {
+            cluster_id: cluster,
+            epoch: second.epoch,
+        };
+
+        let task = seed_task(&store, "fenced session", TaskStatus::Pending).await;
+
+        assert!(
+            !store
+                .record_task_acp_session(task.id, "sess-stale", Some(&stale))
+                .await
+                .unwrap(),
+            "제어권을 잃은 인스턴스의 신원 기록은 적용되면 안 된다"
+        );
+        assert!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .acp_session_id
+                .is_none(),
+            "거절된 쓰기가 값을 남겼다면 fence가 술어로 걸리지 않은 것이다"
+        );
+
+        // 살아 있는 fence로는 같은 기록이 통과한다. 이 대조가 없으면 위의
+        // 단정은 "항상 거절한다"는 구현으로도 통과한다.
+        assert!(
+            store
+                .record_task_acp_session(task.id, "sess-live", Some(&live))
+                .await
+                .unwrap(),
+            "lease를 쥔 인스턴스는 통과해야 한다"
         );
     }
 );

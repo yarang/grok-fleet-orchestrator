@@ -422,7 +422,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
                FROM tasks WHERE created_by = $1 AND idempotency_key = $2"#,
         )
         .bind(&task.created_by)
@@ -456,7 +456,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -472,7 +472,7 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -674,6 +674,45 @@ impl Store for PgStore {
         Ok(retry_count as u32)
     }
 
+    async fn record_task_acp_session(
+        &self,
+        id: TaskId,
+        session_id: &str,
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // `acp_session_id IS NULL`과 fence 술어를 **둘 다 같은 UPDATE 안에**
+        // 둔다. 먼저 SELECT해서 비어 있는지 보고 쓰면 그 사이에 다른 세션이
+        // 들어올 수 있고, lease를 먼저 확인하고 쓰면 그 사이에 fenced되어도
+        // 이미 떠난 쓰기가 도착한다 — 같은 결함의 두 얼굴이다.
+        let result = match fence {
+            Some(f) => {
+                sqlx::query(
+                    "UPDATE tasks SET acp_session_id = $2 \
+                     WHERE id = $1 AND acp_session_id IS NULL \
+                       AND EXISTS (SELECT 1 FROM control_plane_lease \
+                                   WHERE cluster_id = $3 AND epoch = $4)",
+                )
+                .bind(id.as_uuid())
+                .bind(session_id)
+                .bind(f.cluster_id.as_str())
+                .bind(f.epoch)
+                .execute(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE tasks SET acp_session_id = $2 \
+                     WHERE id = $1 AND acp_session_id IS NULL",
+                )
+                .bind(id.as_uuid())
+                .bind(session_id)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
         // `status_phase`는 생성(STORED) 칼럼(`001_init.sql:43`)이고 전용 인덱스
         // `idx_tasks_phase`(`002_indexes.sql:10`)가 있으므로 이 술어는 기존
@@ -761,7 +800,7 @@ impl Store for PgStore {
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                           requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
                    FROM tasks"#;
 
         // 자리 번호는 상수에 넣지 않는다. 예전에는 `$1`이 상수 안에 박혀 있었고,
@@ -4043,6 +4082,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let priority_str: String = row.try_get("priority")?;
     let status_json: serde_json::Value = row.try_get("status")?;
     let dispatched_at: Option<DateTime<Utc>> = row.try_get("dispatched_at")?;
+    let acp_session_id: Option<String> = row.try_get("acp_session_id")?;
     let thread_id: Uuid = row.try_get("thread_id")?;
     let parent_task_id: Option<Uuid> = row.try_get("parent_task_id")?;
     let project_id: Option<Uuid> = row.try_get("project_id")?;
@@ -4079,6 +4119,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         priority,
         status,
         dispatched_at,
+        acp_session_id,
         thread_id: TaskId::from(thread_id),
         parent_task_id: parent_task_id.map(TaskId::from),
         project_id: project_id.map(fleet_core::ProjectId::from),

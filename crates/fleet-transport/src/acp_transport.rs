@@ -514,6 +514,15 @@ impl WorkerTransport for AcpTransport {
                 .await
                 .insert(session_id.clone(), InFlightSession { task_id, notify_tx });
 
+            // 세션이 열린 **직후** 신원을 내보낸다. 여기보다 늦추면(예: 첫
+            // 프롬프트 응답 뒤) 그 사이의 크래시가 다시 이름 없는 세션을
+            // 만든다 — 이 이벤트의 존재 이유가 정확히 그 창이므로, 창을
+            // 넓히지 않는 유일한 자리가 맵에 넣는 이 줄의 옆이다.
+            let _ = broadcaster.send(WorkerEvent::SessionOpened {
+                task_id,
+                session_id: session_id.0.to_string(),
+            });
+
             // 로드맵 #41 — 이 세션 전용 워커. FIFO 단일 컨슈머라 세션 내부
             // 순서는 보존되고, 세션마다 독립된 태스크로 돌기 때문에 한
             // 세션의 처리가 같은 연결을 공유하는 다른 세션을 지연시키지
