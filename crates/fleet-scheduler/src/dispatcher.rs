@@ -388,18 +388,28 @@ impl Dispatcher {
             }
             WorkerEvent::ToolCall {
                 task_id,
+                worker_id,
                 invocation,
             } => {
-                // 워커를 모르면 이벤트를 만들 수 없다. 지어내지 않고 버리는
-                // 이유: `worker_id`는 이 관측을 나중에 process inventory와
-                // 대조할 때의 축인데, 틀린 축은 없는 축보다 나쁘다.
-                let Some(worker_id) = self.current_worker_of(task_id).await else {
-                    tracing::debug!(
-                        %task_id,
-                        "dropping a tool-call observation for a task with no current worker"
-                    );
-                    return;
-                };
+                // **축을 Task 상태에서 되찾지 않는다** (로드맵 `#70` 게이트 4).
+                //
+                // 예전에는 `current_worker_of(task_id)`로 찾았고, 그 함수는
+                // `TaskStatus::Dispatched`일 때만 `Some`을 준다. `Failed`가
+                // `worker_id`를 들고 있어도 보지 않았다. 결과는 조용한 증거
+                // 인멸이었다 — **Task가 terminal로
+                // 확정된 순간부터 도착하는 도구 호출이 전부 버려졌다.** 하필
+                // 그 구간이 게이트 4가 존재하는 이유다: `Failed(ResultLost)`의
+                // 정의가 "워커에서 아직 돌고 있을 수도 있다"인데, 정말로 돌고
+                // 있다는 증거가 정확히 그때부터 기록되지 않았다.
+                //
+                // 이제 축은 그 관측을 배달한 연결 자신이 싣는다. "틀린 축은 없는
+                // 축보다 나쁘다"는 기존 판단은 유효하고, 이 값은 가변적인 Task
+                // 상태에서 추론한 것이 아니라 가장 권위 있는 출처의 것이다.
+                //
+                // **"terminal 뒤에 왔는가"를 여기서 판정하지 않는다.** 그러려면
+                // 도구 호출마다 store를 한 번 읽어야 하고, 그것은 스트리밍
+                // 경로에 왕복을 하나 심는 것이다. 이 이벤트와 Task의 terminal
+                // 시각이 둘 다 남으므로 그 판정은 나중에 사후로 도출된다.
                 // `invocation`을 로그 메시지에 통째로 넣지 않는다 — 필드 단위로
                 // 넘겨야 관측성 정본의 금지 목록을 코드에서 눈으로 확인할 수
                 // 있다. (그 넷은 전부 안전하지만, 형태를 지키는 것이 나중에
@@ -2172,6 +2182,7 @@ mod tests {
         dispatcher
             .handle_worker_event(WorkerEvent::ToolCall {
                 task_id,
+                worker_id: worker.id,
                 invocation: fleet_core::ToolInvocation {
                     tool_call_id: "tc-9".into(),
                     name: Some("bash".into()),
@@ -2206,24 +2217,48 @@ mod tests {
         );
     }
 
-    /// 워커를 모르는 Task의 관측은 **지어내지 않고 버린다**.
+    /// **terminal로 확정된 뒤에 도착한 도구 호출도 기록된다**
+    /// (로드맵 `#70` 게이트 4).
     ///
-    /// `worker_id`는 이 관측을 process inventory와 대조할 때의 축인데, 틀린
-    /// 축은 없는 축보다 나쁘다 — 엉뚱한 워커의 활동으로 읽힌다.
+    /// 이 시험은 예전에 정반대를 단정했다(`..._is_dropped`). 그 근거는 "축을
+    /// 모르면 지어내지 않는다"였고 그 원칙 자체는 지금도 옳지만, **축을 Task
+    /// 상태에서 되찾으려 한 것이 틀렸다.** `current_worker_of`는
+    /// `TaskStatus::Dispatched`만 매치했다. `Cancelled`에는 워커가 아예 없지만
+    /// `Failed(TaskFailure)`는 `worker_id`를 들고 있는데도 보지 않았다 — 즉 그
+    /// 구현은 "축을 모른다"가 아니라 **"Task가 끝났다"를 축의 부재로 오독**하고
+    /// 있었고, 축을 아는 경우조차 버렸다.
+    ///
+    /// 결과는 조용한 증거 인멸이었다. `Failed(ResultLost)`의 정의가 "워커에서
+    /// 아직 돌고 있을 수도 있다"인데, 정말로 돌고 있다는 **유일한 증거**가
+    /// 정확히 그 순간부터 버려졌다 — 게이트 4가 존재하는 이유가 그 구간이다.
+    ///
+    /// 이제 축은 그 관측을 배달한 연결이 싣는다. 지어낸 값이 아니라 가장
+    /// 권위 있는 출처의 값이므로 원래 원칙과 어긋나지 않는다.
     #[tokio::test]
-    async fn a_tool_call_for_a_task_with_no_worker_is_dropped() {
+    async fn a_tool_call_after_the_task_went_terminal_is_still_recorded() {
         let (state, dispatcher) = setup_fenced();
 
-        let task = sample_task(); // Pending — 배정된 워커가 없다.
+        let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
+        state.store.upsert_worker(&worker).await.unwrap();
+
+        // 결과 유실로 **이미 확정된** Task. 이 상태에는 worker_id가 없다.
+        let mut task = sample_task();
         let task_id = task.id;
+        task.status = TaskStatus::Failed(fleet_core::TaskFailure {
+            error: "worker went away".into(),
+            kind: fleet_core::FailureKind::ResultLost,
+            worker_id: Some(worker.id),
+            attempts: 1,
+        });
         state.store.insert_task(&task).await.unwrap();
 
         dispatcher
             .handle_worker_event(WorkerEvent::ToolCall {
                 task_id,
+                worker_id: worker.id,
                 invocation: fleet_core::ToolInvocation {
-                    tool_call_id: "tc-orphan".into(),
-                    name: None,
+                    tool_call_id: "tc-after-terminal".into(),
+                    name: Some("bash".into()),
                     kind: fleet_core::ToolInvocationKind::Execute,
                     status: fleet_core::ToolInvocationStatus::Completed,
                 },
@@ -2231,11 +2266,26 @@ mod tests {
             .await;
 
         let events = state.store.list_events(0, 100).await.unwrap();
+        let recorded = events
+            .iter()
+            .find(|e| e.event.event_type() == "task_tool_call")
+            .unwrap_or_else(|| {
+                panic!(
+                    "확정 뒤에도 실행이 계속됐다는 증거가 남아야 한다 — 받은 것 {:?}",
+                    events
+                        .iter()
+                        .map(|e| e.event.event_type())
+                        .collect::<Vec<_>>()
+                )
+            });
+        let payload = serde_json::to_string(&recorded.event).unwrap();
         assert!(
-            !events
-                .iter()
-                .any(|e| e.event.event_type() == "task_tool_call"),
-            "축을 모르면 기록하지 않는다"
+            payload.contains("tc-after-terminal"),
+            "어느 호출인지 남아야 한다: {payload}"
+        );
+        assert!(
+            payload.contains(&worker.id.to_string()),
+            "축이 남아야 한다 — 배달한 연결의 것이지 Task 상태에서 추론한 것이 아니다: {payload}"
         );
     }
 

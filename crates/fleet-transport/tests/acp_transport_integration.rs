@@ -538,9 +538,13 @@ async fn tool_calls_reach_the_orchestrator_without_their_free_form_text() {
         match timeout(Duration::from_millis(500), events.recv()).await {
             Ok(Some(WorkerEvent::ToolCall {
                 task_id: t,
+                worker_id: w,
                 invocation,
             })) => {
                 assert_eq!(t, task_id);
+                // 축은 이 관측을 배달한 연결의 것이다 (로드맵 `#70` 게이트 4).
+                // 소비자가 Task 상태에서 되찾으면 terminal 뒤의 호출을 잃는다.
+                assert_eq!(w, worker, "도구 호출은 자기를 배달한 워커를 싣고 와야 한다");
                 observed.push(invocation);
             }
             Ok(Some(_)) => continue,

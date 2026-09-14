@@ -545,6 +545,7 @@ impl WorkerTransport for AcpTransport {
                         SessionMsg::Tool(invocation) => {
                             let _ = worker_broadcaster.send(WorkerEvent::ToolCall {
                                 task_id,
+                                worker_id,
                                 invocation,
                             });
                         }

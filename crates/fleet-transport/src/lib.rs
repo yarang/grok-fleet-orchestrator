@@ -147,6 +147,21 @@ pub enum WorkerEvent {
     /// 대한 유일한 증거가 오케스트레이터에 도달한 적이 없다.
     ToolCall {
         task_id: TaskId,
+        /// 이 호출을 **실제로 전달한 연결**의 워커 (로드맵 `#70` 게이트 4).
+        ///
+        /// 소비자가 Task 상태에서 되찾게 하지 않고 여기에 싣는 이유가 있다.
+        /// 소비자는 `TaskStatus::Dispatched`에서만 `worker_id`를 찾았고,
+        /// 그래서 **Task가 terminal로 확정된 순간부터 도착하는 도구 호출이
+        /// 통째로 버려졌다** — `Failed(TaskFailure)`가 `worker_id`를 들고 있는
+        /// 경우까지 포함해서. 하필 그 구간이 게이트 4가 존재하는
+        /// 이유다 — `Failed(ResultLost)`의 정의가 "워커에서 아직 돌고 있을
+        /// 수도 있다"인데, 정말로 돌고 있다는 증거가 정확히 그때부터
+        /// 기록되지 않았다.
+        ///
+        /// 여기서 오는 값은 가변적인 Task 상태에서 추론한 것이 아니라 그
+        /// 관측을 배달한 연결 자신의 것이므로, "틀린 축은 없는 축보다 나쁘다"는
+        /// 기존 판단과도 어긋나지 않는다 — 오히려 가장 권위 있는 출처다.
+        worker_id: WorkerId,
         invocation: fleet_core::ToolInvocation,
     },
 

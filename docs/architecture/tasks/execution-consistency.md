@@ -254,7 +254,7 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | 취소·완료 경쟁의 단일 터미널 상태 | 구현됨 | — (같은 CAS) |
 | timeout 후 동일 key 재호출의 중복 방지 | 구현됨 | — (로드맵 `#62` 2단계) |
 | **이전 control epoch 이벤트 거부** | **Task 단위 · Agent 명령 발행 단위 둘 다 구현됨** (Task: 쓰기 `#62` 3단계 · 읽기 `#67` 1단계, 2026-08-27. Agent 명령: `#67` 게이트 ①-B, 2026-09-01) | Agent **process** 단위는 여전히 미구현 — 프로세스에 세대를 물릴 관측 주체가 없다(`worker_execution_lease`는 만들지 않기로 확정). 아래 참고 |
-| non-idempotent tool effect 자동 재실행 금지 | 미구현 | effect ledger 부재, 그리고 **ledger를 채울 생산자 부재** |
+| non-idempotent tool effect 자동 재실행 금지 | 미구현 | effect ledger 부재, 그리고 **ledger를 채울 생산자 부재**. 2026-09-14: 원장의 **입력**은 이제 terminal 이후에도 보존된다(아래 참고) — 여전히 원장은 아니다 |
 | redrive Task의 external idempotency key 승계 | **설계 미결** | 새 Task ID가 키를 바꾼다. 새 Task 경계를 넘는 앵커 필드가 없음 |
 | policy revision 변경 후 redrive의 동일 key | 미구현 | `policy_revision` 개념이 저장소·코드 어디에도 없음 |
 | `CancelUnconfirmed` 해소와 archive 차단 | 미구현 | 해당 상태 자체가 `TaskStatus`에 없음. 해소 판정에 필요한 effect ledger도 없음 |
@@ -262,6 +262,30 @@ id를 건네게 된다 — 보장을 지키는 것이 아니라 더 나쁘게 �
 | 조회 불가 `Started` effect → `PartiallyApplied` | 미구현 | ledger 부재 |
 | cancel/timeout이 ledger를 우회하지 않음 | 미구현(결함 존재) | ledger 부재. 현재 `cancel`은 transport 실패를 로그만 남기고 `Cancelled`를 확정한다 |
 | Task 삭제 후 동일 key 재제출 | 구현됨 | — (로드맵 `#96`) |
+
+### 원장의 입력이 terminal 뒤에 사라지던 것 (2026-09-14, 고침)
+
+`WorkerEvent::ToolCall` → `FleetEvent::TaskToolCall`은 위에서 적었듯 **원장이 아니라 원장의
+입력**이다. 그 입력이 정작 가장 필요한 구간에서 기록되지 않고 있었다.
+
+소비자(`dispatcher.rs`)가 `worker_id`를 **Task 상태에서 되찾았다.** 그 함수는
+`TaskStatus::Dispatched`만 매치하므로, Task가 terminal로 확정되는 순간부터 도착하는 도구
+호출은 축을 찾지 못해 전부 버려졌다 — `Failed(TaskFailure)`가 `worker_id`를 실제로 들고
+있는 경우까지 포함해서. 하필 그 구간이 이 게이트가 존재하는 이유다: `FailureKind::ResultLost`의
+정의가 "워커에서 아직 돌고 있을 수도 있다"인데, **정말로 돌고 있다는 유일한 증거가 정확히
+그 순간부터 인멸됐다.**
+
+원래의 판단("워커를 지어내지 않는다 — 틀린 축은 없는 축보다 나쁘다")은 옳다. 틀린 것은
+축을 **가변적인 Task 상태에서 추론**하려 한 쪽이다. 이제 축은 그 관측을 배달한 연결 자신이
+이벤트에 실어 보낸다. 지어낸 값이 아니라 가장 권위 있는 출처의 값이므로 원래 원칙과
+어긋나지 않는다.
+
+**"terminal 뒤에 왔는가"를 수신 시점에 판정하지는 않는다.** 그러려면 도구 호출마다 store를
+한 번 읽어야 하고, 그것은 스트리밍 경로에 왕복을 심는 것이다. 이 이벤트와 Task의 terminal
+시각이 둘 다 남으므로 그 판정은 사후로 도출된다.
+
+**이것은 게이트를 닫지 않는다.** 원장도, 여덟 상태도, receipt도 그대로 없다. 닫힌 것은
+"원장이 나중에 읽을 로그에서 가장 중요한 구간이 비어 있었다"는 결함 하나다.
 
 ### `OutcomeUnknown` 상태와 `FailureKind::ResultLost`는 다른 것이다
 
