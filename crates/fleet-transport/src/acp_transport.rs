@@ -63,7 +63,8 @@ use tracing::{debug, info, warn};
 #[cfg(feature = "mtls")]
 use crate::tls::ClientTlsConfig;
 use crate::{
-    DispatchRequest, FailureObservation, ProbeOutcome, TransportError, WorkerEvent, WorkerTransport,
+    CancelDelivery, CancelRequest, DispatchRequest, FailureObservation, ProbeOutcome,
+    TransportError, WorkerEvent, WorkerTransport,
 };
 
 /// 브로드캐스트 채널 용량.
@@ -672,36 +673,79 @@ impl WorkerTransport for AcpTransport {
         Ok(())
     }
 
-    async fn cancel(&self, task_id: TaskId) -> Result<(), TransportError> {
+    async fn cancel(&self, req: CancelRequest) -> Result<CancelDelivery, TransportError> {
+        let task_id = req.task_id;
         let clients = self.clients.read().await;
+
+        // 1단계 — 이 프로세스가 직접 연 세션. 평상시의 경로다.
+        let mut target: Option<(WorkerId, SessionId)> = None;
         for (worker_id, session) in clients.iter() {
-            let session_id = {
+            let found = {
                 let sessions = session.sessions.lock().await;
                 sessions
                     .iter()
                     .find(|(_, s)| s.task_id == task_id)
                     .map(|(sid, _)| sid.clone())
             };
-            let Some(session_id) = session_id else {
-                continue;
-            };
-
-            let connection = session.connection.lock().await.clone();
-            let Some(connection) = connection else {
-                debug!(
-                    %task_id, %worker_id,
-                    "cancel: active connection missing — likely disconnected, treating as idempotent success"
-                );
-                return Ok(());
-            };
-
-            info!(%task_id, %worker_id, session_id = %session_id, "sending ACP cancel");
-            let _ = connection.send_notification(CancelNotification::new(session_id));
-            return Ok(());
+            if let Some(sid) = found {
+                target = Some((*worker_id, sid));
+                break;
+            }
         }
 
-        debug!(%task_id, "cancel: no active worker session found — task already terminal?");
-        Ok(())
+        // 2단계 — 인메모리 맵이 모르는 세션의 폴백 (로드맵 `#70` 게이트 7).
+        //
+        // **이 분기가 없던 동안, 오케스트레이터가 한 번이라도 재시작하면 그
+        // 뒤의 모든 취소가 조용히 성공했다.** 맵은 프로세스와 함께 비워지는데
+        // 워커의 세션은 그대로 돌고 있었고, 저장소에는 `Cancelled`가 적혔다.
+        //
+        // 세션 id만으로는 어느 연결로 보낼지 모르기 때문에 `worker_id`가 함께
+        // 있어야 한다. 둘 중 하나라도 없으면 폴백은 성립하지 않는다.
+        if target.is_none() {
+            if let (Some(sid), Some(wid)) = (req.known_session.as_deref(), req.worker_id) {
+                if clients.contains_key(&wid) {
+                    target = Some((wid, SessionId::new(sid)));
+                } else {
+                    // **세션은 아는데 그 워커가 등록돼 있지 않다.** 이것을
+                    // `NoSession`으로 접으면 안 된다 — 저쪽은 "보낼 것이 없다"이고
+                    // 이쪽은 "보낼 것이 있는데 못 보냈다"이며, 저쪽 세션은 그대로
+                    // 돌고 있을 수 있다.
+                    warn!(
+                        %task_id, worker_id = %wid, session_id = %sid,
+                        "cancel: the worker holding this session is not registered here"
+                    );
+                    return Ok(CancelDelivery::Unreachable);
+                }
+            }
+        }
+
+        let Some((worker_id, session_id)) = target else {
+            debug!(%task_id, "cancel: no session known for this task");
+            return Ok(CancelDelivery::NoSession);
+        };
+
+        let Some(session) = clients.get(&worker_id) else {
+            warn!(%task_id, %worker_id, "cancel: worker is no longer registered");
+            return Ok(CancelDelivery::Unreachable);
+        };
+
+        let connection = session.connection.lock().await.clone();
+        let Some(connection) = connection else {
+            // 예전에는 이 자리가 `Ok(())`였고 주석은 "idempotent success"라고
+            // 적었다. 그것은 **거짓이다** — 워커가 재연결되면 그 세션은 계속
+            // 돌고 있고, 우리는 취소를 한 번도 보내지 못했다.
+            warn!(
+                %task_id, %worker_id, %session_id,
+                "cancel: no live connection to the worker — the session may still be running"
+            );
+            return Ok(CancelDelivery::Unreachable);
+        };
+
+        info!(%task_id, %worker_id, %session_id, "sending ACP cancel");
+        let _ = connection.send_notification(CancelNotification::new(session_id));
+        // `Sent`는 확인이 아니다 — ACP cancel은 ack 없는 notification이다.
+        // [`CancelDelivery::Sent`] 문서 참고.
+        Ok(CancelDelivery::Sent)
     }
 
     /// **왕복하지 않는다.** supervisor가 유지하는 연결 상태를 읽고 상수를

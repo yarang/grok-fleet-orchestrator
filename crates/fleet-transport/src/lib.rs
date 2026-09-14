@@ -71,6 +71,61 @@ pub struct DispatchRequest {
     pub skills_required: Vec<String>,
 }
 
+/// 취소 요청 (로드맵 `#70` 게이트 7).
+///
+/// **`task_id`만으로는 재시작 뒤에 대상을 찾을 수 없다.** 전송 계층이 세션을
+/// 기억하는 곳은 인메모리 맵뿐이라, 오케스트레이터가 한 번이라도 재시작하면
+/// 그 맵이 비어 있고 모든 취소가 대상 없이 "성공"한다. 그래서 저장소가
+/// 기억하는 단서를 호출부가 함께 싣는다.
+#[derive(Debug, Clone)]
+pub struct CancelRequest {
+    pub task_id: TaskId,
+    /// `tasks.acp_session_id`. 인메모리 맵이 비었을 때의 **유일한** 단서다.
+    pub known_session: Option<String>,
+    /// 그 세션이 열린 워커. 세션 id만으로는 어느 연결로 보낼지 알 수 없어서
+    /// 함께 필요하다.
+    pub worker_id: Option<WorkerId>,
+}
+
+impl CancelRequest {
+    /// 단서 없이 보내는 취소 — 인메모리 맵에 있을 때만 대상을 찾는다.
+    pub fn new(task_id: TaskId) -> Self {
+        Self {
+            task_id,
+            known_session: None,
+            worker_id: None,
+        }
+    }
+}
+
+/// 취소 통지가 **어디까지 갔는가** (로드맵 `#70` 게이트 7).
+///
+/// 예전에는 세 경우가 전부 `Ok(())`였다: 연결이 없을 때, 통지를 보냈을 때,
+/// 세션을 못 찾았을 때. 호출부는 그 셋을 구분할 수 없었고, 그래서 재시작 뒤의
+/// 모든 취소가 조용히 성공한 것처럼 보였다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelDelivery {
+    /// 살아 있는 연결로 취소 통지를 내보냈다.
+    ///
+    /// **이것은 확인(confirmation)이 아니다.** ACP의 cancel은 ack 없는
+    /// notification이라 "저쪽이 받았다"도 "실행이 멈췄다"도 뜻하지 않는다.
+    /// 확인은 세션이 실제로 사라졌는지를 되묻는 별도 왕복이 있어야 하고,
+    /// 그것이 게이트 7의 남은 절반이다.
+    Sent,
+    /// 지목할 세션 자체가 없다.
+    ///
+    /// 정상인 경우가 많다 — `Pending`이라 아직 세션이 없거나, `session/new`
+    /// 전에 실패했거나. 다만 `Dispatched`인데 이 값이 나오면 그 Task는 세션이
+    /// 열린 뒤 신원이 기록되기 전에 크래시한 것이다.
+    NoSession,
+    /// 세션은 알지만 그 워커로 가는 연결이 없다.
+    ///
+    /// **취소가 전달되지 않았다는 뜻이고, 저쪽은 계속 돌고 있을 수 있다.**
+    /// `NoSession`과 뭉개면 안 된다 — 저쪽은 "보낼 것이 없다"이고 이쪽은
+    /// "보낼 것이 있는데 못 보냈다"이다.
+    Unreachable,
+}
+
 /// 워커에서 발생하는 이벤트 (스트리밍).
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
@@ -206,7 +261,11 @@ pub trait WorkerTransport: Send + Sync {
     async fn dispatch(&self, req: DispatchRequest) -> Result<(), TransportError>;
 
     /// 진행 중인 작업을 취소.
-    async fn cancel(&self, task_id: TaskId) -> Result<(), TransportError>;
+    ///
+    /// 반환값이 `()`가 아닌 이유는 [`CancelDelivery`] 문서에 있다 — 세 가지
+    /// 다른 결과를 `Ok(())` 하나로 뭉개면 호출부가 "취소했다"와 "취소하지
+    /// 못했다"를 구분할 수 없다.
+    async fn cancel(&self, req: CancelRequest) -> Result<CancelDelivery, TransportError>;
 
     /// 워커 **연결 상태**를 확인한다.
     ///

@@ -129,4 +129,39 @@ impl FleetState {
                 "failed to record a control-plane audit event");
         }
     }
+
+    /// 제어면 **결정의 결과**를 남긴다 — 리스 설정 여부와 무관하게
+    /// (로드맵 `#70` 게이트 7).
+    ///
+    /// [`audit_control`](Self::audit_control)과 갈리는 자리가 정확히 하나다:
+    /// 저쪽은 **경합**의 증거라 리스가 없으면 남길 사실이 없지만, 이쪽은
+    /// "내린 결정이 상대에게 닿지 않았다"라서 **단일 인스턴스 배포에서도 참**이다.
+    /// 오히려 그쪽이 일상적이다 — 오케스트레이터가 재시작하면 세션 맵이 비고,
+    /// 그 뒤의 취소는 리스와 아무 상관 없이 전달되지 못한다. 이것을
+    /// `audit_control`에 실었다면 가장 흔한 경우가 통째로 사라졌을 것이다.
+    ///
+    /// 행위자는 리스가 있으면 그 `instance_id`이고, 없으면 `orchestrator`다.
+    /// 세대는 있을 때만 싣는다 — `None`은 "정보 없음"이 아니라 "세대가
+    /// 없었다"이며 그것 자체가 사실이다.
+    pub async fn audit_decision(
+        &self,
+        action: &str,
+        target: (&str, String),
+        detail: serde_json::Value,
+    ) {
+        let actor = match self.lease.as_ref() {
+            Some(lease) => format!("orchestrator:{}", lease.instance_id()),
+            None => "orchestrator".to_string(),
+        };
+        let mut event = fleet_core::AuditEvent::failure(actor, action)
+            .target(target.0, target.1)
+            .detail(detail);
+        if let Some(epoch) = self.lease.as_ref().and_then(|l| l.status().epoch()) {
+            event = event.control_epoch(epoch);
+        }
+        if let Err(e) = self.store.record_audit_event(&event).await {
+            tracing::warn!(target: "fleet::control", action, error = %e,
+                "failed to record a control-plane decision audit event");
+        }
+    }
 }

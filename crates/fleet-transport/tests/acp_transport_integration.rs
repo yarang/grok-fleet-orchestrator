@@ -23,7 +23,9 @@ use axum::{
     Router,
 };
 use fleet_core::{TaskId, WorkerId};
-use fleet_transport::{AcpTransport, FailureObservation, WorkerEvent, WorkerTransport};
+use fleet_transport::{
+    AcpTransport, CancelDelivery, CancelRequest, FailureObservation, WorkerEvent, WorkerTransport,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -574,9 +576,74 @@ async fn tool_calls_reach_the_orchestrator_without_their_free_form_text() {
 }
 
 #[tokio::test]
-async fn cancel_unknown_task_is_noop() {
+async fn cancel_without_a_known_session_reports_no_session() {
     let transport = AcpTransport::new();
-    assert!(transport.cancel(TaskId::new()).await.is_ok());
+    assert_eq!(
+        transport
+            .cancel(CancelRequest::new(TaskId::new()))
+            .await
+            .unwrap(),
+        CancelDelivery::NoSession,
+        "지목할 세션이 없으면 `Sent`가 아니라 `NoSession`이다 — 예전에는 둘 다 Ok(())였다"
+    );
+}
+
+/// 재시작한 오케스트레이터가 저장소의 세션 id로 취소를 보낸다
+/// (로드맵 `#70` 게이트 7).
+///
+/// **이것이 이 변경의 핵심 시나리오다.** 새 `AcpTransport`는 인메모리 세션 맵이
+/// 비어 있다 — 재시작 직후와 정확히 같은 상태다. 폴백이 없으면 여기서 취소는
+/// 대상을 찾지 못한 채 "성공"하고, 워커의 세션은 계속 돈다.
+#[tokio::test]
+async fn a_restarted_orchestrator_cancels_using_the_stored_session() {
+    let (_state, addr) = start_mock_server().await;
+    let worker = WorkerId::new();
+
+    // 이 transport는 이 세션을 연 적이 없다. dispatch도 하지 않는다.
+    let transport = AcpTransport::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let task_id = TaskId::new();
+    let delivery = transport
+        .cancel(CancelRequest {
+            task_id,
+            known_session: Some("sess-from-the-store".to_string()),
+            worker_id: Some(worker),
+        })
+        .await
+        .expect("cancel");
+
+    assert_eq!(
+        delivery,
+        CancelDelivery::Sent,
+        "저장소가 세션을 기억하고 워커 연결이 살아 있으면 취소는 실제로 나가야 한다"
+    );
+}
+
+/// 단서가 있어도 그 워커로 가는 연결이 없으면 **미전달**이다.
+///
+/// 예전에는 이 경우가 `Ok(())`였고 주석이 "idempotent success"라고 적었다.
+/// 그것은 거짓이다 — 저쪽 세션은 그대로 돌고 있다.
+#[tokio::test]
+async fn a_session_on_an_unregistered_worker_is_unreachable() {
+    let transport = AcpTransport::new();
+    let delivery = transport
+        .cancel(CancelRequest {
+            task_id: TaskId::new(),
+            known_session: Some("sess-somewhere".to_string()),
+            worker_id: Some(WorkerId::new()),
+        })
+        .await
+        .expect("cancel");
+
+    assert_eq!(
+        delivery,
+        CancelDelivery::Unreachable,
+        "세션을 아는데 못 보낸 것은 `NoSession`이 아니다 — 저쪽은 계속 돌고 있을 수 있다"
+    );
 }
 
 #[tokio::test]

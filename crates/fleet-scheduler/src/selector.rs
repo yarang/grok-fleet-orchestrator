@@ -665,8 +665,11 @@ mod tests {
         ) -> Result<(), fleet_transport::TransportError> {
             Ok(())
         }
-        async fn cancel(&self, _: TaskId) -> Result<(), fleet_transport::TransportError> {
-            Ok(())
+        async fn cancel(
+            &self,
+            _: fleet_transport::CancelRequest,
+        ) -> Result<fleet_transport::CancelDelivery, fleet_transport::TransportError> {
+            Ok(fleet_transport::CancelDelivery::Sent)
         }
         async fn ping(
             &self,

@@ -1037,10 +1037,51 @@ impl Dispatcher {
             _ => None,
         };
         if let Some(wid) = worker_id {
+            // **저장소가 기억하는 세션을 함께 싣는다** (로드맵 `#70` 게이트 7).
+            // 전송 계층의 인메모리 맵은 프로세스와 함께 비워지므로, 이 단서가
+            // 없으면 오케스트레이터가 한 번이라도 재시작한 뒤의 모든 취소가
+            // 대상 없이 "성공"한다.
+            let req = fleet_transport::CancelRequest {
+                task_id,
+                known_session: task.acp_session_id.clone(),
+                worker_id: Some(wid),
+            };
             // transport.cancel은 best-effort — 워커가 이미 끝났을 수 있음.
             // 에러가 나도 상태 전이는 진행.
-            if let Err(e) = self.state.transport.cancel(task_id).await {
-                warn!(%task_id, %wid, error = %e, "transport.cancel failed, proceeding with status update");
+            match self.state.transport.cancel(req).await {
+                Ok(fleet_transport::CancelDelivery::Sent) => {}
+                // **전달되지 않았다.** 저쪽은 계속 돌고 있을 수 있는데 아래에서
+                // `Cancelled`를 적는다. 그 어긋남을 로그로만 남기면 재시작
+                // 뒤에는 아무 흔적도 없으므로 감사에 싣는다 — 이 경로가
+                // 조용했던 것이 게이트 7이 존재하는 이유다.
+                Ok(fleet_transport::CancelDelivery::Unreachable) => {
+                    warn!(
+                        %task_id, %wid,
+                        "cancel was not delivered — the worker session may still be running"
+                    );
+                    // `audit_control`이 아니라 `audit_decision`이다 — 저쪽은
+                    // 리스가 없으면 아무것도 남기지 않는데, 미전달 취소는
+                    // 단일 인스턴스 배포에서 **더** 흔하다.
+                    self.state
+                        .audit_decision(
+                            fleet_core::audit::action::CONTROL_CANCEL_UNDELIVERED,
+                            ("task", task_id.to_string()),
+                            serde_json::json!({
+                                "worker_id": wid.to_string(),
+                                "session_known": task.acp_session_id.is_some(),
+                            }),
+                        )
+                        .await;
+                }
+                // 지목할 세션이 없다. `Dispatched`인데 이 값이 나오면 세션이
+                // 열린 뒤 신원이 기록되기 전에 크래시한 Task다 — 드물지만
+                // 정상 경로와 구분해서 남긴다.
+                Ok(fleet_transport::CancelDelivery::NoSession) => {
+                    tracing::debug!(%task_id, %wid, "cancel: no session known for a dispatched task");
+                }
+                Err(e) => {
+                    warn!(%task_id, %wid, error = %e, "transport.cancel failed, proceeding with status update");
+                }
             }
         }
 

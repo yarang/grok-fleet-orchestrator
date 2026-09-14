@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fleet_api::{build_app, ApiTokenCredential, AppState};
-use fleet_core::{TaskId, WorkerId};
+use fleet_core::WorkerId;
 use fleet_store::Store;
 use fleet_transport::{DispatchRequest, TransportError, WorkerEvent, WorkerTransport};
 
@@ -68,8 +68,11 @@ impl WorkerTransport for RecordingTransportShared {
     async fn dispatch(&self, _: DispatchRequest) -> Result<(), TransportError> {
         Ok(())
     }
-    async fn cancel(&self, _: TaskId) -> Result<(), TransportError> {
-        Ok(())
+    async fn cancel(
+        &self,
+        _: fleet_transport::CancelRequest,
+    ) -> Result<fleet_transport::CancelDelivery, TransportError> {
+        Ok(fleet_transport::CancelDelivery::Sent)
     }
     async fn ping(&self, _: WorkerId) -> Result<Duration, TransportError> {
         Ok(Duration::from_millis(1))
@@ -254,8 +257,11 @@ async fn transport_failure_does_not_break_store_registration() {
         async fn dispatch(&self, _: DispatchRequest) -> Result<(), TransportError> {
             Ok(())
         }
-        async fn cancel(&self, _: TaskId) -> Result<(), TransportError> {
-            Ok(())
+        async fn cancel(
+            &self,
+            _: fleet_transport::CancelRequest,
+        ) -> Result<fleet_transport::CancelDelivery, TransportError> {
+            Ok(fleet_transport::CancelDelivery::Sent)
         }
         async fn ping(&self, _: WorkerId) -> Result<Duration, TransportError> {
             Ok(Duration::from_millis(1))

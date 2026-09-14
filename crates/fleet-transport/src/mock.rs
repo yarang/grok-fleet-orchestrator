@@ -14,7 +14,10 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::debug;
 
-use crate::{DispatchRequest, ProbeOutcome, TransportError, WorkerEvent, WorkerTransport};
+use crate::{
+    CancelDelivery, CancelRequest, DispatchRequest, ProbeOutcome, TransportError, WorkerEvent,
+    WorkerTransport,
+};
 
 /// Mock 내부 브로드캐스트 채널의 버퍼 크기.
 /// WorkerEvent는 Clone 가능해야 broadcast로 전달 가능.
@@ -279,10 +282,11 @@ impl WorkerTransport for MockTransport {
         Ok(())
     }
 
-    async fn cancel(&self, _task_id: TaskId) -> Result<(), TransportError> {
-        // Mock에서는 실제 취소를 시뮬레이션하지 않음 (단순 성공).
-        // 진짜 취소 동작은 Phase 2에서 CancellationToken으로 구현.
-        Ok(())
+    async fn cancel(&self, _req: CancelRequest) -> Result<CancelDelivery, TransportError> {
+        // Mock은 전달을 시뮬레이션하지 않으므로 항상 `Sent`다. 전달되지 않는
+        // 경우를 시험해야 하면 그 시험 전용 double을 쓴다 — 여기서 조건을
+        // 흉내 내면 mock이 무엇을 보장하는지가 흐려진다.
+        Ok(CancelDelivery::Sent)
     }
 
     async fn ping(&self, worker_id: WorkerId) -> Result<Duration, TransportError> {

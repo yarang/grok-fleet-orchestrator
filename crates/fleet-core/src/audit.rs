@@ -135,6 +135,17 @@ pub mod action {
     /// 그 Task의 최종 상태를 **아무도 확정하지 않은 채** 창이 닫혔다는 뜻이라,
     /// 새 리스 소유자의 재조정이 반드시 다시 봐야 하는 항목이다.
     pub const CONTROL_OUTCOME_ABANDONED: &str = "control.outcome_abandoned";
+    /// 취소 통지를 워커에 **전달하지 못한 채** Task를 `Cancelled`로 확정했다
+    /// (로드맵 `#70` 게이트 7).
+    ///
+    /// 세션은 알지만 그 워커로 가는 연결이 없었다는 뜻이다. 저장소는 취소를
+    /// 적었고 저쪽은 계속 돌고 있을 수 있으므로, **이 줄이 있는 Task는 상태와
+    /// 실제가 어긋났을 수 있는 후보다.**
+    ///
+    /// [`CONTROL_OUTCOME_ABANDONED`]와 다른 사실이다 — 저쪽은 이 인스턴스가
+    /// 결정을 내리지 못한 것이고, 이쪽은 결정을 내렸는데 그 결정이 상대에게
+    /// 도달하지 않은 것이다.
+    pub const CONTROL_CANCEL_UNDELIVERED: &str = "control.cancel_undelivered";
     /// Project 생성 (로드맵 #48).
     pub const PROJECT_CREATE: &str = "project.create";
     /// Project archive 요청(`Active → Draining`) (로드맵 #48).
