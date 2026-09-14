@@ -266,6 +266,33 @@ grant를 함께 닫고, Worker는 cleanup 증거를 ACK하기 전 `Stopped`로 �
 cleanup은 process memory와 실행 자원만 지우며, 승인된 durable Project/Agent context와 audit
 snapshot은 [배치·맥락 계약](../entity-placement-and-context.md)에 따라 보존한다.
 
+## 게이트별 실측 상태 (2026-09-14)
+
+착수 전에 일곱 게이트를 코드에 대조했다. **여섯은 선행이 미구현이고, 하나는 절반이 이미
+성립한다.** 이 표를 남기는 이유는 `#64`가 "아직 안 했다"가 아니라 **"무엇이 있어야 할 수
+있는가"**의 문제이기 때문이다 — 그것을 적지 않으면 다음 세션이 같은 조사를 반복한다.
+
+| 게이트 | 상태 | 막고 있는 것 (실측) |
+| --- | --- | --- |
+| 1. dispatcher capability 검증·snapshot 고정 | 차단 | `Worker`에 capability 개념이 없다(`worker.rs`에 `capabilit*` 0건; 있는 것은 범용 `labels`뿐). 「실행 snapshot」이 요구하는 11개 항목 중 대부분은 `#86`·`#51` 대기 |
+| 2. container의 host socket·권한 상승·비허용 egress 거절 | 차단 | container 실행 경로 자체가 없다. **검증 환경도 없다** — 개발 컨테이너에 docker 데몬이 없어 만들어도 돌려볼 수 없다 |
+| 3. cancel·timeout·crash 뒤 다른 Task 자원 불간섭 | **절반 성립** | **프로세스 축은 이미 지켜진다**: `terminate_recorded_agents_blocking`이 spawn record로 대상을 좁히고 `is_our_child`(시작 시각)로 PID 재사용까지 거른다. 정본이 금지한 광범위 종료(`tmux kill-server`·`killall`류)는 저장소에 0건. 남은 container·socket·workspace 축은 1·2에 걸린다 |
+| 4. 감사만으로 isolation 결정·실행 위치 재구성 | 차단 | isolation 결정 자체가 코드에 없다. 감사에 실을 값이 없다 |
+| 5. 다른 Agent worktree·socket·credential 접근 거절 | 차단 | 위 「현재 구현」이 적었듯 `validate_workspace_cwd`는 **어휘적**이라 다른 Agent worktree의 절대 경로가 그대로 통과한다. 정본 자신이 "container mount 경계나 워커측 relay 중 하나가 선행"이라 적었고 둘 다 없다 |
+| 6. sudo·임의 shell·만료 fencing token의 privileged helper 거절 | 차단 | privileged helper 개념이 없다 |
+| 7. redirect·DNS 재해결 포함 egress 우회 거절 | 차단 | egress policy 개념이 없다 |
+
+**요지: `#64`의 실체는 `fleet-worker`에 container 실행 어댑터를 만드는 것이고, 나머지 여섯
+게이트가 전부 그 위에 얹힌다.** 그것 없이 isolation 필드만 먼저 만들면 두 가지 중 하나가
+된다 — 기본값을 정본대로 `container_required`로 두면 **오늘의 모든 Task가 거절되고**,
+`host_trusted`로 두면 정본을 어기는 기본값이 된다. 어느 쪽도 "격리가 생겼다"가 아니다.
+
+**부수 실측 하나 — 선언됐지만 강제되지 않는 allow-list.** `AgentTemplateBody.tools`는 저장되고
+(Postgres 바인딩) 표시되지만(Dashboard) **읽어서 제한하는 코드가 없다.** 강제되지 않는
+allow-list는 없는 것보다 위험하다 — 통제처럼 보이기 때문이다. 지금은 `ToolInvocation.name`이
+기록되므로 **탐지형 통제**(목록 밖 호출을 감사에 남기는 것)는 container 없이도 가능하다.
+예방형(호출 자체를 막는 것)은 이 문서의 범위이고 container mount 경계를 기다린다.
+
 ## 구현 게이트
 
 1. dispatcher capability 검증과 snapshot 고정 통합 시험
