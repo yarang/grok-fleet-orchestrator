@@ -146,6 +146,19 @@ pub mod action {
     /// 결정을 내리지 못한 것이고, 이쪽은 결정을 내렸는데 그 결정이 상대에게
     /// 도달하지 않은 것이다.
     pub const CONTROL_CANCEL_UNDELIVERED: &str = "control.cancel_undelivered";
+    /// Agent가 자기 템플릿의 tool 허용 목록 **밖에 있는 도구**를 호출했다
+    /// (로드맵 `#64`·`#86` 선행).
+    ///
+    /// **이것은 탐지이지 예방이 아니다.** 도구는 워커의 grok 프로세스 안에서
+    /// 이미 실행된 뒤이고, 오케스트레이터는 ACP 알림으로 사후에 관측할 뿐이라
+    /// 호출 자체를 막을 수단이 없다. 막는 것은 [실행 격리](../../../docs/architecture/agents/execution-isolation.md)의
+    /// container mount·egress 경계이며 그것은 아직 없다.
+    ///
+    /// 그래도 남기는 이유는 `AgentTemplateBody.tools`가 그동안 **저장되고
+    /// 표시되기만 하고 아무도 읽지 않는 필드**였기 때문이다. 강제되지 않는
+    /// 허용 목록은 없는 것보다 위험하다 — 통제처럼 보이기 때문이다. 최소한
+    /// 위반이 일어났다는 사실은 durable하게 남아야 한다.
+    pub const AGENT_TOOL_OUTSIDE_ALLOWLIST: &str = "agent.tool_outside_allowlist";
     /// Project 생성 (로드맵 #48).
     pub const PROJECT_CREATE: &str = "project.create";
     /// Project archive 요청(`Active → Draining`) (로드맵 #48).

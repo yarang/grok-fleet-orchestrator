@@ -4,6 +4,7 @@
 //! CircuitBreaker에 결과를 기록합니다. grok-build의 PendingGuard RAII 패턴과
 //! sync_running_gauge 패턴을 차용했습니다.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -52,6 +53,18 @@ pub struct Dispatcher {
     /// 명시적으로 설정한다 — Dispatcher와 Reconciler가 같은 기준으로 재시도
     /// 소진 여부를 판단해야 하기 때문이다.
     max_dispatch_retries: u32,
+    /// pin된 AgentTemplate revision의 tool 허용 목록 캐시 (로드맵 `#64`·`#86` 선행).
+    ///
+    /// **revision id로 캐싱해도 안전한 이유**는 `#86`의 요지가 revision
+    /// immutability이기 때문이다 — pin된 revision의 본문은 바뀌지 않으므로
+    /// 무효화 문제가 없다. Agent id로 캐싱했다면 pin이 옮겨갈 때 낡은 목록을
+    /// 쓰게 된다.
+    ///
+    /// 캐시를 두는 이유는 이 판정이 **스트리밍 경로**에서 돌기 때문이다.
+    /// 도구 호출마다 Agent와 revision을 조회하면 왕복 둘이 붙는다.
+    tool_allowlist_cache: tokio::sync::Mutex<
+        std::collections::HashMap<fleet_core::AgentTemplateRevisionId, Arc<HashSet<String>>>,
+    >,
 }
 
 impl Dispatcher {
@@ -60,6 +73,7 @@ impl Dispatcher {
             state,
             event_rx: tokio::sync::Mutex::new(None),
             max_dispatch_retries: 0,
+            tool_allowlist_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -421,13 +435,115 @@ impl Dispatcher {
                     status = ?invocation.status,
                     "tool call observed"
                 );
+                // 대조가 store 조회를 하므로 **관측을 먼저 durable하게 남긴다.**
+                // 조회가 실패하거나 느려도 "이 도구가 호출됐다"는 사실 자체는
+                // 남아 있어야 한다 — 그것이 원장의 입력이고, 허용 목록 판정은
+                // 그 위에 얹히는 부가 정보다.
+                let tool_name_check = invocation.clone();
                 let _ = self
                     .state
                     .store
                     .append_event(&FleetEvent::task_tool_call(task_id, worker_id, invocation))
                     .await;
+                self.check_tool_against_allowlist(task_id, worker_id, &tool_name_check)
+                    .await;
             }
         }
+    }
+
+    /// 관측된 도구 호출이 Agent 템플릿의 허용 목록 안에 있는지 보고, 밖이면
+    /// 감사에 남긴다 (로드맵 `#64`·`#86` 선행).
+    ///
+    /// **탐지이지 예방이 아니다.** 도구는 이미 워커의 grok 프로세스 안에서
+    /// 실행된 뒤이고 우리는 ACP 알림으로 사후에 볼 뿐이다. 그래도 남기는
+    /// 이유는 `AgentTemplateBody.tools`가 그동안 저장·표시만 되고 **아무도
+    /// 읽지 않는 필드**였기 때문이다 — 강제되지 않는 허용 목록은 없는 것보다
+    /// 위험하다.
+    ///
+    /// **판정하지 않는 경우가 셋이고, 셋 다 "위반 아님"이 아니라 "판정 불가"다.**
+    /// 그 구분이 이 함수에서 가장 틀리기 쉬운 자리다:
+    ///
+    /// 1. Task에 `agent_id`가 없다 — 어떤 템플릿을 적용할지 자체가 없다.
+    /// 2. Agent에 `template_pin`이 없거나 목록이 **비어 있다** — 비어 있는
+    ///    `tools`는 "아무 도구도 허용하지 않는다"가 아니라 **"선언하지 않았다"**이다.
+    ///    `#[serde(default)]`로 기본이 빈 벡터라 기존 템플릿 대부분이 여기 해당하며,
+    ///    이것을 deny-all로 읽으면 모든 호출이 위반으로 쏟아져 신호가 죽는다.
+    ///    **미선언 자체가 공백이라는 사실은 별개로 다뤄야 하고, 호출마다 남길
+    ///    일이 아니다.**
+    /// 3. `invocation.name`이 `None` — SDK의 `unstable_tool_call_name`이 주지
+    ///    않은 경우다. 이름을 모르면 목록과 대조할 수 없다. 모르는 것을 위반으로
+    ///    접으면 거짓 양성이 되고, 반대로 통과로 세면 거짓 음성이 된다. 어느 쪽도
+    ///    아니므로 아무것도 적지 않는다.
+    async fn check_tool_against_allowlist(
+        &self,
+        task_id: TaskId,
+        worker_id: WorkerId,
+        invocation: &fleet_core::ToolInvocation,
+    ) {
+        // (3) 이름이 없으면 대조 자체가 불가능하다.
+        let Some(name) = invocation.name.as_deref() else {
+            return;
+        };
+
+        // (1) Agent에 묶이지 않은 Task.
+        let Ok(Some(task)) = self.state.store.get_task(task_id).await else {
+            return;
+        };
+        let Some(agent_id) = task.agent_id else {
+            return;
+        };
+        let Ok(Some(agent)) = self.state.store.get_agent(agent_id).await else {
+            return;
+        };
+        // (2) pin이 없으면 적용할 revision이 없다.
+        let Some(pin) = agent.template_pin else {
+            return;
+        };
+
+        let allowed = {
+            let mut cache = self.tool_allowlist_cache.lock().await;
+            match cache.get(&pin.revision_id) {
+                Some(hit) => hit.clone(),
+                None => {
+                    let Ok(Some(revision)) = self
+                        .state
+                        .store
+                        .get_agent_template_revision(pin.revision_id)
+                        .await
+                    else {
+                        return;
+                    };
+                    let set: Arc<HashSet<String>> =
+                        Arc::new(revision.body.tools.iter().cloned().collect());
+                    cache.insert(pin.revision_id, set.clone());
+                    set
+                }
+            }
+        };
+
+        // (2) 빈 목록은 미선언이다 — deny-all이 아니다.
+        if allowed.is_empty() || allowed.contains(name) {
+            return;
+        }
+
+        tracing::warn!(
+            %task_id, %worker_id, %agent_id, tool = %name,
+            "agent called a tool outside its template allow-list"
+        );
+        // `audit_control`이 아니라 `audit_decision`이다 — 이 사실은 리스 경합과
+        // 무관하고 단일 인스턴스 배포에서도 참이다.
+        self.state
+            .audit_decision(
+                fleet_core::audit::action::AGENT_TOOL_OUTSIDE_ALLOWLIST,
+                ("task", task_id.to_string()),
+                serde_json::json!({
+                    "agent_id": agent_id.to_string(),
+                    "worker_id": worker_id.to_string(),
+                    "tool": name,
+                    "template_revision_id": pin.revision_id.to_string(),
+                }),
+            )
+            .await;
     }
 
     /// 작업 상태에서 worker_id 추출 (Failed 이벤트 처리용).
@@ -2214,6 +2330,156 @@ mod tests {
         assert!(
             payload.contains(&worker.id.to_string()),
             "나중에 process inventory와 대조할 축이 남아야 한다: {payload}"
+        );
+    }
+
+    // ── tool 허용 목록 탐지 (로드맵 `#64`·`#86` 선행) ──────────────────
+    //
+    // `AgentTemplateBody.tools`는 그동안 저장되고 Dashboard에 표시되기만 하고
+    // **아무도 읽지 않는 필드**였다. 강제되지 않는 허용 목록은 없는 것보다
+    // 위험하다 — 통제처럼 보이기 때문이다. 아래 넷은 그 필드가 이제 실제로
+    // 판정에 쓰인다는 것과, **판정하지 않는 경우를 위반으로 접지 않는다는 것**을
+    // 함께 지킨다. 하나만 두면 "항상 그 답을 내는" 구현으로도 통과한다.
+
+    /// pin된 템플릿과 그 Agent에 묶인 Task를 만들어 돌려준다.
+    async fn agent_with_tools(state: &Arc<FleetState>, tools: Vec<String>) -> Task {
+        let project = fleet_core::Project::new(format!("p-{}", uuid::Uuid::new_v4()));
+        state.store.create_project(&project).await.unwrap();
+
+        let template = fleet_core::AgentTemplate::new(Some(project.id), "role");
+        state.store.create_agent_template(&template).await.unwrap();
+        let mut body = fleet_core::AgentTemplateBody::new("do things");
+        body.tools = tools;
+        let revision = state
+            .store
+            .create_agent_template_revision(template.id, &body, Some("test"))
+            .await
+            .unwrap();
+
+        // 템플릿은 draft로 태어나고 draft는 pin을 받지 않는다 — 실제 도메인
+        // 규칙이라 시험도 같은 경로를 밟아야 한다.
+        state
+            .store
+            .update_agent_template_status(template.id, fleet_core::AgentTemplateStatus::Published)
+            .await
+            .unwrap();
+
+        let mut agent = fleet_core::Agent::new(project.id, "a1");
+        agent = agent.with_template_pin(fleet_core::AgentTemplatePin {
+            template_id: template.id,
+            revision_id: revision.id,
+        });
+        state.store.create_agent(&agent).await.unwrap();
+
+        let mut task = sample_task();
+        task.agent_id = Some(agent.id);
+        task.project_id = Some(project.id);
+        state.store.insert_task(&task).await.unwrap();
+        task
+    }
+
+    async fn allowlist_audit_count(state: &Arc<FleetState>) -> usize {
+        state
+            .store
+            .list_audit_events(&fleet_core::AuditFilter {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == fleet_core::audit::action::AGENT_TOOL_OUTSIDE_ALLOWLIST)
+            .count()
+    }
+
+    async fn observe_tool(
+        dispatcher: &Dispatcher,
+        task_id: TaskId,
+        worker_id: WorkerId,
+        name: Option<&str>,
+    ) {
+        dispatcher
+            .handle_worker_event(WorkerEvent::ToolCall {
+                task_id,
+                worker_id,
+                invocation: fleet_core::ToolInvocation {
+                    tool_call_id: "tc-1".into(),
+                    name: name.map(str::to_string),
+                    kind: fleet_core::ToolInvocationKind::Execute,
+                    status: fleet_core::ToolInvocationStatus::Completed,
+                },
+            })
+            .await;
+    }
+
+    /// 목록 **안**의 도구는 아무것도 남기지 않는다.
+    ///
+    /// 이 케이스가 없으면 아래 위반 테스트가 "항상 위반으로 적는" 구현으로도
+    /// 통과한다.
+    #[tokio::test]
+    async fn a_tool_inside_the_allowlist_is_not_flagged() {
+        let (state, dispatcher) = setup_fenced();
+        let task = agent_with_tools(&state, vec!["bash".into(), "read".into()]).await;
+
+        observe_tool(&dispatcher, task.id, WorkerId::new(), Some("bash")).await;
+
+        assert_eq!(
+            allowlist_audit_count(&state).await,
+            0,
+            "허용된 도구가 위반으로 남으면 신호가 죽는다"
+        );
+    }
+
+    /// 목록 **밖**의 도구는 감사에 남는다.
+    #[tokio::test]
+    async fn a_tool_outside_the_allowlist_is_recorded() {
+        let (state, dispatcher) = setup_fenced();
+        let task = agent_with_tools(&state, vec!["read".into()]).await;
+
+        observe_tool(&dispatcher, task.id, WorkerId::new(), Some("bash")).await;
+
+        assert_eq!(
+            allowlist_audit_count(&state).await,
+            1,
+            "선언된 목록 밖의 호출은 durable하게 남아야 한다 — \
+             막을 수는 없어도 일어났다는 사실은 남는다"
+        );
+    }
+
+    /// **빈 목록은 미선언이지 deny-all이 아니다.**
+    ///
+    /// `tools`는 `#[serde(default)]`로 기본이 빈 벡터라 기존 템플릿 대부분이
+    /// 여기 해당한다. deny-all로 읽으면 모든 호출이 위반으로 쏟아져 신호가
+    /// 죽고, 그러면 이 통제 자체가 무의미해진다.
+    #[tokio::test]
+    async fn an_empty_allowlist_means_undeclared_not_deny_all() {
+        let (state, dispatcher) = setup_fenced();
+        let task = agent_with_tools(&state, vec![]).await;
+
+        observe_tool(&dispatcher, task.id, WorkerId::new(), Some("bash")).await;
+
+        assert_eq!(
+            allowlist_audit_count(&state).await,
+            0,
+            "빈 목록을 deny-all로 읽으면 모든 호출이 위반이 된다"
+        );
+    }
+
+    /// **이름을 모르면 판정하지 않는다.**
+    ///
+    /// SDK의 `unstable_tool_call_name`이 주지 않는 경우다. 모르는 것을 위반으로
+    /// 접으면 거짓 양성이고, 통과로 세면 거짓 음성이다. 어느 쪽도 아니다.
+    #[tokio::test]
+    async fn a_tool_call_without_a_name_is_not_judged() {
+        let (state, dispatcher) = setup_fenced();
+        let task = agent_with_tools(&state, vec!["read".into()]).await;
+
+        observe_tool(&dispatcher, task.id, WorkerId::new(), None).await;
+
+        assert_eq!(
+            allowlist_audit_count(&state).await,
+            0,
+            "이름 없는 호출을 위반으로 적으면 거짓 양성이다"
         );
     }
 

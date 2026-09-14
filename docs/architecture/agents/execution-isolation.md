@@ -287,11 +287,23 @@ snapshot은 [배치·맥락 계약](../entity-placement-and-context.md)에 따�
 된다 — 기본값을 정본대로 `container_required`로 두면 **오늘의 모든 Task가 거절되고**,
 `host_trusted`로 두면 정본을 어기는 기본값이 된다. 어느 쪽도 "격리가 생겼다"가 아니다.
 
-**부수 실측 하나 — 선언됐지만 강제되지 않는 allow-list.** `AgentTemplateBody.tools`는 저장되고
-(Postgres 바인딩) 표시되지만(Dashboard) **읽어서 제한하는 코드가 없다.** 강제되지 않는
-allow-list는 없는 것보다 위험하다 — 통제처럼 보이기 때문이다. 지금은 `ToolInvocation.name`이
-기록되므로 **탐지형 통제**(목록 밖 호출을 감사에 남기는 것)는 container 없이도 가능하다.
-예방형(호출 자체를 막는 것)은 이 문서의 범위이고 container mount 경계를 기다린다.
+**부수 실측 하나 — 선언됐지만 강제되지 않던 allow-list (2026-09-14, 탐지형으로 전환).**
+`AgentTemplateBody.tools`는 저장되고(Postgres 바인딩) 표시되지만(Dashboard) **읽어서 제한하는
+코드가 없었다.** 강제되지 않는 allow-list는 없는 것보다 위험하다 — 통제처럼 보이기 때문이다.
+
+이제 `Dispatcher`가 관측된 도구 호출을 pin된 템플릿 revision의 목록과 대조하고, 밖이면
+`agent.tool_outside_allowlist`로 감사에 남긴다. **탐지이지 예방이 아니다** — 도구는 워커의
+grok 프로세스 안에서 이미 실행된 뒤이고 오케스트레이터는 ACP 알림으로 사후에 볼 뿐이라 호출
+자체를 막을 수단이 없다. 예방형은 이 문서의 container mount·egress 경계이고 그대로 기다린다.
+
+**판정하지 않는 경우를 위반으로 접지 않는 것**이 이 통제의 핵심이다. 셋이 있고 셋 다 "위반
+아님"이 아니라 **"판정 불가"**다: Task에 `agent_id`가 없거나, pin이 없거나 목록이 **비어**
+있거나(`#[serde(default)]`로 기본이 빈 벡터라 기존 템플릿 대부분이 여기 해당한다 — deny-all로
+읽으면 모든 호출이 위반으로 쏟아져 신호가 죽는다), `ToolInvocation.name`이 `None`이거나.
+**미선언 자체가 공백이라는 사실은 별개로 다뤄야 하고, 호출마다 남길 일이 아니다.**
+
+캐시는 revision id로 건다. `#86`의 요지가 revision immutability라 pin된 본문은 바뀌지 않고,
+따라서 무효화 문제가 없다 — Agent id로 캐싱했다면 pin이 옮겨갈 때 낡은 목록을 쓰게 된다.
 
 ## 구현 게이트
 
