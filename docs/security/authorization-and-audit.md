@@ -191,6 +191,14 @@ provisioning 대상 정책 필드"가 존재하지 않으므로 "그 필드를 �
 | Worker control stream | mTLS Worker identity + control epoch/fencing token | Worker는 자기 command/result만 ACK |
 | Security Manager | service mTLS + 실행 구간에 묶인 delivery grant | 원문 export 대신 grant; break-glass만 예외 |
 
+> **2026-09-15 — MCP stdio 공백의 실효 피해가 커졌다.** 위 표의 "MCP stdio" 행은 목표 상태이고,
+> 현재 `fleet_cancel_task`는 인자로 받은 `task_id`를 **아무 principal·Project scope 검증 없이**
+> `Dispatcher::cancel`에 넘긴다. 이 공백 자체는 새로운 것이 아니다. 다만 같은 주의
+> [cancel 폴백](../architecture/observability-and-reconciliation.md)(로드맵 `#70` 게이트 7)이
+> 그 영향 범위를 바꿨다 — **예전에는 오케스트레이터가 한 번이라도 재시작하면 모든 취소가 대상
+> 없이 조용히 성공해 사실상 무력했는데, 이제 실제로 워커에 도달한다.** 취약점이 새로 생긴 것이
+> 아니라 이미 있던 공백의 피해가 실현 가능해진 것이므로, 이 트랙의 우선순위 판단에 반영한다.
+
 ### 등록되지 않은 route·tool의 판정 (fail-closed 불변식)
 
 **어떤 transport에서든 required capability가 등록되지 않은 route/tool은 deny한다.** 등록 누락은

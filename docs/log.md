@@ -8285,3 +8285,63 @@ SQL에 없어도 통과한다.** 그래서 셋 다 `archive_project_if_drained`�
 "중복 제출"로 해석**한다. 술어를 그대로 더하면 거절된 삽입이 중복으로 오독되어 호출자가 남의
 Task를 돌려받는다 — 조용한 오답이다. 0행의 이유를 가르는 진단이 함께 필요하고, 그것은 별개
 작업이라 여기서 하지 않았다.
+
+## 2026-09-15 — 이번 주 제어 경계 변경 보안 검토
+
+병합 이후 9커밋(코드 21파일 +1534줄)이 전부 제어 경계에 닿았는데 보안 검토 없이 지나갔다.
+`expert-security`로 `b7d703a..HEAD`를 검토했다. **차단 항목 0건** — fail-closed를 fail-open으로
+바꾼 것은 없고, 새로 가능해진 것은 전부 "이미 있던 통제를 실제로 작동시킴" 방향이다.
+
+### 내가 걱정했던 것들의 판정
+
+**워커가 신뢰 경계 밖이면?** `worker_id`는 어느 이벤트에서도 **워커가 보낸 값이 아니다** —
+`dispatch()` 클로저 스코프에 잡힌, 오케스트레이터 자신이 정한 값이다. 워커는 조작할 수 없다.
+`session_id` 문자열은 워커가 고르지만, 그 값으로 할 수 있는 최악은 **자기 커넥션으로 가는
+cancel notification의 session_id**뿐이다 — `cancel`의 `worker_id`는 `TaskStatus::Dispatched`
+(저장소 값)에서 오고 폴백도 `clients.get(&worker_id)`로 그 워커 자신에게만 보낸다. 같은 워커
+안에서 다른 Task의 세션을 사칭하는 것은 이론상 가능하나(`acp_session_id`에 UNIQUE 없음),
+그 워커는 이미 자기가 호스팅하는 모든 세션을 직접 조작할 수 있어 추가 권한이 없다. 워커 간
+격리 부재는 `execution-isolation.md` 게이트 5가 이미 **차단**으로 적어 둔 기존 공백이다.
+
+**감사 detail이 관측성 금지 목록을 어기나?** 아니다. 금지는 prompt·사용자 입력·repository
+URL·raw provider payload이고, 같은 정본이 `task_id·agent_id·worker_id·control_epoch` 같은
+상관관계 필드는 **structured record에 남기라고 요구**한다. 도구 **이름**은 `334f837`이 이미
+허용 넷(`tool_call_id·name·kind·status`)으로 판정해 둔 것과 일치한다.
+`control.cancel_undelivered`는 session_id 원문이 아니라 `session_known` bool만 싣는다.
+
+**`audit_decision`의 actor 위조?** 없다. 사람 행위와 오케스트레이터 결정은 문자열이 아니라
+`actor_user_id`의 유무로 갈린다(전자는 `Some`, 후자는 항상 `None`). 새로 여는 것은 "리스가
+없어도 기록한다"는 관측성뿐이다.
+
+**`ArchiveProgress::Fenced`가 Project 소실까지 접는 것?** 위험하지 않다. 하드 삭제 경로가
+저장소에 **0건**이라 도달 불가능하고, 두 표면 모두 `Fenced`를 성공으로 위장하지 않고 에러로
+돌려주며, 폴딩은 항상 "중단" 쪽으로 접힌다.
+
+**SQL 인젝션?** 아니다. `format!`이 이어 붙이는 것은 컴파일 타임 상수 둘뿐이고 외부 값은 전부
+`.bind()`다. (같은 확인을 나도 직접 했다.)
+
+### 반영한 것 — 중복 술어의 역방향 참조
+
+`archive_project_if_drained`의 인라인 조건이 `project_has_active_tasks`/
+`project_has_live_agents`와 **바이트 단위로 같다**는 것은 확인됐다. 문제는 앞으로다: 저 두
+메서드를 고치는 사람은 `archive_project_if_drained` 쪽 복제본을 보지 못한다. 대조 시험도
+**현재 조건에서의 행동**만 확인하지 SQL 텍스트 동치를 보장하지 않는다.
+
+그래서 **역방향 주석**을 두 메서드에 달았다 — 원래 주석은 복제하는 쪽에만 있었고, 정작 회귀가
+시작되는 자리는 복제**당하는** 쪽이다. 조건이 갈라지면 archive 게이트가 조용히 관대해진다.
+
+### 우선순위를 바꾼 사실 하나
+
+**MCP `fleet_cancel_task`에는 caller principal 검증도 Project scope 검증도 없다.** 인자에서
+받은 `task_id`를 그대로 `Dispatcher::cancel`에 넘긴다(직접 확인). 이것은 기존 공백이고
+`authorization-and-audit.md`가 소유하지만, **이번 주 `77cfd1d`가 그 공백의 영향 범위를 키웠다** —
+예전에는 재시작 뒤 모든 취소가 대상 없이 조용히 성공해 사실상 무력했는데, 이제 실제로 워커에
+도달한다. 취약점을 새로 만든 것은 아니지만 **같은 공백의 실효 피해가 커졌다.**
+
+### 안 한 것
+
+`tasks.acp_session_id`의 UNIQUE 제약은 저비용 방어 심화로 제안됐으나 넣지 않았다 — 같은 워커
+내부 사칭은 이미 그 워커가 통제하는 영역이라 실효 이득이 제한적이고, 제약을 걸면 그 워커의
+정상 재사용 시나리오까지 막을 수 있다. 판단 근거를 남겨 다음에 재검토할 수 있게 한다.
+
+게이트: fmt/clippy 두 세트 exit=0 · 두 세트 78 suites 0 failed(1413 / 1409 passed).

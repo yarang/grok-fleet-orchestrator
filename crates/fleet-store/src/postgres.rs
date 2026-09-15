@@ -2960,6 +2960,10 @@ impl Store for PgStore {
     }
 
     async fn project_has_active_tasks(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        // **이 조건은 `archive_project_if_drained`의 UPDATE 안에 복제되어 있다.**
+        // 거기서는 사전 조회가 아니라 쓰기 술어여야 하므로 이 메서드를 부를 수
+        // 없다(부르면 다시 check-then-act가 된다). 여기를 고치면 **그쪽도 함께
+        // 고쳐야 한다** — 조건이 갈라지면 archive 게이트가 조용히 관대해진다.
         // `status_phase`는 001_init.sql의 생성 칼럼(`status->>'phase'`) —
         // TaskStatus가 `#[serde(tag = "phase")]`라 이 값이 정확히
         // 'pending'/'dispatched'/'completed'/'failed'/'cancelled'다.
@@ -3221,6 +3225,10 @@ impl Store for PgStore {
     }
 
     async fn project_has_live_agents(&self, project_id: ProjectId) -> Result<bool, StoreError> {
+        // **이 조건은 `archive_project_if_drained`의 UPDATE 안에 복제되어 있다.**
+        // 거기서는 사전 조회가 아니라 쓰기 술어여야 하므로 이 메서드를 부를 수
+        // 없다(부르면 다시 check-then-act가 된다). 여기를 고치면 **그쪽도 함께
+        // 고쳐야 한다** — 조건이 갈라지면 archive 게이트가 조용히 관대해진다.
         // `idx_agents_project_status`(027)가 이 조회를 덮는다.
         let (exists,): (bool,) = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE project_id = $1 AND status <> 'stopped')",
