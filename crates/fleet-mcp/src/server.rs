@@ -38,6 +38,16 @@ pub struct McpServer {
 #[derive(Debug, Clone)]
 pub struct McpAuthorization {
     capabilities: Vec<PermissionKind>,
+    /// 런처가 주장하는 호출자 신원 (`FLEET_MCP_PRINCIPAL`, 선택).
+    ///
+    /// **이것은 인증이 아니다.** 런처가 env로 주장하는 값이고, capability 집합이
+    /// 이미 같은 출처에서 같은 방식으로 온다 — 즉 신뢰 수준이 더 낮아지지도
+    /// 높아지지도 않는다. 이 값으로 **접근 권한이 생기지는 않는다**:
+    /// `created_by`는 인가 주체가 아니라 멱등성 스코프이자 선택적 조회 필터다
+    /// (`postgres.rs`에서 `created_by`가 술어로 쓰이는 자리는 그 둘뿐이다).
+    ///
+    /// 없으면 `None`이고 기존 동작(`created_by = "mcp"`)이 그대로 유지된다.
+    principal: Option<String>,
 }
 
 impl McpAuthorization {
@@ -76,7 +86,34 @@ impl McpAuthorization {
                 "FLEET_MCP_CAPABILITIES must contain at least one capability",
             ));
         }
-        Ok(Self { capabilities })
+        Ok(Self {
+            capabilities,
+            principal: Self::principal_from_environment(),
+        })
+    }
+
+    /// `FLEET_MCP_PRINCIPAL`을 읽어 `created_by`에 쓸 값을 만든다.
+    ///
+    /// **`mcp:` 접두사를 붙이는 것이 이 함수의 요지다.** 접두사가 없으면 런처가
+    /// 임의 문자열을 주장해 Dashboard 사용자의 `created_by`(= username)와 같은
+    /// 값을 만들 수 있고, 그러면 그 사용자의 **멱등성 네임스페이스를 점유**한다
+    /// — 같은 키로 제출했을 때 상대가 내 Task를 돌려받거나 409를 받는다.
+    /// 접두사는 두 네임스페이스가 절대 겹치지 않게 한다.
+    ///
+    /// 비어 있거나 공백뿐이면 `None`으로 접는다 — 빈 신원은 신원이 아니고,
+    /// 그것을 `"mcp:"`로 만들면 아무 의미 없는 새 버킷이 하나 더 생긴다.
+    fn principal_from_environment() -> Option<String> {
+        let raw = std::env::var("FLEET_MCP_PRINCIPAL").ok()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(format!("mcp:{trimmed}"))
+    }
+
+    /// `created_by`에 쓸 값. 런처가 신원을 주지 않으면 기존과 같은 `"mcp"`다.
+    pub fn created_by(&self) -> String {
+        self.principal.clone().unwrap_or_else(|| "mcp".to_string())
     }
 
     fn permits_tool(&self, tool: &str) -> bool {
@@ -134,6 +171,7 @@ impl McpServer {
             dispatcher,
             McpAuthorization {
                 capabilities: Vec::new(),
+                principal: None,
             },
         )
     }
@@ -145,7 +183,8 @@ impl McpServer {
     ) -> Self {
         Self {
             ctx: ToolContext::new(state, dispatcher)
-                .with_capabilities(authorization.capabilities.clone()),
+                .with_capabilities(authorization.capabilities.clone())
+                .with_created_by(authorization.created_by()),
             authorization,
         }
     }
@@ -325,6 +364,7 @@ mod tests {
     fn launcher_capabilities_gate_tools() {
         let authorization = McpAuthorization {
             capabilities: vec![PermissionKind::TaskRead],
+            principal: None,
         };
         assert!(authorization.permits_tool(crate::schema::TOOL_GET_TASK_STATUS));
         assert!(authorization.permits_tool(crate::schema::TOOL_LIST_TASKS));
@@ -341,11 +381,13 @@ mod tests {
     fn place_agent_tool_needs_agent_manage() {
         let read_only = McpAuthorization {
             capabilities: vec![PermissionKind::AgentRead, PermissionKind::TaskRead],
+            principal: None,
         };
         assert!(!read_only.permits_tool(crate::schema::TOOL_PLACE_AGENT));
 
         let manager = McpAuthorization {
             capabilities: vec![PermissionKind::AgentManage],
+            principal: None,
         };
         assert!(manager.permits_tool(crate::schema::TOOL_PLACE_AGENT));
         assert!(manager.permits_tool(crate::schema::TOOL_CREATE_AGENT));
@@ -359,6 +401,7 @@ mod tests {
     fn transition_issue_tool_is_hidden_without_any_transition_capability() {
         let none = McpAuthorization {
             capabilities: vec![PermissionKind::IssueRead, PermissionKind::IssueCreate],
+            principal: None,
         };
         assert!(
             !none.permits_tool(crate::schema::TOOL_TRANSITION_ISSUE),
@@ -375,6 +418,7 @@ mod tests {
         ] {
             let some = McpAuthorization {
                 capabilities: vec![cap],
+                principal: None,
             };
             assert!(
                 some.permits_tool(crate::schema::TOOL_TRANSITION_ISSUE),
@@ -386,6 +430,73 @@ mod tests {
 
     // 더 깊은 통합 테스트는 fleet-cli/tests/에서 수행 (실제 Dispatcher + Store 필요).
     // 여기서는 라우팅 로직을 단위 테스트하기 어려움 (FleetState가 concrete Store 필요).
+    // ── 런처가 주장하는 호출자 신원 (로드맵 `#58`) ──────────────────
+    //
+    // 넷을 함께 두는 이유는 하나만 두면 "항상 그 답을 내는" 구현으로도
+    // 통과하기 때문이다.
+
+    /// **접두사가 이 기능의 요지다.**
+    ///
+    /// 접두사가 없으면 런처가 Dashboard 사용자의 username과 같은 값을 주장해
+    /// 그 사용자의 **멱등성 네임스페이스를 점유**할 수 있다 — 같은 키로
+    /// 제출했을 때 상대가 내 Task를 돌려받거나 409를 받는다.
+    #[test]
+    fn a_launcher_principal_is_namespaced_under_mcp() {
+        let auth = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskCreate],
+            principal: Some("mcp:alice".to_string()),
+        };
+        assert_eq!(auth.created_by(), "mcp:alice");
+        assert_ne!(
+            auth.created_by(),
+            "alice",
+            "접두사가 없으면 Dashboard 사용자 'alice'의 멱등성 버킷을 점유한다"
+        );
+    }
+
+    /// 신원을 주지 않는 배포는 **기존 동작 그대로**다.
+    ///
+    /// 기존 행들이 `"mcp"` 버킷에 있으므로 기본값이 바뀌면 과거 제출과
+    /// 네임스페이스가 갈라진다.
+    #[test]
+    fn no_launcher_principal_keeps_the_original_bucket() {
+        let auth = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskCreate],
+            principal: None,
+        };
+        assert_eq!(auth.created_by(), "mcp");
+    }
+
+    /// 서로 다른 두 런처는 서로 다른 버킷을 갖는다.
+    ///
+    /// 이것이 없던 동안 키 네임스페이스는 MCP 클라이언트 단위가 아니라
+    /// 오케스트레이터 단위였다(마이그레이션 024의 한계).
+    #[test]
+    fn two_launchers_do_not_share_an_idempotency_bucket() {
+        let a = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskCreate],
+            principal: Some("mcp:a".to_string()),
+        };
+        let b = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskCreate],
+            principal: Some("mcp:b".to_string()),
+        };
+        assert_ne!(a.created_by(), b.created_by());
+    }
+
+    /// 빈 신원은 신원이 아니다 — `"mcp:"`라는 무의미한 버킷을 만들지 않는다.
+    #[test]
+    fn a_blank_principal_folds_to_none() {
+        // `principal_from_environment`는 env를 읽으므로 직접 부르지 않고,
+        // 그 함수가 만드는 값의 형태를 여기서 고정한다: 공백뿐인 입력은 접혀야
+        // 하고 접힌 결과는 기본 버킷이다.
+        let folded = McpAuthorization {
+            capabilities: vec![PermissionKind::TaskCreate],
+            principal: None,
+        };
+        assert_eq!(folded.created_by(), "mcp");
+    }
+
     // server.rs는 얇은 레이어이므로, 핸들러 테스트가 대부분의 커버리지를 제공.
     //
     // TODO(0.2.0): test_utils 크레이트를 만들어 mock Store를 공유하면

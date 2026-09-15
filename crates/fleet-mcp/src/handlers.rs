@@ -47,6 +47,13 @@ pub struct ToolContext {
     /// 기본값은 **빈 집합**이다(fail-closed) — 명시적으로 부여하지 않으면
     /// 인자 의존 도구는 전부 거절된다.
     pub capabilities: Vec<fleet_core::PermissionKind>,
+    /// 이 표면에서 만든 리소스의 `created_by`. 런처가 `FLEET_MCP_PRINCIPAL`을
+    /// 주면 `mcp:<principal>`이고, 주지 않으면 기존과 같은 `"mcp"`다.
+    ///
+    /// **인가 주체가 아니다.** `created_by`는 멱등성 스코프이자 선택적 조회
+    /// 필터일 뿐이며, 이 값으로 접근 권한이 생기지 않는다. 런처가 주장하는
+    /// 값이라는 것도 `capabilities`와 같다 — 신뢰 출처가 동일하다.
+    pub created_by: String,
 }
 
 impl ToolContext {
@@ -55,7 +62,15 @@ impl ToolContext {
             state,
             dispatcher,
             capabilities: Vec::new(),
+            // 런처가 신원을 주지 않는 배포와 같은 기본값 — 이 값이 기존 행들의
+            // 멱등성 버킷이므로 바꾸면 과거 제출과 네임스페이스가 갈라진다.
+            created_by: "mcp".to_string(),
         }
+    }
+
+    pub fn with_created_by(mut self, created_by: String) -> Self {
+        self.created_by = created_by;
+        self
     }
 
     pub fn with_capabilities(mut self, capabilities: Vec<fleet_core::PermissionKind>) -> Self {
@@ -227,11 +242,21 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(String::from);
-    // 이 표면에는 호출자 principal이 없다 — `ToolContext`는 capability 집합만
-    // 들고 있고(server.rs의 `McpAuthorization`), stdio 런처가 신원을 전달하지
-    // 않는다. 그래서 모든 MCP 제출이 `created_by = "mcp"` 한 버킷을 공유하고,
-    // 멱등성 키 네임스페이스도 그 버킷 단위다(마이그레이션 024 참고).
-    req.created_by = "mcp".to_string();
+    // **런처가 신원을 주면 그것을 쓴다** (로드맵 `#58`). 주지 않으면 기존과 같은
+    // `"mcp"` 한 버킷이다.
+    //
+    // 마이그레이션 024가 멱등성 유일성 스코프를 `created_by`로 잡은 근거는
+    // "정본이 말하는 principal에 해당하는 값이 오늘 코드에 존재하지 않는다"였고,
+    // 그래서 **모든 MCP 제출이 한 버킷을 공유해 키 네임스페이스가 MCP 클라이언트
+    // 단위가 아니라 오케스트레이터 단위**였다. 서로 다른 두 MCP 호출자가 같은
+    // 키를 쓰면 뒤에 온 쪽이 앞 호출자의 Task를 돌려받거나 409를 받는다 — 키
+    // 네임스페이스가 호출자 간 채널이 되는 것이다.
+    //
+    // `FLEET_MCP_PRINCIPAL`이 그 전제를 바꾼다. 이것은 **인증이 아니라 런처의
+    // 주장**이며 신뢰 수준은 `FLEET_MCP_CAPABILITIES`와 같다(같은 env, 같은 출처).
+    // 그래도 유효한 이유는 이 값으로 **권한이 생기지 않기** 때문이다 —
+    // `created_by`는 인가 주체가 아니라 멱등성 스코프이자 선택적 필터다.
+    req.created_by = ctx.created_by.clone();
 
     let task = Task::from_request(req);
     let task_id = task.id;
