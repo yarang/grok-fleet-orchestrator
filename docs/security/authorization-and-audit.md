@@ -208,6 +208,11 @@ provisioning 대상 정책 필드"가 존재하지 않으므로 "그 필드를 �
 > username을 주장해 **그 사용자의 멱등성 네임스페이스를 점유**하는 것을 막는다.
 > **Project scope 절반은 그대로 보류**다 — 로드맵 `#58`이 적었듯 멤버십 모델 설계 승인이 선행이며,
 > 지금 검사를 넣으면 비교 대상이 없어 항상 통과하는 죽은 분기가 된다.
+>
+> **2026-09-15 — 그 절반이 곧바로 다른 공백 하나를 닫았다.** `created_by`가 생기면서 MCP 표면의
+> mutation 13개가 감사 이벤트를 남기게 됐다(아래 "MCP mutation 감사"). 신원이 인가를 주지는 못해도
+> **사후 귀속**은 준다는 뜻이다 — 위 cancel 노출에 대해 이것이 바꾸는 것은 "막는다"가 아니라 "누가
+> 무엇을 취소했는지 사후에 셀 수 있다"이며, 그 구분을 흐리지 않는다.
 
 ### 등록되지 않은 route·tool의 판정 (fail-closed 불변식)
 
@@ -286,8 +291,8 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 
 위 규칙은 목표 계약이다. **`#76`(2026-08-23, 1단계)로 HTTP `/v1` 표면의 mutation과 capability 거절은
 대부분 감사된다.** `#95` 1단계(2026-09-02)가 `project_id` 상관 필드를, 2단계(2026-09-03)가 Dashboard
-`/api`의 **권한 거절**을, 3단계(2026-09-04)가 Dashboard의 **non-GET route 31개 전부와 상태를 바꾸는 GET 1개**를 각각 닫았다. MCP
-표면은 아직이다.
+`/api`의 **권한 거절**을, 3단계(2026-09-04)가 Dashboard의 **non-GET route 31개 전부와 상태를 바꾸는 GET 1개**를 각각 닫았다.
+2026-09-15에 MCP 표면의 **mutation 13개**가 닫혔다(아래 참조). MCP의 **거절**은 아직이다.
 
 | 경로 | 현재 감사 | 비고 |
 |---|---|---|
@@ -300,7 +305,38 @@ audit read도 권한이며 Project 범위 읽기는 자신의 Project event만, 
 | HTTP capability 거절 | **기록함 (`#76`)** | `http.capability_denied`, log-only — `auth_middleware`의 모든 인증 분기(개발 무인증 포함)에서 `authorize_http_endpoint`가 거절할 때 기록 |
 | Dashboard `/api` 권한 거절 | **기록함 (`#95` 2단계)** | `dashboard.permission_denied`, log-only. `require_permission`이 유일한 판단 지점이므로 그 안에서 기록한다 — 아래 참조 |
 | Dashboard `/api`·폼 mutation | **기록함 (`#95` 3단계)** | non-GET route 31개 전부, 여기에 상태를 바꾸는 GET(`/verify-email`) 1개. 라우터 원문을 읽는 계약 테스트가 분류 누락을 테스트 시점에 깨뜨린다 — 아래 참조 |
-| MCP mutation/거절 | **없음** | MCP tool별 감사는 `ToolContext`에 호출 principal이 없어 착수 전. Dashboard의 중앙 capability 행렬도 여전히 없다(`#92`가 다룸) |
+| MCP mutation | **기록함 (`#95` 2단계)** | 상태를 바꾸는 tool 13개 전부, log-only. actor는 `ToolContext::created_by`이고 `actor_user_id`는 항상 `None`이다 — 아래 참조 |
+| MCP capability 거절 | **없음** | 판정이 `McpServer`의 `permits_tool`과 `handle_transition_issue` **두 곳**에 나뉘어 있어, Dashboard의 `require_permission`처럼 "거절을 기록할 수 있는 자리가 한 곳"이 아직 아니다. 중앙 capability 행렬은 `#92`가 다룬다 |
+
+#### MCP mutation 감사 (`#95` 2단계, 2026-09-15)
+
+`crates/fleet-mcp/src/audit.rs`의 `record`가 기록하고, 13개 mutation 핸들러가 각자 부른다
+(`fleet_dispatch_task`, `fleet_cancel_task`, `fleet_reset_worker_breaker`,
+`fleet_revoke_bootstrap_token`, `fleet_create_project`, `fleet_delete_project`,
+`fleet_create_agent`, `fleet_place_agent`, `fleet_start_agent`, `fleet_stop_agent`,
+`fleet_create_issue`, `fleet_transition_issue`, `fleet_comment_issue`).
+
+**막고 있던 것은 감사 파이프라인이 아니라 신원이었다.** 이 표의 이전 판은 "MCP tool별 감사는
+`ToolContext`에 호출 principal이 없어 착수 전"이라고 적었고, 그 선결 조건은 `#58`이
+`FLEET_MCP_PRINCIPAL`을 넣으면서 사라졌다. actor는 `ToolContext::created_by`와 **같은 문자열**이다 —
+런처가 신원을 주면 `mcp:<principal>`, 주지 않으면 기존 배포와 같은 `"mcp"` 한 버킷이다. 같은 값을
+쓰는 것이 중요하다: 리소스의 `created_by`와 감사의 actor가 갈라지면 "누가 만들었나"와 "누가 그
+행위를 했나"를 나중에 맞대 볼 수 없다. 같은 이유로 Issue와 Issue 코멘트의 작성자도 `"mcp"` 고정에서
+`created_by`로 바뀌었다.
+
+`actor_user_id`는 **항상 `None`**이다. 이 표면에는 `users` 행에 대응하는 주체가 없으며, 사람 행위와
+이 표면을 DB에서 가르는 것은 actor 문자열이 아니라 이 필드다.
+
+기록은 전부 log-only다. `/v1`의 발급(mint) 계열이 fail-closed인 것과 다른데, 근거는 그쪽과 같다 —
+여기 13개 중 **새 비밀값을 발급하는 것이 하나도 없다.** 감사에 실패해도 회수해야 할 자격이 생기지
+않으므로, 이미 반영된 mutation을 감사 실패로 되돌리면 잃는 것만 있다.
+
+**판정의 출발점은 도구 카탈로그다.** `crates/fleet-mcp/tests/audit_coverage.rs`는
+`schema::all_tools()`의 24개가 전부 mutation/조회 중 하나로 **분류돼 있는지** 먼저 확인하고, 그다음
+13개를 실제로 호출해 **도구 이름 단위로** 감사 행이 났는지 본다. 손으로 센 목록만 검사하면 나중에
+누가 새 mutation 도구를 더했을 때 그 도구는 목록에 없어 테스트가 통과한다 — Dashboard 쪽에서 라우터
+원문을 읽는 계약 테스트를 둔 것과 같은 이유이며, 거기서와 마찬가지로 **총 건수는 세지 않는다**(한
+도구가 두 줄을 남기고 다른 도구가 한 줄도 남기지 않아도 합계는 맞는다).
 
 #### Dashboard 권한 거절 감사 (`#95` 2단계, 2026-09-03)
 

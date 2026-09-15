@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+pub mod audit;
 pub mod handlers;
 pub mod schema;
 pub mod server;

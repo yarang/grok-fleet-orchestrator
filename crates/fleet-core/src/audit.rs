@@ -261,6 +261,17 @@ pub mod action {
     /// "언제 누구에 의해 지워졌는가"이며, `actor`/`target`이 인덱스가 있는
     /// 자리에 남는 조회 가능한 유일한 경로라는 뜻이다.
     pub const TASK_DELETE: &str = "task.delete";
+    /// Task 취소 요청 (`#95` 2단계 — MCP tool별 감사).
+    ///
+    /// [`TASK_DELETE`]와 다른 사실이다 — 저쪽은 행을 지우는 것이고 이쪽은 실행
+    /// 중일 수 있는 것을 멈추라고 **요청**하는 것이다. 요청이 워커에 실제로
+    /// 닿았는지는 [`CONTROL_CANCEL_UNDELIVERED`]가 따로 말한다.
+    pub const TASK_CANCEL: &str = "task.cancel";
+    /// Worker circuit breaker 수동 초기화 (`#95` 2단계).
+    ///
+    /// 운영자가 자동 차단을 걷어내는 행위라, 그 뒤에 그 워커로 나간 dispatch의
+    /// 책임 소재가 이 기록에 달려 있다.
+    pub const WORKER_BREAKER_RESET: &str = "worker.breaker_reset";
     /// Task 제출 (로드맵 #95 3단계).
     ///
     /// `detail`에 **prompt를 넣지 않는다.** prompt는 사용자가 붙여 넣은 임의

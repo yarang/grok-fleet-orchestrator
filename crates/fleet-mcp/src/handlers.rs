@@ -258,6 +258,10 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
     // `created_by`는 인가 주체가 아니라 멱등성 스코프이자 선택적 필터다.
     req.created_by = ctx.created_by.clone();
 
+    // 감사 이벤트의 `project_id`로 쓴다 (`#95` 2단계). `req`는 아래에서
+    // `Task::from_request`에 소비되므로 여기서 복사해 둔다.
+    let task_project_id = req.project_id;
+
     let task = Task::from_request(req);
     let task_id = task.id;
 
@@ -282,6 +286,23 @@ async fn handle_dispatch_task(ctx: &ToolContext, args: &Value) -> Result<Value, 
             // 모르면 "방금 새 작업을 시작했다"고 오해하고, 이미 완료된 작업의
             // 상태를 새 작업의 진행으로 읽는다.
             let deduplicated = returned_id != task_id;
+            // 멱등 흡수는 Task 행을 만들지 않았으므로 기록하지 않는다 —
+            // Dashboard `POST /api/tasks`와 같은 규칙이다. 기록하면 감사 행
+            // 수가 "몇 개가 제출됐는가"가 아니라 "몇 번 요청했는가"를 센다.
+            if !deduplicated {
+                crate::audit::record(
+                    &ctx.state,
+                    fleet_core::AuditEvent::success(
+                        &ctx.created_by,
+                        fleet_core::audit::action::TASK_SUBMIT,
+                    )
+                    .project_opt(task_project_id)
+                    .target("task", returned_id.to_string())
+                    // prompt는 싣지 않는다(`TASK_SUBMIT` 문서 참고).
+                    .detail(json!({ "dispatched": status == "dispatched" })),
+                )
+                .await;
+            }
             Ok(schema::tool_json(&json!({
                 "task_id": returned_id.to_string(),
                 "status": status,
@@ -356,12 +377,39 @@ async fn handle_cancel_task(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         .unwrap_or("cancelled by user")
         .to_string();
 
-    match ctx.dispatcher.cancel(task_id, reason).await {
-        Ok(()) => Ok(schema::tool_json(&json!({
+    match ctx.dispatcher.cancel(task_id, reason.clone()).await {
+        Ok(()) => {
+            // Project는 취소 **뒤에** 읽는다. 취소는 이미 확정됐으므로 이 조회가
+            // 실패해도 감사를 포기하지 않는다 — `project_id`가 `None`인 줄이
+            // 남는 것이 줄이 아예 없는 것보다 낫다.
+            let project_id = ctx
+                .state
+                .store
+                .get_task(task_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|t| t.project_id);
+            crate::audit::record(
+                &ctx.state,
+                fleet_core::AuditEvent::success(
+                    &ctx.created_by,
+                    fleet_core::audit::action::TASK_CANCEL,
+                )
+                .project_opt(project_id)
+                .target("task", task_id.to_string())
+                // `reason`은 호출자가 넣는 임의 문자열이라 자격증명이 섞일 수
+                // 있다. 길이만 남겨 "사유가 주어졌는가"는 답하되 본문은 넣지
+                // 않는다 — `TASK_SUBMIT`이 prompt를 빼는 것과 같은 이유다.
+                .detail(json!({ "reason_len": reason.chars().count() })),
+            )
+            .await;
+            Ok(schema::tool_json(&json!({
             "task_id": task_id.to_string(),
             "status": "cancelled",
             "hint": "Cancellation has been recorded; the worker has been notified (best-effort)."
-        }))),
+            })))
+        }
         Err(e) => Ok(schema::tool_error(format!("cancel failed: {e}"))),
     }
 }
@@ -933,6 +981,19 @@ async fn handle_reset_worker_breaker(
         ))
         .await;
 
+    // Worker는 Project에 속하지 않으므로 `project_id`는 `None`이다 — 누락이
+    // 아니라 단정이다(`AuditEvent::project_id` 문서 참고).
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(
+            &ctx.created_by,
+            fleet_core::audit::action::WORKER_BREAKER_RESET,
+        )
+        .target("worker", worker_id.to_string())
+        .detail(json!({ "previous_state": format!("{from_state:?}").to_lowercase() })),
+    )
+    .await;
+
     Ok(schema::tool_json(&json!({
         "worker_id": worker_id.to_string(),
         "previous_state": format!("{from_state:?}").to_lowercase(),
@@ -1011,6 +1072,18 @@ async fn handle_revoke_bootstrap_token(
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
     if revoked {
+        // 실제로 회수된 경우에만 기록한다 — 없는 토큰에 대한 호출까지 남기면
+        // 감사 행 수가 회수 횟수가 아니라 요청 횟수가 된다(`ISSUE_LINK`와 같은
+        // 규칙). 대상 식별자는 `fleet-api`의 같은 경로와 같은 public id다.
+        crate::audit::record(
+            &ctx.state,
+            fleet_core::AuditEvent::success(
+                &ctx.created_by,
+                fleet_core::audit::action::TOKEN_BOOTSTRAP_REVOKE,
+            )
+            .target("bootstrap_token", token_id.to_string()),
+        )
+        .await;
         Ok(schema::tool_json(&json!({
             "token_id": token_id,
             "revoked": true,
@@ -1065,6 +1138,15 @@ async fn handle_create_project(ctx: &ToolContext, args: &Value) -> Result<Value,
             fleet_store::StoreError::Conflict(msg) => JsonRpcError::invalid_params(msg),
             other => JsonRpcError::internal(format!("store error: {other}")),
         })?;
+
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::PROJECT_CREATE)
+            .project(project.id)
+            .target("project", project.id.to_string())
+            .detail(json!({ "name": project.name })),
+    )
+    .await;
 
     Ok(schema::tool_json(&project_json(&project)))
 }
@@ -1122,19 +1204,39 @@ async fn handle_delete_project(ctx: &ToolContext, args: &Value) -> Result<Value,
     };
 
     // archive 절차는 Dashboard `DELETE /api/projects/{id}`와 공유한다
-    // (`fleet_store::advance_project_archive`). MCP 표면에는 아직 감사
-    // 파이프라인이 없어 상태 전이 콜백은 무시한다 — 감사 확장은 `#95`.
+    // (`fleet_store::advance_project_archive`) — 계약 문서가 두 표면의 동일
+    // 동작을 요구하므로 규칙을 각자 구현하지 않는다. 상태 전이는 콜백으로
+    // 받아 이 표면의 감사 파이프라인에 기록한다(`#95` 2단계).
     // archive는 제어면 결정이므로 lease를 잃은 인스턴스가 수행하면 안 된다
     // (로드맵 `#70`). 이 표면의 다른 제어 경로와 같은 관용구를 쓴다.
+    let mut transitions = Vec::new();
     let fence = ctx.state.control_fence();
     let progress = fleet_store::advance_project_archive(
         ctx.state.store.as_ref(),
         &mut project,
         fence.as_ref(),
-        |_| {},
+        |status| transitions.push(status),
     )
     .await
     .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    for status in transitions {
+        let action = match status {
+            fleet_core::ProjectStatus::Draining => {
+                fleet_core::audit::action::PROJECT_ARCHIVE_REQUESTED
+            }
+            fleet_core::ProjectStatus::Archived => fleet_core::audit::action::PROJECT_ARCHIVED,
+            // advance_project_archive는 Active로 되돌리지 않는다.
+            fleet_core::ProjectStatus::Active => continue,
+        };
+        crate::audit::record(
+            &ctx.state,
+            fleet_core::AuditEvent::success(&ctx.created_by, action)
+                .project(project.id)
+                .target("project", project.id.to_string()),
+        )
+        .await;
+    }
 
     if matches!(progress, fleet_store::ArchiveProgress::Fenced) {
         return Err(JsonRpcError::internal(
@@ -1273,6 +1375,24 @@ async fn handle_create_agent(ctx: &ToolContext, args: &Value) -> Result<Value, J
         agent = agent.without_placement();
     }
 
+    // 되맞춘 **뒤에** 기록한다. 위에서 배정이 떨어졌으면 `agent.worker_id`는
+    // 이미 `None`이고, 그 전에 기록하면 감사 로그가 일어나지 않은 배정을
+    // 증언한다.
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::AGENT_CREATE)
+            .project(agent.project_id)
+            .target("agent", agent.id.to_string())
+            .detail(json!({
+                "name": agent.name,
+                "project_id": agent.project_id.to_string(),
+                // 생성 시점 배정은 `agent.assign`을 따로 내지 않는다 —
+                // Dashboard `POST /api/agents`와 같은 규칙.
+                "worker_id": agent.worker_id.map(|w| w.to_string()),
+            })),
+    )
+    .await;
+
     Ok(schema::tool_json(&agent_json(&agent)))
 }
 
@@ -1291,20 +1411,21 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
     // 존재 검사만 한다. 아래 `SlotClaim::NoSuchAgent`도 같은 답을 주지만
     // 그것은 `choose_worker` **뒤**라, Agent가 없고 후보 Worker도 없을 때
     // "no candidate worker"라는 엉뚱한 이유가 먼저 나온다. 요청의 결함을
-    // fleet의 상태보다 먼저 말해 준다. Dashboard는 이 자리에서 읽은 행을
-    // 감사 로그의 `previous_worker_id`로도 쓰지만 MCP에는 감사가 없다.
-    if ctx
+    // fleet의 상태보다 먼저 말해 준다. 여기서 읽은 행은 감사 로그의
+    // `previous_worker_id`로도 쓴다 — Dashboard의 같은 경로와 같다(`#95`
+    // 2단계). 배정 **뒤에** 읽으면 그 값은 이미 새 Worker다.
+    let Some(before) = ctx
         .state
         .store
         .get_agent(agent_id)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
-        .is_none()
-    {
+    else {
         return Err(JsonRpcError::invalid_params(format!(
             "no such agent: {agent_id}"
         )));
-    }
+    };
+    let previous_worker_id = before.worker_id;
 
     // **회수된 Agent도 배정한다.** 근거는 Dashboard의 같은 경로와 같다 —
     // 게이트 ② 아래에서는 "회수 → 관측 소멸 → 이동"이 살아 있는 Agent를
@@ -1381,6 +1502,24 @@ async fn handle_place_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
         .ok_or_else(|| JsonRpcError::internal("agent vanished during placement".to_string()))?;
+
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::AGENT_ASSIGN)
+            .project(placed.project_id)
+            .target("agent", agent_id.to_string())
+            .detail(json!({
+                "worker_id": worker_id.to_string(),
+                // 최초 배정이면 `null`이다. 이것이 없으면 감사 로그가 "어디로
+                // 갔는가"만 말하고 "어디에서 왔는가"는 앞 이벤트를 거슬러
+                // 올라가야 알 수 있다.
+                "previous_worker_id": previous_worker_id.map(|w| w.to_string()),
+                // 재배정은 값이 같아도 세대를 올리므로 **무조건** 값이 있다
+                // (`AGENT_ASSIGN` 문서 참고).
+                "generation": placed.command_generation,
+            })),
+    )
+    .await;
 
     Ok(schema::tool_json(&agent_json(&placed)))
 }
@@ -1512,6 +1651,26 @@ async fn handle_start_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Js
             .await
             .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
             .ok_or_else(|| JsonRpcError::internal("agent disappeared during start"))?;
+        // 세대가 실제로 오른 경우에만 — 즉 이 `if` 안에서만 — 기록한다.
+        // 이미 `running`인 Agent를 다시 start하면 이벤트를 내지 않는다
+        // (`AGENT_START` 문서 참고).
+        crate::audit::record(
+            &ctx.state,
+            fleet_core::AuditEvent::success(
+                &ctx.created_by,
+                fleet_core::audit::action::AGENT_START,
+            )
+            .project(agent.project_id)
+            .target("agent", agent.id.to_string())
+            .detail(json!({
+                "project_id": agent.project_id.to_string(),
+                "generation": agent.command_generation,
+                // 미배정이면 `null`이다 — 명령이 어디로도 가지 않은 채
+                // 발행됐다는 사실 자체가 기록될 값이다.
+                "worker_id": agent.worker_id.map(|w| w.to_string()),
+            })),
+        )
+        .await;
     }
 
     Ok(schema::tool_json(&agent_json(&agent)))
@@ -1542,6 +1701,7 @@ async fn handle_stop_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Jso
     // 이미 `Stopped`면 쓰지 않는다 — `updated_at`을 무의미하게 갱신하면
     // "언제 회수됐는가"라는 기록이 재호출마다 밀린다.
     if agent.status != fleet_core::AgentStatus::Stopped {
+        let generation_before = agent.command_generation;
         ctx.state
             .store
             .update_agent_status(agent.id, fleet_core::AgentStatus::Stopped)
@@ -1557,6 +1717,21 @@ async fn handle_stop_agent(ctx: &ToolContext, args: &Value) -> Result<Value, Jso
             .await
             .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
             .ok_or_else(|| JsonRpcError::internal("agent disappeared during stop"))?;
+        crate::audit::record(
+            &ctx.state,
+            fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::AGENT_STOP)
+                .project(agent.project_id)
+                .target("agent", agent.id.to_string())
+                .detail(json!({
+                    "project_id": agent.project_id.to_string(),
+                    // 세대가 올랐을 때만 값이 있다. `null`은 "회수는 기록됐지만
+                    // Worker로 나간 명령은 없다"를 뜻한다(`AGENT_STOP` 문서).
+                    "generation": (agent.command_generation > generation_before)
+                        .then_some(agent.command_generation),
+                    "worker_id": agent.worker_id.map(|w| w.to_string()),
+                })),
+        )
+        .await;
     }
 
     Ok(schema::tool_json(&agent_json(&agent)))
@@ -1679,7 +1854,10 @@ async fn handle_create_issue(ctx: &ToolContext, args: &Value) -> Result<Value, J
         )));
     }
 
-    let mut issue = fleet_core::Issue::new(project_id, title, "mcp");
+    // 작성자는 `ctx.created_by`다 — 이 표면이 만드는 다른 리소스와 같은 값이고,
+    // 아래 감사 이벤트의 actor와도 같은 문자열이다(`crate::audit` 모듈 문서).
+    // 둘이 갈라지면 "누가 만들었나"와 "누가 그 행위를 했나"를 맞대 볼 수 없다.
+    let mut issue = fleet_core::Issue::new(project_id, title, &ctx.created_by);
     if let Some(body) = args.get("body").and_then(|v| v.as_str()) {
         issue.body = body.to_string();
     }
@@ -1699,6 +1877,16 @@ async fn handle_create_issue(ctx: &ToolContext, args: &Value) -> Result<Value, J
         .create_issue(&issue)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::ISSUE_CREATE)
+            .project(issue.project_id)
+            .target("issue", issue.id.to_string())
+            // 본문(`body`)은 싣지 않는다 — 임의 사용자 텍스트다.
+            .detail(json!({ "project_id": project_id.to_string() })),
+    )
+    .await;
 
     Ok(schema::tool_json(&issue_json(&issue, false)))
 }
@@ -1757,6 +1945,23 @@ async fn handle_transition_issue(ctx: &ToolContext, args: &Value) -> Result<Valu
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
 
+    // `ready_for_agent`로의 전이는 Agent 자동 착수의 인가 지점이라, 누가
+    // 승인했는지가 남아야 한다(`ISSUE_TRANSITION` 문서).
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(
+            &ctx.created_by,
+            fleet_core::audit::action::ISSUE_TRANSITION,
+        )
+        .project(issue.project_id)
+        .target("issue", issue.id.to_string())
+        .detail(json!({
+            "to": to.as_str(),
+            "close_reason": close_reason.map(|r| r.as_str()),
+        })),
+    )
+    .await;
+
     let active = ctx
         .state
         .store
@@ -1781,23 +1986,36 @@ async fn handle_comment_issue(ctx: &ToolContext, args: &Value) -> Result<Value, 
     }
 
     let issue_id = parse_issue_id_arg(args)?;
-    if ctx
+    // 존재 검사에서 읽은 행의 `project_id`를 감사 이벤트에 싣는다 — 이 값이
+    // 없으면 Project 범위 감사 질의에서 코멘트가 보이지 않는다(`#95` 1단계가
+    // `project_id`를 컬럼으로 둔 이유).
+    let Some(issue) = ctx
         .state
         .store
         .get_issue(issue_id)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?
-        .is_none()
-    {
+    else {
         return Ok(schema::tool_error("issue not found"));
-    }
+    };
 
-    let comment = fleet_core::IssueComment::new(issue_id, "mcp", body);
+    // 작성자는 `handle_create_issue`와 같은 이유로 `ctx.created_by`다.
+    let comment = fleet_core::IssueComment::new(issue_id, &ctx.created_by, body);
     ctx.state
         .store
         .add_issue_comment(&comment)
         .await
         .map_err(|e| JsonRpcError::internal(format!("store error: {e}")))?;
+
+    crate::audit::record(
+        &ctx.state,
+        fleet_core::AuditEvent::success(&ctx.created_by, fleet_core::audit::action::ISSUE_COMMENT)
+            .project(issue.project_id)
+            .target("issue", issue_id.to_string())
+            // 본문은 넣지 않는다 — `comment_id`가 원문으로 가는 경로다.
+            .detail(json!({ "comment_id": comment.id.to_string() })),
+    )
+    .await;
 
     Ok(schema::tool_json(&json!({
         "id": comment.id.to_string(),

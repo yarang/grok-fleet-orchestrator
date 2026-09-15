@@ -8405,3 +8405,68 @@ URL·raw provider payload이고, 같은 정본이 `task_id·agent_id·worker_id�
 
 Project scope(위 (b))와 MCP 감사 파이프라인(`#95`)은 그대로다. 후자가 붙으면 이 `created_by`가
 감사 actor로도 쓰일 수 있다 — 지금은 리소스의 생성자 필드일 뿐이다.
+
+---
+
+## 2026-09-15 — ingest — MCP 표면의 mutation 감사 (`#95` 2단계)
+
+상태를 바꾸는 MCP tool 13개가 감사 이벤트를 남기기 시작했다. 이 표면은 그때까지 **한 건도**
+남기지 않았고, 정본([인가·감사](./security/authorization-and-audit.md))은 "모든 mutation은
+append-only audit event를 남긴다"를 요구하고 있었다.
+
+### 막고 있던 것은 감사가 아니라 신원이었다
+
+로드맵 `#95` 행은 1·2·3단계에 걸쳐 같은 대기 사유를 세 번 적었다 — "MCP tool별 감사는
+`ToolContext`에 호출 principal이 없다". **그 선결 조건은 직전 커밋(`#58`, 같은 날)이
+`FLEET_MCP_PRINCIPAL`을 넣으면서 사라져 있었다.** 착수 전에 정본과 로드맵을 다시 읽지 않았다면
+이 항목은 "차단됨"으로 한 번 더 넘어갔을 것이다.
+
+### actor는 `created_by`와 같은 문자열이다
+
+런처가 신원을 주면 `mcp:<principal>`, 주지 않으면 기존 배포와 같은 `"mcp"` 한 버킷이다. 같은
+값을 쓰는 것이 요점이라 **Issue와 Issue 코멘트의 작성자도 `"mcp"` 고정에서 `created_by`로
+바꿨다** — 리소스의 작성자와 감사의 actor가 갈라지면 "누가 만들었나"와 "누가 그 행위를 했나"를
+나중에 맞대 볼 수 없다.
+
+`actor_user_id`는 **항상 `None`**이다. 단정이지 누락이 아니다: 이 표면에는 `users` 행에
+대응하는 주체가 없고, 사람 행위와 이 표면을 DB에서 가르는 것은 actor 문자열이 아니라 이
+필드다.
+
+### 어휘는 두 개만 새로 냈다
+
+11개는 기존 상수에 대응했다. 새로 낸 것은 `task.cancel`과 `worker.breaker_reset`이다.
+전자가 `task.delete`와 다른 사실인 이유를 상수 문서에 적었다 — 저쪽은 행을 지우는 것이고
+이쪽은 실행 중일 수 있는 것을 멈추라고 **요청**하는 것이며, 그 요청이 워커에 실제로 닿았는지는
+`control.cancel_undelivered`가 따로 말한다.
+
+### 판정의 출발점을 목록이 아니라 카탈로그로 뒀다
+
+`crates/fleet-mcp/tests/audit_coverage.rs`는 `schema::all_tools()`의 24개가 전부
+mutation/조회 중 하나로 **분류돼 있는지**를 먼저 깨뜨린다. 손으로 센 목록만 검사하면 나중에
+새 mutation 도구가 들어왔을 때 그 도구는 목록에 없어 테스트가 통과한다 — `#95` 3단계가
+Dashboard에서 라우터 원문을 읽게 한 것과 같은 이유다.
+
+**총 건수는 세지 않는다.** 한 도구가 두 줄을 남기고 다른 도구가 한 줄도 남기지 않아도 합계는
+맞는다. 도구 이름 단위로 보고, 구별력은 실측했다 — `fleet_reset_worker_breaker`의 감사 호출
+하나를 지우자 테스트가 그 도구 이름을 지목하며 실패했다.
+
+### 하네스가 가릴 뻔한 것
+
+Worker를 저장소에만 등록하면 dispatch가 `isError`("worker is not registered")로 끝나고,
+그러면 감사 경로가 **한 번도 밟히지 않는다.** 감사 행 수만 보는 테스트는 그것을 구분하지
+못하므로 `exercise()`가 `isError`를 명시적으로 단정한다. 같은 이유로 취소 대상 Task가 취소
+시점까지 실행 중이어야 해서 MockWorker의 지연을 10ms에서 300초로 올렸다 — 기본값이면 취소가
+이미 끝난 Task를 향한다.
+
+### 부정 테스트
+
+조회 도구 11개는 0행, 멱등 흡수된 재제출은 `task.submit` 1행(2회 요청), 취소 사유 본문은 감사
+행 어디에도 없고 `reason_len`만 남는다. 긍정 테스트만 있으면 **무조건 기록하는 구현도
+초록**이고, 그러면 감사 행 수가 "몇 번 변경됐는가"가 아니라 "몇 번 요청했는가"를 센다.
+
+### 검증 한계
+
+새 테스트 7건은 `MemStore` 위에서 돌아 Postgres 제약 아래의 `audit_log` 쓰기 경로를 시험하지
+않는다. MCP **거절**은 여전히 감사되지 않으며 그 이유는 Dashboard와 대칭이 아니다 — 판정이
+`permits_tool`과 `handle_transition_issue` **두 곳**에 나뉘어 있어 "기록할 수 있는 자리가 한
+곳"이 아직 아니다(중앙 capability 행렬은 `#92`).
