@@ -1207,6 +1207,26 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("update_project_status"))
     }
 
+    /// `Draining → Archived`를 **하나의 문장으로** 적용한다 (로드맵 `#70`).
+    ///
+    /// 위상·두 archive 게이트·fence를 전부 같은 `UPDATE`의 술어로 건다.
+    /// [`update_project_status`](Self::update_project_status)로 나눠 쓰면
+    /// check-then-act가 되어, 게이트를 통과시킨 뒤 최종 쓰기 **사이에** 들어온
+    /// Task나 Agent 위로 archive가 그대로 지나간다. 그 창은 마이크로초 규모지만
+    /// 유계가 아니다 — 두 질의와 한 쓰기 사이의 임의 지연이 전부 그 창이다.
+    ///
+    /// **`false`의 이유를 이 메서드는 구분하지 않는다.** 위상이 아니거나,
+    /// 막는 것이 있거나, fence가 거절했거나, 그런 id가 없거나. 호출부가 0행 뒤에
+    /// 조회해서 가르며, 그것은 이 저장소가 `control_fence_holds`에서 이미 쓰는
+    /// 방식이다 — 진단을 술어와 섞으면 술어가 원자성을 잃는다.
+    async fn archive_project_if_drained(
+        &self,
+        _id: ProjectId,
+        _fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("archive_project_if_drained"))
+    }
+
     /// 이 Project를 참조하는 비종료(`Pending`/`Dispatched`) Task가 하나라도
     /// 있는지. `Draining → Archived` 전이의 유일한 게이트(1단계) — 목표
     /// 계약의 나머지 archive 게이트(Agent process/lease/credential grant

@@ -323,10 +323,27 @@ fence는 SQL 술어이므로 `MemStore`로 도는 시험은 이 `AND EXISTS`를 
 낡은 fence가 거절되는 것만 보면 "id가 없어서 0행"과 구분되지 않으므로, **같은 Project에 살아
 있는 fence로 같은 전이가 통과하는 대조**를 함께 둔다.
 
-**남은 것(이 수정의 범위 밖)**: `advance_project_archive`는 여전히 check-then-act다 — 두 blocker
-SELECT와 최종 `UPDATE`가 별개 문장이고, 반대편 제출 경로(`ensure_project_accepts_new_tasks` →
-`insert_task_row`)도 마찬가지라 **archive 확정 뒤에 Task가 들어오는 순서**가 남아 있다. fence는
-"누가"를 닫았고 이 창은 "언제"에 속한다.
+**"언제"의 절반을 2026-09-15에 닫았다.** `advance_project_archive`는 check-then-act였다 — 두
+blocker SELECT와 최종 `UPDATE`가 별개 문장이라, 게이트를 통과시킨 뒤 쓰기 **사이에** 들어온
+Task나 Agent 위로 archive가 그대로 지나갔다. 이제 `Store::archive_project_if_drained`가
+위상(`draining`)·Task 게이트·Agent 게이트·fence를 **전부 같은 `UPDATE`의 술어로** 건다.
+
+순서를 뒤집은 것이 요지다. 진단(무엇이 막았는가)을 술어 **앞**에 두면 그 진단이 곧 창이
+된다 — `control_fence_holds`에서 이미 배운 형태로, 진단은 0행 **뒤에** 와야 한다. 그래서
+`advance_project_archive`는 먼저 시도하고, 0행이면 그때 두 게이트를 조회해 사유를 만든다.
+`ArchiveBlockers` 보고는 그대로다.
+
+시험은 **`advance_project_archive`를 거치지 않고** `archive_project_if_drained`를 직접 부른다.
+상위 함수를 거치면 그 함수의 사전 조회가 막아 주기 때문에, 술어가 SQL에 없어도 시험이
+통과한다(`crates/fleet-store/tests/projects.rs`의
+`an_active_task_blocks_the_archive_write_itself` 외 2건).
+
+**아직 남은 반대 방향**: 제출 경로(`ensure_project_accepts_new_tasks` → `insert_task_row`)는
+여전히 두 문장이라 **archive 확정 뒤에 Task가 삽입되는 순서**가 성립한다. 그쪽을 닫으려면
+INSERT에 project 위상 술어를 걸어야 하는데, 그 INSERT는 `ON CONFLICT`로 클라이언트 멱등성
+(`#62` 2단계)을 구현하고 있고 **0행을 "중복 제출"로 해석**한다. 술어를 그대로 더하면 거절된
+삽입이 중복으로 오독되어 호출자가 남의 Task를 돌려받는다. 0행의 이유를 가르는 진단이 함께
+필요하며, 그것은 이 수정과 별개의 작업이다.
 
 게이트 5의 판정 근거를 남긴다: 이 차단은 새로 도입한 제약이 아니라 **이미 문서가 요구하고 있었으나
 집행되지 않던 것**이다. `fleet-api`의 `build_worker`는 `liveness_mode`와 무관하게

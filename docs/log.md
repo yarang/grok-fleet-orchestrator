@@ -8226,3 +8226,62 @@ Agent가 `bash`로 비가역 호출을 **할 수는 있고**, 하지 않고 있�
 **미선언이 얼마나 되는지는 아직 아무도 모른다.** 이 통제는 "선언된 목록을 어겼다"만 말하고
 "선언이 없다"는 말하지 않는다. 후자는 호출 단위가 아니라 Agent/템플릿 단위의 질문이라 별도
 표면(예: Dashboard의 템플릿 목록이나 운영 점검)이 맞다.
+
+## 2026-09-15 — archive의 "언제" 창을 닫았다 (한 방향)
+
+2026-09-12에 archive의 fence("누가")를 닫으면서 **"언제"는 범위 밖으로 남긴다**고 적었다.
+그 빚을 갚는다.
+
+### 무엇이 열려 있었나
+
+`advance_project_archive`는 check-then-act였다. 두 게이트(`project_has_active_tasks`,
+`project_has_live_agents`)를 조회하고, 통과하면 **별개 문장으로** `Archived`를 썼다. 그 사이에
+Task가 dispatch되거나 Agent가 생기면 **archive가 살아 있는 작업 위로 그대로 지나갔다.**
+창은 마이크로초 규모지만 유계가 아니다 — 두 질의와 한 쓰기 사이의 임의 지연이 전부 그 창이다.
+
+### 고친 방식
+
+`Store::archive_project_if_drained`가 넷을 **한 문장의 술어로** 건다: 위상(`draining`),
+Task 게이트, Agent 게이트, fence.
+
+**순서를 뒤집은 것이 요지다.** 진단(무엇이 막았는가)을 술어 앞에 두면 그 진단이 곧 창이 된다.
+이 저장소는 같은 형태를 `control_fence_holds`에서 이미 배웠다 — 진단은 0행 **뒤에** 온다.
+그래서 `advance_project_archive`는 먼저 시도하고, 0행이면 그때 두 게이트를 조회해 사유를
+만든다. `ArchiveBlockers` 보고와 "둘 다 평가한다"는 기존 판단은 그대로 살렸다.
+
+0행인데 막는 것도 없으면 위상이 이미 바뀌었거나 fence다. Project를 다시 읽어 `Archived`면
+`Archived`로 답한다 — idempotent 계약을 지키기 위해서다. 나머지는 `Fenced`로 접었고, Project가
+사라진 경우까지 거기 들어간다. 별도 variant를 만들지 않은 이유는 그 경우가 이 경로에서 관측된
+적이 없고, 호출부가 할 일이 같기 때문이다(재시도가 아니라 중단) — 없는 사례를 위한 이름은
+죽은 variant가 된다.
+
+### SQL을 일부러 중복해서 적었다
+
+새 술어의 조건은 `project_has_active_tasks`/`project_has_live_agents`와 같은 문장이다. 그
+메서드들을 불러 값을 받아 오면 **다시 check-then-act가 되어** 이 함수의 존재 이유가 사라진다.
+조건이 갈라질 위험은 시험으로 막는다 — 같은 Project에 Task를 넣고 이 함수가 거절하는지 보는
+시험이 곧 두 조건이 같음을 확인한다.
+
+### 시험이 상위 함수를 거치지 않는 이유
+
+`advance_project_archive`를 통해 시험하면 **그 함수의 사전 조회가 막아 주기 때문에 술어가
+SQL에 없어도 통과한다.** 그래서 셋 다 `archive_project_if_drained`를 직접 부른다. 판별력도
+확인했다: 같은 Project, 같은 위상, fence 없음이라 거절 사유가 Task 술어 하나뿐이고, 그 Task가
+종료되면 같은 호출이 통과한다(대조가 없으면 "항상 거절한다"는 구현으로도 통과한다).
+
+### MemStore는 흉내만 낸다
+
+단일 문장이 없으므로 판정을 순서대로 하되 락을 겹치지 않게 잡았고, 그 사이의 창이 남는다는
+사실을 코드 주석에 적었다. **실제 원자성은 Postgres 술어가 갖고 시험도 그쪽이 정본이다.**
+
+게이트: rustc 1.98.0 · `RUSTFLAGS="-D warnings"` · fmt/clippy 두 세트 exit=0 ·
+두 세트 78 suites 0 failed(1413 / 1409 passed).
+
+### 남은 반대 방향
+
+제출 경로(`ensure_project_accepts_new_tasks` → `insert_task_row`)는 여전히 두 문장이라
+**archive 확정 뒤에 Task가 삽입되는 순서**가 성립한다. 닫으려면 INSERT에 project 위상 술어를
+걸어야 하는데, 그 INSERT는 `ON CONFLICT`로 클라이언트 멱등성(`#62` 2단계)을 구현하며 **0행을
+"중복 제출"로 해석**한다. 술어를 그대로 더하면 거절된 삽입이 중복으로 오독되어 호출자가 남의
+Task를 돌려받는다 — 조용한 오답이다. 0행의 이유를 가르는 진단이 함께 필요하고, 그것은 별개
+작업이라 여기서 하지 않았다.

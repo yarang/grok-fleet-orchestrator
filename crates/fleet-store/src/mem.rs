@@ -1748,6 +1748,58 @@ impl Store for MemStore {
         }
     }
 
+    async fn archive_project_if_drained(
+        &self,
+        id: ProjectId,
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // Postgres 쪽과 같은 순서로 판정한다: fenced를 먼저, 그다음 위상, 그다음
+        // 두 게이트. 다만 **락을 겹치지 않게** 잡는다 — projects·tasks·agents를
+        // 동시에 들고 있으면 다른 메서드와 교착할 수 있어서, 각 판정을 끝낸 뒤
+        // 값만 들고 나온다.
+        if !self.control_fence_holds(fence) {
+            return Ok(false);
+        }
+        {
+            let projects = self.projects.lock().unwrap();
+            match projects.get(&id) {
+                Some(p) if p.status == ProjectStatus::Draining => {}
+                _ => return Ok(false),
+            }
+        }
+        let has_active_task = {
+            let tasks = self.tasks.lock().unwrap();
+            tasks.values().any(|t| {
+                t.project_id == Some(id)
+                    && matches!(t.status.phase(), TaskPhase::Pending | TaskPhase::Dispatched)
+            })
+        };
+        if has_active_task {
+            return Ok(false);
+        }
+        let has_live_agent = {
+            let agents = self.agents.lock().unwrap();
+            agents
+                .values()
+                .any(|a| a.project_id == id && a.status != AgentStatus::Stopped)
+        };
+        if has_live_agent {
+            return Ok(false);
+        }
+        let mut projects = self.projects.lock().unwrap();
+        match projects.get_mut(&id) {
+            // 락을 놓았다 다시 잡는 사이에 위상이 바뀌었을 수 있다. MemStore는
+            // 단일 문장을 흉내 낼 수 없으므로 창이 남으며, 그 사실을 여기 적는다 —
+            // 실제 원자성은 Postgres 쪽 술어가 갖고, 그래서 시험도 그쪽이 정본이다.
+            Some(p) if p.status == ProjectStatus::Draining => {
+                p.status = ProjectStatus::Archived;
+                p.updated_at = Utc::now();
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     async fn project_has_active_tasks(&self, project_id: ProjectId) -> Result<bool, StoreError> {
         let tasks = self.tasks.lock().unwrap();
         Ok(tasks.values().any(|t| {

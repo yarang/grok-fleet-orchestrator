@@ -2921,6 +2921,44 @@ impl Store for PgStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn archive_project_if_drained(
+        &self,
+        id: ProjectId,
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // 술어 넷이 **한 문장 안에** 있다. 위상(`draining`), Task 게이트,
+        // Agent 게이트, 그리고 fence. 두 게이트의 SQL은
+        // `project_has_active_tasks`/`project_has_live_agents`와 같은 조건이며
+        // 같은 인덱스를 탄다(`idx_tasks_phase`, `idx_agents_project_status`).
+        //
+        // **일부러 중복해서 적는다.** 그 두 메서드를 호출해 값을 받아 오면 다시
+        // check-then-act가 되고, 이 함수의 존재 이유가 사라진다. 조건이 갈라질
+        // 위험은 시험으로 막는다 — 같은 Project에 Task를 넣고 이 함수가 거절하는지
+        // 보는 시험이 곧 두 조건이 같음을 확인한다.
+        let base = "UPDATE projects SET status = 'archived', updated_at = NOW() \
+                    WHERE id = $1 AND status = 'draining' \
+                      AND NOT EXISTS (SELECT 1 FROM tasks \
+                                      WHERE project_id = $1 \
+                                        AND status_phase IN ('pending', 'dispatched')) \
+                      AND NOT EXISTS (SELECT 1 FROM agents \
+                                      WHERE project_id = $1 AND status <> 'stopped')";
+        let result = match fence {
+            Some(f) => {
+                sqlx::query(&format!(
+                    "{base} AND EXISTS (SELECT 1 FROM control_plane_lease \
+                                        WHERE cluster_id = $2 AND epoch = $3)"
+                ))
+                .bind(id.0)
+                .bind(f.cluster_id.as_str())
+                .bind(f.epoch)
+                .execute(&self.pool)
+                .await?
+            }
+            None => sqlx::query(base).bind(id.0).execute(&self.pool).await?,
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn project_has_active_tasks(&self, project_id: ProjectId) -> Result<bool, StoreError> {
         // `status_phase`는 001_init.sql의 생성 칼럼(`status->>'phase'`) —
         // TaskStatus가 `#[serde(tag = "phase")]`라 이 값이 정확히

@@ -223,10 +223,26 @@ pub async fn advance_project_archive(
     }
 
     if project.status == ProjectStatus::Draining {
-        // 두 질의를 `||`로 단락시키지 않고 **둘 다** 평가한다. 단락시키면
-        // Task가 막고 있을 때 Agent 조건을 묻지 않은 채로 답하게 되고, 호출자는
-        // Task를 전부 끝낸 뒤에야 Agent도 막고 있었다는 사실을 알게 된다.
-        // 추가 비용은 Task가 막는 경우의 질의 한 번뿐이다.
+        // **먼저 시도하고, 0행이면 그때 이유를 묻는다.**
+        //
+        // 예전에는 두 게이트를 먼저 조회하고 통과하면 쓰는 check-then-act였다.
+        // 그 사이에 Task나 Agent가 들어오면 archive가 **살아 있는 작업 위로**
+        // 그대로 지나갔다. 이제 위상·두 게이트·fence가 전부 같은 `UPDATE`의
+        // 술어이므로 그 창이 없다.
+        //
+        // 순서를 뒤집은 것이 이 변경의 요지다. 진단을 술어 앞에 두면 그 진단이
+        // 곧 창이 된다 — 이 저장소가 `control_fence_holds`에서 이미 배운 형태로,
+        // 진단은 0행 **뒤에** 와야 한다.
+        if store.archive_project_if_drained(project.id, fence).await? {
+            project.status = ProjectStatus::Archived;
+            on_transition(ProjectStatus::Archived);
+            return Ok(ArchiveProgress::Archived);
+        }
+
+        // 0행의 이유를 가른다. 두 질의를 `||`로 단락시키지 않고 **둘 다**
+        // 평가한다 — 단락시키면 Task가 막고 있을 때 Agent 조건을 묻지 않은 채로
+        // 답하게 되고, 호출자는 Task를 전부 끝낸 뒤에야 Agent도 막고 있었다는
+        // 사실을 알게 된다.
         let blockers = ArchiveBlockers {
             active_tasks: store.project_has_active_tasks(project.id).await?,
             live_agents: store.project_has_live_agents(project.id).await?,
@@ -234,14 +250,21 @@ pub async fn advance_project_archive(
         if blockers.any() {
             return Ok(ArchiveProgress::Draining(blockers));
         }
-        if !store
-            .update_project_status(project.id, ProjectStatus::Archived, fence)
-            .await?
-        {
-            return Ok(ArchiveProgress::Fenced);
-        }
-        project.status = ProjectStatus::Archived;
-        on_transition(ProjectStatus::Archived);
+
+        // 막는 것이 없는데 0행이다. 남은 이유는 위상이 이미 바뀌었거나
+        // (누군가 먼저 끝냈다) fence가 거절한 것이다.
+        return match store.get_project(project.id).await? {
+            Some(current) if current.status == ProjectStatus::Archived => {
+                // idempotent 계약을 지킨다 — 이미 도달했으면 도달했다고 답한다.
+                project.status = ProjectStatus::Archived;
+                Ok(ArchiveProgress::Archived)
+            }
+            // fence 거절이 압도적으로 흔한 경우이고, Project가 사라진 경우도
+            // 호출부가 할 일은 같다(재시도가 아니라 중단). 그 둘을 가르는
+            // variant를 지금 만들지 않는 이유는 후자가 이 경로에서 관측된 적이
+            // 없기 때문이다 — 없는 사례를 위한 이름은 죽은 variant가 된다.
+            _ => Ok(ArchiveProgress::Fenced),
+        };
     }
 
     Ok(ArchiveProgress::Archived)

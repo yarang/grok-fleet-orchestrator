@@ -387,3 +387,116 @@ async fn archive_reports_fenced_separately_from_blocked() {
         "거절됐으면 메모리 상태도 전이되면 안 된다"
     );
 }
+
+// ── archive 게이트의 원자성 (로드맵 `#70`) ────────────────────────────
+//
+// 예전에는 두 게이트를 조회하고 통과하면 별개 문장으로 `Archived`를 썼다. 그
+// 사이에 들어온 Task/Agent 위로 archive가 그대로 지나갔다. 아래 셋은 게이트가
+// **쓰기 술어**라는 것을 직접 확인한다 — `advance_project_archive`를 거치지 않고
+// `archive_project_if_drained`를 호출하는 것이 핵심이다. 상위 함수를 거치면 그
+// 함수의 사전 조회가 막아 주기 때문에, 술어가 SQL에 없어도 시험이 통과한다.
+
+async fn draining_project(store: &PgStore) -> Project {
+    let mut project = Project::new(format!("arch-{}", uuid::Uuid::new_v4()));
+    store.create_project(&project).await.unwrap();
+    store
+        .update_project_status(project.id, ProjectStatus::Draining, None)
+        .await
+        .unwrap();
+    project.status = ProjectStatus::Draining;
+    project
+}
+
+/// 살아 있는 Task가 있으면 **쓰기 자체가** 거절된다.
+#[tokio::test]
+async fn an_active_task_blocks_the_archive_write_itself() {
+    require_db!(store);
+    let project = draining_project(&store).await;
+
+    let mut pending = sample_task("still running");
+    pending.project_id = Some(project.id);
+    store.insert_task(&pending).await.unwrap();
+
+    assert!(
+        !store
+            .archive_project_if_drained(project.id, None)
+            .await
+            .unwrap(),
+        "게이트가 사전 조회가 아니라 술어여야 한다 — 사전 조회만이면 이 호출이 통과한다"
+    );
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().status,
+        ProjectStatus::Draining,
+        "거절된 쓰기가 상태를 바꿨다면 술어가 걸리지 않은 것이다"
+    );
+
+    // 대조: 그 Task가 끝나면 같은 호출이 통과한다. 이것이 없으면 위 단정은
+    // "항상 거절한다"는 구현으로도 통과한다.
+    let mut done = pending.clone();
+    done.status = TaskStatus::Cancelled {
+        reason: "done".into(),
+        cancelled_at: chrono::Utc::now(),
+    };
+    store.insert_task(&done).await.ok();
+    store
+        .update_task_status(pending.id, &done.status)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .archive_project_if_drained(project.id, None)
+            .await
+            .unwrap(),
+        "막는 것이 사라지면 통과해야 한다"
+    );
+}
+
+/// `Draining`이 아닌 Project는 이 경로로 archive되지 않는다.
+///
+/// 위상 검사도 같은 문장의 술어다 — 두 호출자가 동시에 들어와도 하나만 적용된다.
+#[tokio::test]
+async fn only_a_draining_project_can_be_archived_by_this_path() {
+    require_db!(store);
+    let project = Project::new(format!("arch-active-{}", uuid::Uuid::new_v4()));
+    store.create_project(&project).await.unwrap(); // Active
+
+    assert!(
+        !store
+            .archive_project_if_drained(project.id, None)
+            .await
+            .unwrap(),
+        "Active에서 곧바로 Archived로 건너뛸 수 없다"
+    );
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().status,
+        ProjectStatus::Active
+    );
+}
+
+/// fence도 같은 문장의 술어다.
+#[tokio::test]
+async fn a_fenced_instance_cannot_take_the_archive_write() {
+    require_db!(store);
+    let (live, stale) = fences(&store, "atomic-archive").await;
+    let project = draining_project(&store).await;
+
+    assert!(
+        !store
+            .archive_project_if_drained(project.id, Some(&stale))
+            .await
+            .unwrap(),
+        "제어권을 잃은 인스턴스는 막는 것이 없어도 적용하지 못한다"
+    );
+    assert_eq!(
+        store.get_project(project.id).await.unwrap().unwrap().status,
+        ProjectStatus::Draining
+    );
+
+    assert!(
+        store
+            .archive_project_if_drained(project.id, Some(&live))
+            .await
+            .unwrap(),
+        "lease를 쥔 인스턴스는 통과해야 한다"
+    );
+}
