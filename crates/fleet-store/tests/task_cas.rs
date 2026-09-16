@@ -1073,3 +1073,45 @@ both_backends!(
         );
     }
 );
+
+// ── 세션 → Task 역방향 조회 (로드맵 `#70` 게이트 2·7) ───────────────────
+
+both_backends!(
+    a_session_can_be_traced_back_to_the_task_that_opened_it,
+    |store| async move {
+        // 두 Task가 각각 세션을 연다. 하나만 두면 "항상 그 하나를 돌려주는"
+        // 구현도 통과한다.
+        let a = seed_task(&store, "opened sess-a", TaskStatus::Pending).await;
+        let b = seed_task(&store, "opened sess-b", TaskStatus::Pending).await;
+        assert!(store
+            .record_task_acp_session(a.id, "sess-a", None)
+            .await
+            .unwrap());
+        assert!(store
+            .record_task_acp_session(b.id, "sess-b", None)
+            .await
+            .unwrap());
+
+        let found = store
+            .find_task_by_acp_session("sess-b")
+            .await
+            .unwrap()
+            .expect("기록한 세션은 찾을 수 있어야 한다");
+        assert_eq!(found.id, b.id);
+        assert_eq!(found.acp_session_id.as_deref(), Some("sess-b"));
+
+        // **없는 세션은 `None`이지 오류가 아니다.** 이 구분이 재조정의 처분을
+        // 가른다 — `None`은 "누구의 것인지 모른다"라 손대지 않는 쪽이고,
+        // 오류였다면 그 자리에서 판정을 미뤄야 한다.
+        assert!(store
+            .find_task_by_acp_session("sess-nobody-opened")
+            .await
+            .unwrap()
+            .is_none());
+
+        // 세션을 한 번도 열지 않은 Task가 `NULL` 때문에 걸려 나오면 안 된다.
+        // `041`의 인덱스가 부분 인덱스인 것과 같은 전제다.
+        let _never = seed_task(&store, "never opened a session", TaskStatus::Pending).await;
+        assert!(store.find_task_by_acp_session("").await.unwrap().is_none());
+    }
+);

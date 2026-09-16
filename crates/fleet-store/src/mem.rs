@@ -372,6 +372,14 @@ impl Store for MemStore {
         Ok(true)
     }
 
+    async fn find_task_by_acp_session(&self, session_id: &str) -> Result<Option<Task>, StoreError> {
+        let tasks = self.tasks.lock().unwrap();
+        Ok(tasks
+            .values()
+            .find(|t| t.acp_session_id.as_deref() == Some(session_id))
+            .cloned())
+    }
+
     async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
         if self.is_failing("count_dispatched_tasks_by_worker") {
             return Err(StoreError::Unsupported("count_dispatched_tasks_by_worker"));

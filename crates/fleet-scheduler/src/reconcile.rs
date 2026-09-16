@@ -141,6 +141,14 @@ pub struct ReconcileConfig {
     /// **더 하기** 위한 근거이지 덜 하기 위한 것이 아니므로, 못 물어봤다고
     /// 다른 판정을 미루지 않는다.
     pub session_list_timeout: Duration,
+    /// 워커가 들고 있는 세션 중 이미 끝난 Task의 것을 찾아 취소할지
+    /// (로드맵 `#70` 게이트 2·7). 기본값 `true`.
+    ///
+    /// 끌 수 있게 둔 이유는 이것이 워커의 실행을 **멈추는** 유일한 자동
+    /// 경로이기 때문이다. 인벤토리를 광고하지 않는 배포에서는 어차피 한 건도
+    /// 일어나지 않지만, 광고하는 배포에서 예상 밖의 취소가 보이면 운영자가
+    /// 원인을 찾는 동안 이것부터 끌 수 있어야 한다.
+    pub reap_orphan_sessions: bool,
 }
 
 impl Default for ReconcileConfig {
@@ -152,6 +160,7 @@ impl Default for ReconcileConfig {
             offline_worker_grace: Duration::from_secs(300),
             max_dispatch_retries: 20,
             session_list_timeout: Duration::from_secs(5),
+            reap_orphan_sessions: true,
         }
     }
 }
@@ -185,6 +194,12 @@ pub struct ReconcileSummary {
     pub vanished_session_found: u64,
     /// 이번 라운드에 `Failed(ExecutionVanished)`로 전이시킨 작업 수.
     pub vanished_session_failed: u64,
+    /// 워커가 아직 들고 있지만 그 Task는 이미 끝나 있어 취소를 보낸 세션 수
+    /// (로드맵 `#70` 게이트 2·7).
+    pub orphan_sessions_cancelled: u64,
+    /// 워커가 들고 있는데 **어느 Task도 지목하지 않는** 세션 수. 손대지 않고
+    /// 감사에만 남긴다.
+    pub unclaimed_sessions_found: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -411,7 +426,8 @@ impl Reconciler {
             }
         }
 
-        self.reap_stale_dispatched(&mut summary).await;
+        let inventories = self.reap_stale_dispatched(&mut summary).await;
+        self.reap_orphan_sessions(inventories, &mut summary).await;
 
         if summary.stale_found > 0 || summary.orphaned_found > 0 || summary.offline_worker_found > 0
         {
@@ -434,7 +450,14 @@ impl Reconciler {
     /// (b) 담당 워커가 여전히 존재하지만 `Offline`으로 `offline_worker_grace`
     /// 이상 남아있는 것을 찾아 `Failed(WorkerUnavailable)`로 전이한다.
     /// `summary`에 결과를 누적한다.
-    async fn reap_stale_dispatched(&self, summary: &mut ReconcileSummary) {
+    /// 반환값은 이 sweep에서 실제로 물어본 워커별 인벤토리다. 고아 세션
+    /// 스윕이 같은 답을 다시 묻지 않도록 넘겨준다 — 한 sweep 안에서 두 번
+    /// 물으면 서로 다른 시점의 목록으로 두 판정을 내리게 되고, 그 둘이
+    /// 모순될 수 있다.
+    async fn reap_stale_dispatched(
+        &self,
+        summary: &mut ReconcileSummary,
+    ) -> HashMap<WorkerId, SessionInventory> {
         let dispatched = match self
             .state
             .store
@@ -448,7 +471,7 @@ impl Reconciler {
             Ok(tasks) => tasks,
             Err(e) => {
                 warn!(error = %e, "reconcile: failed to list dispatched tasks");
-                return;
+                return HashMap::new();
             }
         };
 
@@ -715,6 +738,178 @@ impl Reconciler {
                 }
             }
         }
+
+        inventories
+    }
+
+    /// 워커가 아직 들고 있는데 **살아 있는 Task가 아무도 지목하지 않는**
+    /// 세션을 정리한다 (로드맵 `#70` 게이트 2·7).
+    ///
+    /// [`reap_stale_dispatched`](Self::reap_stale_dispatched)의 **거울상**이다.
+    /// 저쪽은 우리가 들고 있는 Task에서 출발해 워커에게 그 실행이 아직
+    /// 있는지 묻고, 이쪽은 워커가 들고 있는 세션에서 출발해 그것이 아직
+    /// 누구의 것인지 묻는다. 두 방향이 모두 필요한 이유는 어긋남이 양쪽으로
+    /// 생기기 때문이다 — Task는 남았는데 실행이 사라지는 쪽은 저쪽이 보고,
+    /// **실행은 남았는데 Task가 끝난** 쪽은 이쪽만 본다.
+    ///
+    /// 그 두 번째가 실제로 새는 자리다. `Dispatcher::cancel`이
+    /// `CancelDelivery::Unreachable`을 받으면 저장소에는 `Cancelled`를 적지만
+    /// 워커는 그 통지를 받은 적이 없다. 그 Task는 이제 **종료 상태**라
+    /// `reap_stale_dispatched`의 `Dispatched` 필터에 걸리지 않고, 전송 계층의
+    /// 세션 맵은 프로세스와 함께 비워지며, 워커의 세션은 계속 돌면서 토큰을
+    /// 쓴다. 그것을 지목할 수 있는 코드가 한 곳도 없었다.
+    ///
+    /// 세션 하나에 대한 처분은 셋이고, **셋을 가르는 것이 이 함수의 전부다**:
+    ///
+    /// | `find_task_by_acp_session` | 뜻 | 처분 |
+    /// | --- | --- | --- |
+    /// | 살아 있는 Task | 정상 실행 | 건드리지 않는다 |
+    /// | 종료된 Task | 고아 — 상태와 실제가 어긋났다 | 취소를 보낸다 |
+    /// | `None` | 누구의 것인지 모른다 | **손대지 않고** 감사에만 남긴다 |
+    ///
+    /// 세 번째를 두 번째로 접으면 안 된다. `None`인 경우가 셋이고 그중 둘은
+    /// 죽이면 안 되는 것이다 — 지금 dispatch가 진행 중이라 `acp_session_id`가
+    /// 아직 커밋되지 않았거나(경합 창), 아예 다른 제어면이 연 세션이거나,
+    /// 우리가 기록을 잃었거나. 첫째와 둘째에서 취소를 보내면 살아 있는 남의
+    /// 실행을 죽인다. 관측만 남기는 것이 여기서 가능한 가장 강한 처분이다.
+    async fn reap_orphan_sessions(
+        &self,
+        mut inventories: HashMap<WorkerId, SessionInventory>,
+        summary: &mut ReconcileSummary,
+    ) {
+        if !self.config.reap_orphan_sessions {
+            return;
+        }
+
+        // `reap_stale_dispatched`가 물어본 워커는 **자기 Task가 있는 워커뿐**
+        // 이다. 고아 세션은 그 반대쪽에 있다 — Task가 이미 끝났으므로 그
+        // 워커에는 `Dispatched`가 한 건도 없을 수 있고, 실제로 그쪽이 더 흔한
+        // 경우다. 그래서 여기서는 워커를 따로 전수한다.
+        let workers = match self
+            .state
+            .store
+            .list_workers(&fleet_core::WorkerFilter {
+                limit: MAX_PENDING_SCAN,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "reconcile: failed to list workers for the orphan session sweep");
+                return;
+            }
+        };
+
+        for worker in workers {
+            let worker_id = worker.id;
+            let inventory = match inventories.remove(&worker_id) {
+                Some(cached) => cached,
+                None => match self
+                    .state
+                    .transport
+                    .list_sessions(worker_id, self.config.session_list_timeout)
+                    .await
+                {
+                    Ok(inv) => inv,
+                    Err(e) => {
+                        debug!(
+                            %worker_id, error = %e,
+                            "reconcile: could not list sessions; skipping the orphan sweep for this worker"
+                        );
+                        continue;
+                    }
+                },
+            };
+
+            let SessionInventory::Reported(sessions) = inventory else {
+                // 권위 없는 답으로는 "이 세션이 고아다"를 말할 수 없다. 더
+                // 중요하게는, 여기서 접으면 **아무 목록도 없는 것**과 같아져
+                // 애초에 순회할 대상이 없다.
+                continue;
+            };
+
+            for session_id in sessions {
+                let owner = match self.state.store.find_task_by_acp_session(&session_id).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // 조회가 실패한 것을 "주인이 없다"로 읽으면 살아 있는
+                        // 실행을 고아로 만든다. 다음 tick에서 다시 본다.
+                        warn!(
+                            %worker_id, %session_id, error = %e,
+                            "reconcile: could not look up the owner of a session; leaving it alone"
+                        );
+                        continue;
+                    }
+                };
+
+                let Some(task) = owner else {
+                    // 누구의 것인지 모른다 — 위 표의 셋째 줄. 손대지 않는다.
+                    summary.unclaimed_sessions_found += 1;
+                    self.state
+                        .audit_decision(
+                            fleet_core::audit::action::CONTROL_UNCLAIMED_SESSION,
+                            ("worker", worker_id.to_string()),
+                            serde_json::json!({ "session_id": session_id }),
+                        )
+                        .await;
+                    warn!(
+                        %worker_id, %session_id,
+                        "reconciliation: the worker holds a session that no task claims — left running"
+                    );
+                    continue;
+                };
+
+                if !task.is_terminal() {
+                    continue; // 정상 실행.
+                }
+
+                // 종료된 Task의 실행이 아직 살아 있다. **여기서 `task.id`가
+                // 진짜인 것이 중요하다** — 합성한 id로 취소를 보내면 전송
+                // 계층의 1단계 조회가 엉뚱한 세션을 집을 수 있고, 감사에는
+                // 존재하지 않는 Task가 남는다.
+                let req = fleet_transport::CancelRequest {
+                    task_id: task.id,
+                    known_session: Some(session_id.clone()),
+                    worker_id: Some(worker_id),
+                };
+                match self.state.transport.cancel(req).await {
+                    Ok(fleet_transport::CancelDelivery::Sent) => {
+                        summary.orphan_sessions_cancelled += 1;
+                        self.state
+                            .audit_decision(
+                                fleet_core::audit::action::CONTROL_ORPHAN_SESSION_CANCELLED,
+                                ("task", task.id.to_string()),
+                                serde_json::json!({
+                                    "worker_id": worker_id.to_string(),
+                                    "session_id": session_id,
+                                    "task_phase": task.status.phase().as_str(),
+                                }),
+                            )
+                            .await;
+                        warn!(
+                            task_id = %task.id, %worker_id, %session_id,
+                            "reconciliation: cancelled a session whose task had already ended"
+                        );
+                    }
+                    // 워커에 닿지 않았다. 인벤토리는 방금 답했는데 취소는 못
+                    // 보낸 경우이므로(그 사이에 연결이 끊겼다) 다음 tick에서
+                    // 다시 본다 — 그때는 인벤토리 조회부터 실패할 것이다.
+                    Ok(other) => {
+                        debug!(
+                            task_id = %task.id, %worker_id, %session_id, delivery = ?other,
+                            "reconcile: orphan session cancel was not delivered"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            task_id = %task.id, %worker_id, %session_id, error = %e,
+                            "reconcile: orphan session cancel failed"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -856,6 +1051,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -909,6 +1105,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -972,6 +1169,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1012,6 +1210,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1060,6 +1259,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1110,6 +1310,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1164,6 +1365,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1275,6 +1477,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(5), // 짧게 — 테스트용
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1437,6 +1640,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300), // 기본값 — 2초는 한참 못 미침
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                reap_orphan_sessions: true,
             },
         );
 
@@ -1759,5 +1963,239 @@ mod tests {
         assert_eq!(summary.vanished_session_found, 0);
         let task = state.store.get_task(task_id).await.unwrap().unwrap();
         assert!(matches!(task.status, TaskStatus::Dispatched { .. }));
+    }
+
+    // ── 고아 세션 회수 (로드맵 `#70` 게이트 2·7) ────────────────────────
+    //
+    // 위 블록이 "Task는 남았는데 실행이 사라진" 쪽을 고정했다면, 이 블록은
+    // **거울상**을 고정한다 — 실행은 남았는데 Task가 끝난 쪽이다. 그쪽은
+    // `Dispatched`만 훑어서는 원리적으로 볼 수 없다(대상이 이미 종료 상태라
+    // 그 필터에 걸리지 않는다).
+
+    /// 종료된 Task의 세션을 워커가 아직 들고 있으면 취소를 보낸다.
+    ///
+    /// **이것이 새던 자리다.** `cancel`이 `Unreachable`을 받아도 저장소에는
+    /// `Cancelled`가 적히고, 그 Task는 종료 상태라 `reap_stale_dispatched`의
+    /// `Dispatched` 필터에 걸리지 않으며, 전송 계층의 세션 맵은 프로세스와
+    /// 함께 비워진다. 그 실행을 지목할 수 있는 코드가 한 곳도 없었다.
+    #[tokio::test]
+    async fn a_session_whose_task_already_ended_is_cancelled() {
+        let worker = make_worker("still-holds-a-dead-task");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        // 취소가 전달되지 않은 채 종료 상태가 된 Task를 재현한다.
+        let mut task = make_dispatched_task_with_session(
+            "cancelled but never told",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-zombie",
+        );
+        task.status = TaskStatus::Cancelled {
+            reason: "operator asked".into(),
+            cancelled_at: chrono::Utc::now(),
+        };
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec!["sess-zombie".into()]),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.orphan_sessions_cancelled, 1);
+        assert_eq!(summary.unclaimed_sessions_found, 0);
+
+        let sent = transport.cancel_requests().await;
+        assert_eq!(sent.len(), 1, "취소는 정확히 한 번 나가야 한다");
+        assert_eq!(sent[0].known_session.as_deref(), Some("sess-zombie"));
+        assert_eq!(sent[0].worker_id, Some(worker_id));
+        assert_eq!(
+            sent[0].task_id, task_id,
+            "합성한 id가 아니라 그 세션을 연 Task의 진짜 id여야 한다 — \
+             전송 계층의 1단계 조회가 task_id로 세션을 찾기 때문이다"
+        );
+    }
+
+    /// 살아 있는 Task의 세션은 건드리지 않는다.
+    #[tokio::test]
+    async fn a_session_of_a_running_task_is_never_cancelled() {
+        let worker = make_worker("running");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "still running",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-live",
+        );
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec!["sess-live".into()]),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.orphan_sessions_cancelled, 0);
+        assert!(
+            transport.cancel_requests().await.is_empty(),
+            "살아 있는 실행에 취소를 보냈다"
+        );
+    }
+
+    /// **어느 Task도 지목하지 않는 세션은 죽이지 않는다.**
+    ///
+    /// 이 부정 단정이 이 스윕에서 가장 중요하다. `None`이 나오는 경우가 셋이고
+    /// 그중 둘은 죽이면 안 되는 것이다 — dispatch가 진행 중이라
+    /// `acp_session_id`가 아직 커밋되지 않았거나, 다른 제어면이 연 세션이거나.
+    /// "주인이 없으니 고아"로 접는 구현은 그 둘을 죽인다.
+    #[tokio::test]
+    async fn a_session_no_task_claims_is_reported_but_left_running() {
+        let worker = make_worker("holds-something-unknown");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec!["sess-nobodys".into()]),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.unclaimed_sessions_found, 1);
+        assert_eq!(summary.orphan_sessions_cancelled, 0);
+        assert!(
+            transport.cancel_requests().await.is_empty(),
+            "누구의 것인지 모르는 실행을 죽였다 — 진행 중인 dispatch가 그 모양이다"
+        );
+
+        // 감사에 남아야 한다. 손대지 않는 처분에서 **유일한** 산출물이므로,
+        // 이것이 없으면 운영자는 그런 세션이 있다는 사실조차 알 수 없다.
+        let events = state
+            .store
+            .list_audit_events(&fleet_core::AuditFilter {
+                action: Some(fleet_core::audit::action::CONTROL_UNCLAIMED_SESSION.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list audit");
+        assert_eq!(events.len(), 1, "받은 값 {events:?}");
+    }
+
+    /// 인벤토리를 주지 않는 워커에서는 이 스윕도 아무것도 하지 않는다.
+    /// `Undeclared`를 빈 목록으로 읽는 구현은 순회할 대상이 없어 조용히
+    /// 통과하지만, `Reported(vec![])`로 읽는 구현과 구분하기 위해 고정한다.
+    #[tokio::test]
+    async fn an_undeclared_worker_contributes_no_orphans() {
+        let worker = make_worker("silent");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = make_dispatched_task_with_session(
+            "ended",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-x",
+        );
+        task.status = TaskStatus::Cancelled {
+            reason: "r".into(),
+            cancelled_at: chrono::Utc::now(),
+        };
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.orphan_sessions_cancelled, 0);
+        assert_eq!(summary.unclaimed_sessions_found, 0);
+        assert!(transport.cancel_requests().await.is_empty());
+    }
+
+    /// 설정으로 끌 수 있다. 워커의 실행을 멈추는 유일한 자동 경로이므로
+    /// 운영자가 원인을 찾는 동안 이것부터 끌 수 있어야 한다.
+    #[tokio::test]
+    async fn the_orphan_sweep_can_be_turned_off() {
+        let worker = make_worker("opt-out");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let mut task = make_dispatched_task_with_session(
+            "ended",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-zombie",
+        );
+        task.status = TaskStatus::Cancelled {
+            reason: "r".into(),
+            cancelled_at: chrono::Utc::now(),
+        };
+        store.insert_task(&task).await.unwrap();
+
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec!["sess-zombie".into()]),
+            )
+            .await;
+
+        let cfg = ReconcileConfig {
+            reap_orphan_sessions: false,
+            ..ReconcileConfig::default()
+        };
+        let summary = Reconciler::new(state.clone(), dispatcher, cfg)
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.orphan_sessions_cancelled, 0);
+        assert!(transport.cancel_requests().await.is_empty());
     }
 }

@@ -112,6 +112,16 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_reconcile: bool,
 
+        /// 워커가 아직 들고 있는 **이미 끝난 Task의 세션**을 찾아 취소하는
+        /// 스윕을 끈다 (기본값: 활성, 로드맵 `#70` 게이트 2·7).
+        ///
+        /// 이 스윕은 오케스트레이터가 워커의 실행을 자동으로 **멈추는**
+        /// 유일한 경로다. Agent가 `session/list`를 광고하지 않는 배포에서는
+        /// 어차피 한 건도 일어나지 않지만, 광고하는 배포에서 예상 밖의 취소가
+        /// 보이면 원인을 찾는 동안 이것부터 끌 수 있어야 한다.
+        #[arg(long, default_value_t = false)]
+        no_orphan_session_reap: bool,
+
         /// 재조정 루프 폴링 주기 (초).
         #[arg(long, env = "FLEET_RECONCILE_INTERVAL_SECS", default_value_t = 30)]
         reconcile_interval_secs: u64,
@@ -1137,6 +1147,7 @@ async fn main() -> Result<()> {
             cleanup_interval_secs,
             cleanup_retention_days,
             no_reconcile,
+            no_orphan_session_reap,
             reconcile_interval_secs,
             reconcile_stale_secs,
             reconcile_dispatched_check_secs,
@@ -1165,6 +1176,7 @@ async fn main() -> Result<()> {
                 cleanup_interval_secs,
                 cleanup_retention_days,
                 no_reconcile,
+                no_orphan_session_reap,
                 reconcile_interval_secs,
                 reconcile_stale_secs,
                 reconcile_dispatched_check_secs,

@@ -227,6 +227,7 @@ pub async fn run_serve(
     cleanup_interval_secs: u64,
     cleanup_retention_days: i64,
     no_reconcile: bool,
+    no_orphan_session_reap: bool,
     reconcile_interval_secs: u64,
     reconcile_stale_secs: u64,
     reconcile_dispatched_check_secs: u64,
@@ -390,6 +391,7 @@ pub async fn run_serve(
             ),
             offline_worker_grace: Duration::from_secs(reconcile_offline_worker_grace_secs.max(1)),
             max_dispatch_retries: reconcile_max_dispatch_retries,
+            reap_orphan_sessions: !no_orphan_session_reap,
             // 플래그로 열지 않는다. 이 값은 재조정 한 라운드 안에서 워커에게
             // `session/list`를 묻고 기다리는 시간이고, 답이 늦으면 인벤토리
             // 없이 지나갈 뿐이라 운영자가 조율할 이유가 아직 없다 — 필요가
@@ -402,6 +404,7 @@ pub async fn run_serve(
             dispatched_check_secs = reconcile_dispatched_check_secs,
             offline_worker_grace_secs = reconcile_offline_worker_grace_secs,
             max_dispatch_retries = reconcile_max_dispatch_retries,
+            reap_orphan_sessions = !no_orphan_session_reap,
             "task reconciliation loop enabled (pending redispatch + orphaned/offline dispatched reap)"
         );
         let reconciler = Reconciler::new(state.clone(), dispatcher.clone(), cfg);

@@ -357,6 +357,29 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("record_task_acp_session"))
     }
 
+    /// ACP 세션 id로 그 세션을 연 Task를 찾는다 (로드맵 `#70` 게이트 2·7).
+    ///
+    /// `record_task_acp_session`의 **역방향**이다. 저쪽이 "이 Task가 어느
+    /// 세션을 열었나"를 적고, 이쪽은 "이 세션은 누구의 것인가"를 묻는다.
+    /// `041`이 만든 부분 인덱스(`idx_tasks_acp_session`)가 정확히 이 조회의
+    /// 축이며, 그 마이그레이션의 주석이 "재시작 뒤 내가 띄웠다고 믿는 세션을
+    /// 여는 조회"라고 적은 조회가 이것이다 — **인덱스는 먼저 들어왔고 그것을
+    /// 읽는 질의는 없었다.**
+    ///
+    /// 워커가 인벤토리로 답한 세션 하나하나에 대해 이 질문을 하면 셋 중
+    /// 하나가 나오고, 셋이 서로 다른 처분을 요구한다: 살아 있는 Task의
+    /// 것(그대로 둔다), 이미 끝난 Task의 것(고아다), 그리고 **아무 Task도
+    /// 지목하지 않는 것**(우리가 연 적 없거나 기록을 잃었다 — 함부로 손대면
+    /// 남의 실행을 죽인다).
+    ///
+    /// `None`은 "그런 세션을 가진 Task가 없다"이지 오류가 아니다.
+    async fn find_task_by_acp_session(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<Task>, StoreError> {
+        Err(StoreError::Unsupported("find_task_by_acp_session"))
+    }
+
     /// 작업 마이그레이션 이관용 Git 임시 브랜치명을 업데이트합니다.
     async fn update_task_checkpoint(
         &self,

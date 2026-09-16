@@ -713,6 +713,25 @@ impl Store for PgStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn find_task_by_acp_session(&self, session_id: &str) -> Result<Option<Task>, StoreError> {
+        // `041`의 부분 인덱스(`idx_tasks_acp_session ... WHERE acp_session_id
+        // IS NOT NULL`)를 그대로 탄다. 새 인덱스를 만들지 않은 이유는 그
+        // 마이그레이션이 **이 조회를 위해** 이미 만들어 두었기 때문이다.
+        let row = sqlx::query(
+            r#"SELECT id, prompt, cwd, model, server_hint, required_labels,
+                      max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
+                      thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
+                      requested_profile, resolved_model, token_budget, partial_output,
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+               FROM tasks WHERE acp_session_id = $1"#,
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(row_to_task).transpose()
+    }
+
     async fn count_dispatched_tasks_by_worker(&self) -> Result<HashMap<WorkerId, u32>, StoreError> {
         // `status_phase`는 생성(STORED) 칼럼(`001_init.sql:43`)이고 전용 인덱스
         // `idx_tasks_phase`(`002_indexes.sql:10`)가 있으므로 이 술어는 기존

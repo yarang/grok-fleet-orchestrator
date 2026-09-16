@@ -146,6 +146,24 @@ pub mod action {
     /// 결정을 내리지 못한 것이고, 이쪽은 결정을 내렸는데 그 결정이 상대에게
     /// 도달하지 않은 것이다.
     pub const CONTROL_CANCEL_UNDELIVERED: &str = "control.cancel_undelivered";
+    /// 이미 끝난 Task의 세션을 워커가 아직 들고 있어 취소를 보냈다
+    /// (로드맵 `#70` 게이트 2·7).
+    ///
+    /// [`CONTROL_CANCEL_UNDELIVERED`]의 **뒷정리**다. 저쪽은 "취소가 닿지
+    /// 않았다"를 남기고, 이쪽은 그렇게 어긋난 채 남은 실행을 나중에 워커의
+    /// 인벤토리에서 발견해 실제로 멈춘 기록이다. 두 줄이 같은 Task에 대해
+    /// 짝으로 나타나면 그것이 어긋남이 **해소된** 경로이고, 앞줄만 있으면
+    /// 아직 해소되지 않았다는 뜻이다.
+    pub const CONTROL_ORPHAN_SESSION_CANCELLED: &str = "control.orphan_session_cancelled";
+    /// 워커가 들고 있는 세션을 **어느 Task도 지목하지 않는다**
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// [`CONTROL_ORPHAN_SESSION_CANCELLED`]와 반드시 구분한다 — 저쪽은 우리
+    /// 것이라고 말할 수 있는 실행을 멈춘 것이고, 이쪽은 **누구의 것인지 모르는
+    /// 실행**이라 손대지 않고 남긴 기록이다. 우리가 연 적이 없거나, 기록을
+    /// 잃었거나, 다른 제어면의 것일 수 있다. 셋 다 함부로 죽이면 남의 실행을
+    /// 죽이는 것이므로 관측만 남긴다.
+    pub const CONTROL_UNCLAIMED_SESSION: &str = "control.unclaimed_session";
     /// Agent가 자기 템플릿의 tool 허용 목록 **밖에 있는 도구**를 호출했다
     /// (로드맵 `#64`·`#86` 선행).
     ///

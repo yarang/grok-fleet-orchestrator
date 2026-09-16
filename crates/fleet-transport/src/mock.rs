@@ -78,6 +78,12 @@ struct Inner {
     /// 테스트는 그 배포를 재현해야 한다. 기본을 `Reported(vec![])`로 두면
     /// "인벤토리가 없는 배포"라는 가장 흔한 경우가 시험에서 사라진다.
     session_inventories: HashMap<WorkerId, SessionInventory>,
+    /// 받은 `cancel` 요청을 순서대로 기록한다.
+    ///
+    /// 취소는 **notification이라 결과가 상태에 남지 않는다** — mock이 이것을
+    /// 적어 두지 않으면 "무엇을 취소하라고 했는가"를 시험이 볼 방법이 아예
+    /// 없고, 엉뚱한 세션을 죽이는 구현과 옳은 구현이 구분되지 않는다.
+    cancels: Vec<CancelRequest>,
 }
 
 /// 인메모리 `WorkerTransport`. 테스트에서 `Arc<MockTransport>`로 공유.
@@ -101,6 +107,7 @@ impl MockTransport {
             probe_failures: HashMap::new(),
             probe_answers_with_error: std::collections::HashSet::new(),
             session_inventories: HashMap::new(),
+            cancels: Vec::new(),
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -142,6 +149,11 @@ impl MockTransport {
             .await
             .session_inventories
             .insert(worker_id, inventory);
+    }
+
+    /// 지금까지 받은 `cancel` 요청을 순서대로 돌려준다.
+    pub async fn cancel_requests(&self) -> Vec<CancelRequest> {
+        self.inner.lock().await.cancels.clone()
     }
 
     /// 특정 작업의 결과를 미리 설정 (강제 성공/실패).
@@ -301,7 +313,8 @@ impl WorkerTransport for MockTransport {
         Ok(())
     }
 
-    async fn cancel(&self, _req: CancelRequest) -> Result<CancelDelivery, TransportError> {
+    async fn cancel(&self, req: CancelRequest) -> Result<CancelDelivery, TransportError> {
+        self.inner.lock().await.cancels.push(req);
         // Mock은 전달을 시뮬레이션하지 않으므로 항상 `Sent`다. 전달되지 않는
         // 경우를 시험해야 하면 그 시험 전용 double을 쓴다 — 여기서 조건을
         // 흉내 내면 mock이 무엇을 보장하는지가 흐려진다.
