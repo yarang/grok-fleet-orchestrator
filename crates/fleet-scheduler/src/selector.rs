@@ -693,6 +693,15 @@ mod tests {
                 answered_with_error: false,
             })
         }
+        /// 이 spy는 probe만 관찰한다. 인벤토리는 `Undeclared`로 둔다 — 여기서
+        /// 빈 목록을 주면 "세션이 없다"는 권위 있는 답을 가짜로 만들어 낸다.
+        async fn list_sessions(
+            &self,
+            _: WorkerId,
+            _: std::time::Duration,
+        ) -> Result<fleet_transport::SessionInventory, fleet_transport::TransportError> {
+            Ok(fleet_transport::SessionInventory::Undeclared)
+        }
         async fn subscribe(
             &self,
         ) -> Result<

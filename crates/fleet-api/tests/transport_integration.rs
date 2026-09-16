@@ -87,6 +87,17 @@ impl WorkerTransport for RecordingTransportShared {
             answered_with_error: false,
         })
     }
+
+    /// 이 double은 인벤토리를 흉내 내지 않는다 — `Undeclared`가 실제 배포
+    /// 다수의 모양이고, 여기서 빈 목록을 주면 "세션이 없다"는 권위 있는 답을
+    /// 가짜로 만들어 낸다.
+    async fn list_sessions(
+        &self,
+        _: WorkerId,
+        _: Duration,
+    ) -> Result<fleet_transport::SessionInventory, TransportError> {
+        Ok(fleet_transport::SessionInventory::Undeclared)
+    }
     async fn subscribe(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
@@ -275,6 +286,17 @@ async fn transport_failure_does_not_break_store_registration() {
                 round_trip: Duration::from_millis(1),
                 answered_with_error: false,
             })
+        }
+
+        /// 이 double은 인벤토리를 흉내 내지 않는다 — `Undeclared`가 실제 배포
+        /// 다수의 모양이고, 여기서 빈 목록을 주면 "세션이 없다"는 권위 있는 답을
+        /// 가짜로 만들어 낸다.
+        async fn list_sessions(
+            &self,
+            _: WorkerId,
+            _: Duration,
+        ) -> Result<fleet_transport::SessionInventory, TransportError> {
+            Ok(fleet_transport::SessionInventory::Undeclared)
         }
         async fn subscribe(
             &self,

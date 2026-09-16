@@ -249,6 +249,48 @@ pub struct ProbeOutcome {
     pub answered_with_error: bool,
 }
 
+/// [`WorkerTransport::list_sessions`]가 본 것 (로드맵 `#70` 게이트 2).
+///
+/// **세 값이 전부 "지금 인벤토리가 없다"를 뜻할 수 있지만, 운영자의 처분은
+/// 서로 다르다.** 하나로 뭉개면 게이트 2가 열려 있는 이유를 사후에 셀 수
+/// 없다 — [`CancelDelivery`]를 셋으로 가른 것과 같은 판단이다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionInventory {
+    /// Agent가 `initialize`에서 `session/list`를 광고했고 실제로 목록을 줬다.
+    ///
+    /// 빈 `Vec`은 **"세션이 없다"이지 "모른다"가 아니다.** 이 구분이 게이트 2의
+    /// 전부다: 재시작한 오케스트레이터가 `Dispatched`로 기억하는 Task의
+    /// `acp_session_id`가 이 목록에 없으면, 그 실행은 **정말로 사라진 것**이고
+    /// 재조정이 결론을 내릴 수 있다. `Undeclared`였다면 같은 부재가 "저쪽이
+    /// 말해 주지 않았다"와 구분되지 않는다.
+    Reported(Vec<String>),
+    /// Agent가 `initialize`의 `agentCapabilities.sessionCapabilities.list`를
+    /// 광고하지 않았다. **요청을 보내지도 않았다.**
+    ///
+    /// 스펙이 "광고하지 않으면 지원하지 않는다"로 정의하므로 이것은 추측이
+    /// 아니라 저쪽의 선언이다. 이 값을 받은 워커에 대해서는 인벤토리 기반
+    /// 재조정을 **하지 않는다** — 없는 목록을 빈 목록으로 읽으면 살아 있는
+    /// 실행을 전부 사라진 것으로 판정한다.
+    Undeclared,
+    /// 광고는 했는데 호출이 오류로 끝났다.
+    ///
+    /// [`Undeclared`](Self::Undeclared)와 **다른 사실이다.** 저쪽은 저쪽이 자기
+    /// 자신에 대해 정직하게 말한 것이고, 이쪽은 선언과 행동이 어긋난 것이다 —
+    /// 둘 다 인벤토리를 주지 않지만, 이쪽은 상대 구현의 결함이므로 보고할
+    /// 대상이 있다. `message`는 진단용이며 판정에 쓰지 않는다.
+    Refused { message: String },
+}
+
+impl SessionInventory {
+    /// 이 워커에 대해 인벤토리 기반 판정을 내릴 수 있는가.
+    ///
+    /// `Reported`만 `true`다. 빈 목록도 `true`인 것이 요점이다 — 위
+    /// [`Reported`](Self::Reported) 문서 참고.
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::Reported(_))
+    }
+}
+
 /// 워커 통신 trait. 각 워커 엔드포인트당 하나의 인스턴스가 아닌,
 /// 풀 전체를 관리하는 구현체를 가정합니다 (`register`/`unregister`).
 #[async_trait]
@@ -329,6 +371,39 @@ pub trait WorkerTransport: Send + Sync {
         worker_id: WorkerId,
         timeout: Duration,
     ) -> Result<ProbeOutcome, TransportError>;
+
+    /// 이 워커의 Agent가 **지금 들고 있는 세션**을 묻는다
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// [`probe`](Self::probe)와 **같은 요청을 쓰지만 묻는 것이 다르다.** 저쪽은
+    /// "답이 왔는가"만 보고 본문을 버린다 — 그래서 `session/list`를 모르는
+    /// Agent도 살아 있다고 판정한다. 이쪽은 본문이 전부다.
+    ///
+    /// ## 지원 여부는 추측하지 않는다
+    ///
+    /// ACP는 `initialize` 응답의
+    /// `agentCapabilities.sessionCapabilities.list`로 이 메서드의 지원을
+    /// **선언**한다. 구현은 그 선언을 연결 시점에 붙잡아 두고, 광고하지 않은
+    /// Agent에게는 요청을 **보내지 않은 채** [`SessionInventory::Undeclared`]를
+    /// 돌려준다. 그렇게 하지 않으면 "메서드를 모른다"와 "세션이 하나도 없다"가
+    /// 둘 다 빈 결과로 도착해 구분되지 않는다.
+    ///
+    /// ## 이것으로 무엇을 판정할 수 있는가
+    ///
+    /// [`SessionInventory::Reported`]일 때만 판정할 수 있다. 재시작한
+    /// 오케스트레이터가 `Dispatched`로 기억하는 Task의 `acp_session_id`가 그
+    /// 목록에 **없다면** 그 실행은 사라진 것이다. 다른 두 값에서는 같은 부재가
+    /// "저쪽이 말해 주지 않았다"와 구분되지 않으므로 아무 결론도 내리면 안 된다.
+    ///
+    /// ## 부작용이 없어야 한다
+    ///
+    /// `probe`와 같은 이유다 — 재조정 루프에서 주기적으로 불릴 것이므로,
+    /// 세션을 만들거나 상태를 바꾸는 요청으로 구현해서는 안 된다.
+    async fn list_sessions(
+        &self,
+        worker_id: WorkerId,
+        timeout: Duration,
+    ) -> Result<SessionInventory, TransportError>;
 
     /// 워커 이벤트 스트림을 구독.
     ///

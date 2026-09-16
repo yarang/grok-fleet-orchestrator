@@ -63,6 +63,20 @@ struct MockState {
     /// 켜면 `session/prompt` 처리 중에 도구 호출 알림 두 건(시작·완료)을
     /// 흘려보낸다 (로드맵 `#70` 게이트 4 선행).
     emit_tool_calls: Arc<AtomicBool>,
+    /// 켜면 `initialize` 응답에
+    /// `agentCapabilities.sessionCapabilities.list`를 실어 `session/list`
+    /// 지원을 **광고**한다 (로드맵 `#70` 게이트 2).
+    ///
+    /// [`knows_session_list`](Self::knows_session_list)와 **일부러 별개**다.
+    /// 광고와 실제 동작을 따로 켤 수 있어야 "광고했는데 거절한다"와
+    /// "광고하지 않았는데 답할 수는 있다" 둘을 만들 수 있고, 후자가 없으면
+    /// "광고하지 않은 Agent에게는 보내지 않는다"를 시험할 방법이 없다.
+    declares_session_list: Arc<AtomicBool>,
+    /// `session/list`가 돌려줄 세션 id 목록.
+    session_list_entries: Arc<Mutex<Vec<String>>>,
+    /// 켜면 `session/list` 응답에 `nextCursor`를 실어 목록이 **불완전**함을
+    /// 알린다.
+    session_list_paginates: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,10 +122,16 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
 
         match method.as_str() {
             "initialize" => {
+                let mut result = json!({ "protocolVersion": 1 });
+                if state.declares_session_list.load(Ordering::SeqCst) {
+                    result["agentCapabilities"] = json!({
+                        "sessionCapabilities": { "list": {} },
+                    });
+                }
                 let resp = json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": { "protocolVersion": 1 },
+                    "result": result,
                 });
                 let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
@@ -222,10 +242,21 @@ async fn handle_acp_socket(socket: WebSocket, state: MockState) {
                     let _ = writer.send(WsMessage::Text(resp.to_string())).await;
                     continue;
                 }
+                let sessions: Vec<Value> = state
+                    .session_list_entries
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|sid| json!({ "sessionId": sid, "cwd": "/srv/fleet/workspaces/test" }))
+                    .collect();
+                let mut result = json!({ "sessions": sessions });
+                if state.session_list_paginates.load(Ordering::SeqCst) {
+                    result["nextCursor"] = json!("page-2");
+                }
                 let resp = json!({
                     "jsonrpc": "2.0",
                     "id": id,
-                    "result": { "sessions": [] },
+                    "result": result,
                 });
                 let _ = writer.send(WsMessage::Text(resp.to_string())).await;
             }
@@ -935,5 +966,191 @@ async fn prompt_timeout_cancels_the_session_but_still_reports_result_lost() {
             .iter()
             .filter_map(|m| m.get("method").and_then(|v| v.as_str()).map(str::to_string))
             .collect::<Vec<_>>()
+    );
+}
+
+// ── session/list 인벤토리 (로드맵 `#70` 게이트 2) ────────────────────────
+//
+// 이 네 시험이 함께 단정하는 것은 **"인벤토리가 없다"의 세 가지 이유를 이
+// 코드가 실제로 가른다**는 것이다. 하나로 뭉갠 구현은 첫 번째만 통과한다.
+
+/// 광고한 Agent는 목록을 준다 — 그리고 그 목록이 **권위를 갖는다**.
+#[tokio::test]
+async fn a_worker_that_declares_session_list_reports_its_inventory() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(true, Ordering::SeqCst);
+    state.knows_session_list.store(true, Ordering::SeqCst);
+    *state.session_list_entries.lock().await = vec!["sess-a".into(), "sess-b".into()];
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let inventory = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await
+        .expect("list_sessions");
+
+    assert_eq!(
+        inventory,
+        fleet_transport::SessionInventory::Reported(vec!["sess-a".into(), "sess-b".into()])
+    );
+    assert!(inventory.is_authoritative());
+}
+
+/// **빈 목록도 권위 있는 답이다.** 이것이 게이트 2의 전부다 — "세션이 없다"와
+/// "모른다"가 구분되지 않으면 재조정이 아무 결론도 내릴 수 없다.
+#[tokio::test]
+async fn an_empty_inventory_is_an_answer_not_an_absence() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(true, Ordering::SeqCst);
+    state.knows_session_list.store(true, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let inventory = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await
+        .expect("list_sessions");
+
+    assert_eq!(
+        inventory,
+        fleet_transport::SessionInventory::Reported(Vec::new())
+    );
+    assert!(
+        inventory.is_authoritative(),
+        "빈 목록을 권위 없는 답으로 접으면 '실행이 사라졌다'를 영영 판정할 수 없다"
+    );
+}
+
+/// 광고하지 않은 Agent에게는 **요청을 보내지 않는다.**
+///
+/// mock은 물어보면 답할 수 있게 켜 두었다(`knows_session_list`). 그런데도
+/// 답이 `Undeclared`라는 것은 요청이 나가지 않았다는 뜻이고, 수신 기록으로
+/// 다시 확인한다. 이 두 번째 단정이 없으면 "보내고 결과를 버리는" 구현도
+/// 통과한다.
+#[tokio::test]
+async fn an_undeclared_agent_is_never_asked() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(false, Ordering::SeqCst);
+    state.knows_session_list.store(true, Ordering::SeqCst);
+    *state.session_list_entries.lock().await = vec!["sess-hidden".into()];
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let inventory = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await
+        .expect("list_sessions");
+
+    assert_eq!(inventory, fleet_transport::SessionInventory::Undeclared);
+    assert!(!inventory.is_authoritative());
+
+    let asked = state
+        .received
+        .lock()
+        .await
+        .iter()
+        .filter(|m| m.get("method").and_then(|v| v.as_str()) == Some("session/list"))
+        .count();
+    assert_eq!(asked, 0, "광고하지 않은 Agent에게 session/list를 보냈다");
+}
+
+/// 광고와 행동이 어긋나면 `Refused`다 — `Undeclared`가 **아니다**.
+///
+/// 둘 다 인벤토리를 주지 않지만 하나는 저쪽이 자기 자신에 대해 정직하게 말한
+/// 것이고 다른 하나는 상대 구현의 결함이다. 접으면 후자를 영영 관측할 수 없다.
+#[tokio::test]
+async fn a_declared_but_refusing_agent_is_not_the_same_as_an_undeclared_one() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(true, Ordering::SeqCst);
+    state.knows_session_list.store(false, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let inventory = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await
+        .expect("list_sessions");
+
+    assert!(
+        matches!(inventory, fleet_transport::SessionInventory::Refused { .. }),
+        "받은 값 {inventory:?}"
+    );
+    assert!(!inventory.is_authoritative());
+}
+
+/// 페이지가 잘린 목록은 권위를 갖지 않는다.
+///
+/// 불완전한 목록으로 "이 세션이 없다"를 판정하면 살아 있는 실행을 사라진
+/// 것으로 읽는다. 다음 페이지를 따라가는 것은 "몇 페이지까지"라는 두 번째
+/// 파라미터를 만드는 일이라, 지금은 권위를 주장하지 않는 쪽을 고른다.
+#[tokio::test]
+async fn a_paginated_inventory_is_not_authoritative() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(true, Ordering::SeqCst);
+    state.knows_session_list.store(true, Ordering::SeqCst);
+    state.session_list_paginates.store(true, Ordering::SeqCst);
+    *state.session_list_entries.lock().await = vec!["sess-page1".into()];
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let inventory = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await
+        .expect("list_sessions");
+
+    assert!(
+        matches!(inventory, fleet_transport::SessionInventory::Refused { .. }),
+        "받은 값 {inventory:?}"
+    );
+    assert!(!inventory.is_authoritative());
+}
+
+/// 연결이 죽은 것은 `Refused`가 아니라 `Err`다 — probe의 같은 자리와 같은
+/// 함정이다. 갈라 두지 않으면 끊긴 연결이 "이 Agent 구현이 선언과 어긋난다"로
+/// 기록된다.
+#[tokio::test]
+async fn a_dead_connection_is_an_error_not_a_refusal() {
+    let (state, addr) = start_mock_server().await;
+    state.declares_session_list.store(true, Ordering::SeqCst);
+    state.close_on_session_list.store(true, Ordering::SeqCst);
+
+    let transport = AcpTransport::new();
+    let worker = WorkerId::new();
+    transport
+        .register(worker, &endpoint(addr), 1)
+        .await
+        .expect("register");
+
+    let result = transport
+        .list_sessions(worker, Duration::from_secs(5))
+        .await;
+    assert!(
+        result.is_err(),
+        "소켓이 닫혔는데 인벤토리에 대한 답으로 읽혔다: {result:?}"
     );
 }

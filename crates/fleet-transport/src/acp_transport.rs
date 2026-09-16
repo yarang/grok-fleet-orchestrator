@@ -64,7 +64,7 @@ use tracing::{debug, info, warn};
 use crate::tls::ClientTlsConfig;
 use crate::{
     CancelDelivery, CancelRequest, DispatchRequest, FailureObservation, ProbeOutcome,
-    TransportError, WorkerEvent, WorkerTransport,
+    SessionInventory, TransportError, WorkerEvent, WorkerTransport,
 };
 
 /// 브로드캐스트 채널 용량.
@@ -157,6 +157,20 @@ struct WorkerSession {
     /// session_id -> in-flight 메타데이터. task당 세션 하나이므로 이 맵의
     /// 키만으로 스트리밍 출력을 완전히 모호함 없이 라우팅할 수 있다.
     sessions: Arc<Mutex<HashMap<SessionId, InFlightSession>>>,
+    /// 이 Agent가 `initialize`에서 `session/list`를 광고했는가
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// **이 값은 매 연결마다 도착하고 있었는데 버려지고 있었다.** 예전 코드는
+    /// `initialize` 응답을 `if let Err(e)`로만 보고 `Ok`의 본문을 통째로
+    /// 흘려보냈고, 그래서 "grok이 `session/list`를 지원하는가"가 문서에
+    /// **실측되지 않은 미지**로 두 게이트(2·7)를 막고 있었다. 미지가 아니라
+    /// 읽지 않은 것이었다.
+    ///
+    /// 재연결할 때마다 다시 쓴다 — 저쪽이 업그레이드되면 답이 달라지고,
+    /// 연결이 끊긴 동안의 옛 선언을 들고 있으면 새 연결에 대해 거짓말을 한다.
+    /// 초기값 `false`는 "광고하지 않았다"와 같은 처분을 받는다: 확인되지 않은
+    /// 지원을 있다고 가정하는 쪽이 위험하기 때문이다(fail-closed).
+    session_list_declared: Arc<std::sync::atomic::AtomicBool>,
     /// supervisor 종료 신호. `register()` 시 1회만 생성되고 `WorkerSession`의
     /// 수명 동안 유지된다(oneshot이 아니라 watch를 쓰는 이유 — 2026-08-11
     /// 버그 수정: 예전엔 supervisor 루프가 돌 때마다 새 oneshot을 만들어서,
@@ -187,6 +201,7 @@ impl WorkerSession {
             capacity: Arc::new(Semaphore::new(cap as usize)),
             max_concurrent: cap,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            session_list_declared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown,
             supervisor: Mutex::new(None),
             #[cfg(feature = "mtls")]
@@ -862,6 +877,106 @@ impl WorkerTransport for AcpTransport {
         }
     }
 
+    /// 계약은 트레이트 쪽 독스트링이 갖는다. 여기 적는 것은 구현 판단 둘이다.
+    ///
+    /// **광고하지 않은 Agent에게는 보내지 않는다.** 보내고 `-32601`을
+    /// [`SessionInventory::Undeclared`]로 접는 구현도 같은 값을 주지만, 그러면
+    /// 매 재조정마다 아무에게도 답이 없을 왕복이 한 번씩 나간다. 더 중요한
+    /// 것은 그 구현이 "선언과 행동이 어긋났다"([`SessionInventory::Refused`])를
+    /// 영영 관측할 수 없게 만든다는 것이다.
+    ///
+    /// **오류를 `Err`가 아니라 `Refused`로 돌려준다.** `probe`와 갈리는
+    /// 자리인데, 저쪽은 "살아 있는가"를 묻고 이쪽은 "무엇을 들고 있는가"를
+    /// 묻기 때문이다. 연결이 죽은 것만 `Err`이고, 저쪽이 답을 보냈다면 그
+    /// 답이 오류여도 **인벤토리에 대한 답**이다.
+    async fn list_sessions(
+        &self,
+        worker_id: WorkerId,
+        timeout: Duration,
+    ) -> Result<SessionInventory, TransportError> {
+        let session = {
+            let clients = self.clients.read().await;
+            clients
+                .get(&worker_id)
+                .cloned()
+                .ok_or_else(|| TransportError::WorkerNotRegistered(worker_id.to_string()))?
+        };
+        let state = *session.state.read().await;
+        if state != ConnState::Connected {
+            return Err(TransportError::Connection(format!(
+                "worker {worker_id} not connected (state={state:?}); cannot list sessions"
+            )));
+        }
+        if !session
+            .session_list_declared
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(SessionInventory::Undeclared);
+        }
+        let connection = {
+            let guard = session.connection.lock().await;
+            guard.clone().ok_or_else(|| {
+                TransportError::Connection(format!(
+                    "worker {worker_id} session disappeared mid-listing"
+                ))
+            })?
+        };
+
+        let answered = tokio::time::timeout(
+            timeout,
+            connection
+                .send_request(ListSessionsRequest::new())
+                .block_task(),
+        )
+        .await;
+
+        match answered {
+            Ok(Ok(resp)) => {
+                // **페이지네이션을 따라가지 않는다.** `next_cursor`가 있으면 이
+                // 목록은 완전하지 않고, 불완전한 목록으로 "이 세션이 없다"를
+                // 판정하면 살아 있는 실행을 사라진 것으로 읽는다. 완전하지
+                // 않다는 것을 아는 이상 권위를 주장하지 않는 쪽이 맞다 —
+                // 커서를 따라가는 것은 그 자체로 "몇 페이지까지"라는 두 번째
+                // 파라미터를 만든다(probe가 신선도를 두지 않은 것과 같은 이유).
+                if resp.next_cursor.is_some() {
+                    return Ok(SessionInventory::Refused {
+                        message: "agent paginated the session list; \
+                                  a partial inventory cannot decide absence"
+                            .to_string(),
+                    });
+                }
+                Ok(SessionInventory::Reported(
+                    resp.sessions
+                        .into_iter()
+                        .map(|s| s.session_id.0.to_string())
+                        .collect(),
+                ))
+            }
+            Ok(Err(e)) => {
+                // 연결이 죽은 것과 Agent가 거절한 것은 SDK에서 같은 `Err`로
+                // 온다 — `probe`의 같은 자리와 같은 함정이다. 여기서 갈라
+                // 두지 않으면 끊긴 연결이 `Refused`로 보고되어 "이 Agent 구현이
+                // 선언과 어긋난다"는 잘못된 결론이 남는다.
+                let still_connected = *session.state.read().await == ConnState::Connected;
+                if !(error_is_an_agent_answer(&e) && still_connected) {
+                    return Err(TransportError::Connection(format!(
+                        "worker {worker_id} connection died while listing sessions: {e}"
+                    )));
+                }
+                warn!(
+                    %worker_id, error = %e,
+                    "worker declared session/list support but refused the call"
+                );
+                Ok(SessionInventory::Refused {
+                    message: e.to_string(),
+                })
+            }
+            Err(_) => Err(TransportError::Connection(format!(
+                "worker {worker_id} did not answer session/list within {timeout:?}"
+            ))),
+        }
+    }
+
     async fn subscribe(
         &self,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
@@ -948,10 +1063,34 @@ fn spawn_supervisor(
                             .send_request(InitializeRequest::new(ProtocolVersion::V1))
                             .block_task()
                             .await;
-                        if let Err(e) = init {
-                            let _ = ready_tx.send(Err(format!("initialize: {e}")));
-                            return Err(e);
-                        }
+                        let init = match init {
+                            Ok(resp) => resp,
+                            Err(e) => {
+                                let _ = ready_tx.send(Err(format!("initialize: {e}")));
+                                return Err(e);
+                            }
+                        };
+
+                        // **응답 본문을 읽는다** (로드맵 `#70` 게이트 2). 예전에는
+                        // `if let Err(e)`로 실패만 보고 `Ok`의 본문을 버렸는데, 그
+                        // 본문에 "이 Agent가 `session/list`를 지원하는가"가 들어
+                        // 있다. 그 값이 없어서 게이트 2와 7이 "grok의 지원 여부가
+                        // 실측되지 않았다"로 막혀 있었다 — 매 연결마다 도착하던
+                        // 답을 읽지 않고 있었던 것이다.
+                        //
+                        // 스펙상 광고하지 않으면 지원하지 않는 것이므로 `None`은
+                        // 미지가 아니라 **부정**이다.
+                        let declares_list =
+                            init.agent_capabilities.session_capabilities.list.is_some();
+                        session
+                            .session_list_declared
+                            .store(declares_list, std::sync::atomic::Ordering::SeqCst);
+                        debug!(
+                            worker_id = %session.worker_id,
+                            declares_session_list = declares_list,
+                            agent = ?init.agent_info.as_ref().map(|i| i.name.clone()),
+                            "ACP initialize handshake completed"
+                        );
 
                         *session.connection.lock().await = Some(connection);
                         *session.state.write().await = ConnState::Connected;

@@ -15,8 +15,8 @@ use tokio::time::sleep;
 use tracing::debug;
 
 use crate::{
-    CancelDelivery, CancelRequest, DispatchRequest, ProbeOutcome, TransportError, WorkerEvent,
-    WorkerTransport,
+    CancelDelivery, CancelRequest, DispatchRequest, ProbeOutcome, SessionInventory, TransportError,
+    WorkerEvent, WorkerTransport,
 };
 
 /// Mock 내부 브로드캐스트 채널의 버퍼 크기.
@@ -71,6 +71,13 @@ struct Inner {
     /// probe가 "오류로 답함"을 보고해야 하는 워커. **실패가 아니다** —
     /// [`WorkerTransport::probe`]의 독스트링대로 거절도 살아 있다는 증거다.
     probe_answers_with_error: std::collections::HashSet<WorkerId>,
+    /// `session/list`에 대해 이 워커가 내놓을 답 (로드맵 `#70` 게이트 2).
+    ///
+    /// **기본값이 [`SessionInventory::Undeclared`]인 것이 의도다.** 실제
+    /// Agent 다수가 이 메서드를 광고하지 않으므로, 아무것도 설정하지 않은
+    /// 테스트는 그 배포를 재현해야 한다. 기본을 `Reported(vec![])`로 두면
+    /// "인벤토리가 없는 배포"라는 가장 흔한 경우가 시험에서 사라진다.
+    session_inventories: HashMap<WorkerId, SessionInventory>,
 }
 
 /// 인메모리 `WorkerTransport`. 테스트에서 `Arc<MockTransport>`로 공유.
@@ -93,6 +100,7 @@ impl MockTransport {
             event_tx,
             probe_failures: HashMap::new(),
             probe_answers_with_error: std::collections::HashSet::new(),
+            session_inventories: HashMap::new(),
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
@@ -123,6 +131,17 @@ impl MockTransport {
     pub async fn add_worker(&self, worker: MockWorker) {
         let id = worker.id;
         self.inner.lock().await.workers.insert(id, worker);
+    }
+
+    /// 이 워커가 `session/list`에 어떻게 답할지 정한다 (로드맵 `#70` 게이트 2).
+    ///
+    /// 설정하지 않으면 [`SessionInventory::Undeclared`]다 — 위 필드 문서 참고.
+    pub async fn set_session_inventory(&self, worker_id: WorkerId, inventory: SessionInventory) {
+        self.inner
+            .lock()
+            .await
+            .session_inventories
+            .insert(worker_id, inventory);
     }
 
     /// 특정 작업의 결과를 미리 설정 (강제 성공/실패).
@@ -320,6 +339,22 @@ impl WorkerTransport for MockTransport {
             round_trip: Duration::from_millis(1),
             answered_with_error: guard.probe_answers_with_error.contains(&worker_id),
         })
+    }
+
+    async fn list_sessions(
+        &self,
+        worker_id: WorkerId,
+        _timeout: Duration,
+    ) -> Result<SessionInventory, TransportError> {
+        let guard = self.inner.lock().await;
+        if !guard.workers.contains_key(&worker_id) {
+            return Err(TransportError::WorkerNotRegistered(worker_id.to_string()));
+        }
+        Ok(guard
+            .session_inventories
+            .get(&worker_id)
+            .cloned()
+            .unwrap_or(SessionInventory::Undeclared))
     }
 
     async fn subscribe(&self) -> Result<mpsc::UnboundedReceiver<WorkerEvent>, TransportError> {
