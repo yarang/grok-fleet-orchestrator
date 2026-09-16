@@ -64,6 +64,7 @@ fn eager_reconcile() -> ReconcileConfig {
         // `Pending`이라 단정이 통과한다(실측으로 확인했다). 1회면 리스가
         // 없을 때 곧바로 상태가 바뀌므로 그 구멍이 사라진다.
         max_dispatch_retries: 1,
+        session_list_timeout: Duration::from_secs(5),
     }
 }
 

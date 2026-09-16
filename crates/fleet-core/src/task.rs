@@ -867,19 +867,35 @@ pub enum FailureKind {
     /// 관측 사실만 정직하게 남기는 **terminal 분류**다. 이 variant가 있다고
     /// `OutcomeUnknown` 상태 기계가 구현된 것이 아니다.
     ResultLost,
+    /// 워커의 Agent가 이 Task의 세션을 **더 이상 들고 있지 않다고 답했다**
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// **`ResultLost`와 반드시 구분해야 한다 — 그 차이가 재제출의 안전성을
+    /// 가른다.** 저쪽은 "아직 돌고 있을 수도, 이미 끝났을 수도 있다"라서
+    /// 재제출하면 같은 일을 두 번 시킬 위험이 있다. 이쪽은 워커가
+    /// `session/list`로 **지금 들고 있는 것 전부**를 답했고 이 Task의
+    /// `acp_session_id`가 그 안에 없었다는 뜻이므로, 그 실행이 끝났다는 것은
+    /// 확정이다. 남은 미지는 "어떻게 끝났는가" 하나뿐이다.
+    ///
+    /// **관측이 없어서가 아니라 관측이 있어서 생기는 분류다.** 인벤토리를
+    /// 주지 않는 Agent(`SessionInventory::Undeclared`)에서는 이 판정 자체가
+    /// 일어나지 않고, 그 경우 같은 Task는 기존 경로대로 `Dispatched`에
+    /// 남거나 워커 상태로 회수된다.
+    ExecutionVanished,
 }
 
 impl FailureKind {
     /// 모든 variant를 순서대로 나열 — metric label 등 전량 순회가 필요한
     /// 곳에서 사용(새 variant 추가를 컴파일러가 강제하도록 이 배열도 함께
     /// 갱신해야 한다).
-    pub const ALL: [FailureKind; 6] = [
+    pub const ALL: [FailureKind; 7] = [
         FailureKind::WorkerUnavailable,
         FailureKind::WorkerError,
         FailureKind::CircuitOpen,
         FailureKind::CredentialMissing,
         FailureKind::InvalidRequest,
         FailureKind::ResultLost,
+        FailureKind::ExecutionVanished,
     ];
 
     /// Prometheus label 등 안정적인 텍스트 표현이 필요한 곳에서 사용.
@@ -893,6 +909,7 @@ impl FailureKind {
             Self::CredentialMissing => "credential_missing",
             Self::InvalidRequest => "invalid_request",
             Self::ResultLost => "result_lost",
+            Self::ExecutionVanished => "execution_vanished",
         }
     }
 }

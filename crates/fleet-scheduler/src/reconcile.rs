@@ -81,6 +81,7 @@
 //!   ~수십 초 내 회복)와, 정말로 죽었거나 네트워크가 갈라진 경우를 구분하기
 //!   위한 훨씬 보수적인 유예 시간이다.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -90,8 +91,9 @@ use tracing::{debug, info, warn};
 
 use fleet_core::{
     FailureKind, TaskFailure, TaskFilter, TaskPhase, TaskStatus, TaskStatusFilter,
-    TransitionOrigin, WorkerStatus,
+    TransitionOrigin, WorkerId, WorkerStatus,
 };
+use fleet_transport::SessionInventory;
 
 use crate::dispatcher::{DispatchError, Dispatcher};
 use crate::selector::SelectionError;
@@ -132,6 +134,13 @@ pub struct ReconcileConfig {
     /// 흡수하기엔 충분하고, 영구적으로 워커가 없는 상황을 무기한 Pending으로
     /// 방치하지도 않는 절충값.
     pub max_dispatch_retries: u32,
+    /// 워커에게 `session/list`를 물을 때의 응답 대기 시간
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// 답이 늦으면 인벤토리 없이 그 워커를 지나친다 — 인벤토리는 회수를
+    /// **더 하기** 위한 근거이지 덜 하기 위한 것이 아니므로, 못 물어봤다고
+    /// 다른 판정을 미루지 않는다.
+    pub session_list_timeout: Duration,
 }
 
 impl Default for ReconcileConfig {
@@ -142,6 +151,7 @@ impl Default for ReconcileConfig {
             dispatched_worker_check_after: Duration::from_secs(30),
             offline_worker_grace: Duration::from_secs(300),
             max_dispatch_retries: 20,
+            session_list_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -169,6 +179,12 @@ pub struct ReconcileSummary {
     /// `retry_count`가 `max_dispatch_retries`에 도달해 재시도를 포기하고
     /// dead-letter(`Failed`)로 전이시킨 작업 수 (로드맵 #38).
     pub dead_lettered: u64,
+    /// 워커가 권위 있는 인벤토리로 답했고 그 안에 이 Task의 세션이 없어
+    /// 실행이 사라진 것으로 발견된 `Dispatched` 작업 수
+    /// (로드맵 `#70` 게이트 2).
+    pub vanished_session_found: u64,
+    /// 이번 라운드에 `Failed(ExecutionVanished)`로 전이시킨 작업 수.
+    pub vanished_session_failed: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -441,6 +457,11 @@ impl Reconciler {
             .unwrap_or_else(|_| chrono::Duration::seconds(30));
         let offline_grace = chrono::Duration::from_std(self.config.offline_worker_grace)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
+        // 워커당 **한 번만** 묻는다 (로드맵 `#70` 게이트 2). Task마다 물으면
+        // 같은 워커에 붙은 작업 수만큼 왕복이 나가고, 더 나쁘게는 한 sweep
+        // 안에서 서로 다른 시점의 인벤토리로 판정하게 된다 — 그러면 같은
+        // 라운드의 두 판정이 모순될 수 있다.
+        let mut inventories: HashMap<WorkerId, SessionInventory> = HashMap::new();
 
         for task in dispatched {
             let TaskStatus::Dispatched {
@@ -611,10 +632,86 @@ impl Reconciler {
                     }
                 }
                 Some(_) => {
-                    // 워커는 존재하고 Offline이 아님(Online/Degraded/CircuitOpen) —
-                    // 응답이 느릴 뿐이면 헬스체크/CircuitBreaker가 담당하는 영역이므로
-                    // 건드리지 않는다.
-                    continue;
+                    // 워커는 존재하고 Offline이 아님(Online/Degraded/CircuitOpen).
+                    // 워커의 **건강도**로는 더 할 말이 없다 — 응답이 느릴 뿐이면
+                    // 헬스체크/CircuitBreaker의 영역이다.
+                    //
+                    // 여기가 게이트 2가 지목하던 구멍이다 (로드맵 `#70`). 워커는
+                    // 멀쩡한데 **그 위의 실행**이 사라진 경우 — 오케스트레이터가
+                    // 재시작해 완료 이벤트를 놓쳤거나, Agent가 세션을 잃었거나 —
+                    // 어느 분기도 그것을 보지 않았고, 그 Task는 완료되지도 실패하지도
+                    // 않은 채 `Dispatched`로 영구히 남았다. 이제 워커에게 **지금
+                    // 무엇을 들고 있는지** 직접 묻는다.
+                    let Some(session_id) = task.acp_session_id.as_deref() else {
+                        // 세션 이름이 없으면 인벤토리에서 찾을 대상이 없다.
+                        // `041` 이전에 만들어진 행, 그리고 `session/new` 전에
+                        // 멈춘 행이 여기 온다 — **부재가 아니라 무지**이므로
+                        // 아무 결론도 내리지 않는다.
+                        continue;
+                    };
+
+                    let inventory = match inventories.get(&worker_id) {
+                        Some(cached) => cached,
+                        None => {
+                            let fetched = match self
+                                .state
+                                .transport
+                                .list_sessions(worker_id, self.config.session_list_timeout)
+                                .await
+                            {
+                                Ok(inv) => inv,
+                                Err(e) => {
+                                    // 못 물어본 것을 "세션이 없다"로 읽으면 살아 있는
+                                    // 실행을 전부 회수한다. 권위 없음으로 접는다.
+                                    debug!(
+                                        %worker_id, error = %e,
+                                        "reconcile: could not list sessions; skipping inventory check"
+                                    );
+                                    SessionInventory::Undeclared
+                                }
+                            };
+                            inventories.entry(worker_id).or_insert(fetched)
+                        }
+                    };
+
+                    let SessionInventory::Reported(live) = inventory else {
+                        // `Undeclared`/`Refused`에서는 부재를 판정할 수 없다 —
+                        // 그 둘에서 같은 부재는 "저쪽이 말해 주지 않았다"와
+                        // 구분되지 않는다(`SessionInventory` 문서).
+                        continue;
+                    };
+                    if live.iter().any(|s| s == session_id) {
+                        continue; // 여전히 살아 있다.
+                    }
+
+                    summary.vanished_session_found += 1;
+                    let failure = TaskFailure {
+                        error: format!(
+                            "worker {worker_id} no longer holds ACP session {session_id} for this \
+                             task — the execution ended without reporting a result"
+                        ),
+                        kind: FailureKind::ExecutionVanished,
+                        worker_id: Some(worker_id),
+                        attempts: 0,
+                    };
+                    // 위 세 분기와 같은 이유로 `[Dispatched]`와 `ControlDecision`.
+                    if self
+                        .dispatcher
+                        .mark_failed(
+                            task_id,
+                            &[TaskPhase::Dispatched],
+                            failure,
+                            TransitionOrigin::ControlDecision,
+                        )
+                        .await
+                    {
+                        summary.vanished_session_failed += 1;
+                        warn!(
+                            %task_id, %worker_id, %session_id,
+                            "reconciliation: the worker's session inventory no longer lists this \
+                             task's session, marked failed"
+                        );
+                    }
                 }
             }
         }
@@ -639,6 +736,16 @@ mod tests {
         store: Arc<dyn Store>,
         mock_workers: Vec<MockWorker>,
     ) -> (Arc<FleetState>, Arc<Dispatcher>) {
+        let (state, dispatcher, _) = setup_with_transport(store, mock_workers).await;
+        (state, dispatcher)
+    }
+
+    /// `setup`과 같되 transport 핸들도 함께 돌려준다 — 인벤토리를 설정해야
+    /// 하는 시험(로드맵 `#70` 게이트 2)에 필요하다.
+    async fn setup_with_transport(
+        store: Arc<dyn Store>,
+        mock_workers: Vec<MockWorker>,
+    ) -> (Arc<FleetState>, Arc<Dispatcher>, Arc<MockTransport>) {
         let transport = MockTransport::new();
         for mw in mock_workers {
             transport.add_worker(mw).await;
@@ -646,7 +753,8 @@ mod tests {
         let event_rx = fleet_transport::WorkerTransport::subscribe(&transport)
             .await
             .unwrap();
-        let transport: Arc<dyn fleet_transport::WorkerTransport> = Arc::new(transport);
+        let mock = Arc::new(transport);
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = mock.clone();
 
         let state = Arc::new(FleetState::new(
             store,
@@ -662,7 +770,7 @@ mod tests {
             bg.run_event_loop().await;
         });
 
-        (state, dispatcher)
+        (state, dispatcher, mock)
     }
 
     /// 온라인 워커. `incarnation_started_at`을 충분히 과거로 밀어 둔다 —
@@ -747,6 +855,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -799,6 +908,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -861,6 +971,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -900,6 +1011,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -947,6 +1059,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -996,6 +1109,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -1049,6 +1163,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -1159,6 +1274,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(5), // 짧게 — 테스트용
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -1320,6 +1436,7 @@ mod tests {
                 dispatched_worker_check_after: Duration::from_secs(30),
                 offline_worker_grace: Duration::from_secs(300), // 기본값 — 2초는 한참 못 미침
                 max_dispatch_retries: 20,
+                session_list_timeout: Duration::from_secs(5),
             },
         );
 
@@ -1366,5 +1483,281 @@ mod tests {
             still_dispatched.status,
             TaskStatus::Dispatched { .. }
         ));
+    }
+
+    // ── 인벤토리 기반 회수 (로드맵 `#70` 게이트 2) ──────────────────────
+    //
+    // 이 네 시험이 함께 단정하는 것은 **회수의 근거가 워커의 건강도가 아니라
+    // 워커가 답한 인벤토리**라는 것이다. 앞의 세 분기(row 삭제·재시작·Offline)는
+    // 전부 워커에 관한 사실로 판정하고, 워커가 멀쩡한데 그 위의 실행만 사라진
+    // 경우를 하나도 보지 못했다.
+
+    /// 세션 픽스처를 갖춘 `Dispatched` 작업.
+    fn make_dispatched_task_with_session(
+        prompt: &str,
+        worker_id: WorkerId,
+        age: chrono::Duration,
+        session_id: &str,
+    ) -> Task {
+        let mut task = make_dispatched_task(prompt, worker_id, age);
+        task.acp_session_id = Some(session_id.to_string());
+        task
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_task_whose_session_vanished_from_the_inventory_is_marked_failed() {
+        let worker = make_worker("healthy-but-empty");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "its session is gone",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-gone",
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // transport에도 등록한다 — `list_sessions`는 등록된 워커만 안다.
+        // 등록하지 않으면 `WorkerNotRegistered`가 나고 구현이 그것을 권위 없음으로
+        // 접으므로, 이 시험이 **인벤토리를 읽지 않고도** 통과해 버린다.
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        // 워커는 **다른** 세션 하나를 들고 있다. 빈 목록으로 두면 "목록을
+        // 읽었는가"와 "목록이 비어 있었는가"가 구분되지 않는다.
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec!["sess-other".into()]),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 1);
+        assert_eq!(summary.vanished_session_failed, 1);
+        let failed = state.store.get_task(task_id).await.unwrap().unwrap();
+        match failed.status {
+            TaskStatus::Failed(f) => assert_eq!(f.kind, FailureKind::ExecutionVanished),
+            other => panic!("기대와 다름: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_task_whose_session_is_still_listed_is_left_alone() {
+        let worker = make_worker("still-running");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "still running",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-live",
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // transport에도 등록한다 — `list_sessions`는 등록된 워커만 안다.
+        // 등록하지 않으면 `WorkerNotRegistered`가 나고 구현이 그것을 권위 없음으로
+        // 접으므로, 이 시험이 **인벤토리를 읽지 않고도** 통과해 버린다.
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(vec![
+                    "sess-other".into(),
+                    "sess-live".into(),
+                ]),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 0);
+        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(task.status, TaskStatus::Dispatched { .. }));
+    }
+
+    /// **인벤토리를 주지 않는 워커에서는 아무 결론도 내리지 않는다.**
+    ///
+    /// 이것이 이 변경에서 가장 중요한 부정 단정이다. `Undeclared`를 빈 목록으로
+    /// 읽는 구현은 오늘의 모든 배포에서 **진행 중인 모든 작업을 회수한다** —
+    /// 실제 Agent 다수가 `session/list`를 광고하지 않기 때문이다.
+    #[tokio::test]
+    async fn a_worker_that_declares_no_inventory_never_triggers_a_reap() {
+        let worker = make_worker("silent-about-sessions");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "nobody can say whether this is alive",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-unknowable",
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // 워커는 transport에 **등록돼 있다** — 그래야 `Undeclared`가 조회
+        // 실패의 부산물이 아니라 실제로 읽은 답이 된다.
+        // MockTransport의 기본값이 `Undeclared`라 일부러 설정하지 않는다.
+        let (state, dispatcher, _) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 0);
+        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(task.status, TaskStatus::Dispatched { .. }),
+            "인벤토리를 주지 않는 워커의 작업을 회수했다 — 오늘의 모든 배포가 그 워커다"
+        );
+    }
+
+    /// 광고했다가 거절한 워커도 마찬가지다. `Refused`는 "이 Agent 구현이
+    /// 선언과 어긋난다"는 진단이지 "세션이 없다"가 아니다.
+    #[tokio::test]
+    async fn a_refused_inventory_never_triggers_a_reap() {
+        let worker = make_worker("declares-then-refuses");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "the agent contradicted itself",
+            worker_id,
+            chrono::Duration::seconds(120),
+            "sess-x",
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // transport에도 등록한다 — `list_sessions`는 등록된 워커만 안다.
+        // 등록하지 않으면 `WorkerNotRegistered`가 나고 구현이 그것을 권위 없음으로
+        // 접으므로, 이 시험이 **인벤토리를 읽지 않고도** 통과해 버린다.
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Refused {
+                    message: "method not found".into(),
+                },
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 0);
+        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(task.status, TaskStatus::Dispatched { .. }));
+    }
+
+    /// 세션 이름이 없는 작업은 인벤토리에서 찾을 대상이 없다 — **부재가 아니라
+    /// 무지**다. `041` 이전 행과 `session/new` 전에 멈춘 행이 여기 온다.
+    #[tokio::test]
+    async fn a_task_without_a_session_name_is_not_judged_by_the_inventory() {
+        let worker = make_worker("empty-inventory");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        // `acp_session_id`가 없다.
+        let task =
+            make_dispatched_task("no session name", worker_id, chrono::Duration::seconds(120));
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // transport에도 등록한다 — `list_sessions`는 등록된 워커만 안다.
+        // 등록하지 않으면 `WorkerNotRegistered`가 나고 구현이 그것을 권위 없음으로
+        // 접으므로, 이 시험이 **인벤토리를 읽지 않고도** 통과해 버린다.
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(Vec::new()),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 0);
+        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(task.status, TaskStatus::Dispatched { .. }));
+    }
+
+    /// 유예 시간 안의 작업은 인벤토리를 묻기도 전에 건너뛴다 — 방금
+    /// `Pending → Dispatched`로 넘어간 작업은 아직 `session/new` 왕복 중이라
+    /// 워커의 목록에 없는 것이 정상이다.
+    #[tokio::test]
+    async fn a_freshly_dispatched_task_is_not_judged_by_the_inventory() {
+        let worker = make_worker("fresh");
+        let worker_id = worker.id;
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+
+        let task = make_dispatched_task_with_session(
+            "just dispatched",
+            worker_id,
+            chrono::Duration::seconds(1),
+            "sess-not-yet-open",
+        );
+        let task_id = task.id;
+        store.insert_task(&task).await.unwrap();
+
+        // transport에도 등록한다 — `list_sessions`는 등록된 워커만 안다.
+        // 등록하지 않으면 `WorkerNotRegistered`가 나고 구현이 그것을 권위 없음으로
+        // 접으므로, 이 시험이 **인벤토리를 읽지 않고도** 통과해 버린다.
+        let (state, dispatcher, transport) = setup_with_transport(
+            store.clone() as Arc<dyn Store>,
+            vec![MockWorker::new(worker_id, worker.endpoint.clone())],
+        )
+        .await;
+        transport
+            .set_session_inventory(
+                worker_id,
+                fleet_transport::SessionInventory::Reported(Vec::new()),
+            )
+            .await;
+
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.vanished_session_found, 0);
+        let task = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(task.status, TaskStatus::Dispatched { .. }));
     }
 }
