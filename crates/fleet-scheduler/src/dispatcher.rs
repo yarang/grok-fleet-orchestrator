@@ -25,6 +25,14 @@ use crate::selector::SelectionError;
 use crate::skill_loader::inject_skills;
 use crate::state::FleetState;
 
+/// dispatch 전 인벤토리 조회의 응답 대기 시간 (로드맵 `#70` 게이트 2).
+///
+/// 플래그로 열지 않는다. 이 값이 하는 일은 "묻지 못했다"를 언제 선언할지
+/// 하나뿐이고, 늦으면 그 워커로의 dispatch가 한 번 거절되며 다음 시도에서
+/// 다시 묻는다 — 운영자가 조율할 이유가 아직 없다. `ReconcileConfig::
+/// session_list_timeout`과 같은 값으로 맞춰 둔 것은 같은 왕복이기 때문이다.
+const WORKER_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 활성 작업 게이지 (pending + active). 모니터링용.
 static RUNNING_GAUGE: AtomicUsize = AtomicUsize::new(0);
 
@@ -65,6 +73,26 @@ pub struct Dispatcher {
     tool_allowlist_cache: tokio::sync::Mutex<
         std::collections::HashMap<fleet_core::AgentTemplateRevisionId, Arc<HashSet<String>>>,
     >,
+    /// 이 제어 세대에서 **인벤토리를 이미 물어본** 워커들 (로드맵 `#70` 게이트 2).
+    ///
+    /// 게이트 문언은 "control failover 뒤 inventory-first recovery가 신규
+    /// dispatch보다 **먼저** 수행"을 요구한다. 그 순서를 배경 루프의 타이밍에
+    /// 맡기면 순서가 아니라 경합이 된다 — `Reconciler`는 첫 tick을 30초 뒤에
+    /// 돌고, 그 사이의 dispatch는 아무것도 묻지 않은 채 나간다. 그래서 여기서
+    /// **dispatch의 전제조건**으로 만든다: 구조적으로 어길 수 없다.
+    ///
+    /// **전역 배리어가 아니라 워커별인 이유**는 "모든 워커가 재연결했다"는
+    /// 시점이 존재하지 않기 때문이다. 워커는 자기가 join할 때만 transport에
+    /// 등록되고, 영영 돌아오지 않는 워커도 있다. 전역 배리어를 두면 그런 워커
+    /// 하나가 fleet 전체의 dispatch를 영구히 막는다. 물어볼 수 있는 시점은
+    /// **그 워커에게 실제로 일을 주려는 순간**뿐이고, 그때가 곧 "먼저"가
+    /// 성립해야 하는 유일한 자리다.
+    ///
+    /// 인메모리인 것이 의도다. 프로세스가 죽으면 비워지고, 그것이 정확히 이
+    /// 복구가 다시 필요해지는 조건이다. `i64`는 lease epoch이며(lease를 켜지
+    /// 않은 배포는 `None`), 세대가 바뀌면 집합을 통째로 버린다 — 새 제어
+    /// 기관은 이전 기관이 물어본 것을 물려받지 않는다.
+    recovered_workers: tokio::sync::Mutex<(Option<i64>, HashSet<WorkerId>)>,
 }
 
 impl Dispatcher {
@@ -74,6 +102,7 @@ impl Dispatcher {
             event_rx: tokio::sync::Mutex::new(None),
             max_dispatch_retries: 0,
             tool_allowlist_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            recovered_workers: tokio::sync::Mutex::new((None, HashSet::new())),
         }
     }
 
@@ -94,6 +123,167 @@ impl Dispatcher {
     /// 않는다(`FleetState::control_fence`와 같은 이유).
     pub fn control_fence(&self) -> Option<ControlFence> {
         self.state.control_fence()
+    }
+
+    /// 회로 상태가 바뀌었으면 저장소와 이벤트 로그에 반영한다.
+    ///
+    /// 이 블록은 원래 dispatch 경로에 두 번 인라인돼 있었다. 세 번째 사본을
+    /// 만드는 대신 여기로 뽑았다 — 기존 둘은 그대로 두었다(같은 커밋에서
+    /// 건드리면 복구 경로의 변경과 리팩터가 한 diff에 섞인다).
+    async fn persist_breaker_transition(
+        &self,
+        worker_id: WorkerId,
+        old_state: BreakerState,
+        new_state: BreakerState,
+    ) {
+        if old_state == new_state {
+            return;
+        }
+        let to_circuit = |s: BreakerState| match s {
+            BreakerState::Closed => CircuitState::Closed,
+            BreakerState::Open => CircuitState::Open,
+            BreakerState::HalfOpen => CircuitState::HalfOpen,
+        };
+        let _ = self
+            .state
+            .store
+            .update_worker_circuit_state(worker_id, to_circuit(new_state))
+            .await;
+        let _ = self
+            .state
+            .store
+            .append_event(&FleetEvent::worker_circuit_changed(
+                worker_id,
+                to_circuit(old_state),
+                to_circuit(new_state),
+            ))
+            .await;
+    }
+
+    /// 이 워커에게 일을 주기 **전에** 무엇을 들고 있는지 묻는다
+    /// (로드맵 `#70` 게이트 2 — inventory-first recovery).
+    ///
+    /// 이 제어 세대에서 이미 물어본 워커면 즉시 통과한다. 그렇지 않으면
+    /// 지금 묻고, 답에 따라 이 워커의 어긋난 Task를 먼저 정리한 뒤에야
+    /// dispatch를 허용한다.
+    ///
+    /// **"물어봤다"가 통과 조건이지 "답을 받았다"가 아니다.** 인벤토리를
+    /// 광고하지 않는 Agent(`Undeclared`)와 선언과 어긋난 Agent(`Refused`)도
+    /// 통과시킨다 — 그러지 않으면 오늘의 거의 모든 배포에서 dispatch가
+    /// 영구히 막힌다. 막는 것은 **묻지 못한** 경우뿐이고, 그때는 어차피 그
+    /// 워커로 일을 보낼 수도 없다.
+    ///
+    /// 되돌려주는 값은 이 호출이 실제로 복구를 수행했는지다. 시험이 "두 번째
+    /// dispatch는 다시 묻지 않는다"를 보기 위한 것이고, 운영에서는 로그로만
+    /// 쓰인다.
+    async fn ensure_worker_recovered(&self, worker_id: WorkerId) -> Result<bool, DispatchError> {
+        let generation = self.state.lease.as_ref().and_then(|l| l.status().epoch());
+
+        {
+            let mut ledger = self.recovered_workers.lock().await;
+            if ledger.0 != generation {
+                // 제어 세대가 바뀌었다 — 이전 기관이 물어본 것은 이 기관의
+                // 근거가 아니다. 통째로 버린다.
+                ledger.0 = generation;
+                ledger.1.clear();
+            }
+            if ledger.1.contains(&worker_id) {
+                return Ok(false);
+            }
+        }
+
+        let inventory = match self
+            .state
+            .transport
+            .list_sessions(worker_id, WORKER_RECOVERY_TIMEOUT)
+            .await
+        {
+            Ok(inv) => inv,
+            Err(e) => {
+                // **여기서 통과시키면 게이트가 사라진다.** 묻지 못한 것을
+                // "물어본 것"으로 적으면 이 워커는 이 세대 내내 다시는
+                // 조회되지 않는다.
+                warn!(
+                    %worker_id, error = %e,
+                    "dispatch refused — could not read the worker's session inventory"
+                );
+                return Err(DispatchError::RecoveryUnavailable(worker_id));
+            }
+        };
+
+        if let fleet_transport::SessionInventory::Reported(live) = &inventory {
+            self.reap_vanished_on_worker(worker_id, live).await;
+        }
+
+        // 무엇을 근거로 이 워커를 dispatch 가능하다고 판정했는지 남긴다.
+        // `Undeclared`가 대부분일 것이고, **그 사실 자체가 기록할 값어치가
+        // 있다** — 이 fleet에서 게이트가 실질적으로 비어 있다는 뜻이기 때문이다.
+        self.state
+            .audit_decision(
+                fleet_core::audit::action::CONTROL_WORKER_RECOVERED,
+                ("worker", worker_id.to_string()),
+                serde_json::json!({
+                    "inventory": inventory.label(),
+                    "authoritative": inventory.is_authoritative(),
+                }),
+            )
+            .await;
+
+        self.recovered_workers.lock().await.1.insert(worker_id);
+        Ok(true)
+    }
+
+    /// 이 워커에 배정된 `Dispatched` Task 중 인벤토리에 세션이 없는 것을
+    /// `Failed(ExecutionVanished)`로 회수한다.
+    ///
+    /// `Reconciler`의 주기 스윕과 **같은 규칙**이고 고르는 대상만 다르다 —
+    /// 저쪽은 모든 워커를 유예 시간과 함께 훑고, 이쪽은 한 워커를 유예 없이
+    /// 본다. 유예가 필요 없는 이유는 이 경로가 **제어 세대마다 한 번**만
+    /// 돌기 때문이다: 이 세대에서 아직 아무것도 dispatch하지 않았으므로
+    /// "방금 dispatch돼서 아직 세션이 열리지 않은 Task"가 존재할 수 없다.
+    async fn reap_vanished_on_worker(&self, worker_id: WorkerId, live: &[String]) {
+        let dispatched = match self
+            .state
+            .store
+            .list_tasks(&fleet_core::TaskFilter {
+                status: Some(fleet_core::TaskStatusFilter::Dispatched),
+                worker_id: Some(worker_id),
+                limit: 1000,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(%worker_id, error = %e, "recovery: failed to list this worker's dispatched tasks");
+                return;
+            }
+        };
+
+        for task in dispatched {
+            let Some(session_id) = task.acp_session_id.as_deref() else {
+                continue; // 지목할 세션이 없으면 부재가 아니라 무지다.
+            };
+            if live.iter().any(|s| s == session_id) {
+                continue;
+            }
+            let failure = vanished_session_failure(worker_id, session_id);
+            if self
+                .mark_failed(
+                    task.id,
+                    &[TaskPhase::Dispatched],
+                    failure,
+                    TransitionOrigin::ControlDecision,
+                )
+                .await
+            {
+                warn!(
+                    task_id = %task.id, %worker_id, %session_id,
+                    "recovery: this worker no longer holds the session for a task we believed was \
+                     running — marked failed before dispatching new work here"
+                );
+            }
+        }
     }
 
     /// dispatch 실패 시 최대 재시도 횟수를 설정한다 (로드맵 #38). `n == 0`
@@ -821,6 +1011,50 @@ impl Dispatcher {
             return Err(DispatchError::CircuitOpen(worker_id));
         }
 
+        // 4.5. inventory-first recovery (로드맵 `#70` 게이트 2).
+        //
+        // **이 워커에게 이 제어 세대의 첫 일을 주기 직전이다.** 게이트 문언은
+        // 복구가 신규 dispatch보다 "먼저"일 것을 요구하는데, 그 순서를 배경
+        // 루프에 맡기면 순서가 아니라 경합이 된다 — `Reconciler`의 첫 tick은
+        // 30초 뒤이고 그 사이의 dispatch는 아무것도 묻지 않은 채 나간다.
+        // 전제조건으로 만들면 구조적으로 어길 수 없다.
+        //
+        // **브레이커 뒤인 이유**는 못 닿는 워커가 회로를 열 수 있어야 하기
+        // 때문이다. 앞에 두면 이 경로가 transport 실패보다 먼저 반환해 브레이커
+        // 기록을 건너뛰고, 그러면 selector가 그 워커를 영영 계속 고른다. 회로가
+        // 열린 워커는 어차피 여기 오지 않으므로 복구할 필요도 없다 — 그 워커의
+        // 어긋난 Task는 `Reconciler`의 주기 스윕이 본다.
+        //
+        // **CAS 앞인 이유**는 반대다. 이 Task를 `Dispatched`로 차지한 뒤에
+        // 복구가 실패하면 상태만 옮겨 두고 보내지 못한 실행이 생긴다.
+        if let Err(e) = self.ensure_worker_recovered(worker_id).await {
+            // 못 닿은 것은 **워커 결함**이다. transport dispatch 실패와 같은
+            // 자리에 기록해야 회로가 열리고, 그래야 selector가 이 워커를
+            // 그만 고른다.
+            let old_state = cb.state();
+            cb.record(Outcome::Failure);
+            self.persist_breaker_transition(worker_id, old_state, cb.state())
+                .await;
+
+            if mark_unavailable_as_failed {
+                let failure = TaskFailure {
+                    error: e.to_string(),
+                    kind: FailureKind::WorkerUnavailable,
+                    worker_id: Some(worker_id),
+                    attempts: 0,
+                };
+                // 아직 `Pending`이다 — 워커를 배정하지 못한 것과 같은 자리다.
+                self.mark_failed(
+                    task_id,
+                    &[TaskPhase::Pending],
+                    failure,
+                    TransitionOrigin::ControlDecision,
+                )
+                .await;
+            }
+            return Err(e);
+        }
+
         // 5. Dispatched 상태로 전이
         task.status = TaskStatus::Dispatched {
             worker_id,
@@ -1361,6 +1595,23 @@ impl Dispatcher {
 }
 
 /// `TaskStatus`의 위상 라벨 (에러 메시지용).
+/// 인벤토리에서 사라진 세션에 대한 실패 기록 (로드맵 `#70` 게이트 2).
+///
+/// `Reconciler`의 주기 스윕과 dispatch 전 복구가 **같은 판정을 두 자리에서**
+/// 내리므로, 그 판정의 이름(`ExecutionVanished`)과 운영자가 읽을 문장은 한
+/// 곳에만 둔다. 두 곳에 적으면 한쪽만 고쳐져 같은 사실이 두 문장으로 남는다.
+pub(crate) fn vanished_session_failure(worker_id: WorkerId, session_id: &str) -> TaskFailure {
+    TaskFailure {
+        error: format!(
+            "worker {worker_id} no longer holds ACP session {session_id} for this task — \
+             the execution ended without reporting a result"
+        ),
+        kind: FailureKind::ExecutionVanished,
+        worker_id: Some(worker_id),
+        attempts: 0,
+    }
+}
+
 fn phase_label(status: &TaskStatus) -> &'static str {
     // 같은 매핑을 손으로 두 번 적지 않는다 — CAS의 SQL 조건절이 이 문자열
     // 집합에 의존하므로, 사본이 늘어날수록 조용히 어긋날 자리가 늘어난다.
@@ -1378,6 +1629,16 @@ pub enum DispatchError {
 
     #[error("circuit breaker open for worker {0}")]
     CircuitOpen(WorkerId),
+
+    /// 이 제어 세대에서 그 워커에게 **아직 무엇을 들고 있는지 묻지 못했다**
+    /// (로드맵 `#70` 게이트 2).
+    ///
+    /// 재시도는 안전하다 — 워커가 다시 닿으면 다음 시도에서 조회가 성공하고
+    /// 그때 dispatch가 진행된다. [`CircuitOpen`](Self::CircuitOpen)과 다른
+    /// 사실이다: 저쪽은 "이 워커가 최근에 실패를 쌓았다"이고 이쪽은 "이
+    /// 워커에 대해 아직 아무것도 모른다"이다.
+    #[error("worker {0} has not been recovered yet — its session inventory could not be read")]
+    RecoveryUnavailable(WorkerId),
 
     #[error("transport error: {0}")]
     Transport(String),
@@ -1684,9 +1945,15 @@ mod tests {
             .dispatch_existing(task2, true)
             .await
             .expect_err("an unregistered worker must fail the dispatch");
+        // `#70` 게이트 2 이후로 **못 닿는 워커는 transport dispatch보다 먼저**
+        // 걸린다 — dispatch 전 인벤토리 조회가 같은 연결을 쓰기 때문이다.
+        // 에러 이름만 바뀌었고 이 시험의 주장은 그대로다: 아래 회로 단정이
+        // 그 주장이며, 복구 실패도 transport 실패와 **같은 자리에** 브레이커
+        // 기록을 남기므로 통과한다. 그 기록을 빠뜨리면 selector가 못 닿는
+        // 워커를 영영 계속 고른다.
         assert!(
-            matches!(err2, DispatchError::Transport(_)),
-            "expected Transport, got {err2:?}"
+            matches!(err2, DispatchError::RecoveryUnavailable(_)),
+            "expected RecoveryUnavailable, got {err2:?}"
         );
 
         assert!(
@@ -2006,8 +2273,8 @@ mod tests {
             .unwrap();
         assert!(taken.epoch > held.epoch, "시험 전제: 세대가 넘어갔다");
 
-        let transport: Arc<dyn fleet_transport::WorkerTransport> =
-            Arc::new(fleet_transport::MockTransport::new());
+        let mock = Arc::new(fleet_transport::MockTransport::new());
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = mock.clone();
         let state = Arc::new(
             FleetState::new(store.clone(), transport, CircuitBreakerConfig::default()).with_lease(
                 LeaseObserver::with_status(
@@ -2024,9 +2291,18 @@ mod tests {
             "관측이 아직 Active여야 이 시나리오가 성립한다"
         );
 
-        // 후보 워커가 있어야 선택을 지나 CAS까지 간다.
+        // 후보 워커가 있어야 선택을 지나 CAS까지 간다. **transport에도**
+        // 등록한다 — `#70` 게이트 2의 dispatch 전 인벤토리 조회가 등록된
+        // 워커만 알기 때문이다. 저장소에만 넣으면 CAS에 닿기도 전에
+        // `RecoveryUnavailable`로 끝나 이 시험이 보려는 fenced 경로가 아예
+        // 실행되지 않는다.
         let worker = fleet_core::Worker::new("w1", "wss://w1/ws");
         store.upsert_worker(&worker).await.unwrap();
+        mock.add_worker(fleet_transport::MockWorker::new(
+            worker.id,
+            worker.endpoint.clone(),
+        ))
+        .await;
         let task = sample_task();
         let task_id = task.id;
         store.insert_task(&task).await.unwrap();
@@ -2855,6 +3131,194 @@ mod tests {
             state.breakers.state_of(worker.id),
             crate::breaker::BreakerState::Open,
             "관측 상실도 워커 건강도 신호다 — breaker에서 빠지면 안 된다"
+        );
+    }
+
+    // ── dispatch 전 inventory-first recovery (로드맵 `#70` 게이트 2) ──────
+    //
+    // 게이트 문언은 복구가 신규 dispatch보다 **먼저**일 것을 요구한다. 아래
+    // 넷이 그 "먼저"를 네 방향에서 고정한다: 실제로 먼저 일어나는가, 세대당
+    // 한 번인가, 못 물어보면 막히는가, 그리고 **오늘의 배포를 막지 않는가**.
+
+    /// 한 워커를 store와 transport 양쪽에 올리고 dispatcher를 조립한다.
+    async fn setup_one_registered_worker() -> (
+        Arc<FleetState>,
+        Arc<Dispatcher>,
+        Arc<fleet_transport::MockTransport>,
+        fleet_core::Worker,
+    ) {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker = fleet_core::Worker::new("w-recovery", "wss://w-recovery/ws");
+        worker.status = fleet_core::WorkerStatus::Online;
+        store.upsert_worker(&worker).await.unwrap();
+
+        let mock = Arc::new(fleet_transport::MockTransport::new());
+        mock.add_worker(fleet_transport::MockWorker::new(
+            worker.id,
+            worker.endpoint.clone(),
+        ))
+        .await;
+        let transport: Arc<dyn fleet_transport::WorkerTransport> = mock.clone();
+        let state = Arc::new(FleetState::new(
+            store,
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Arc::new(Dispatcher::new(state.clone()));
+        (state, dispatcher, mock, worker)
+    }
+
+    /// **복구가 dispatch보다 먼저 일어난다.**
+    ///
+    /// 재시작한 오케스트레이터를 재현한다: 저장소에는 이 워커에 배정된
+    /// `Dispatched` Task가 남아 있고, 워커의 인벤토리에는 그 세션이 없다.
+    /// 새 Task를 제출하면, 그 dispatch가 나가기 **전에** 먼저 그 어긋남이
+    /// 정리돼 있어야 한다.
+    #[tokio::test]
+    async fn a_worker_is_recovered_before_it_receives_new_work() {
+        let (state, dispatcher, mock, worker) = setup_one_registered_worker().await;
+
+        // 재시작 전에 이 워커로 나갔다고 믿는 Task.
+        let mut stale = sample_task();
+        stale.status = TaskStatus::Dispatched {
+            worker_id: worker.id,
+            started_at: Utc::now() - chrono::Duration::seconds(300),
+        };
+        stale.acp_session_id = Some("sess-gone".into());
+        let stale_id = stale.id;
+        state.store.insert_task(&stale).await.unwrap();
+
+        // 워커는 그 세션을 들고 있지 않다(다른 것 하나를 들고 있다 — 빈
+        // 목록으로 두면 "목록을 읽었는가"와 "비어 있었는가"가 섞인다).
+        mock.set_session_inventory(
+            worker.id,
+            fleet_transport::SessionInventory::Reported(vec!["sess-other".into()]),
+        )
+        .await;
+
+        let fresh = sample_task();
+        state.store.insert_task(&fresh).await.unwrap();
+        dispatcher
+            .dispatch_existing(fresh, false)
+            .await
+            .expect("dispatch");
+
+        let recovered = state.store.get_task(stale_id).await.unwrap().unwrap();
+        match recovered.status {
+            TaskStatus::Failed(f) => assert_eq!(f.kind, fleet_core::FailureKind::ExecutionVanished),
+            other => panic!(
+                "새 dispatch가 나가기 전에 어긋난 Task가 정리됐어야 한다 — 받은 값 {other:?}"
+            ),
+        }
+
+        // 순서를 사후에 재구성할 수 있는 기록이 남아야 한다.
+        let e = audited(
+            state.store.as_ref(),
+            fleet_core::audit::action::CONTROL_WORKER_RECOVERED,
+        )
+        .await;
+        assert_eq!(e.target_id.as_deref(), Some(worker.id.to_string().as_str()));
+    }
+
+    /// 세대당 **한 번만** 묻는다. 매 dispatch마다 물으면 왕복이 하나 붙고,
+    /// 그것은 이 게이트가 요구한 적 없는 비용이다.
+    #[tokio::test]
+    async fn the_inventory_is_read_once_per_control_generation() {
+        let (state, dispatcher, mock, worker) = setup_one_registered_worker().await;
+        mock.set_session_inventory(
+            worker.id,
+            fleet_transport::SessionInventory::Reported(Vec::new()),
+        )
+        .await;
+
+        for _ in 0..3 {
+            let t = sample_task();
+            state.store.insert_task(&t).await.unwrap();
+            dispatcher
+                .dispatch_existing(t, false)
+                .await
+                .expect("dispatch");
+        }
+
+        let recoveries = state
+            .store
+            .list_audit_events(&fleet_core::AuditFilter {
+                action: Some(fleet_core::audit::action::CONTROL_WORKER_RECOVERED.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            recoveries.len(),
+            1,
+            "세 번 dispatch했는데 복구가 {}번 일어났다",
+            recoveries.len()
+        );
+    }
+
+    /// **물어보지 못하면 보내지 않는다.** 이 단정이 없으면 게이트가 사라진다 —
+    /// 조회 실패를 통과시키는 구현은 "먼저 물어본다"를 지키지 않으면서도
+    /// 위의 두 시험을 통과한다.
+    #[tokio::test]
+    async fn a_worker_we_cannot_ask_does_not_receive_work() {
+        let store: Arc<dyn Store> = Arc::new(MemStore::new());
+        let mut worker = fleet_core::Worker::new("w-unreachable", "wss://w-unreachable/ws");
+        worker.status = fleet_core::WorkerStatus::Online;
+        store.upsert_worker(&worker).await.unwrap();
+
+        // store에만 있고 transport에는 없다 — 재연결되지 않은 워커의 모양이다.
+        let transport: Arc<dyn fleet_transport::WorkerTransport> =
+            Arc::new(fleet_transport::MockTransport::new());
+        let state = Arc::new(FleetState::new(
+            store,
+            transport,
+            CircuitBreakerConfig::default(),
+        ));
+        let dispatcher = Dispatcher::new(state.clone());
+
+        let t = sample_task();
+        state.store.insert_task(&t).await.unwrap();
+        let err = dispatcher
+            .dispatch_existing(t, false)
+            .await
+            .expect_err("물어보지 못한 워커로는 보내면 안 된다");
+        assert!(
+            matches!(err, DispatchError::RecoveryUnavailable(_)),
+            "받은 값 {err:?}"
+        );
+    }
+
+    /// **인벤토리를 광고하지 않는 워커에게도 일은 나간다.**
+    ///
+    /// 이 부정 단정이 없으면 게이트가 오늘의 거의 모든 배포에서 dispatch를
+    /// 영구히 막는다 — 실제 Agent 다수가 `session/list`를 광고하지 않는다.
+    /// 통과 조건은 "물어봤다"이지 "답을 받았다"가 아니다.
+    #[tokio::test]
+    async fn an_undeclared_worker_is_still_dispatchable() {
+        let (state, dispatcher, _mock, _worker) = setup_one_registered_worker().await;
+        // 인벤토리를 설정하지 않는다 — MockTransport의 기본값이 `Undeclared`다.
+
+        let t = sample_task();
+        let task_id = t.id;
+        state.store.insert_task(&t).await.unwrap();
+        dispatcher
+            .dispatch_existing(t, false)
+            .await
+            .expect("광고하지 않는 워커에게도 dispatch는 나가야 한다");
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(stored.status, TaskStatus::Dispatched { .. }));
+
+        let e = audited(
+            state.store.as_ref(),
+            fleet_core::audit::action::CONTROL_WORKER_RECOVERED,
+        )
+        .await;
+        assert_eq!(
+            e.detail.get("inventory").and_then(|v| v.as_str()),
+            Some("undeclared"),
+            "무엇을 근거로 통과시켰는지가 기록에 남아야 한다 — 이 fleet에서 \
+             게이트가 실질적으로 비어 있다는 사실이 그 기록이다"
         );
     }
 }

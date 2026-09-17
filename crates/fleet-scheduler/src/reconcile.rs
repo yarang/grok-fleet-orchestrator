@@ -708,15 +708,11 @@ impl Reconciler {
                     }
 
                     summary.vanished_session_found += 1;
-                    let failure = TaskFailure {
-                        error: format!(
-                            "worker {worker_id} no longer holds ACP session {session_id} for this \
-                             task — the execution ended without reporting a result"
-                        ),
-                        kind: FailureKind::ExecutionVanished,
-                        worker_id: Some(worker_id),
-                        attempts: 0,
-                    };
+                    // 같은 판정을 dispatch 전 복구(`Dispatcher::
+                    // ensure_worker_recovered`)도 내리므로 실패 기록의 이름과
+                    // 문장은 한 곳에서만 만든다.
+                    let failure =
+                        crate::dispatcher::vanished_session_failure(worker_id, session_id);
                     // 위 세 분기와 같은 이유로 `[Dispatched]`와 `ControlDecision`.
                     if self
                         .dispatcher

@@ -155,6 +155,15 @@ pub mod action {
     /// 짝으로 나타나면 그것이 어긋남이 **해소된** 경로이고, 앞줄만 있으면
     /// 아직 해소되지 않았다는 뜻이다.
     pub const CONTROL_ORPHAN_SESSION_CANCELLED: &str = "control.orphan_session_cancelled";
+    /// 이 제어 세대에서 그 워커에게 **처음 일을 주기 전에** 인벤토리를 묻고
+    /// 어긋난 Task를 정리했다 (로드맵 `#70` 게이트 2).
+    ///
+    /// 워커당 세대당 한 줄이며, **이 줄이 없는 워커로는 이 세대에 dispatch가
+    /// 나가지 않았다**는 뜻이다 — 게이트가 요구하는 순서를 사후에 재구성할 수
+    /// 있는 유일한 기록이다. `inventory` 필드가 `undeclared`인 줄이 대부분일
+    /// 것이고 그 사실 자체가 값어치가 있다: 그 fleet에서는 이 게이트가
+    /// 실질적으로 비어 있다는 뜻이기 때문이다.
+    pub const CONTROL_WORKER_RECOVERED: &str = "control.worker_recovered";
     /// 워커가 들고 있는 세션을 **어느 Task도 지목하지 않는다**
     /// (로드맵 `#70` 게이트 2).
     ///

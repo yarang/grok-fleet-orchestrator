@@ -131,8 +131,8 @@ recovery snapshot은 control epoch, binary/schema compatibility, 정책 revision
 
 ## 구현 상태 (2026-09-06)
 
-게이트별 현황이다. **닫힌 것은 1과 5 둘, 부분은 2와 3 둘이며, 남은 셋은 4·6·7이다**
-(2026-09-16에 2가 차단에서 부분으로 옮겨졌다 — 아래 표와 그 아래 절 참고). 다만 그
+게이트별 현황이다. **닫힌 것은 1·2·5 셋, 부분은 3 하나이며, 남은 셋은 4·6·7이다**
+(2026-09-16에 2가 차단에서 부분으로 옮겨졌고 2026-09-17에 닫혔다 — 아래 표와 그 아래 절들 참고). 다만 그
 넷의 막힘이 전부 같은 종류는 아니다 — 게이트 4와 7은 하부 구조(effect ledger의 상태 기계,
 `CancelUnconfirmed`)가 저장소에 **없어서** 시험을 작성할 수조차 없다. 게이트 2는 워커가 명령과
 무관하게 들고 있는 것을 오케스트레이터가 **묻는** process inventory를 기다린다. 게이트 6은
@@ -169,7 +169,7 @@ Worker 자신이 이미 쥐고 있던 두 근거였다 — 명령 목록에서�
 | 게이트 | 상태 | 근거 / 막고 있는 것 |
 | --- | --- | --- |
 | 1. metric 노출 금지 | **닫힘** | `crates/fleet-api/src/metrics.rs`의 `metrics_body_never_exposes_ids_prompts_or_secrets`(fixture의 UUID·prompt·리포지터리 URL·`?server-key=` secret이 본문에 없음)와 `metrics_body_labels_stay_within_a_bounded_allow_list`(라벨 이름·값이 유한 허용 목록 안) |
-| 2. inventory-first recovery E2E | **부분** | **Reconciler는 있고 fencing도 있다** — `crates/fleet-scheduler/src/reconcile.rs`의 `Reconciler`는 `lease_allows_control()`로 lease를 잃은 인스턴스의 sweep 전체를 건너뛴다(시험 `reconcile_once_skips_the_whole_sweep_when_control_plane_lease_is_fenced`). 선행으로 적혀 있던 `#63`의 lease/epoch primitive도 1~4단계로 들어왔다. 없는 것은 **inventory-first라는 순서**다: 이 Reconciler는 `#62`의 stale `Pending`/`Dispatched` sweeper라 **저장소가 기억하는 작업만** 훑고, failover 뒤 워커에게 "무엇을 들고 있는가"를 먼저 묻지 않는다. 그 물음의 답이 게이트 3이 지목하는 inventory와 같은 것이므로, 선행은 `#63`이 아니라 **게이트 3**이다. (**2026-09-12 정정 — 이 마지막 문장이 틀렸다.** 두 inventory는 **축이 다르다**: 게이트 3이 지목하는 것은 **Agent 프로세스 축**으로 `fleet-worker`가 자기가 띄운 것을 heartbeat의 `agent_orphans`로 보고하는 것이고, 게이트 2가 필요로 하는 것은 **task 실행 축**으로 오케스트레이터가 grok의 ACP 세션에 직접 붙어 묻는 것이다(오케스트레이터는 워커의 `endpoint`에 직접 연결하며 `fleet-worker` 프로세스는 task 세션을 보지 못한다). 상대도 채널도 다르므로 **게이트 3을 끝까지 닫아도 게이트 2는 열려 있다.** 게이트 2의 실제 선행은 **task 실행 신원의 내구화**다 — ACP `session_id`는 `fleet-transport`의 인메모리 맵에만 있고 `fleet-store`·`fleet-core`에 grep 0건이라, 재시작하면 "내가 띄운 세션"을 가리킬 이름 자체가 사라진다. `session/list` 왕복은 이미 `probe`가 하고 있으나 응답 본문을 버린다 — 인벤토리의 절반이 이미 도착하고 있는데 붙일 왼쪽이 없다.) **2026-09-16 — "grok의 지원 여부가 실측되지 않았다"는 사유가 틀렸다.** 미지가 아니라 **읽지 않은 것**이었다: ACP는 `initialize` 응답의 `agentCapabilities.sessionCapabilities.list`로 `session/list` 지원을 **선언**하고, 그 응답은 모든 연결에서 이미 도착하고 있었다. `acp_transport.rs`가 그것을 `if let Err(e)`로 실패만 보고 `Ok`의 본문을 통째로 버리고 있었다 — 위 문단이 지목한 "응답 본문을 버린다"(probe)와 **같은 결함이 두 겹**이었던 셈이다. 이제 handshake가 그 선언을 세션에 붙잡고, `WorkerTransport::list_sessions`가 세 값을 가른다: `Reported(Vec<String>)`·`Undeclared`(광고하지 않음 — **요청을 보내지도 않는다**)·`Refused`(광고했는데 거절했거나 페이지가 잘렸다). 셋을 하나로 뭉개면 "메서드를 모른다"와 "세션이 하나도 없다"가 같은 빈 결과로 도착한다. **왼쪽은 `041`의 `tasks.acp_session_id`다.** Reconciler의 `Some(_) => continue` 분기가 이 게이트가 지목하던 구멍이었고(워커는 멀쩡한데 그 위의 **실행**이 사라진 경우를 어느 분기도 보지 않았다), 이제 그 자리에서 워커에게 묻고 목록에 없는 세션의 Task를 `Failed(ExecutionVanished)`로 회수한다. 새 `FailureKind`인 이유는 `ResultLost`와 **재제출 안전성이 다르기** 때문이다 — 저쪽은 "아직 돌고 있을 수도 있다"라 재제출이 이중 실행을 낳을 수 있고, 이쪽은 워커가 지금 들고 있는 것 전부를 답한 뒤의 부재라 실행이 끝났다는 것이 확정이다. **여전히 부분인 이유**: 이 경로는 `Reported`에서만 발동하고, 오늘 실제 Agent가 이 capability를 광고하는지는 **아직 관측되지 않았다**(광고하지 않는 배포에서는 회수가 한 건도 일어나지 않고 시험이 그것을 부정 단정으로 고정한다). 그리고 이 게이트가 요구하는 "failover 뒤 inventory-first가 **신규 dispatch보다 먼저**"라는 **순서**는 아직 없다 — 지금 조회는 재조정 sweep 안에서 워커당 한 번 일어날 뿐 dispatch 경로를 막지 않는다. **2026-09-16 (2) — 어긋남의 나머지 절반을 닫았다.** 위 조회는 한 방향으로만 쓰이고 있었다(우리 Task → 워커). 거울상인 "실행은 남았는데 Task가 끝난" 쪽은 원리적으로 `Dispatched` 필터로 볼 수 없고(대상이 이미 종료 상태다), 실제로 새고 있었다: `cancel`이 `Unreachable`을 받으면 워커는 통지를 받은 적 없는데 저장소에는 `Cancelled`가 적히고, 전송 계층의 세션 맵은 프로세스와 함께 비워지며, 세션은 계속 돈다. `Store::find_task_by_acp_session`이 그 조회이며 **`041`이 만든 부분 인덱스에 처음 붙는 질의**다(그 마이그레이션 주석이 적어 둔 용도가 이것이고, 지금까지 쓰기만 있었다 — 새 마이그레이션 없음). 세 갈래를 가른다: 살아 있는 Task의 세션(건드리지 않음)·끝난 Task의 세션(취소, `control.orphan_session_cancelled`)·**주인 없는 세션**(손대지 않고 `control.unclaimed_session`으로 관측만). 셋째를 둘째로 접으면 진행 중인 dispatch와 다른 제어면의 실행을 죽인다. 아래 [어긋남은 양쪽으로 생긴다](#어긋남은-양쪽으로-생긴다-2026-09-16--고아-세션-회수) 절 참고. |
+| 2. inventory-first recovery E2E | **닫힘** | **Reconciler는 있고 fencing도 있다** — `crates/fleet-scheduler/src/reconcile.rs`의 `Reconciler`는 `lease_allows_control()`로 lease를 잃은 인스턴스의 sweep 전체를 건너뛴다(시험 `reconcile_once_skips_the_whole_sweep_when_control_plane_lease_is_fenced`). 선행으로 적혀 있던 `#63`의 lease/epoch primitive도 1~4단계로 들어왔다. 없는 것은 **inventory-first라는 순서**다: 이 Reconciler는 `#62`의 stale `Pending`/`Dispatched` sweeper라 **저장소가 기억하는 작업만** 훑고, failover 뒤 워커에게 "무엇을 들고 있는가"를 먼저 묻지 않는다. 그 물음의 답이 게이트 3이 지목하는 inventory와 같은 것이므로, 선행은 `#63`이 아니라 **게이트 3**이다. (**2026-09-12 정정 — 이 마지막 문장이 틀렸다.** 두 inventory는 **축이 다르다**: 게이트 3이 지목하는 것은 **Agent 프로세스 축**으로 `fleet-worker`가 자기가 띄운 것을 heartbeat의 `agent_orphans`로 보고하는 것이고, 게이트 2가 필요로 하는 것은 **task 실행 축**으로 오케스트레이터가 grok의 ACP 세션에 직접 붙어 묻는 것이다(오케스트레이터는 워커의 `endpoint`에 직접 연결하며 `fleet-worker` 프로세스는 task 세션을 보지 못한다). 상대도 채널도 다르므로 **게이트 3을 끝까지 닫아도 게이트 2는 열려 있다.** 게이트 2의 실제 선행은 **task 실행 신원의 내구화**다 — ACP `session_id`는 `fleet-transport`의 인메모리 맵에만 있고 `fleet-store`·`fleet-core`에 grep 0건이라, 재시작하면 "내가 띄운 세션"을 가리킬 이름 자체가 사라진다. `session/list` 왕복은 이미 `probe`가 하고 있으나 응답 본문을 버린다 — 인벤토리의 절반이 이미 도착하고 있는데 붙일 왼쪽이 없다.) **2026-09-16 — "grok의 지원 여부가 실측되지 않았다"는 사유가 틀렸다.** 미지가 아니라 **읽지 않은 것**이었다: ACP는 `initialize` 응답의 `agentCapabilities.sessionCapabilities.list`로 `session/list` 지원을 **선언**하고, 그 응답은 모든 연결에서 이미 도착하고 있었다. `acp_transport.rs`가 그것을 `if let Err(e)`로 실패만 보고 `Ok`의 본문을 통째로 버리고 있었다 — 위 문단이 지목한 "응답 본문을 버린다"(probe)와 **같은 결함이 두 겹**이었던 셈이다. 이제 handshake가 그 선언을 세션에 붙잡고, `WorkerTransport::list_sessions`가 세 값을 가른다: `Reported(Vec<String>)`·`Undeclared`(광고하지 않음 — **요청을 보내지도 않는다**)·`Refused`(광고했는데 거절했거나 페이지가 잘렸다). 셋을 하나로 뭉개면 "메서드를 모른다"와 "세션이 하나도 없다"가 같은 빈 결과로 도착한다. **왼쪽은 `041`의 `tasks.acp_session_id`다.** Reconciler의 `Some(_) => continue` 분기가 이 게이트가 지목하던 구멍이었고(워커는 멀쩡한데 그 위의 **실행**이 사라진 경우를 어느 분기도 보지 않았다), 이제 그 자리에서 워커에게 묻고 목록에 없는 세션의 Task를 `Failed(ExecutionVanished)`로 회수한다. 새 `FailureKind`인 이유는 `ResultLost`와 **재제출 안전성이 다르기** 때문이다 — 저쪽은 "아직 돌고 있을 수도 있다"라 재제출이 이중 실행을 낳을 수 있고, 이쪽은 워커가 지금 들고 있는 것 전부를 답한 뒤의 부재라 실행이 끝났다는 것이 확정이다. **여전히 부분인 이유**: 이 경로는 `Reported`에서만 발동하고, 오늘 실제 Agent가 이 capability를 광고하는지는 **아직 관측되지 않았다**(광고하지 않는 배포에서는 회수가 한 건도 일어나지 않고 시험이 그것을 부정 단정으로 고정한다). 그리고 이 게이트가 요구하는 "failover 뒤 inventory-first가 **신규 dispatch보다 먼저**"라는 **순서**는 아직 없다 — 지금 조회는 재조정 sweep 안에서 워커당 한 번 일어날 뿐 dispatch 경로를 막지 않는다. **2026-09-16 (2) — 어긋남의 나머지 절반을 닫았다.** 위 조회는 한 방향으로만 쓰이고 있었다(우리 Task → 워커). 거울상인 "실행은 남았는데 Task가 끝난" 쪽은 원리적으로 `Dispatched` 필터로 볼 수 없고(대상이 이미 종료 상태다), 실제로 새고 있었다: `cancel`이 `Unreachable`을 받으면 워커는 통지를 받은 적 없는데 저장소에는 `Cancelled`가 적히고, 전송 계층의 세션 맵은 프로세스와 함께 비워지며, 세션은 계속 돈다. `Store::find_task_by_acp_session`이 그 조회이며 **`041`이 만든 부분 인덱스에 처음 붙는 질의**다(그 마이그레이션 주석이 적어 둔 용도가 이것이고, 지금까지 쓰기만 있었다 — 새 마이그레이션 없음). 세 갈래를 가른다: 살아 있는 Task의 세션(건드리지 않음)·끝난 Task의 세션(취소, `control.orphan_session_cancelled`)·**주인 없는 세션**(손대지 않고 `control.unclaimed_session`으로 관측만). 셋째를 둘째로 접으면 진행 중인 dispatch와 다른 제어면의 실행을 죽인다. 아래 [어긋남은 양쪽으로 생긴다](#어긋남은-양쪽으로-생긴다-2026-09-16--고아-세션-회수) 절 참고. **2026-09-17 — 순서가 들어와 게이트가 닫혔다.** 남아 있던 것은 "failover 뒤 inventory-first가 **신규 dispatch보다 먼저**"라는 순서였고, 그것을 배경 루프에 맡기면 순서가 아니라 경합이 된다(`Reconciler`의 첫 tick은 30초 뒤이고 그 사이의 dispatch는 아무것도 묻지 않은 채 나간다). `Dispatcher::ensure_worker_recovered`가 그것을 **dispatch의 전제조건**으로 만든다 — 구조적으로 어길 수 없다. 전역 배리어가 아니라 **워커별**인 이유는 "모든 워커가 재연결했다"는 시점이 존재하지 않기 때문이다(워커는 자기가 join할 때만 transport에 등록되고 영영 돌아오지 않는 워커도 있다 — 전역 배리어는 그 하나로 fleet 전체를 영구히 막는다). **통과 조건은 "물어봤다"이지 "답을 받았다"가 아니다**: `Undeclared`·`Refused`도 통과시키며, 그러지 않으면 오늘의 거의 모든 배포에서 dispatch가 영구히 막힌다. 막는 것은 **묻지 못한** 경우뿐이고 그때는 어차피 보낼 수도 없다. `control.worker_recovered`가 워커당 세대당 한 줄을 남겨 순서를 사후에 재구성하게 하고, 그 줄의 `inventory` 필드가 무엇을 근거로 통과시켰는지 말한다. 아래 [순서는 전제조건이라야 순서다](#순서는-전제조건이라야-순서다-2026-09-17--게이트-2-닫힘) 절 참고. |
 | 3. ACK 유실·orphan·grant expiry quarantine | **부분** | start/stop ACK는 `#67` 4b에서 왔고 `worker_incarnation`은 `workers.incarnation_started_at`(028)으로 있다. `#67` 4c-B가 관측 채널까지 넣었지만 **그것으로 orphan을 지목할 수는 없다** — `crates/fleet-worker/src/agent_process.rs`의 재조정 루프는 관측을 `Vec::with_capacity(commands.len())`에 담고 `commands.iter().filter(desired_status == Running)`만 순회하므로, 오케스트레이터가 **이미 배치했다고 믿는** Agent를 확인·부인할 뿐 명령한 적 없는 프로세스를 실어 나를 형식이 없다. 같은 루프 2단계는 목록에서 사라진 프로세스를 **보고 없이** 종료하고, `procs`는 in-memory라 워커가 SIGKILL되면 워커 자신도 자기 자식을 잃는다. 남은 것은 워커가 **명령과 무관하게** 들고 있는 것을 여는 inventory 보고이며, 게이트 2도 같은 것을 기다린다. (**2026-09-12 갱신**: 이 문장이 지목한 inventory는 아래 orphan 자기 보고로 **절반이 채워졌다**. 남은 전수 조회는 이제 게이트 2 단독의 선행이고, 이 칸의 남은 절반은 문장 끝이 적듯 ACK 유실과 grant expiry다 — 한 칸이 서로 다른 두 절반을 지목하고 있었다.) lease quarantine은 요구에서 빠진다: `worker_execution_lease`를 만들지 않기로 확정했다(2026-09-01, `#67` 게이트 ①-B) **2026-09-06 — 이 행의 근거는 `claude/pam-phase2-task5` 병합 전 트리에서 재도출된 것이라, 아래 사실이 그 뒤에 들어왔다.** orphan 쪽은 닫혔다 — 워커가 배정받지 않은 Agent 프로세스를 종료한 사실을 heartbeat의 `agent_orphans`로 올리고 오케스트레이터가 `agent.orphan_terminated`로 감사한다. 근거가 둘이고 서로 다른 실패를 덮는다: 명령 목록에서의 부재(`unplaced`)와 이전 incarnation이 남긴 디스크 기록(`stale_incarnation`, `.fleet-agent.json` + 시작 시각 대조로 pid 재사용을 거른다). **위 문단이 "형식이 없다"고 적은 그 형식이 이것이다.** 다만 그것이 곧 process inventory는 아니다 — 이 보고는 워커가 **자기가 띄운 것**에 대해 말하는 것이고, 게이트 2가 기다리는 것은 워커가 명령과 무관하게 들고 있는 것 전부를 여는 조회다. 남은 절반은 ACK 유실과 grant expiry다 |
 | 4. `Started` effect·archive hold 자동 redrive 금지 | 차단 (2026-09-14 **의도적 보류** — 증명할 비가역 부작용이 아직 없다. 아래 절 참고) | effect ledger가 코드에 존재하지 않는다(`EffectLedger`/`PartiallyApplied` grep 0건). archive hold 테이블은 `#91` **2026-09-06 — 이 행의 근거는 `claude/pam-phase2-task5` 병합 전 트리에서 재도출된 것이라, 아래 사실이 그 뒤에 들어왔다.** 원장은 여전히 없지만 **그것이 읽을 증거는 이제 남는다.** 차단 사유가 순환이었다는 것이 드러났고("원장이 없어서 원장을 못 만든다") 진짜 막힌 자리는 더 앞이었다 — 도구는 Worker의 grok 프로세스 안에서 돌고 오케스트레이터는 `session/prompt`만 보내는데, ACP가 `session/update`로 주는 `ToolCall`/`ToolCallUpdate`를 `acp_transport.rs`가 `_ => None`으로 전부 버리고 있었다. 그 알림을 `WorkerEvent::ToolCall` → `FleetEvent::TaskToolCall`로 올린다(`fleet_core::ToolInvocation`). 여덟 상태·idempotency key·external receipt는 **하나도** 만들지 않았으므로 게이트는 차단이다. 남기는 것은 `tool_call_id`·`name`·`kind`·`status` 넷뿐 — `title`·`raw_input`·`raw_output`·`content`·`locations`는 위 금지 목록에 걸려 버린다. `status = Completed`는 **effect 증거가 아니다**([실행 일관성](tasks/execution-consistency.md)이 적은 대로 모델의 "완료" 서술이지 provider receipt가 아니다) |
 | 5. on-demand Worker probe 전 dispatch 금지 | **닫힘** | 안전한 절반(확인 없는 dispatch 금지)은 원래 `WorkerSelector::select` 1.5단계가 `on_demand` 워커를 후보에서 통째로 제외해 닫혀 있었고, **2026-09-06에 그 제외가 probe로 대체됐다** — 1.5단계는 이제 liveness를 거르지 않고(`selector.rs`의 "liveness는 여기서 **거르지 않는다**" 주석), 확인은 결승전인 8단계 `responds()`가 승자에게만 건다(probe는 왕복이라 후보를 좁히는 필터로 두면 뒤 필터에서 어차피 떨어질 워커까지 전부 왕복시킨다). `on_demand`·probe 시험 6건 (2026-09-12 정정: 이 문장은 병합 전 트리의 서술이라 "1.5단계가 제외한다"와 "시험 4건" 둘 다 지금 트리에서 거짓이었다). 나머지 절반인 **probe 성공 후 dispatch 허용**의 막힘은 수단이 아니라 배선이다: `WorkerTransport::ping(worker_id) -> Duration`이 이미 트레이트에 있고, 없는 것은 selector가 dispatch 직전에 그것을 부르고 결과를 후보 판정에 되먹이는 경로다. **소유는 이 게이트(`#70`)이지 `#67`이 아니다** — probe는 Agent 프로비저닝이 아니라 Worker liveness이고 수단인 `ping`도 `fleet-transport`에 있다(2026-09-06 귀속 정정: 이 표와 `selector.rs`·`health.rs` 주석은 `#67`을, `#67` 로드맵 행과 `placement.rs`는 `#70`을 지목해 **서로에게 미루고 있었다**). `Unchecked` 워커 상태는 만들지 않았다 — probe 없이는 빠져나올 수 없는 도달 불가 상태가 되기 때문 **2026-09-06 — 이 행의 근거는 `claude/pam-phase2-task5` 병합 전 트리에서 재도출된 것이라, 아래 사실이 그 뒤에 들어왔다.** **게이트를 닫았다.** `WorkerTransport::probe`가 `session/list`를 실제로 왕복시키고(부작용 없는 유일한 client→agent 요청이다), `WorkerSelector`가 고른 워커의 `liveness_mode`가 `on_demand`이면 dispatch 직전에 그것을 건다. **판정은 "답이 왔는가"이지 "성공했는가"가 아니다** — grok이 그 메서드를 몰라 `-32601`을 줘도 살아 있다는 증거로는 같다. 구현에서 가장 틀리기 쉬운 자리는 Agent의 거절과 연결의 죽음이 SDK에서 같은 `Err`로 온다는 것이고 실제로 첫 구현이 거기서 틀렸다(시험이 잡았다); 연결 상태(구조적)와 SDK의 문구 표식(텍스트)을 AND로 묶어 갈랐다. probe는 필터가 아니라 **결승전**에서 돈다 — 왕복이라, 값싼 필터가 좁힌 뒤 승자에게만 건다. 신선도는 어디에도 들지 않는다(저장하면 "얼마나 오래 유효한가"라는 두 번째 파라미터가 생긴다). `placement.rs`는 따라가지 않는다 — 그쪽 제외의 근거는 liveness가 아니라 `#61`의 모드 계약이다 |
@@ -391,6 +391,69 @@ HTTP 로그인 세션을 지우는 루프라 무관하다.
 게이트 7에도 직접 기여하지 않는다. `CancelUnconfirmed`는 여전히 존재하지 않는다. 다만 이
 스윕이 그 상태가 **없어도** 회수되는 부분을 회수하므로, 남는 것은 "취소를 보냈고 아직
 확인되지 않은 창" 하나로 좁아진다.
+
+### 순서는 전제조건이라야 순서다 (2026-09-17) — 게이트 2 닫힘
+
+앞의 두 절이 수단을 만들었고(인벤토리 조회, 양방향 회수), 남은 것은 게이트 문언의 한
+단어였다: 복구가 신규 dispatch보다 **먼저**.
+
+#### 배경 루프로는 순서가 만들어지지 않는다
+
+`Reconciler`는 첫 tick을 한 주기(기본 30초) 뒤에 돈다. 그 사이의 dispatch는 아무것도 묻지
+않은 채 나간다. 주기를 줄여도 창은 좁아질 뿐 닫히지 않고, **닫혔는지 확인할 방법도 없다** —
+루프와 dispatch가 경합하는 한 "먼저"는 관측이지 보장이 아니다.
+
+그래서 순서를 **dispatch의 전제조건**으로 옮겼다. `Dispatcher::ensure_worker_recovered`를
+지나지 않은 워커로는 이 제어 세대의 어떤 일도 나가지 않는다. 구조적으로 어길 수 없다.
+
+#### 전역 배리어가 아니라 워커별이다
+
+"failover 뒤"라는 말은 전역 단계처럼 들리지만, **"모든 워커가 재연결했다"는 시점은 존재하지
+않는다.** 워커는 자기가 join할 때만 transport에 등록되고(오케스트레이터가 저장소를 보고
+먼저 다이얼하지 않는다), 영영 돌아오지 않는 워커도 있다. 전역 배리어를 두면 그런 워커
+하나가 fleet 전체의 dispatch를 영구히 막는다.
+
+물어볼 수 있는 시점은 **그 워커에게 실제로 일을 주려는 순간**뿐이고, 그때가 곧 "먼저"가
+성립해야 하는 유일한 자리다. 세대 기록(`recovered_workers`)이 인메모리인 것도 같은 이유다 —
+프로세스가 죽으면 비워지고, 그것이 정확히 이 복구가 다시 필요해지는 조건이다. lease epoch이
+바뀌면 집합을 통째로 버린다: 새 제어 기관은 이전 기관이 물어본 것을 물려받지 않는다.
+
+#### 통과 조건은 "물어봤다"이지 "답을 받았다"가 아니다
+
+| 인벤토리 | dispatch | 이유 |
+| --- | --- | --- |
+| `Reported` | 허용 (어긋난 Task 정리 후) | 권위 있는 답을 받았다 |
+| `Undeclared` | 허용 | 저쪽이 말해 줄 수 없다고 **말했다** |
+| `Refused` | 허용 | 저쪽 구현이 선언과 어긋나지만 연결은 살아 있다 |
+| 조회 실패 | **거절** | 묻지 못했다 — 어차피 보낼 수도 없다 |
+
+`Undeclared`를 막으면 **오늘의 거의 모든 배포에서 dispatch가 영구히 막힌다.** 실제 Agent
+다수가 `session/list`를 광고하지 않기 때문이다. 이 게이트가 요구하는 것은 "복구했다"가 아니라
+"복구를 먼저 시도했다"이며, 물어볼 수 없는 상대에게 물어본 뒤 통과시키는 것이 그 요구의
+정직한 이행이다. 시험 하나가 이 줄을 부정 단정으로 고정한다.
+
+#### 브레이커 뒤, CAS 앞
+
+위치가 두 방향으로 묶여 있다.
+
+- **브레이커 뒤**여야 못 닿는 워커가 회로를 열 수 있다. 앞에 두면 이 경로가 transport 실패보다
+  먼저 반환해 브레이커 기록을 건너뛰고, selector가 그 워커를 영영 계속 고른다. 그래서 복구
+  실패도 transport 실패와 **같은 자리에** 브레이커 실패를 남긴다. 회로가 열린 워커는 어차피
+  여기 오지 않으므로 복구할 필요도 없다 — 그 워커의 어긋난 Task는 주기 스윕이 본다.
+- **CAS 앞**이어야 상태만 옮겨 두고 보내지 못한 실행이 생기지 않는다.
+
+#### 순서를 사후에 재구성하는 기록
+
+`control.worker_recovered`가 워커당 세대당 한 줄을 남긴다. **이 줄이 없는 워커로는 이 세대에
+dispatch가 나가지 않았다**는 뜻이고, 그것이 게이트가 요구하는 순서의 감사 근거다. 줄의
+`inventory` 필드는 무엇을 근거로 통과시켰는지 말하며, `undeclared`인 줄이 대부분일 것이다 —
+그 사실 자체가 값어치가 있다: 그 fleet에서는 이 게이트가 실질적으로 비어 있다는 뜻이기 때문이다.
+
+#### 무엇이 닫히지 않았는가
+
+게이트 2의 문언은 닫혔다. 닫히지 **않은** 것은 인접한 사실 하나다: 오늘 이 capability를
+광고하는 Agent가 실제로 있는지는 여전히 관측되지 않았다. 다만 그것이 이제 런타임이 읽어
+감사에 남기는 값이므로 배포 한 번이면 답이 나온다 — 문서가 미지로 안고 있을 값이 아니다.
 
 ### 게이트 4는 지금 닫을 수 없다 — 그 이유와, 그래도 고친 것 (2026-09-14)
 

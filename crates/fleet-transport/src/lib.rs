@@ -286,6 +286,16 @@ impl SessionInventory {
     ///
     /// `Reported`만 `true`다. 빈 목록도 `true`인 것이 요점이다 — 위
     /// [`Reported`](Self::Reported) 문서 참고.
+    /// 감사·metric에 실을 **안정적인 텍스트 표현**. 세션 id나 개수를 담지
+    /// 않는 이유는 그 둘이 고카디널리티이기 때문이다(`#70` 게이트 1).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Reported(_) => "reported",
+            Self::Undeclared => "undeclared",
+            Self::Refused { .. } => "refused",
+        }
+    }
+
     pub fn is_authoritative(&self) -> bool {
         matches!(self, Self::Reported(_))
     }
