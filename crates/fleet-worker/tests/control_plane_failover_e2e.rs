@@ -217,6 +217,7 @@ async fn a_worker_reconnects_to_the_promoted_instance_and_its_pending_work_moves
             offline_worker_grace: Duration::from_secs(0),
             max_dispatch_retries: 1,
             session_list_timeout: std::time::Duration::from_secs(5),
+            command_ack_timeout: std::time::Duration::from_secs(300),
             reap_orphan_sessions: true,
         },
     )

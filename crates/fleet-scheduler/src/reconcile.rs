@@ -81,7 +81,7 @@
 //!   ~수십 초 내 회복)와, 정말로 죽었거나 네트워크가 갈라진 경우를 구분하기
 //!   위한 훨씬 보수적인 유예 시간이다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -141,6 +141,14 @@ pub struct ReconcileConfig {
     /// **더 하기** 위한 근거이지 덜 하기 위한 것이 아니므로, 못 물어봤다고
     /// 다른 판정을 미루지 않는다.
     pub session_list_timeout: Duration,
+    /// 명령이 이 시간을 넘도록 확인되지 않은 Agent를 감사에 남긴다
+    /// (로드맵 `#70` 게이트 3 — ACK 유실).
+    ///
+    /// heartbeat 주기보다 충분히 길게 잡아야 한다 — 정상적으로 다음 beat을
+    /// 기다리는 중인 Agent를 미확인으로 부르면 그 기록이 소음이 된다.
+    /// 기본값 5분은 `offline_worker_grace`와 같은 값이며, 같은 질문("이
+    /// Worker가 살아 있다고 볼 수 있는가")을 다른 각도에서 재기 때문이다.
+    pub command_ack_timeout: Duration,
     /// 워커가 들고 있는 세션 중 이미 끝난 Task의 것을 찾아 취소할지
     /// (로드맵 `#70` 게이트 2·7). 기본값 `true`.
     ///
@@ -160,6 +168,7 @@ impl Default for ReconcileConfig {
             offline_worker_grace: Duration::from_secs(300),
             max_dispatch_retries: 20,
             session_list_timeout: Duration::from_secs(5),
+            command_ack_timeout: Duration::from_secs(300),
             reap_orphan_sessions: true,
         }
     }
@@ -200,6 +209,9 @@ pub struct ReconcileSummary {
     /// 워커가 들고 있는데 **어느 Task도 지목하지 않는** 세션 수. 손대지 않고
     /// 감사에만 남긴다.
     pub unclaimed_sessions_found: u64,
+    /// 명령이 임계 시간을 넘도록 확인되지 않아 이번 라운드에 처음 보고한
+    /// Agent 수 (로드맵 `#70` 게이트 3).
+    pub unacked_commands_found: u64,
 }
 
 /// stale `Pending` 작업 재조정기. spawn하면 백그라운드 태스크를 반환.
@@ -207,6 +219,12 @@ pub struct Reconciler {
     state: Arc<FleetState>,
     dispatcher: Arc<Dispatcher>,
     config: ReconcileConfig,
+    /// 이미 감사에 남긴 (Agent, 명령 세대) 쌍 (로드맵 `#70` 게이트 3).
+    ///
+    /// 매 tick 남기면 같은 사실이 감사를 채워 다른 기록을 덮는다. 인메모리인
+    /// 것이 의도다 — 재시작하면 한 번 더 남고, 그것은 **옳다**: 새 프로세스는
+    /// 그 사실을 아직 보고한 적이 없다.
+    unacked_reported: tokio::sync::Mutex<HashSet<(fleet_core::AgentId, i64)>>,
 }
 
 /// 백그라운드 재조정 루프 핸들. `abort()`로 종료.
@@ -232,6 +250,7 @@ impl Reconciler {
             state,
             dispatcher,
             config,
+            unacked_reported: tokio::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -428,6 +447,7 @@ impl Reconciler {
 
         let inventories = self.reap_stale_dispatched(&mut summary).await;
         self.reap_orphan_sessions(inventories, &mut summary).await;
+        self.report_unacked_commands(&mut summary).await;
 
         if summary.stale_found > 0 || summary.orphaned_found > 0 || summary.offline_worker_found > 0
         {
@@ -907,6 +927,87 @@ impl Reconciler {
             }
         }
     }
+
+    /// 명령이 확인되지 않은 채 임계 시간을 넘긴 Agent를 감사에 남긴다
+    /// (로드맵 `#70` 게이트 3 — ACK 유실).
+    ///
+    /// **다시 보내지 않는다.** 게이트 문언의 "자동 중복 실행 없이"가 요구하는
+    /// 자리가 정확히 여기다: 확인되지 않은 명령을 자동으로 재발행하면 Worker가
+    /// 첫 명령을 늦게 집어갔을 때 같은 Agent가 두 번 뜬다. 확인이 없다는 것은
+    /// "도달하지 않았다"가 아니라 **"모른다"**이므로, 여기서 할 수 있는 가장
+    /// 강한 처분은 운영자에게 보이게 만드는 것이다.
+    ///
+    /// `031`이 `command_generation`/`last_acked_generation`을 만든 뒤로
+    /// "확인됐는가"는 알 수 있었지만 **그 값으로 판정하는 코드가 한 곳도
+    /// 없었다** — `command_delivered()`/`start_pending()`의 호출부는 MCP 응답을
+    /// 조립하는 두 줄뿐이었다. 운영자가 그 필드를 직접 조회하지 않는 한 Worker가
+    /// 명령을 영영 집어가지 않아도 아무 신호가 나지 않았다.
+    async fn report_unacked_commands(&self, summary: &mut ReconcileSummary) {
+        let threshold = match chrono::Duration::from_std(self.config.command_ack_timeout) {
+            Ok(d) => d,
+            Err(_) => chrono::Duration::seconds(300),
+        };
+        let agents = match self
+            .state
+            .store
+            .list_agents(&fleet_core::AgentFilter {
+                project_id: None,
+                status: None,
+                worker_id: None,
+                limit: MAX_PENDING_SCAN,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(error = %e, "reconcile: failed to list agents for the unacked-command sweep");
+                return;
+            }
+        };
+
+        let now = Utc::now();
+        let mut reported = self.unacked_reported.lock().await;
+        for agent in agents {
+            // 배정된 Worker가 없으면 확인할 상대가 없다 — 미확인이 아니라
+            // **보낸 적이 없는** 것이다.
+            let Some(worker_id) = agent.worker_id else {
+                continue;
+            };
+            let Some(unacked_for) = agent.command_unacked_for(now) else {
+                continue; // 확인이 끝났거나 발행 시각을 모른다.
+            };
+            if unacked_for < threshold {
+                continue;
+            }
+            let key = (agent.id, agent.command_generation);
+            if !reported.insert(key) {
+                continue; // 이 세대는 이미 보고했다.
+            }
+
+            summary.unacked_commands_found += 1;
+            self.state
+                .audit_decision(
+                    fleet_core::audit::action::AGENT_COMMAND_UNACKED,
+                    ("agent", agent.id.to_string()),
+                    serde_json::json!({
+                        "worker_id": worker_id.to_string(),
+                        "command_generation": agent.command_generation,
+                        "last_acked_generation": agent.last_acked_generation,
+                        "unacked_for_secs": unacked_for.num_seconds(),
+                        "desired_status": agent.desired_status.as_str(),
+                    }),
+                )
+                .await;
+            warn!(
+                agent_id = %agent.id, %worker_id,
+                command_generation = agent.command_generation,
+                unacked_for_secs = unacked_for.num_seconds(),
+                "reconciliation: the assigned worker has not acknowledged this agent command — \
+                 not reissuing it (that would risk a duplicate start)"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1047,6 +1148,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1101,6 +1203,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1165,6 +1268,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1206,6 +1310,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1255,6 +1360,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1306,6 +1412,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 3,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1361,6 +1468,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300),
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1473,6 +1581,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(5), // 짧게 — 테스트용
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -1636,6 +1745,7 @@ mod tests {
                 offline_worker_grace: Duration::from_secs(300), // 기본값 — 2초는 한참 못 미침
                 max_dispatch_retries: 20,
                 session_list_timeout: Duration::from_secs(5),
+                command_ack_timeout: Duration::from_secs(300),
                 reap_orphan_sessions: true,
             },
         );
@@ -2193,5 +2303,141 @@ mod tests {
 
         assert_eq!(summary.orphan_sessions_cancelled, 0);
         assert!(transport.cancel_requests().await.is_empty());
+    }
+
+    // ── 확인되지 않은 Agent 명령 (로드맵 `#70` 게이트 3 — ACK 유실) ──────
+    //
+    // `031`이 만든 `command_generation`/`last_acked_generation`으로 "확인됐는가"는
+    // 알 수 있었지만, 그 값으로 **판정하는 코드가 한 곳도 없었다**. 아래 넷이
+    // 그 판정과, 그 판정이 **해서는 안 되는 일**을 고정한다.
+
+    /// 미확인 명령을 들고 배정된 Agent를 만든다.
+    async fn seed_unacked_agent(
+        store: &Arc<MemStore>,
+        worker_id: WorkerId,
+        unacked_for: chrono::Duration,
+    ) -> fleet_core::AgentId {
+        let mut agent = fleet_core::Agent::new(fleet_core::ProjectId::new(), "stuck");
+        agent.worker_id = Some(worker_id);
+        agent.assigned_at = Some(chrono::Utc::now());
+        agent.desired_status = fleet_core::AgentDesiredStatus::Running;
+        agent.command_generation = 1;
+        agent.last_acked_generation = 0;
+        agent.command_issued_at = Some(chrono::Utc::now() - unacked_for);
+        let id = agent.id;
+        store.create_agent(&agent).await.unwrap();
+        id
+    }
+
+    async fn unacked_audits(store: &dyn Store) -> Vec<fleet_core::AuditEvent> {
+        store
+            .list_audit_events(&fleet_core::AuditFilter {
+                action: Some(fleet_core::audit::action::AGENT_COMMAND_UNACKED.to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list audit")
+    }
+
+    #[tokio::test]
+    async fn a_command_unacked_past_the_threshold_is_reported() {
+        let worker = make_worker("never-picks-up");
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+        let agent_id = seed_unacked_agent(&store, worker.id, chrono::Duration::seconds(600)).await;
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.unacked_commands_found, 1);
+        let events = unacked_audits(state.store.as_ref()).await;
+        assert_eq!(events.len(), 1, "받은 값 {events:?}");
+        assert_eq!(
+            events[0].target_id.as_deref(),
+            Some(agent_id.to_string().as_str())
+        );
+    }
+
+    /// **재발행하지 않는다.** 게이트 문언의 "자동 중복 실행 없이"가 요구하는
+    /// 자리가 여기다 — 확인되지 않은 명령을 자동으로 다시 보내면 Worker가 첫
+    /// 명령을 늦게 집어갔을 때 같은 Agent가 두 번 뜬다. 세대가 오르면 그것이
+    /// 곧 재발행이므로, 세대가 그대로인지를 본다.
+    #[tokio::test]
+    async fn an_unacked_command_is_never_reissued() {
+        let worker = make_worker("silent");
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+        let agent_id = seed_unacked_agent(&store, worker.id, chrono::Duration::seconds(600)).await;
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        let after = state.store.get_agent(agent_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.command_generation, 1,
+            "세대가 올랐다면 명령을 다시 보냈다는 뜻이고, 그것이 중복 실행의 경로다"
+        );
+        assert_eq!(
+            after.last_acked_generation, 0,
+            "확인을 가짜로 만들면 안 된다"
+        );
+    }
+
+    /// 같은 세대는 한 번만 보고한다. 매 tick 남기면 같은 사실이 감사를 채워
+    /// 다른 기록을 덮는다.
+    #[tokio::test]
+    async fn the_same_generation_is_reported_once() {
+        let worker = make_worker("silent-twice");
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+        seed_unacked_agent(&store, worker.id, chrono::Duration::seconds(600)).await;
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let reconciler = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default());
+        let first = reconciler.reconcile_once().await;
+        let second = reconciler.reconcile_once().await;
+
+        assert_eq!(first.unacked_commands_found, 1);
+        assert_eq!(
+            second.unacked_commands_found, 0,
+            "두 번째 tick이 또 보고했다"
+        );
+        assert_eq!(unacked_audits(state.store.as_ref()).await.len(), 1);
+    }
+
+    /// 임계 시간 안이면 보고하지 않는다 — 다음 heartbeat을 기다리는 중인
+    /// 정상 Agent가 여기 걸리면 그 기록은 소음이 된다.
+    ///
+    /// **발행 시각을 모르는 Agent도 보고하지 않는다**(042 이전 행). 이쪽이
+    /// 더 중요한 단정이다: `None`을 "오래됐다"로 읽는 구현은 마이그레이션
+    /// 직후에 모든 미확인 Agent를 한꺼번에 쏟아낸다.
+    #[tokio::test]
+    async fn a_fresh_or_undated_command_is_not_reported() {
+        let worker = make_worker("recent");
+        let store = Arc::new(MemStore::new());
+        store.upsert_worker(&worker).await.unwrap();
+        seed_unacked_agent(&store, worker.id, chrono::Duration::seconds(10)).await;
+
+        // 발행 시각을 모르는 Agent.
+        let mut undated = fleet_core::Agent::new(fleet_core::ProjectId::new(), "undated");
+        undated.worker_id = Some(worker.id);
+        undated.assigned_at = Some(chrono::Utc::now());
+        undated.desired_status = fleet_core::AgentDesiredStatus::Running;
+        undated.command_generation = 1;
+        undated.last_acked_generation = 0;
+        undated.command_issued_at = None;
+        store.create_agent(&undated).await.unwrap();
+
+        let (state, dispatcher) = setup(store.clone() as Arc<dyn Store>, vec![]).await;
+        let summary = Reconciler::new(state.clone(), dispatcher, ReconcileConfig::default())
+            .reconcile_once()
+            .await;
+
+        assert_eq!(summary.unacked_commands_found, 0);
+        assert!(unacked_audits(state.store.as_ref()).await.is_empty());
     }
 }

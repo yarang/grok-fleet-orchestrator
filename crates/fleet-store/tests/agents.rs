@@ -1844,3 +1844,71 @@ async fn deleting_the_worker_clears_the_observation_too() {
         SlotClaim::Claimed
     );
 }
+
+// ── 명령 발행 시각 (로드맵 `#70` 게이트 3 · migration 042) ───────────────
+
+/// **세대가 오를 때만** `command_issued_at`이 움직인다.
+///
+/// 이 성질이 이 컬럼의 전부다. 모든 쓰기에서 움직이면 `updated_at`과 같아지고,
+/// 그러면 명령을 집어가지 않는 Worker라도 heartbeat이 계속 오는 동안 미확인
+/// 시간이 영원히 0에 가깝게 유지된다 — 정확히 탐지하려는 상황에서 탐지가
+/// 되지 않는다.
+#[tokio::test]
+async fn the_command_clock_moves_only_when_the_generation_does() {
+    require_db!(store);
+    let project = seed_project(&store, "gate3-clock").await;
+    let worker = seed_worker(&store, "gate3-clock-w").await;
+
+    let agent = Agent::new(project.id, "clocked");
+    store.create_agent(&agent).await.unwrap();
+
+    // 생성 직후에는 나간 명령이 없다 — `None`이지 "오래전"이 아니다.
+    let fresh = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert!(
+        fresh.command_issued_at.is_none(),
+        "명령이 나간 적 없는 행에 시각을 만들어 내면 안 된다"
+    );
+    assert!(fresh.command_unacked_for(chrono::Utc::now()).is_none());
+
+    // 배정은 세대를 무조건 올린다 — 새 Worker는 이전 명령을 본 적이 없다.
+    store
+        .assign_agent_worker(agent.id, worker.id, None)
+        .await
+        .unwrap();
+    let assigned = store.get_agent(agent.id).await.unwrap().unwrap();
+    let first = assigned
+        .command_issued_at
+        .expect("세대가 올랐으면 발행 시각이 찍혀야 한다");
+
+    // 같은 값을 다시 넣는 호출은 세대를 올리지 않는다. 시각도 그대로여야
+    // 한다 — 움직이면 미확인 시간이 매 호출마다 0으로 되감긴다.
+    let same = assigned.desired_status;
+    store
+        .set_agent_desired_status(agent.id, same, None)
+        .await
+        .unwrap();
+    let unchanged = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.command_generation, assigned.command_generation);
+    assert_eq!(
+        unchanged.command_issued_at,
+        Some(first),
+        "세대가 그대로인데 시각이 움직였다"
+    );
+
+    // 값이 실제로 바뀌면 둘 다 움직인다.
+    store
+        .set_agent_desired_status(agent.id, AgentDesiredStatus::Running, None)
+        .await
+        .unwrap();
+    let bumped = store.get_agent(agent.id).await.unwrap().unwrap();
+    assert!(bumped.command_generation > assigned.command_generation);
+    assert!(
+        bumped.command_issued_at.expect("찍혀야 한다") >= first,
+        "세대가 올랐는데 시각이 뒤로 갔다"
+    );
+    assert!(
+        !bumped.command_delivered(),
+        "새 명령은 아직 확인되지 않았다 — 이 시험의 전제다"
+    );
+    assert!(bumped.command_unacked_for(chrono::Utc::now()).is_some());
+}

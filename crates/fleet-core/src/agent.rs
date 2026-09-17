@@ -447,6 +447,18 @@ pub struct Agent {
     /// 조용한 오탐이 된다.
     #[serde(default)]
     pub last_acked_generation: i64,
+    /// 지금 실린 명령이 **언제 나갔는지** (로드맵 `#70` 게이트 3, migration 042).
+    ///
+    /// `command_generation`이 실제로 오를 때만 함께 움직인다. `updated_at`으로
+    /// 대신할 수 없는 이유는 그 컬럼이 관측 보고를 포함한 모든 쓰기에서
+    /// 움직이기 때문이다 — 명령을 집어가지 않는 Worker라도 heartbeat은 계속
+    /// 오므로, 그것으로 재면 미확인 시간이 영원히 0에 가깝다.
+    ///
+    /// `None`은 잴 근거가 없다는 뜻이다: 042 이전에 확인을 마친 행, 그리고
+    /// 아직 아무 명령도 나가지 않은 행이 여기 온다. **`None`을 "오래됐다"로
+    /// 읽으면 안 된다** — 부재가 아니라 무지다.
+    #[serde(default)]
+    pub command_issued_at: Option<DateTime<Utc>>,
     /// 지금 실린 명령을 발행한 control-plane 세대
     /// (로드맵 `#67` 구현 게이트 ①-B).
     ///
@@ -504,6 +516,7 @@ impl Agent {
             desired_status: AgentDesiredStatus::Stopped,
             command_generation: 0,
             last_acked_generation: 0,
+            command_issued_at: None,
             command_control_epoch: None,
             observed_status: None,
             observed_at: None,
@@ -595,6 +608,25 @@ impl Agent {
         self.status == AgentStatus::Ready
             && self.desired_status == AgentDesiredStatus::Running
             && self.observed_status.is_none()
+    }
+
+    /// 지금 실린 명령이 확인되지 않은 채 얼마나 흘렀는지
+    /// (로드맵 `#70` 게이트 3 — ACK 유실).
+    ///
+    /// `None`인 경우가 **둘이고 둘 다 "잴 수 없다"이지 "괜찮다"가 아니다**:
+    /// 확인이 끝났거나([`command_delivered`](Self::command_delivered)),
+    /// 발행 시각을 모르거나(042 이전 행). 호출부는 그 둘을 구분할 필요가
+    /// 없다 — 어느 쪽이든 이 값으로 판정할 수 없다는 결론은 같다.
+    ///
+    /// 음수는 돌려주지 않는다. 시계가 뒤로 가거나 DB와 오케스트레이터의
+    /// 시계가 어긋나면 발행 시각이 미래로 보일 수 있는데, 그것을 음수로
+    /// 흘려보내면 임계값 비교가 조용히 통과한다.
+    pub fn command_unacked_for(&self, now: DateTime<Utc>) -> Option<chrono::Duration> {
+        if self.command_delivered() {
+            return None;
+        }
+        let issued = self.command_issued_at?;
+        Some((now - issued).max(chrono::Duration::zero()))
     }
 }
 

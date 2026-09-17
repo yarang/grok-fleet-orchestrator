@@ -3152,7 +3152,7 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, command_control_epoch, \
+                last_acked_generation, command_control_epoch, command_issued_at, \
                 observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents WHERE id = $1",
@@ -3172,7 +3172,7 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, command_control_epoch, \
+                last_acked_generation, command_control_epoch, command_issued_at, \
                 observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents WHERE project_id = $1 AND name = $2",
@@ -3195,7 +3195,7 @@ impl Store for PgStore {
             "SELECT id, project_id, name, description, created_by, status, \
                 agent_template_id, agent_template_revision_id, \
                 worker_id, assigned_at, desired_status, command_generation, \
-                last_acked_generation, command_control_epoch, \
+                last_acked_generation, command_control_epoch, command_issued_at, \
                 observed_status, observed_at, observed_reason, \
                 created_at, updated_at \
                FROM agents \
@@ -3233,6 +3233,8 @@ impl Store for PgStore {
                     command_generation = command_generation \
                         + CASE WHEN $2 = 'stopped' AND desired_status <> 'stopped' \
                                THEN 1 ELSE 0 END, \
+                    command_issued_at = CASE WHEN $2 = 'stopped' AND desired_status <> 'stopped' \
+                                             THEN NOW() ELSE command_issued_at END, \
                     updated_at = NOW() \
               WHERE id = $1",
         )
@@ -3339,6 +3341,7 @@ impl Store for PgStore {
             "UPDATE agents \
                 SET worker_id = $2, assigned_at = NOW(), \
                     command_generation = command_generation + 1, \
+                    command_issued_at = NOW(), \
                     updated_at = NOW()",
         );
         if fence.is_some() {
@@ -3463,7 +3466,9 @@ impl Store for PgStore {
             "UPDATE agents \
                 SET desired_status = $2, \
                     command_generation = command_generation \
-                        + CASE WHEN desired_status <> $2 THEN 1 ELSE 0 END",
+                        + CASE WHEN desired_status <> $2 THEN 1 ELSE 0 END, \
+                    command_issued_at = CASE WHEN desired_status <> $2 \
+                                             THEN NOW() ELSE command_issued_at END",
         );
         if fence.is_some() {
             // **세대와 같은 조건을 건다** (로드맵 `#67` 구현 게이트 ①-B).
@@ -4398,6 +4403,7 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> Result<Agent, StoreError> {
         desired_status,
         command_generation: row.try_get("command_generation")?,
         last_acked_generation: row.try_get("last_acked_generation")?,
+        command_issued_at: row.try_get("command_issued_at")?,
         command_control_epoch: row.try_get("command_control_epoch")?,
         observed_status,
         observed_at,

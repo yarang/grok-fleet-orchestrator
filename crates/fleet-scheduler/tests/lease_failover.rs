@@ -65,6 +65,7 @@ fn eager_reconcile() -> ReconcileConfig {
         // 없을 때 곧바로 상태가 바뀌므로 그 구멍이 사라진다.
         max_dispatch_retries: 1,
         session_list_timeout: Duration::from_secs(5),
+        command_ack_timeout: Duration::from_secs(300),
         reap_orphan_sessions: true,
     }
 }

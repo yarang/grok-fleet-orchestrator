@@ -259,6 +259,24 @@ pub mod action {
     /// 거슬러 올라간다. Worker가 영영 돌아오지 않으면 이 줄도 오지 않는다 —
     /// 그때 남는 신호는 `HealthChecker`가 찍는 Worker의 `Offline` 전이뿐이다.
     pub const AGENT_SELF_FENCED: &str = "agent.self_fenced";
+    /// 명령이 임계 시간을 넘도록 배정된 Worker에게 **확인되지 않았다**
+    /// (로드맵 `#70` 게이트 3 — ACK 유실).
+    ///
+    /// `031`이 `command_generation`/`last_acked_generation`으로 "확인됐는가"를
+    /// 알 수 있게 했지만 그 값을 **판정에 쓰는 코드가 한 곳도 없었다** —
+    /// `command_delivered()`/`start_pending()`의 호출부는 MCP 응답을 조립하는
+    /// 두 줄뿐이었다. 그래서 Worker가 명령을 영영 집어가지 않아도 아무 신호가
+    /// 나지 않았다.
+    ///
+    /// **이 기록은 재발행이 아니다.** 게이트 문언이 "자동 중복 실행 없이"를
+    /// 요구하는 자리가 정확히 여기다: 확인되지 않은 명령을 자동으로 다시
+    /// 보내면 Worker가 첫 명령을 늦게 집어갔을 때 같은 Agent가 두 번 뜬다.
+    /// 확인되지 않았다는 것은 **도달하지 않았다가 아니라 모른다**이므로,
+    /// 할 수 있는 가장 강한 처분은 운영자에게 보이게 만드는 것이다.
+    ///
+    /// Agent·세대 쌍마다 한 번만 남는다. 매 tick 남기면 같은 사실이 감사를
+    /// 채워 다른 기록을 덮는다.
+    pub const AGENT_COMMAND_UNACKED: &str = "agent.command_unacked";
     /// AgentTemplate 정체성 생성 (로드맵 #86). `detail.project_id`가 없으면
     /// 전역 템플릿이다.
     pub const AGENT_TEMPLATE_CREATE: &str = "agent_template.create";

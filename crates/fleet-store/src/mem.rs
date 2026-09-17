@@ -1974,6 +1974,8 @@ impl Store for MemStore {
                 {
                     a.desired_status = AgentDesiredStatus::Stopped;
                     a.command_generation += 1;
+                    // 세대가 오르는 그 자리에서만 함께 찍는다 (migration 042).
+                    a.command_issued_at = Some(Utc::now());
                 }
                 a.updated_at = Utc::now();
                 Ok(true)
@@ -2081,6 +2083,8 @@ impl Store for MemStore {
         // 새 Worker는 이전 Worker가 받은 명령을 본 적이 없다
         // (로드맵 #67 4b).
         a.command_generation += 1;
+        // 세대가 오르는 그 자리에서만 함께 찍는다 (migration 042).
+        a.command_issued_at = Some(Utc::now());
         // 세대를 올린 그 자리에서만 epoch을 찍는다 — 조건이 갈리면
         // "이 명령을 발행한 세대"가 "이 행을 마지막으로 손댄 세대"로
         // 뜻이 바뀐다. PgStore의 CASE와 같은 조건이다.
@@ -2123,6 +2127,8 @@ impl Store for MemStore {
                 if a.desired_status != desired {
                     a.desired_status = desired;
                     a.command_generation += 1;
+                    // 세대가 오르는 그 자리에서만 함께 찍는다 (migration 042).
+                    a.command_issued_at = Some(Utc::now());
                     a.command_control_epoch = fence.map(|f| f.epoch);
                 }
                 a.updated_at = Utc::now();
