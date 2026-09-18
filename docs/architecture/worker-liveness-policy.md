@@ -112,6 +112,23 @@ task가 계속 배정되고 UI는 이를 `Online`으로 표시한다** — 위 �
 `Unchecked`/`Unknown` 값이 없어 이 설계가 요구하는 상태를 표현할 타입 자체가 없으므로,
 `Unchecked` 도입과 selector 제외가 3단계의 선행 조건이다.
 
+> **2026-09-18 정정 — 이 문단은 세 군데가 지금 트리와 어긋난다.**
+>
+> 1. **3단계의 probe는 2026-09-06에 들어왔다.** `WorkerTransport::probe`가
+>    `session/list`를 실제로 왕복시키고 `WorkerSelector::select`의 8단계가 `on_demand`
+>    승자에게 그것을 건다. 소유는 `#67`이 아니라 `#70` 게이트 5였고, 그 귀속 정정도
+>    [관측성·재조정](observability-and-reconciliation.md)의 게이트 5 행에 적혀 있다.
+> 2. **`Unchecked`는 만들지 않기로 했다.** probe 없이는 빠져나올 수 없는 도달 불가 상태가
+>    되기 때문이다(같은 게이트 5 행). 즉 이 문단이 "선행 조건"이라고 적은 것은 선행이 아니라
+>    **폐기된 대안**이다. 확인은 상태값이 아니라 dispatch 직전 왕복으로 한다.
+> 3. **API의 `422` 거절은 구현된 적이 없다.** 코드에 있던 것은 정확히 이 문단이 "게이트가
+>    아니다"라고 적은 그것 — worker.toml 주석 한 줄 — 이었다. 지금은 3단계가 끝났으므로
+>    거절이 필요 없고, 그 주석도 사실에 맞게 고쳤다.
+>
+> **남은 경계는 하나다**: `placement.rs`가 `on_demand` 워커를 Agent 배치 후보에서 뺀다. 그
+> 근거는 liveness가 아니라 이 문서의 모드 계약(heartbeat 없이 Agent 명령을 전달할 채널)이라
+> probe로 풀리지 않는다. 즉 Task dispatch는 되고 Agent 배치는 안 된다.
+
 ## 구현 순서와 완료 기준
 
 1. `WorkerLivenessMode` enum, migration, register/API/OpenAPI/worker.toml을 추가한다.
@@ -121,4 +138,12 @@ task가 계속 배정되고 UI는 이를 `Online`으로 표시한다** — 위 �
    추가해 dispatcher가 on-demand dispatch 전에 호출한다. 이 단계 완료 시점에 1단계의 등록 거절을
    해제한다.
 4. 상태·이벤트·대시보드에 `last_activity_at`과 probe 결과를 기록한다.
+   (**2026-09-18 — `last_activity_at`이 들어왔다.** `043`이 `workers.last_activity_at`을
+   만들고 selector가 probe 성공 시 `Store::record_worker_activity`로 찍는다. `last_seen`을
+   재사용하지 않은 이유는 그 컬럼의 뜻이 "마지막 **하트비트**"이고 `HealthChecker`·
+   `Reconciler`의 offline 유예 판정이 전부 그 뜻에 기대기 때문이다 — probe 성공을 거기에
+   적으면 하트비트를 보내지 않는 워커가 보낸 것처럼 보인다. MCP `fleet_get_worker`와
+   `fleet worker show`가 이 값과 `liveness_mode`를 함께 낸다. **"probe 결과" 중 왕복
+   시간은 남기지 않는다** — 그것은 metric의 축이고, 워커별 지연을 행에 적으면 읽는 쪽이
+   그 값으로 판정하려 든다. 여기서 필요한 사실은 "언제 답했는가" 하나다.)
 5. 1,000 idle on-demand Worker가 heartbeat 요청 0건을 보내는 테스트와, 죽은 Worker가 probe 실패 뒤 dispatch되지 않는 테스트를 통과한다.

@@ -138,6 +138,7 @@ async fn test_circuit_breaker_sync_between_scaleout_nodes() {
         labels: std::collections::HashMap::new(),
         status: fleet_core::WorkerStatus::Online,
         last_seen: Some(chrono::Utc::now()),
+        last_activity_at: None,
         active_tasks: 0,
         max_concurrent: 2,
         max_agent_processes: None,

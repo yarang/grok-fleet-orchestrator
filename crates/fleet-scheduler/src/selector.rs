@@ -297,6 +297,23 @@ impl WorkerSelector {
                     answered_with_error = outcome.answered_with_error,
                     "on_demand worker answered the pre-dispatch probe"
                 );
+                // **왕복이 증명한 사실을 남긴다** (로드맵 `#61` 4단계).
+                //
+                // 이 워커는 heartbeat을 보내지 않으므로 `last_seen`이 join
+                // 시점에 멈춰 있고, 방금의 probe가 이 워커에 대해 얻을 수 있는
+                // **유일한** 생존 증거다. 그것을 로그로만 흘려보내면 운영자
+                // 화면은 등록 이후로 영영 갱신되지 않은 값을 보여 준다.
+                //
+                // 실패해도 dispatch는 막지 않는다. 기록하지 못한 것은 이
+                // 워커가 답하지 않았다는 뜻이 아니고, 여기서 막으면 관측을
+                // 추가하면서 가용성을 깎는 셈이 된다.
+                if let Err(e) = self.store.record_worker_activity(worker.id).await {
+                    tracing::warn!(
+                        target: "fleet::selector",
+                        worker = %worker.name, error = %e,
+                        "could not record the probe as liveness evidence"
+                    );
+                }
                 true
             }
             Err(e) => {
@@ -866,6 +883,20 @@ mod tests {
         async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
             let workers = self.workers.lock().unwrap();
             Ok(workers.iter().find(|w| w.name == name).cloned())
+        }
+        /// 트레이트 기본 구현(`Unsupported` 에러)을 그대로 두면 안 된다
+        /// (로드맵 `#61` 4단계). selector는 기록 실패를 로그로만 남기고
+        /// 진행하므로, 기본 구현을 쓰면 **기록하지 않는 구현도 모든 시험을
+        /// 통과한다** — 그 자리가 정확히 이 증분이 닫으려는 구멍이다.
+        async fn record_worker_activity(&self, id: WorkerId) -> Result<bool, StoreError> {
+            let mut workers = self.workers.lock().unwrap();
+            match workers.iter_mut().find(|w| w.id == id) {
+                Some(w) => {
+                    w.last_activity_at = Some(chrono::Utc::now());
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
         async fn list_workers(&self, filter: &WorkerFilter) -> Result<Vec<Worker>, StoreError> {
             let workers = self.workers.lock().unwrap();
@@ -1767,5 +1798,64 @@ mod tests {
             Err(SelectionError::AgentWorkerAtCapacity(name)) => assert_eq!(name, "planner"),
             other => panic!("expected AgentWorkerAtCapacity, got {:?}", other),
         }
+    }
+
+    // ── probe가 증명한 사실을 남긴다 (로드맵 `#61` 4단계) ────────────────
+
+    /// **probe 성공이 저장소에 남는다.**
+    ///
+    /// `on_demand` 워커는 heartbeat을 보내지 않으므로 `last_seen`이 join
+    /// 시점에 멈춘다. 그래서 dispatch 직전 probe가 그 워커에 대해 얻을 수 있는
+    /// **유일한** 생존 증거인데, 그 결과가 로그 한 줄로 끝나고 아무 데도 남지
+    /// 않았다 — 얻어 놓고 버린 사실이다.
+    #[tokio::test]
+    async fn a_successful_probe_is_recorded_as_liveness_evidence() {
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let before = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        assert!(
+            before.last_activity_at.is_none(),
+            "시험 전제: 아직 하트비트 밖의 증거가 없다"
+        );
+
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let selector = test_selector_with(store.clone(), breakers, Arc::new(ProbeSpy::default()));
+        selector
+            .select(&make_task("work", None, &[]))
+            .await
+            .expect("응답하는 on_demand 워커는 배정 대상이다");
+
+        let after = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        assert!(
+            after.last_activity_at.is_some(),
+            "probe가 증명한 사실이 저장소에 남지 않았다 — 그러면 운영자 화면은 \
+             등록 이후로 영영 갱신되지 않은 값을 보여 준다"
+        );
+        assert_eq!(
+            after.last_seen, before.last_seen,
+            "`last_seen`을 함께 움직이면 하트비트를 보내지 않는 워커가 보낸 것처럼 \
+             보이고, offline 유예 판정이 조용히 뜻을 잃는다"
+        );
+    }
+
+    /// 응답하지 않은 워커에는 증거를 남기지 않는다. 이 부정 단정이 없으면
+    /// "probe를 불렀다"만으로 기록하는 구현이 통과하고, 그러면 죽은 워커가
+    /// 방금 살아 있었던 것처럼 보인다.
+    #[tokio::test]
+    async fn a_failed_probe_leaves_no_evidence() {
+        let workers = vec![make_on_demand_worker("laptop", 0, &[])];
+        let store = Arc::new(MockStore::new(workers));
+        let laptop = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        let breakers = Arc::new(BreakerRegistry::new(CircuitBreakerConfig::default()));
+        let spy = ProbeSpy::silencing(&[laptop.id]);
+        let selector = test_selector_with(store.clone(), breakers, spy);
+
+        let _ = selector.select(&make_task("work", None, &[])).await;
+
+        let after = store.get_worker_by_name("laptop").await.unwrap().unwrap();
+        assert!(
+            after.last_activity_at.is_none(),
+            "답하지 않은 워커에 생존 증거를 적었다"
+        );
     }
 }

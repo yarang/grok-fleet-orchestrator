@@ -809,6 +809,14 @@ fn worker_summary(w: &fleet_core::Worker) -> Value {
         "max_agent_processes": w.max_agent_processes,
         "circuit_state": format!("{:?}", w.circuit_state).to_lowercase(),
         "last_seen": w.last_seen.map(|t| t.to_rfc3339()),
+        // 로드맵 `#61` 4단계. `last_seen`과 **다른 사실**이다 — 저쪽은 마지막
+        // 하트비트이고 이쪽은 하트비트 **밖에서** 얻은 마지막 생존 증거(오늘은
+        // dispatch 직전 probe 성공)다. `on_demand` 워커에서는 `last_seen`이 join
+        // 시점에 멈추므로 이 필드가 유일하게 움직인다. `null`은 죽었다는 뜻이
+        // 아니라 하트비트 밖의 증거를 아직 얻지 못했다는 뜻이며, `periodic`
+        // 워커는 probe를 받지 않으므로 정상 동작 중에도 계속 `null`이다.
+        "last_activity_at": w.last_activity_at.map(|t| t.to_rfc3339()),
+        "liveness_mode": w.liveness_mode.as_str(),
         "registered_at": w.registered_at.to_rfc3339(),
     })
 }

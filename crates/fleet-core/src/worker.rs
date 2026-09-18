@@ -33,6 +33,23 @@ pub struct Worker {
     /// 마지막 하트비트 수신 시각. `None`이면 한 번도 heartbeat를 받지 않음.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<DateTime<Utc>>,
+    /// 하트비트 **밖에서** 얻은 마지막 생존 증거의 시각 (로드맵 `#61` 4단계).
+    ///
+    /// 오늘 이 값을 쓰는 것은 dispatch 직전 ACP probe 성공뿐이다(`#70` 게이트 5).
+    ///
+    /// **[`last_seen`](Self::last_seen)과 뜻이 다르다.** 저쪽은 "마지막
+    /// 하트비트 수신 시각"이고 `HealthChecker`·`Reconciler`의 offline 유예
+    /// 판정이 전부 그 뜻에 기대고 있다. probe 성공을 거기에 적으면 heartbeat을
+    /// 보내지 않는 워커가 보낸 것처럼 보여 그 판정이 조용히 뜻을 잃는다.
+    ///
+    /// **`on_demand` 워커에서는 이것이 유일하게 움직이는 지표다.** 그 모드는
+    /// idle일 때 heartbeat을 보내지 않으므로 `last_seen`이 join 시점에 멈춘다.
+    ///
+    /// `None`은 "하트비트 밖의 증거를 아직 얻지 못했다"이다 — 죽었다는 뜻이
+    /// 아니다. `periodic` 워커는 probe를 받지 않으므로 정상 동작 중에도 계속
+    /// `None`이다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
     /// 현재 이 워커에서 실행 중인 작업 수.
     #[serde(default)]
     pub active_tasks: u32,
@@ -116,6 +133,9 @@ impl Worker {
             labels: HashMap::new(),
             status: WorkerStatus::Online,
             last_seen: Some(Utc::now()),
+            // 하트비트 밖의 증거는 아직 없다. `last_seen`을 복사하면 이
+            // 컬럼의 뜻이 첫 행부터 거짓이 된다.
+            last_activity_at: None,
             active_tasks: 0,
             max_concurrent: 4,
             // 생성자는 "모른다"로 둔다. 이 값을 아는 유일한 주체가 Worker
@@ -181,6 +201,17 @@ pub enum WorkerLivenessMode {
     #[default]
     Periodic,
     OnDemand,
+}
+
+impl WorkerLivenessMode {
+    /// 안정적인 텍스트 표현. `#[serde(rename_all = "snake_case")]`가 만드는
+    /// JSON 값과 같은 문자열이며, 운영자 표면(CLI·MCP)이 이 값을 쓴다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Periodic => "periodic",
+            Self::OnDemand => "on_demand",
+        }
+    }
 }
 
 /// CircuitBreaker 3상태.

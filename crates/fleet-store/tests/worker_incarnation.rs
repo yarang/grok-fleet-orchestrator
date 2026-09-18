@@ -185,3 +185,44 @@ both_backends!(bump_on_a_missing_worker_reports_none, |store| async move {
         .unwrap();
     assert!(missing.is_none());
 });
+
+// ── 하트비트 밖의 생존 증거 (로드맵 `#61` 4단계 · migration 043) ─────────
+
+both_backends!(
+    activity_and_heartbeat_are_two_separate_clocks,
+    |store| async move {
+        // `on_demand` 워커는 heartbeat을 보내지 않으므로 `last_seen`이 join
+        // 시점에 멈춘다. `record_worker_activity`가 그것을 함께 움직이면
+        // 하트비트를 보내지 않는 워커가 보낸 것처럼 보이고, `HealthChecker`와
+        // `Reconciler`의 offline 유예 판정이 조용히 뜻을 잃는다.
+        let w = seed("two-clocks");
+        store.upsert_worker(&w).await.unwrap();
+
+        let before = store.get_worker(w.id).await.unwrap().expect("worker");
+        assert!(
+            before.last_activity_at.is_none(),
+            "등록만으로 하트비트 밖의 증거가 생기면 안 된다 — 그런 왕복이 없었다"
+        );
+
+        assert!(
+            store.record_worker_activity(w.id).await.unwrap(),
+            "존재하는 워커에 대한 기록은 행을 바꿔야 한다"
+        );
+
+        let after = store.get_worker(w.id).await.unwrap().expect("worker");
+        assert!(after.last_activity_at.is_some(), "증거가 남지 않았다");
+        assert_eq!(
+            after.last_seen.map(|t| t.timestamp_micros()),
+            before.last_seen.map(|t| t.timestamp_micros()),
+            "`last_seen`이 함께 움직였다 — 그 컬럼의 뜻은 '마지막 하트비트'이고 \
+             offline 유예 판정이 전부 그 뜻에 기댄다"
+        );
+
+        // 없는 워커는 오류가 아니라 `false`다. probe에 답한 워커가 그 사이에
+        // 등록 해제된 경우이며, 호출부에게는 재시도가 아니라 기록이 옳다.
+        assert!(
+            !store.record_worker_activity(WorkerId::new()).await.unwrap(),
+            "없는 워커에 대해 `true`를 돌려주면 호출부가 기록됐다고 믿는다"
+        );
+    }
+);

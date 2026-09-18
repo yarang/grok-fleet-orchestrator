@@ -643,6 +643,18 @@ impl Store for MemStore {
         Ok(())
     }
 
+    async fn record_worker_activity(&self, id: WorkerId) -> Result<bool, StoreError> {
+        let mut workers = self.workers.lock().unwrap();
+        match workers.get_mut(&id) {
+            Some(w) => {
+                // PgStore와 같은 이유로 `last_seen`은 건드리지 않는다.
+                w.last_activity_at = Some(Utc::now());
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     async fn update_worker_heartbeat(
         &self,
         id: WorkerId,

@@ -524,6 +524,24 @@ pub trait Store: Send + Sync {
         heartbeat: &WorkerHeartbeat,
     ) -> Result<(), StoreError>;
 
+    /// 하트비트 **밖에서** 얻은 생존 증거를 기록한다 (로드맵 `#61` 4단계).
+    ///
+    /// 오늘의 유일한 호출부는 dispatch 직전 ACP probe가 성공한 자리다
+    /// (`#70` 게이트 5). 그 왕복은 워커가 **지금** 답한다는 것을 증명하는데,
+    /// 이 메서드가 생기기 전에는 그 사실이 로그 한 줄로 끝나고 아무 데도
+    /// 남지 않았다 — `on_demand` 워커는 heartbeat을 보내지 않으므로 그것이
+    /// 그 워커에 대해 얻을 수 있는 **유일한** 증거였는데도 그랬다.
+    ///
+    /// `last_seen`을 쓰지 않는 이유는 그 컬럼의 뜻이 "마지막 하트비트"이고
+    /// offline 유예 판정이 전부 그 뜻에 기대기 때문이다(043 주석 참고).
+    ///
+    /// 반환값은 행을 실제로 바꿨는지다. `false`는 그런 워커가 없다는 뜻이며,
+    /// 호출부에게 재시도가 아니라 기록이 옳은 처분이다 — probe에 답한 워커가
+    /// 그 사이에 등록 해제된 경우다.
+    async fn record_worker_activity(&self, _id: WorkerId) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("record_worker_activity"))
+    }
+
     /// 워커의 CircuitBreaker 상태 강제 갱신.
     async fn update_worker_circuit_state(
         &self,

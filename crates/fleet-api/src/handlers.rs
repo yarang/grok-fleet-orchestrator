@@ -1305,10 +1305,19 @@ fn render_worker_config_toml(params: WorkerConfigTomlParams<'_>) -> String {
     out.push_str(&format!("operational_token = \"{operational_token}\"\n"));
     out.push_str(&format!("existing_worker_id = \"{worker_id}\"\n"));
     if liveness_mode == fleet_core::WorkerLivenessMode::OnDemand {
-        // 로드맵 #61 — on_demand는 아직 스키마/모니터링 예외 처리까지만
-        // 구현되었다. dispatch 전 ACP probe(로드맵 #67 의존)가 없는 상태이므로
-        // 실제로 이 모드를 켜서 운영하는 것은 지원하지 않는다.
-        out.push_str("liveness_mode = \"on_demand\" # 로드맵 #61 3~5단계 미구현 — 아직 프로덕션에서 사용하지 말 것\n");
+        // **2026-09-18 — 이 주석이 적고 있던 경고가 낡았다.** 예전 문구는
+        // "dispatch 전 ACP probe(로드맵 #67 의존)가 없으므로 프로덕션에서 쓰지
+        // 말 것"이었는데, 그 probe는 2026-09-06에 들어왔다(`#70` 게이트 5,
+        // `WorkerSelector::select`의 8단계). 귀속도 틀렸다 — probe는 `#67`이
+        // 아니라 `#70` 소관이고 그 귀속 정정 자체가 게이트 5 행에 적혀 있다.
+        //
+        // 남은 것은 Agent 배치 제외 하나다. `placement.rs`가 `on_demand`
+        // 워커를 후보에서 빼는데, 그 근거는 liveness가 아니라 `#61`의 모드
+        // 계약이라 probe로 풀리지 않는다. 그래서 Task dispatch는 되지만 Agent는
+        // 배치되지 않으며, 그것이 지금 이 모드의 정확한 경계다.
+        out.push_str(
+            "liveness_mode = \"on_demand\" # Task dispatch는 dispatch 직전 ACP probe로 확인한다(#70 게이트 5). Agent 배치는 아직 이 모드를 제외한다(#61)\n",
+        );
     }
     if !labels.is_empty() {
         let mut sorted: Vec<_> = labels.iter().collect();
@@ -1458,6 +1467,10 @@ fn build_worker(params: NewWorkerParams<'_>, existing: Option<&Worker>) -> Worke
         labels,
         status: WorkerStatus::Online,
         last_seen: Some(now),
+        // 재등록이면 기존 값을 그대로 넘긴다 — 위 `incarnation_started_at`과
+        // 같은 이유이고, Store의 upsert도 이 컬럼을 갱신하지 않는다. 새
+        // 등록이면 하트비트 밖의 증거가 아직 없으므로 `None`이다.
+        last_activity_at: existing.and_then(|w| w.last_activity_at),
         active_tasks: 0,
         max_concurrent,
         max_agent_processes,

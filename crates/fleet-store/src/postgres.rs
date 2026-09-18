@@ -1068,7 +1068,7 @@ impl Store for PgStore {
     async fn get_worker(&self, id: WorkerId) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      last_seen, last_activity_at, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
                       incarnation_started_at, max_agent_processes
                FROM workers WHERE id = $1"#,
         )
@@ -1082,7 +1082,7 @@ impl Store for PgStore {
     async fn get_worker_by_name(&self, name: &str) -> Result<Option<Worker>, StoreError> {
         let row = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      last_seen, last_activity_at, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
                       incarnation_started_at, max_agent_processes
                FROM workers WHERE name = $1"#,
         )
@@ -1110,7 +1110,7 @@ impl Store for PgStore {
 
         let rows = sqlx::query(
             r#"SELECT id, name, endpoint, labels, status, circuit_state,
-                      last_seen, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
+                      last_seen, last_activity_at, active_tasks, max_concurrent, worker_version, liveness_mode, registered_at,
                       incarnation_started_at, max_agent_processes
                FROM workers
               WHERE ($1::text IS NULL OR status = $1)
@@ -1137,6 +1137,16 @@ impl Store for PgStore {
             return Err(StoreError::NotFound);
         }
         Ok(())
+    }
+
+    async fn record_worker_activity(&self, id: WorkerId) -> Result<bool, StoreError> {
+        // `last_seen`은 건드리지 않는다 — 그 컬럼의 뜻은 "마지막 하트비트"이고
+        // offline 유예 판정이 전부 그 뜻에 기댄다(043 주석).
+        let result = sqlx::query("UPDATE workers SET last_activity_at = NOW() WHERE id = $1")
+            .bind(id.as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     async fn update_worker_heartbeat(
@@ -4215,6 +4225,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
     let status_str: String = row.try_get("status")?;
     let circuit_str: String = row.try_get("circuit_state")?;
     let last_seen = row.try_get("last_seen")?;
+    let last_activity_at = row.try_get("last_activity_at")?;
     let active_tasks: i32 = row.try_get("active_tasks")?;
     let max_concurrent: i32 = row.try_get("max_concurrent")?;
     let worker_version: Option<String> = row.try_get("worker_version")?;
@@ -4232,6 +4243,7 @@ fn row_to_worker(row: sqlx::postgres::PgRow) -> Result<Worker, StoreError> {
         labels,
         status: str_to_worker_status(&status_str)?,
         last_seen,
+        last_activity_at,
         active_tasks: active_tasks as u32,
         max_concurrent: max_concurrent as u32,
         max_agent_processes: max_agent_processes.map(|n| n as u32),

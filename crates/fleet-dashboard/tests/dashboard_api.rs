@@ -300,6 +300,7 @@ fn sample_worker(name: &str, status: WorkerStatus) -> Worker {
         max_agent_processes: None,
         circuit_state: fleet_core::CircuitState::Closed,
         last_seen: None,
+        last_activity_at: None,
         worker_version: None,
         liveness_mode: fleet_core::WorkerLivenessMode::Periodic,
         registered_at: chrono::Utc::now(),

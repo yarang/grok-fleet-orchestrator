@@ -1315,6 +1315,17 @@ async fn run_workers_show(name: &str) -> Result<()> {
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "(never)".into())
     );
+    // 로드맵 `#61` 4단계. `on_demand` 워커는 LAST_SEEN이 join 시점에 멈추므로
+    // 이 줄이 없으면 그 워커에 대해 화면이 보여 주는 생존 정보가 등록 이후로
+    // 영영 갱신되지 않는다.
+    println!(
+        "{:<20} {}",
+        "LAST_ACTIVITY:",
+        w.last_activity_at
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "(no evidence outside heartbeat)".into())
+    );
+    println!("{:<20} {}", "LIVENESS_MODE:", w.liveness_mode.as_str());
     println!("{:<20} {}", "REGISTERED_AT:", w.registered_at.to_rfc3339());
     println!("{:<20} {:?}", "LABELS:", w.labels);
     Ok(())
