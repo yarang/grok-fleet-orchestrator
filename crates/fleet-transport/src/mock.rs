@@ -78,6 +78,13 @@ struct Inner {
     /// 테스트는 그 배포를 재현해야 한다. 기본을 `Reported(vec![])`로 두면
     /// "인벤토리가 없는 배포"라는 가장 흔한 경우가 시험에서 사라진다.
     session_inventories: HashMap<WorkerId, SessionInventory>,
+    /// 받은 `dispatch` 요청을 순서대로 기록한다.
+    ///
+    /// **프롬프트가 무엇이었는지를 시험이 볼 유일한 창이다** (로드맵 `#65`).
+    /// 하네스 조립(Project 규칙·Skill 인젝션)의 결과는 이 요청 안에만 있고
+    /// 어디에도 저장되지 않으므로, 적어 두지 않으면 "무엇을 보냈는가"를
+    /// 단정할 방법이 없다.
+    dispatches: Vec<DispatchRequest>,
     /// 받은 `cancel` 요청을 순서대로 기록한다.
     ///
     /// 취소는 **notification이라 결과가 상태에 남지 않는다** — mock이 이것을
@@ -107,6 +114,7 @@ impl MockTransport {
             probe_failures: HashMap::new(),
             probe_answers_with_error: std::collections::HashSet::new(),
             session_inventories: HashMap::new(),
+            dispatches: Vec::new(),
             cancels: Vec::new(),
         };
         Self {
@@ -149,6 +157,11 @@ impl MockTransport {
             .await
             .session_inventories
             .insert(worker_id, inventory);
+    }
+
+    /// 지금까지 받은 `dispatch` 요청을 순서대로 돌려준다.
+    pub async fn dispatch_requests(&self) -> Vec<DispatchRequest> {
+        self.inner.lock().await.dispatches.clone()
     }
 
     /// 지금까지 받은 `cancel` 요청을 순서대로 돌려준다.
@@ -228,6 +241,7 @@ impl WorkerTransport for MockTransport {
 
         {
             let mut guard = self.inner.lock().await;
+            guard.dispatches.push(req.clone());
 
             // 명시적으로 clone해서 borrow를 짧게 유지
             let worker_opt = guard.workers.get(&req.worker_id).cloned();

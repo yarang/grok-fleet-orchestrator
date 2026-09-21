@@ -792,6 +792,7 @@ mod tests {
                 "invalid_request",
                 "result_lost",
                 "execution_vanished",
+                "skill_missing",
             ]),
             "type" => Some(&["input", "output", "cache_read", "total"]),
             _ => None,

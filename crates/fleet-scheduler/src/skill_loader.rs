@@ -87,38 +87,67 @@ fn load_skill(skills_dir: &Path, name: &str) -> Option<String> {
     }
 }
 
-/// `skills_required` 목록에서 유효한 스킬을 로드하여 원래 프롬프트 앞에
-/// 인젝션한 새 프롬프트를 반환합니다 (디렉토리 명시 버전, 테스트 / 고급 사용).
+/// 스킬 조립 결과 (로드맵 `#65`).
 ///
-/// 로드할 스킬이 없거나 스킬 파일이 존재하지 않으면 원래 `prompt`를 그대로 반환합니다.
+/// **누락을 값으로 돌려주는 것이 이 타입의 존재 이유다.** 예전 시그니처는
+/// `-> String`이었고 누락된 스킬은 `warn!` 한 줄로 흘려보냈다. 그래서 호출부에는
+/// 거절할 방법이 **원리적으로 없었고**, `skills_required`라는 이름이 강제되지
+/// 않는 장식이었다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInjection {
+    /// 스킬 블록이 앞에 붙은 프롬프트. 누락이 있어도 조립은 해 둔다 —
+    /// 거절 여부는 호출부의 판단이고, 이 함수는 사실만 돌려준다.
+    pub prompt: String,
+    /// 요청됐지만 **로드하지 못한** 스킬 이름. 파일이 없거나, 읽을 수 없거나,
+    /// 이름에 경로 구분자가 들어 있어 거부된 경우다.
+    pub missing: Vec<String>,
+}
+
+impl SkillInjection {
+    /// 요청된 스킬이 전부 로드됐는지.
+    pub fn is_complete(&self) -> bool {
+        self.missing.is_empty()
+    }
+}
+
+/// `skills_required` 목록을 로드해 프롬프트 앞에 인젝션한다
+/// (디렉토리 명시 버전, 테스트 / 고급 사용).
+///
+/// 누락된 스킬은 [`SkillInjection::missing`]에 담아 돌려준다. **여기서
+/// 거절하지 않는 이유**는 이 함수가 파일시스템만 아는 순수 조립기이기
+/// 때문이다 — 거절은 Task 상태 전이를 동반하므로 `Dispatcher`의 일이다.
 pub fn inject_skills_from_dir(
     prompt: &str,
     skills_required: &[String],
     skills_dir: &Path,
-) -> String {
+) -> SkillInjection {
     if skills_required.is_empty() {
-        return prompt.to_string();
+        return SkillInjection {
+            prompt: prompt.to_string(),
+            missing: Vec::new(),
+        };
     }
     let mut blocks = Vec::new();
+    let mut missing = Vec::new();
     for skill in skills_required {
-        if let Some(body) = load_skill(skills_dir, skill) {
-            blocks.push(format!("<SKILL: {skill}>\n{body}\n</SKILL>"));
+        match load_skill(skills_dir, skill) {
+            Some(body) => blocks.push(format!("<SKILL: {skill}>\n{body}\n</SKILL>")),
+            None => missing.push(skill.clone()),
         }
     }
-    if blocks.is_empty() {
-        return prompt.to_string();
-    }
-    format!("{}\n\n<TASK>\n{}\n</TASK>", blocks.join("\n\n"), prompt)
+    let prompt = if blocks.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{}\n\n<TASK>\n{}\n</TASK>", blocks.join("\n\n"), prompt)
+    };
+    SkillInjection { prompt, missing }
 }
 
-/// `skills_required` 목록에서 유효한 스킬을 로드하여 원래 프롬프트 앞에
-/// 인젝션한 새 프롬프트를 반환합니다.
+/// `skills_required` 목록을 로드해 프롬프트 앞에 인젝션한다.
 ///
-/// 스킬 디렉토리는 `FLEET_SKILLS_DIR` 환경 변수 또는 `~/.config/grok-fleet/skills/`
-/// 기본 경로를 사용합니다.
-///
-/// 로드할 스킬이 없거나 스킬 파일이 존재하지 않으면 원래 `prompt`를 그대로 반환합니다.
-pub fn inject_skills(prompt: &str, skills_required: &[String]) -> String {
+/// 스킬 디렉토리는 `FLEET_SKILLS_DIR` 환경 변수 또는
+/// `~/.config/grok-fleet/skills/` 기본 경로를 사용합니다.
+pub fn inject_skills(prompt: &str, skills_required: &[String]) -> SkillInjection {
     inject_skills_from_dir(prompt, skills_required, &default_skills_dir())
 }
 
@@ -140,15 +169,49 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let prompt = "build the project";
         let result = inject_skills_from_dir(prompt, &[], tmp.path());
-        assert_eq!(result, prompt);
+        assert_eq!(result.prompt, prompt);
+        assert!(result.is_complete(), "요청한 스킬이 없으면 누락도 없다");
     }
 
+    /// **누락이 값으로 나온다** (로드맵 `#65`).
+    ///
+    /// 예전 이름은 `missing_skill_file_returns_original_prompt`였고 단정도
+    /// "원래 프롬프트를 그대로 돌려준다" 하나뿐이었다. 그 단정은 지금도
+    /// 참이지만 **그것만으로는 부족하다** — 호출부가 거절하려면 누락이
+    /// 반환값에 있어야 하고, 예전 시그니처에는 그것을 실을 자리가 없었다.
     #[test]
-    fn missing_skill_file_returns_original_prompt() {
+    fn a_missing_skill_is_reported_not_swallowed() {
         let tmp = TempDir::new().unwrap();
         let prompt = "audit the code";
         let result = inject_skills_from_dir(prompt, &["nonexistent-skill".to_string()], tmp.path());
-        assert_eq!(result, prompt);
+        assert_eq!(result.prompt, prompt);
+        assert!(!result.is_complete());
+        assert_eq!(result.missing, vec!["nonexistent-skill".to_string()]);
+    }
+
+    /// 일부만 있는 경우에도 **있는 것은 붙이고 없는 것은 보고한다.**
+    /// 조립기는 사실만 돌려주고 거절은 `Dispatcher`가 한다.
+    #[test]
+    fn a_partial_load_reports_only_what_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        setup_skill(&tmp, "present", "I am here.");
+        let result = inject_skills_from_dir(
+            "work",
+            &["present".to_string(), "absent".to_string()],
+            tmp.path(),
+        );
+        assert!(result.prompt.contains("<SKILL: present>"));
+        assert_eq!(result.missing, vec!["absent".to_string()]);
+    }
+
+    /// 경로 우회 시도는 **누락으로 보고된다** — 조용히 건너뛰면 그 Task가
+    /// 스킬 없이 실행되고, 이름이 수상했다는 사실조차 남지 않는다.
+    #[test]
+    fn a_path_traversal_name_is_reported_as_missing() {
+        let tmp = TempDir::new().unwrap();
+        let result = inject_skills_from_dir("work", &["../../etc/passwd".to_string()], tmp.path());
+        assert_eq!(result.prompt, "work");
+        assert_eq!(result.missing, vec!["../../etc/passwd".to_string()]);
     }
 
     #[test]
@@ -159,11 +222,11 @@ mod tests {
         let prompt = "refactor this code";
         let result = inject_skills_from_dir(prompt, &["rust-expert".to_string()], tmp.path());
 
-        assert!(result.contains("<SKILL: rust-expert>"));
-        assert!(result.contains("You are a Rust expert."));
-        assert!(result.contains("<TASK>"));
-        assert!(result.contains("refactor this code"));
-        assert!(result.find("<SKILL").unwrap() < result.find("<TASK>").unwrap());
+        assert!(result.prompt.contains("<SKILL: rust-expert>"));
+        assert!(result.prompt.contains("You are a Rust expert."));
+        assert!(result.prompt.contains("<TASK>"));
+        assert!(result.prompt.contains("refactor this code"));
+        assert!(result.prompt.find("<SKILL").unwrap() < result.prompt.find("<TASK>").unwrap());
     }
 
     #[test]
@@ -179,10 +242,10 @@ mod tests {
         let result = inject_skills_from_dir(prompt, &["sec-audit".to_string()], tmp.path());
 
         assert!(
-            !result.contains("name: sec-audit"),
+            !result.prompt.contains("name: sec-audit"),
             "frontmatter should be stripped"
         );
-        assert!(result.contains("You are a security auditor."));
+        assert!(result.prompt.contains("You are a security auditor."));
     }
 
     #[test]
@@ -190,7 +253,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let prompt = "do something";
         let result = inject_skills_from_dir(prompt, &["../etc/passwd".to_string()], tmp.path());
-        assert_eq!(result, prompt);
+        assert_eq!(result.prompt, prompt);
+        assert!(
+            !result.is_complete(),
+            "거부한 이름을 '로드 성공'으로 접으면 그 Task가 스킬 없이 나간다"
+        );
     }
 
     #[test]
@@ -206,9 +273,9 @@ mod tests {
             tmp.path(),
         );
 
-        assert!(result.contains("<SKILL: skill-a>"));
-        assert!(result.contains("<SKILL: skill-b>"));
-        assert!(result.contains("Skill A content."));
-        assert!(result.contains("Skill B content."));
+        assert!(result.prompt.contains("<SKILL: skill-a>"));
+        assert!(result.prompt.contains("<SKILL: skill-b>"));
+        assert!(result.prompt.contains("Skill A content."));
+        assert!(result.prompt.contains("Skill B content."));
     }
 }

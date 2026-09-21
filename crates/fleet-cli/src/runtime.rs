@@ -1554,12 +1554,19 @@ async fn run_tasks_submit(
 ) -> Result<()> {
     let store = connect_and_migrate(2).await?;
 
-    // 스킬 주입: skills 목록이 비어 있으면 prompt를 그대로 사용.
-    let final_prompt = if skills.is_empty() {
-        prompt.clone()
-    } else {
-        fleet_scheduler::skill_loader::inject_skills(&prompt, &skills)
-    };
+    // **여기서 스킬을 주입하지 않는다** (로드맵 `#65`).
+    //
+    // 예전에는 이 자리에서 `inject_skills`를 부른 **조립된** 프롬프트를
+    // 저장하면서 `skills_required`도 함께 저장했다. 그런데 dispatch 경로가
+    // 저장된 `skills_required`를 보고 **다시** 주입하므로, `fleet task submit
+    // --skill X`로 들어온 Task는 같은 스킬 본문을 두 번 실은 채, `<TASK>`가
+    // 중첩된 프롬프트로 워커에 갔다.
+    //
+    // 정본([하네스 구성](../../docs/architecture/agents/harness-composition.md))은
+    // 하네스를 "**실행 직전에** 하나의 immutable snapshot으로 조립한다"고
+    // 적는다. 조립 지점은 하나여야 하고 그 자리는 dispatch다 — 제출 시점에
+    // 구우면 그 뒤에 스킬 파일이 바뀌어도 낡은 사본이 실행되고, 저장된
+    // `prompt`가 사용자가 쓴 것과 달라져 재실행 입력 동일성도 깨진다.
 
     let task_priority = match priority.to_lowercase().as_str() {
         "low" => fleet_core::TaskPriority::Low,
@@ -1573,7 +1580,7 @@ async fn run_tasks_submit(
         .context("project_id must be a UUID")?;
 
     let task = fleet_core::Task::from_request(fleet_core::TaskRequest {
-        prompt: final_prompt,
+        prompt,
         cwd: cwd.filter(|s| !s.is_empty()),
         model: model.filter(|s| !s.is_empty()),
         server_hint: server_hint.filter(|s| !s.is_empty()),

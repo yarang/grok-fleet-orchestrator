@@ -1055,6 +1055,57 @@ impl Dispatcher {
             return Err(e);
         }
 
+        // 4.7. 하네스 조립 — 프롬프트 + 필수 Skill (로드맵 `#65`).
+        //
+        // **CAS 앞이다.** 정본([하네스 구성](../../docs/architecture/agents/
+        // harness-composition.md))은 "필수 Skill은 시작 전에 고정하고 누락 시
+        // 실행을 거절한다"고 적는데, 예전에는 조립이 CAS **뒤**에 있었고
+        // 누락은 `warn!` 한 줄이었다. 그래서 선언된 Skill 없이 실행이 나갔고,
+        // 거절하려 해도 Task는 이미 `Dispatched`였다.
+        //
+        // 조립을 한 번만 하는 것도 의도다. "먼저 존재를 확인하고 나중에
+        // 읽는다"로 나누면 그 사이에 파일이 사라질 수 있고, 그러면 확인을
+        // 통과한 Task가 스킬 없이 나간다 — 확인이 무의미해지는 창이다.
+        let base_prompt = if task.parent_task_id.is_some() {
+            self.build_threaded_prompt(&task).await
+        } else {
+            task.prompt.clone()
+        };
+        let harness = inject_skills(&base_prompt, &task.skills_required);
+        if !harness.is_complete() {
+            warn!(
+                %task_id, missing = ?harness.missing,
+                "dispatch refused — a required skill could not be loaded"
+            );
+            if mark_unavailable_as_failed {
+                let failure = TaskFailure {
+                    error: format!(
+                        "required skill(s) not available on the orchestrator: {}",
+                        harness.missing.join(", ")
+                    ),
+                    kind: FailureKind::SkillMissing,
+                    worker_id: Some(worker_id),
+                    attempts: 0,
+                };
+                // 아직 `Pending`이다 — 워커에 보내지 않았다.
+                self.mark_failed(
+                    task_id,
+                    &[TaskPhase::Pending],
+                    failure,
+                    TransitionOrigin::ControlDecision,
+                )
+                .await;
+            }
+            // **브레이커에 기록하지 않는다.** 워커는 이 요청을 본 적이 없고,
+            // 스킬이 없는 것은 오케스트레이터 쪽 사실이다. 여기서 기록하면
+            // 스킬 하나가 빠진 것만으로 멀쩡한 워커의 회로가 열린다 —
+            // `#69`가 `InvalidRequest`를 브레이커에서 면제한 것과 같은 이유다.
+            return Err(DispatchError::SkillMissing {
+                task_id,
+                missing: harness.missing,
+            });
+        }
+
         // 5. Dispatched 상태로 전이
         task.status = TaskStatus::Dispatched {
             worker_id,
@@ -1129,14 +1180,8 @@ impl Dispatcher {
             .append_event(&FleetEvent::task_dispatched(task_id, worker_id))
             .await;
 
-        // 6. Transport로 dispatch
-        let base_prompt = if task.parent_task_id.is_some() {
-            self.build_threaded_prompt(&task).await
-        } else {
-            task.prompt.clone()
-        };
-        // 스킬 로더: skills_required에 지정된 스킬 파일을 로드해 프롬프트 앞에 인젝션.
-        let prompt = inject_skills(&base_prompt, &task.skills_required);
+        // 6. Transport로 dispatch. 프롬프트는 위 4.7에서 이미 조립됐다.
+        let prompt = harness.prompt;
         let req = DispatchRequest {
             task_id,
             worker_id,
@@ -1639,6 +1684,18 @@ pub enum DispatchError {
     /// 워커에 대해 아직 아무것도 모른다"이다.
     #[error("worker {0} has not been recovered yet — its session inventory could not be read")]
     RecoveryUnavailable(WorkerId),
+
+    /// Task가 필수로 선언한 Skill을 조립 시점에 로드하지 못했다
+    /// (로드맵 `#65`).
+    ///
+    /// 재시도해도 같은 결과다 — 오케스트레이터에 그 Skill 파일을 배포해야
+    /// 해소된다. [`NoWorker`](Self::NoWorker)와 달리 워커 가용성 문제가
+    /// 아니므로 다른 워커로 옮겨도 소용이 없다.
+    #[error("task {task_id} requires skill(s) that could not be loaded: {}", missing.join(", "))]
+    SkillMissing {
+        task_id: TaskId,
+        missing: Vec<String>,
+    },
 
     #[error("transport error: {0}")]
     Transport(String),
@@ -3320,5 +3377,121 @@ mod tests {
             "무엇을 근거로 통과시켰는지가 기록에 남아야 한다 — 이 fleet에서 \
              게이트가 실질적으로 비어 있다는 사실이 그 기록이다"
         );
+    }
+
+    // ── 필수 Skill 누락 거절 (로드맵 `#65` 게이트 1) ──────────────────────
+    //
+    // 정본([하네스 구성](../../docs/architecture/agents/harness-composition.md))은
+    // "필수 Skill은 시작 전에 고정하고 **누락 시 실행을 거절한다**"고 적는다.
+    // 예전 구현은 정반대였다 — 없으면 `warn!` 한 줄 찍고 건너뛰어, Task가
+    // 선언한 Skill 없이 그대로 실행됐다. `skills_required`라는 이름이 강제되지
+    // 않는 장식이었다.
+    //
+    // 두 시험 모두 `FLEET_SKILLS_DIR`을 쓴다. env var는 프로세스 전역이라
+    // 병렬 실행에서 서로를 덮는데, CI와 로컬 게이트가 둘 다
+    // `--test-threads=1`을 쓰므로(§agent.md 3.2) 이 파일 안에서는 안전하다.
+
+    #[tokio::test]
+    async fn a_task_missing_its_required_skill_is_never_dispatched() {
+        let skills = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FLEET_SKILLS_DIR", skills.path());
+
+        let (state, dispatcher, mock, _worker) = setup_one_registered_worker().await;
+        let mut task = sample_task();
+        task.skills_required = vec!["security-audit".into()];
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+
+        let err = dispatcher
+            .dispatch_existing(task, false)
+            .await
+            .expect_err("선언된 Skill이 없으면 실행이 나가면 안 된다");
+        match err {
+            DispatchError::SkillMissing { missing, .. } => {
+                assert_eq!(missing, vec!["security-audit".to_string()])
+            }
+            other => panic!("기대와 다름: {other:?}"),
+        }
+
+        // **워커에 아무것도 가지 않았다**는 것이 이 시험의 핵심이다.
+        assert!(
+            mock.dispatch_requests().await.is_empty(),
+            "스킬 없이 실행이 나갔다 — 거절이 성립하지 않은 것이다"
+        );
+        // 그리고 Task는 여전히 `Pending`이다. `Dispatched`로 옮긴 뒤 거절하면
+        // 아무도 소유하지 않는 실행 상태가 남는다.
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(
+            matches!(stored.status, TaskStatus::Pending),
+            "받은 값 {:?}",
+            stored.status
+        );
+
+        std::env::remove_var("FLEET_SKILLS_DIR");
+    }
+
+    /// 대조군. 위 시험만 있으면 **모든** dispatch를 거절하는 구현도 통과한다.
+    /// 여기서는 스킬이 실제로 프롬프트에 실려 나갔는지까지 본다.
+    #[tokio::test]
+    async fn a_task_whose_skill_is_present_is_dispatched_with_it() {
+        let skills = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            skills.path().join("security-audit.md"),
+            "You are a security auditor.",
+        )
+        .unwrap();
+        std::env::set_var("FLEET_SKILLS_DIR", skills.path());
+
+        let (state, dispatcher, mock, _worker) = setup_one_registered_worker().await;
+        let mut task = sample_task();
+        task.skills_required = vec!["security-audit".into()];
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .dispatch_existing(task, false)
+            .await
+            .expect("스킬이 있으면 dispatch는 나가야 한다");
+
+        let sent = mock.dispatch_requests().await;
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].prompt.contains("<SKILL: security-audit>")
+                && sent[0].prompt.contains("You are a security auditor."),
+            "조립된 프롬프트에 스킬 본문이 없다 — 받은 값 {:?}",
+            sent[0].prompt
+        );
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert!(matches!(stored.status, TaskStatus::Dispatched { .. }));
+
+        std::env::remove_var("FLEET_SKILLS_DIR");
+    }
+
+    /// 거절이 **워커의 회로를 열지 않는다.**
+    ///
+    /// 스킬이 없는 것은 오케스트레이터 쪽 사실이고 워커는 이 요청을 본 적이
+    /// 없다. 여기서 브레이커에 기록하면 스킬 하나가 빠진 것만으로 멀쩡한
+    /// 워커가 후보에서 빠지고, 클라이언트가 그 Task를 반복 제출하는 것만으로
+    /// 회로를 열 수 있다 — `#69`가 `InvalidRequest`를 면제한 것과 같은 이유다.
+    #[tokio::test]
+    async fn a_missing_skill_does_not_open_the_workers_circuit() {
+        let skills = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FLEET_SKILLS_DIR", skills.path());
+
+        let (state, dispatcher, _mock, worker) = setup_one_registered_worker().await;
+        for _ in 0..10 {
+            let mut task = sample_task();
+            task.skills_required = vec!["absent".into()];
+            state.store.insert_task(&task).await.unwrap();
+            let _ = dispatcher.dispatch_existing(task, false).await;
+        }
+
+        assert!(
+            !circuit_opened(state.store.as_ref(), worker.id).await,
+            "요청 쪽 결함이 워커의 건강도로 기록됐다"
+        );
+
+        std::env::remove_var("FLEET_SKILLS_DIR");
     }
 }

@@ -882,13 +882,27 @@ pub enum FailureKind {
     /// 일어나지 않고, 그 경우 같은 Task는 기존 경로대로 `Dispatched`에
     /// 남거나 워커 상태로 회수된다.
     ExecutionVanished,
+    /// Task가 **필수로 선언한 Skill**을 조립 시점에 로드하지 못해 워커에
+    /// 보내지 않았다 (로드맵 `#65`).
+    ///
+    /// **`InvalidRequest`와 구분하는 이유는 해소 방법이 다르기 때문이다.**
+    /// 저쪽은 요청 자체가 규칙을 어겨 요청을 고쳐 다시 제출하는 것 말고는
+    /// 길이 없지만, 이쪽의 요청은 멀쩡하다 — 오케스트레이터에 그 Skill 파일이
+    /// 없을 뿐이고, 프로비저닝하면 같은 요청이 그대로 통과한다.
+    /// [`CredentialMissing`](Self::CredentialMissing)과 같은 계열이며
+    /// (원인이 워커의 건강도가 아니라 dispatch 전제에 있다) 그쪽이 credential
+    /// 배포를 요구하듯 이쪽은 Skill 파일 배포를 요구한다.
+    ///
+    /// **`WorkerError`로 뭉치면 운영자가 워커 로그를 뒤진다** — 그 로그에는
+    /// 이 Task의 흔적이 아예 없다. 워커는 이 요청을 본 적이 없기 때문이다.
+    SkillMissing,
 }
 
 impl FailureKind {
     /// 모든 variant를 순서대로 나열 — metric label 등 전량 순회가 필요한
     /// 곳에서 사용(새 variant 추가를 컴파일러가 강제하도록 이 배열도 함께
     /// 갱신해야 한다).
-    pub const ALL: [FailureKind; 7] = [
+    pub const ALL: [FailureKind; 8] = [
         FailureKind::WorkerUnavailable,
         FailureKind::WorkerError,
         FailureKind::CircuitOpen,
@@ -896,6 +910,7 @@ impl FailureKind {
         FailureKind::InvalidRequest,
         FailureKind::ResultLost,
         FailureKind::ExecutionVanished,
+        FailureKind::SkillMissing,
     ];
 
     /// Prometheus label 등 안정적인 텍스트 표현이 필요한 곳에서 사용.
@@ -910,6 +925,7 @@ impl FailureKind {
             Self::InvalidRequest => "invalid_request",
             Self::ResultLost => "result_lost",
             Self::ExecutionVanished => "execution_vanished",
+            Self::SkillMissing => "skill_missing",
         }
     }
 }
