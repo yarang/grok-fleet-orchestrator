@@ -357,6 +357,26 @@ pub trait Store: Send + Sync {
         Err(StoreError::Unsupported("record_task_acp_session"))
     }
 
+    /// 조립 시점에 실제로 실린 Skill의 신원을 Task 행에 기록한다
+    /// (로드맵 `#65` 게이트 2).
+    ///
+    /// [`record_task_acp_session`](Self::record_task_acp_session)과 같은 구조다 —
+    /// **비어 있을 때만 쓰고**, `fence`가 있으면 같은 문장 안에 건다. 덮어쓰기를
+    /// 막는 근거도 같다: 무재시도 정책(`#97`) 아래에서 Task당 실행이 하나뿐이라
+    /// 서로 다른 두 조립 결과가 같은 행에 도착하는 일은 일어나면 안 되고,
+    /// 허용하면 그 위반이 조용히 지나간다.
+    ///
+    /// **빈 슬라이스도 기록한다.** `[]`는 "조립했고 Skill이 없었다"는 사실이며
+    /// `NULL`("조립 기록이 없다")과 다르다.
+    async fn record_task_skill_snapshot(
+        &self,
+        _id: TaskId,
+        _snapshot: &[fleet_core::SkillSnapshotEntry],
+        _fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Unsupported("record_task_skill_snapshot"))
+    }
+
     /// ACP 세션 id로 그 세션을 연 Task를 찾는다 (로드맵 `#70` 게이트 2·7).
     ///
     /// `record_task_acp_session`의 **역방향**이다. 저쪽이 "이 Task가 어느

@@ -422,7 +422,8 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id,
+                      skill_snapshot
                FROM tasks WHERE created_by = $1 AND idempotency_key = $2"#,
         )
         .bind(&task.created_by)
@@ -456,7 +457,8 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id,
+                      skill_snapshot
                FROM tasks WHERE id = $1"#,
         )
         .bind(id.as_uuid())
@@ -472,7 +474,8 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id,
+                      skill_snapshot
                FROM tasks WHERE thread_id = $1 ORDER BY created_at ASC"#,
         )
         .bind(thread_id.as_uuid())
@@ -713,6 +716,47 @@ impl Store for PgStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn record_task_skill_snapshot(
+        &self,
+        id: TaskId,
+        snapshot: &[fleet_core::SkillSnapshotEntry],
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // `record_task_acp_session`과 같은 구조다: 비어 있을 때만 쓰고, fence를
+        // **같은 문장 안에** 건다. 덮어쓰기를 막는 이유도 같다 — 한 Task에는
+        // 실행이 하나뿐이므로(`#97`) 서로 다른 두 조립 결과가 같은 행에
+        // 도착하는 일은 일어나면 안 되고, 허용하면 그 위반이 조용히 지나간다.
+        let value = serde_json::to_value(snapshot)
+            .map_err(|e| StoreError::Decode(format!("skill snapshot: {e}")))?;
+        let result = match fence {
+            Some(f) => {
+                sqlx::query(
+                    "UPDATE tasks SET skill_snapshot = $2 \
+                     WHERE id = $1 AND skill_snapshot IS NULL \
+                       AND EXISTS (SELECT 1 FROM control_plane_lease \
+                                   WHERE cluster_id = $3 AND epoch = $4)",
+                )
+                .bind(id.as_uuid())
+                .bind(&value)
+                .bind(f.cluster_id.as_str())
+                .bind(f.epoch)
+                .execute(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE tasks SET skill_snapshot = $2 \
+                     WHERE id = $1 AND skill_snapshot IS NULL",
+                )
+                .bind(id.as_uuid())
+                .bind(&value)
+                .execute(&self.pool)
+                .await?
+            }
+        };
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn find_task_by_acp_session(&self, session_id: &str) -> Result<Option<Task>, StoreError> {
         // `041`의 부분 인덱스(`idx_tasks_acp_session ... WHERE acp_session_id
         // IS NOT NULL`)를 그대로 탄다. 새 인덱스를 만들지 않은 이유는 그
@@ -722,7 +766,8 @@ impl Store for PgStore {
                       max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                       thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                       requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id,
+                      skill_snapshot
                FROM tasks WHERE acp_session_id = $1"#,
         )
         .bind(session_id)
@@ -819,7 +864,8 @@ impl Store for PgStore {
                           max_turns, timeout_secs, created_at, created_by, priority, status, dispatched_at,
                           thread_id, parent_task_id, project_id, retry_count, dependency_ids, checkpoint_branch, skills_required,
                           requested_profile, resolved_model, token_budget, partial_output,
-                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id
+                      idempotency_key, idempotency_payload_hash, dispatch_control_epoch, agent_id, acp_session_id,
+                      skill_snapshot
                    FROM tasks"#;
 
         // 자리 번호는 상수에 넣지 않는다. 예전에는 `$1`이 상수 안에 박혀 있었고,
@@ -4163,6 +4209,15 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
     let status_json: serde_json::Value = row.try_get("status")?;
     let dispatched_at: Option<DateTime<Utc>> = row.try_get("dispatched_at")?;
     let acp_session_id: Option<String> = row.try_get("acp_session_id")?;
+    // `NULL`과 `[]`를 가른다 — 앞은 "조립 기록이 없다", 뒤는 "조립했고
+    // Skill이 없었다"이며 044 주석이 적은 대로 다른 사실이다.
+    let skill_snapshot: Option<serde_json::Value> = row.try_get("skill_snapshot")?;
+    let skill_snapshot = match skill_snapshot {
+        Some(v) => Some(serde_json::from_value(v).map_err(|e| {
+            StoreError::Decode(format!("tasks.skill_snapshot is not a skill list: {e}"))
+        })?),
+        None => None,
+    };
     let thread_id: Uuid = row.try_get("thread_id")?;
     let parent_task_id: Option<Uuid> = row.try_get("parent_task_id")?;
     let project_id: Option<Uuid> = row.try_get("project_id")?;
@@ -4200,6 +4255,7 @@ fn row_to_task(row: sqlx::postgres::PgRow) -> Result<Task, StoreError> {
         status,
         dispatched_at,
         acp_session_id,
+        skill_snapshot,
         thread_id: TaskId::from(thread_id),
         parent_task_id: parent_task_id.map(TaskId::from),
         project_id: project_id.map(fleet_core::ProjectId::from),

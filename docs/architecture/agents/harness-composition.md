@@ -4,7 +4,7 @@ authority: canonical
 implementation: partial
 verification: design-reviewed
 source: "docs/architecture/agents/harness-composition.md"
-last_verified: "2026-09-21"
+last_verified: "2026-09-22"
 last_verified_commit: "working-tree"
 ---
 
@@ -36,9 +36,30 @@ Skill, tool, runtime revision 중 하나가 바뀌면 실행 중인 Task를 변�
 | 게이트 | 상태 | 근거 / 막고 있는 것 |
 | --- | --- | --- |
 | 1. 필수 Skill 누락 거절 | **닫힘** | `Dispatcher::dispatch_existing`의 4.7단계가 CAS **앞에서** 하네스를 조립하고, `SkillInjection::missing`이 비어 있지 않으면 `Failed(SkillMissing)`로 거절한다. 시험 3건(거절·대조군·브레이커 면제)이며 구별력을 실측했다 |
-| 2. revision 재현 | 차단 | 스킬의 revision/hash를 Task 행에 남기는 자리가 없다. `tasks`에 execution snapshot 컬럼이 없고, 지금 남는 것은 `skills_required`라는 **이름 목록**뿐이라 "그때 무엇이 실행됐는가"를 재구성할 수 없다 |
+| 2. revision 재현 | **닫힘** | `044`가 `tasks.skill_snapshot`(JSONB)을 만들고, dispatch가 조립한 본문의 sha256을 `Store::record_task_skill_snapshot`으로 **한 번만** 쓴다(`record_task_acp_session`과 같은 write-once + fence 구조). `NULL`("조립 기록 없음")과 `[]`("조립했고 Skill 없음")을 가르며 시험이 두 백엔드에서 그것을 단정한다. `fleet task show`가 이름·해시·바이트를 낸다 |
 | 3. prompt-injection이 권한을 올리지 못함 | 차단 | 스킬 본문은 `<SKILL: name>`…`</SKILL>`로 감싸기만 하고 **본문 안의 같은 태그를 이스케이프하지 않는다**. 다만 이 파일들은 운영자가 오케스트레이터에 배포하는 것이라 오늘의 위협 모델에서 신뢰 경계 **안**이다. 사용자 입력이 스킬이 되는 경로가 생기면 그때 강제가 필요하다 |
 | 4. 재시도 snapshot 동일성 | 사실상 해당 없음 | 무재시도 정책(`#97`) 아래에서 Task당 실행이 최대 하나라 "재시도 간 동일성"을 가를 두 번째 실행이 존재하지 않는다. 게이트 2가 닫히면 이 칸은 그 문장으로 대체돼야 한다 |
+
+**2026-09-22 — 게이트 2가 닫혔다. 이름은 신원이 아니다.**
+`skills_required`는 **이름 목록**이고, 이름은 그때 무엇이 실행됐는지를 말해 주지 않는다 —
+같은 `security-audit`라도 어제의 본문과 오늘의 본문이 다르면 다른 실행이며, 파일은
+오케스트레이터의 디스크에 있어 언제든 바뀐다. `044`의 `tasks.skill_snapshot`이 조립 시점에
+실제로 주입된 본문의 sha256을 고정한다.
+
+**해시가 재는 것은 frontmatter를 뺀 뒤의 본문이다.** 그것이 실제로 프롬프트에 들어간
+바이트이기 때문이다 — 파일 전체를 재면 메타데이터만 바뀌어도 다른 실행으로 보이고, "같은
+입력이었는가"라는 질문에 거짓으로 답한다. 본문 자체를 담지 않은 이유는 둘이다: 주입된 본문은
+`tasks.prompt`에 이미 있고, Skill이 커지면 Task 행이 그만큼 커진다. 해시는 "같은가"를
+답하기에 충분하고 "무엇이었는가"는 그 해시를 가진 파일을 찾는 문제다.
+
+**쓰기 지점은 CAS 뒤다.** 이 Task를 `Dispatched`로 차지하지 못했다면 이 인스턴스의 조립은
+아무것도 아니고, 그 기록을 남기면 실행하지 않은 조립이 "그때 실행된 것"으로 읽힌다. 반대로
+게이트 1의 **거절**은 CAS 앞이어야 한다 — 두 지점이 다른 이유가 서로 반대라는 점이 이
+설계의 요지다.
+
+**`NULL`과 `[]`를 가른다.** 앞은 "조립 기록이 없다"(044 이전 행, dispatch된 적 없는 행),
+뒤는 "조립했고 Skill이 없었다"이다. 접으면 게이트 2가 답하려는 질문이 "dispatch 됐는가"와
+섞인다. 두 백엔드 시험이 JSONB 왕복에서 그 구분이 살아남는지를 단정한다.
 
 **2026-09-21 — 게이트 1은 코드가 정본을 정면으로 어기고 있었다.** 위 「조립 규칙」이
 "필수 Skill은 … 누락 시 실행을 **거절**한다"고 적는 동안, `skill_loader.rs`는 파일이 없으면

@@ -17,7 +17,7 @@ use fleet_core::{
 };
 use fleet_store::ControlFence;
 use fleet_transport::{DispatchRequest, FailureObservation, TransportError, WorkerEvent};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::breaker::{BreakerState, Outcome};
 use crate::router::TaskRouter;
@@ -1180,6 +1180,33 @@ impl Dispatcher {
             .append_event(&FleetEvent::task_dispatched(task_id, worker_id))
             .await;
 
+        // 5.5. 조립 결과를 행에 고정한다 (로드맵 `#65` 게이트 2).
+        //
+        // **CAS 뒤인 것이 의도다.** 이 Task를 `Dispatched`로 차지하지 못했다면
+        // 이 인스턴스의 조립은 아무것도 아니고, 그 기록을 남기면 실행하지 않은
+        // 조립이 "그때 실행된 것"으로 읽힌다.
+        //
+        // 실패해도 dispatch를 막지 않는다. 기록하지 못한 것은 조립이 틀렸다는
+        // 뜻이 아니고, 여기서 막으면 관측을 추가하면서 가용성을 깎는 셈이다 —
+        // `#61` 4단계의 probe 증거 기록과 같은 판단이다.
+        match self
+            .state
+            .store
+            .record_task_skill_snapshot(
+                task_id,
+                &harness.loaded,
+                self.state.control_fence().as_ref(),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => debug!(
+                %task_id,
+                "skill snapshot not recorded — the row already had one, or this instance is fenced"
+            ),
+            Err(e) => warn!(%task_id, error = %e, "failed to record the skill snapshot"),
+        }
+
         // 6. Transport로 dispatch. 프롬프트는 위 4.7에서 이미 조립됐다.
         let prompt = harness.prompt;
         let req = DispatchRequest {
@@ -1794,6 +1821,7 @@ mod tests {
     use fleet_core::{CircuitBreakerConfig, TaskRequest};
     use fleet_store::mem::MemStore;
     use fleet_store::Store;
+    use sha2::Digest;
 
     /// 워커가 하나도 없는(선택 실패가 보장되는) `FleetState` + `Dispatcher` 조립.
     fn setup_no_workers(max_dispatch_retries: u32) -> (Arc<FleetState>, Dispatcher) {
@@ -3464,6 +3492,88 @@ mod tests {
 
         let stored = state.store.get_task(task_id).await.unwrap().unwrap();
         assert!(matches!(stored.status, TaskStatus::Dispatched { .. }));
+
+        std::env::remove_var("FLEET_SKILLS_DIR");
+    }
+
+    /// **조립 결과가 행에 남는다** (로드맵 `#65` 게이트 2).
+    ///
+    /// `skills_required`는 이름 목록이라 "그때 무엇이 실행됐는가"에 답하지
+    /// 못한다 — 파일은 오케스트레이터 디스크에 있어 언제든 바뀐다. dispatch가
+    /// 조립한 본문의 해시를 남기지 않으면 그 질문은 영영 답할 수 없다.
+    #[tokio::test]
+    async fn the_assembled_skills_are_pinned_to_the_task_row() {
+        let skills = tempfile::TempDir::new().unwrap();
+        std::fs::write(skills.path().join("audit.md"), "You are an auditor.").unwrap();
+        std::env::set_var("FLEET_SKILLS_DIR", skills.path());
+
+        let (state, dispatcher, _mock, _worker) = setup_one_registered_worker().await;
+        let mut task = sample_task();
+        task.skills_required = vec!["audit".into()];
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+        assert!(
+            state
+                .store
+                .get_task(task_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .skill_snapshot
+                .is_none(),
+            "시험 전제: 제출만으로는 조립 기록이 없다"
+        );
+
+        dispatcher
+            .dispatch_existing(task, false)
+            .await
+            .expect("dispatch");
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        let snapshot = stored
+            .skill_snapshot
+            .expect("dispatch가 조립한 것의 신원이 남아야 한다");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].name, "audit");
+        assert_eq!(
+            snapshot[0].sha256,
+            format!(
+                "{:x}",
+                sha2::Sha256::digest("You are an auditor.".as_bytes())
+            ),
+            "프롬프트에 실제로 들어간 본문의 해시여야 한다"
+        );
+
+        std::env::remove_var("FLEET_SKILLS_DIR");
+    }
+
+    /// **`None`과 `Some(vec![])`은 다른 사실이다.**
+    ///
+    /// 앞은 "조립 기록이 없다"(아직 dispatch되지 않았다)이고 뒤는 "조립했고
+    /// Skill이 없었다"이다. 스킬을 요구하지 않은 Task에 기록을 남기지 않으면
+    /// 그 Task는 영원히 전자로 보이고, 게이트 2가 답하려는 질문이 "dispatch
+    /// 됐는가"와 섞인다.
+    #[tokio::test]
+    async fn a_task_with_no_skills_records_an_empty_snapshot_not_nothing() {
+        let skills = tempfile::TempDir::new().unwrap();
+        std::env::set_var("FLEET_SKILLS_DIR", skills.path());
+
+        let (state, dispatcher, _mock, _worker) = setup_one_registered_worker().await;
+        let task = sample_task(); // skills_required 없음
+        let task_id = task.id;
+        state.store.insert_task(&task).await.unwrap();
+
+        dispatcher
+            .dispatch_existing(task, false)
+            .await
+            .expect("dispatch");
+
+        let stored = state.store.get_task(task_id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.skill_snapshot,
+            Some(Vec::new()),
+            "빈 조립도 조립이다 — `None`으로 두면 '아직 dispatch 안 됨'과 구분되지 않는다"
+        );
 
         std::env::remove_var("FLEET_SKILLS_DIR");
     }

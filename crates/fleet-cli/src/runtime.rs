@@ -1395,6 +1395,23 @@ async fn run_tasks_show(id_str: &str) -> Result<()> {
     println!("{:<20} {}", "PHASE:", phase);
     println!("{:<20} {}", "PROMPT:", truncate(&t.prompt, 60));
     println!("{:<20} {}", "CREATED_BY:", t.created_by);
+    // 로드맵 `#65` 게이트 2 — "그때 무엇이 실행됐는가". `skills_required`는
+    // 이름 목록이라 그 질문에 답하지 못한다.
+    match &t.skill_snapshot {
+        Some(entries) if entries.is_empty() => {
+            println!("{:<20} (none — assembled with no skills)", "SKILLS:")
+        }
+        Some(entries) => {
+            for e in entries {
+                println!(
+                    "{:<20} {} sha256={} ({} bytes)",
+                    "SKILL:", e.name, e.sha256, e.bytes
+                );
+            }
+        }
+        // 조립 기록이 **없는** 것이지 스킬이 없었던 것이 아니다.
+        None => println!("{:<20} (not assembled yet)", "SKILLS:"),
+    }
     println!("{:<20} {}", "CREATED_AT:", t.created_at.to_rfc3339());
     if let Some(hint) = &t.server_hint {
         println!("{:<20} {hint}", "SERVER_HINT:");

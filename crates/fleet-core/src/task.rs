@@ -292,6 +292,18 @@ pub struct Task {
     /// 폭으로 좁힌다.**
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_session_id: Option<String>,
+    /// 이 실행에 **실제로 실린** Skill의 신원 (로드맵 `#65` 게이트 2, migration 044).
+    ///
+    /// [`skills_required`](Self::skills_required)는 **이름 목록**이고, 이름은
+    /// 그때 무엇이 실행됐는지를 말해 주지 않는다 — 같은 `security-audit`라도
+    /// 어제의 본문과 오늘의 본문이 다르면 다른 실행이고, 파일은
+    /// 오케스트레이터의 디스크에 있어 언제든 바뀐다.
+    ///
+    /// **`None`과 `Some(vec![])`은 다른 사실이다.** 앞은 "조립 기록이 없다"
+    /// (044 이전 행, dispatch된 적 없는 행)이고 뒤는 "조립했고 Skill이
+    /// 없었다"이다. 접으면 이 필드가 답하려는 질문에 대해 거짓을 만든다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_snapshot: Option<Vec<SkillSnapshotEntry>>,
     /// 스레드(연속 대화) 전체를 한 번에 조회하기 위한 평평한 키.
     /// 스레드 루트 태스크는 자기 자신의 `id`를 그대로 갖고, 이어지는 모든
     /// 자식 태스크는 부모의 `thread_id`를 그대로 물려받는다 — `parent_task_id`를
@@ -399,6 +411,9 @@ impl Task {
             status: TaskStatus::Pending,
             dispatched_at: None,
             acp_session_id: None,
+            // 조립은 dispatch 시점에 일어난다. 생성 시점에 `[]`를 넣으면
+            // "조립했고 Skill이 없었다"는 없던 사실이 만들어진다.
+            skill_snapshot: None,
             thread_id: id,
             parent_task_id: req.parent_task_id,
             project_id: req.project_id,
@@ -463,6 +478,26 @@ impl Task {
     pub fn is_running(&self) -> bool {
         matches!(self.status, TaskStatus::Dispatched { .. })
     }
+}
+
+/// 조립 시점에 실제로 주입된 Skill 하나의 신원 (로드맵 `#65` 게이트 2).
+///
+/// 본문 자체를 담지 않는 이유가 둘이다: 주입된 본문은 `tasks.prompt`에 이미
+/// 들어 있고(중복), Skill이 커지면 Task 행이 그만큼 커진다. 해시는 "같은가"를
+/// 답하기에 충분하고, "무엇이었는가"는 그 해시를 가진 파일을 찾는 문제다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSnapshotEntry {
+    /// `skills_required`에 적힌 이름.
+    pub name: String,
+    /// 주입된 본문(frontmatter 제거 **후**)의 sha256 hex.
+    ///
+    /// frontmatter를 뺀 뒤를 재는 이유는 그것이 **실제로 프롬프트에 들어간
+    /// 바이트**이기 때문이다. 파일 전체를 재면 메타데이터만 바뀌어도 다른
+    /// 실행으로 보이고, 그러면 "같은 입력이었는가"라는 질문에 거짓으로 답한다.
+    pub sha256: String,
+    /// 주입된 본문의 바이트 수. 해시만으로는 사람이 규모를 가늠할 수 없어
+    /// 운영자 화면에서 눈으로 거르는 데 쓴다.
+    pub bytes: usize,
 }
 
 /// 작업 상태 (상태머신).

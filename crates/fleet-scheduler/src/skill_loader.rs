@@ -21,6 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
+use fleet_core::SkillSnapshotEntry;
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 /// 스킬 디렉토리 기본 경로를 반환합니다.
@@ -101,6 +103,13 @@ pub struct SkillInjection {
     /// 요청됐지만 **로드하지 못한** 스킬 이름. 파일이 없거나, 읽을 수 없거나,
     /// 이름에 경로 구분자가 들어 있어 거부된 경우다.
     pub missing: Vec<String>,
+    /// 실제로 주입된 Skill의 신원 (로드맵 `#65` 게이트 2).
+    ///
+    /// **이름이 아니라 내용의 해시**다. 이름은 그때 무엇이 실행됐는지를 말해
+    /// 주지 않는다 — 파일이 오케스트레이터 디스크에 있어 언제든 바뀐다.
+    /// `skills_required`가 비어 있으면 빈 벡터이며, 그것은 "조립했고 Skill이
+    /// 없었다"라는 **사실**이다(기록 없음과 다르다).
+    pub loaded: Vec<SkillSnapshotEntry>,
 }
 
 impl SkillInjection {
@@ -125,13 +134,26 @@ pub fn inject_skills_from_dir(
         return SkillInjection {
             prompt: prompt.to_string(),
             missing: Vec::new(),
+            loaded: Vec::new(),
         };
     }
     let mut blocks = Vec::new();
     let mut missing = Vec::new();
+    let mut loaded = Vec::new();
     for skill in skills_required {
         match load_skill(skills_dir, skill) {
-            Some(body) => blocks.push(format!("<SKILL: {skill}>\n{body}\n</SKILL>")),
+            Some(body) => {
+                // **frontmatter를 뺀 뒤를 잰다.** 그것이 실제로 프롬프트에
+                // 들어간 바이트이기 때문이다 — 파일 전체를 재면 메타데이터만
+                // 바뀌어도 다른 실행으로 보이고, "같은 입력이었는가"에
+                // 거짓으로 답한다.
+                loaded.push(SkillSnapshotEntry {
+                    name: skill.clone(),
+                    sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
+                    bytes: body.len(),
+                });
+                blocks.push(format!("<SKILL: {skill}>\n{body}\n</SKILL>"));
+            }
             None => missing.push(skill.clone()),
         }
     }
@@ -140,7 +162,11 @@ pub fn inject_skills_from_dir(
     } else {
         format!("{}\n\n<TASK>\n{}\n</TASK>", blocks.join("\n\n"), prompt)
     };
-    SkillInjection { prompt, missing }
+    SkillInjection {
+        prompt,
+        missing,
+        loaded,
+    }
 }
 
 /// `skills_required` 목록을 로드해 프롬프트 앞에 인젝션한다.
@@ -202,6 +228,62 @@ mod tests {
         );
         assert!(result.prompt.contains("<SKILL: present>"));
         assert_eq!(result.missing, vec!["absent".to_string()]);
+    }
+
+    /// **같은 이름이라도 본문이 다르면 다른 해시다** (로드맵 `#65` 게이트 2).
+    ///
+    /// 이것이 이 스냅샷의 존재 이유다 — `skills_required`는 이름 목록이라
+    /// "그때 무엇이 실행됐는가"에 답하지 못한다. 파일은 오케스트레이터
+    /// 디스크에 있어 언제든 바뀐다.
+    #[test]
+    fn the_snapshot_identifies_content_not_the_name() {
+        let tmp = TempDir::new().unwrap();
+        setup_skill(&tmp, "audit", "version one");
+        let first = inject_skills_from_dir("work", &["audit".to_string()], tmp.path());
+
+        setup_skill(&tmp, "audit", "version two");
+        let second = inject_skills_from_dir("work", &["audit".to_string()], tmp.path());
+
+        assert_eq!(first.loaded.len(), 1);
+        assert_eq!(first.loaded[0].name, second.loaded[0].name);
+        assert_ne!(
+            first.loaded[0].sha256, second.loaded[0].sha256,
+            "이름만 같고 본문이 다른 두 실행이 같은 신원을 가지면 재현이 성립하지 않는다"
+        );
+        assert_eq!(first.loaded[0].bytes, "version one".len());
+    }
+
+    /// **frontmatter를 뺀 뒤를 잰다.** 파일 전체를 재면 메타데이터만 바뀌어도
+    /// 다른 실행으로 보이고, "같은 입력이었는가"에 거짓으로 답한다.
+    #[test]
+    fn the_hash_covers_only_the_injected_body() {
+        let tmp = TempDir::new().unwrap();
+        setup_skill(&tmp, "a", "---\nname: a\n---\nBODY");
+        let with_fm = inject_skills_from_dir("w", &["a".to_string()], tmp.path());
+
+        setup_skill(&tmp, "a", "---\nname: a\nnote: changed metadata\n---\nBODY");
+        let other_fm = inject_skills_from_dir("w", &["a".to_string()], tmp.path());
+
+        assert_eq!(
+            with_fm.loaded[0].sha256, other_fm.loaded[0].sha256,
+            "frontmatter만 달라진 것은 같은 실행이다 — 프롬프트에 들어간 바이트가 같다"
+        );
+    }
+
+    /// 누락된 스킬은 스냅샷에 **없다.** 없는 것을 신원과 함께 적으면 그
+    /// 기록이 "실행됐다"고 거짓말한다.
+    #[test]
+    fn a_missing_skill_is_absent_from_the_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        setup_skill(&tmp, "present", "here");
+        let r = inject_skills_from_dir(
+            "w",
+            &["present".to_string(), "absent".to_string()],
+            tmp.path(),
+        );
+        assert_eq!(r.loaded.len(), 1);
+        assert_eq!(r.loaded[0].name, "present");
+        assert_eq!(r.missing, vec!["absent".to_string()]);
     }
 
     /// 경로 우회 시도는 **누락으로 보고된다** — 조용히 건너뛰면 그 Task가

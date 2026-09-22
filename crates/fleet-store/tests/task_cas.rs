@@ -1115,3 +1115,84 @@ both_backends!(
         assert!(store.find_task_by_acp_session("").await.unwrap().is_none());
     }
 );
+
+// ── Skill 조립 스냅샷 (로드맵 `#65` 게이트 2 · migration 044) ────────────
+
+both_backends!(
+    a_skill_snapshot_is_written_once_and_read_back,
+    |store| async move {
+        let task = seed_task(&store, "assembled", TaskStatus::Pending).await;
+        assert!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .skill_snapshot
+                .is_none(),
+            "제출만으로는 조립 기록이 없다"
+        );
+
+        let first = vec![fleet_core::SkillSnapshotEntry {
+            name: "audit".into(),
+            sha256: "a".repeat(64),
+            bytes: 19,
+        }];
+        assert!(store
+            .record_task_skill_snapshot(task.id, &first, None)
+            .await
+            .unwrap());
+
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(stored.skill_snapshot.as_deref(), Some(first.as_slice()));
+
+        // **두 번째 쓰기는 적용되지 않는다.** 무재시도 정책(`#97`) 아래에서
+        // Task당 실행이 하나뿐이라 서로 다른 두 조립 결과가 같은 행에
+        // 도착하는 일은 일어나면 안 되고, 허용하면 그 위반이 조용히 지나가
+        // 마지막 것만 남는다.
+        let second = vec![fleet_core::SkillSnapshotEntry {
+            name: "audit".into(),
+            sha256: "b".repeat(64),
+            bytes: 99,
+        }];
+        assert!(
+            !store
+                .record_task_skill_snapshot(task.id, &second, None)
+                .await
+                .unwrap(),
+            "이미 기록된 행을 덮어썼다"
+        );
+        assert_eq!(
+            store
+                .get_task(task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .skill_snapshot
+                .as_deref(),
+            Some(first.as_slice()),
+            "거절된 쓰기가 값을 바꿨다면 술어가 걸리지 않은 것이다"
+        );
+    }
+);
+
+both_backends!(
+    an_empty_snapshot_is_distinguishable_from_no_snapshot,
+    |store| async move {
+        // `NULL`("조립 기록이 없다")과 `[]`("조립했고 Skill이 없었다")는
+        // 다른 사실이다. JSONB 왕복에서 둘이 섞이면 게이트 2가 답하려는
+        // 질문이 "dispatch 됐는가"와 구분되지 않는다.
+        let task = seed_task(&store, "no skills", TaskStatus::Pending).await;
+        assert!(store
+            .record_task_skill_snapshot(task.id, &[], None)
+            .await
+            .unwrap());
+
+        let stored = store.get_task(task.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.skill_snapshot,
+            Some(Vec::new()),
+            "빈 배열이 NULL로 접혀 돌아왔다"
+        );
+    }
+);

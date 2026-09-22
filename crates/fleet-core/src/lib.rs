@@ -70,10 +70,10 @@ pub use issue::{
 };
 pub use project::{Project, ProjectFilter, ProjectStatus};
 pub use task::{
-    validate_workspace_cwd, FailureKind, IdempotentInsert, Labels, Task, TaskDeleteOutcome,
-    TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPhase, TaskPriority, TaskRequest,
-    TaskResult, TaskStatus, TaskStatusFilter, TokenUsage, TransitionOrigin, TransitionOutcome,
-    WorkspacePathError,
+    validate_workspace_cwd, FailureKind, IdempotentInsert, Labels, SkillSnapshotEntry, Task,
+    TaskDeleteOutcome, TaskFailure, TaskFilter, TaskOutput, TaskOutputChunk, TaskPhase,
+    TaskPriority, TaskRequest, TaskResult, TaskStatus, TaskStatusFilter, TokenUsage,
+    TransitionOrigin, TransitionOutcome, WorkspacePathError,
 };
 pub use tool_invocation::{ToolInvocation, ToolInvocationKind, ToolInvocationStatus};
 pub use worker::{

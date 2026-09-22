@@ -372,6 +372,27 @@ impl Store for MemStore {
         Ok(true)
     }
 
+    async fn record_task_skill_snapshot(
+        &self,
+        id: TaskId,
+        snapshot: &[fleet_core::SkillSnapshotEntry],
+        fence: Option<&ControlFence>,
+    ) -> Result<bool, StoreError> {
+        // PgStore와 같은 순서: fenced를 먼저, tasks 락 **밖에서**.
+        if !self.control_fence_holds(fence) {
+            return Ok(false);
+        }
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.get_mut(&id) else {
+            return Ok(false);
+        };
+        if task.skill_snapshot.is_some() {
+            return Ok(false);
+        }
+        task.skill_snapshot = Some(snapshot.to_vec());
+        Ok(true)
+    }
+
     async fn find_task_by_acp_session(&self, session_id: &str) -> Result<Option<Task>, StoreError> {
         let tasks = self.tasks.lock().unwrap();
         Ok(tasks
