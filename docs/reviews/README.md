@@ -30,6 +30,7 @@ owners: ["documentation-governance"]
 | [`ui-management-and-issue-spec-2026-08-22.md`](./ui-management-and-issue-spec-2026-08-22.md) | UI 관리 대상 재해석, AgentTemplate 정본화와 Issue 추적 명세, `#86`~`#92` 도출 |
 | [`roadmap-vs-issue-tracker-2026-08-23.md`](./roadmap-vs-issue-tracker-2026-08-23.md) | 영구 ID 원장의 소유권 비교 — roadmap.md 유지·대체·생성물 전환 세 모델 |
 | [`task-retry-policy-decision-2026-08-26.md`](./task-retry-policy-decision-2026-08-26.md) | 무재시도 정책이 `TaskAttempt`를 무너뜨린 근거와 `dispatch_control_epoch` 한 컬럼으로의 축소 결정 |
+| [`effect-ledger-research-2026-09-23.md`](./effect-ledger-research-2026-09-23.md) | effect ledger 설계의 문헌 대조 — 게이트 4 보류의 하한("첫 비가역 effect와 동시에"), `Cancelled`/`Compensated` 분리 도출, 멱등 키 제어면 파생 가설의 근거 부재 |
 
 새 review는 대상 정본, 비교 근거, 결정 결과, 정본 반영 링크를 적는다. 설계 규칙이나 운영
 절차를 여기서 새로 정의하지 않는다.
