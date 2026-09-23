@@ -83,6 +83,7 @@ last_verified: "2026-08-17"
 
 | 문서 | 한 줄 요약 | 상태 | 최종 개정 |
 |---|---|---|---|
+| [`engineering-patterns/jev-decision-records.md`](./engineering-patterns/jev-decision-records.md) | 설계 결정 기록 MCP 서버 `jev`의 설치 절차(`scripts/setup-jev-mcp.sh`), `.mcp.json`을 커밋하지 않는 이유, 외부 평가로 나가는 데이터의 경계 | 🟢 정본 — 2026-09-23 등록·연결 실측 | 2026-09-23 |
 | [`engineering-patterns/reuse-patterns.md`](./engineering-patterns/reuse-patterns.md) | `grok-build`/`xai-*` 코드베이스에서 채굴한 재사용 패턴 10종(RAII PendingGuard, 워커별 CircuitBreaker 등) — 10종 중 3종(#1,#3,#6)이 `fleet-scheduler` 코드 주석에 명시적으로 채택 근거로 인용됨을 확인 | 🔵 사본 — 실제 채택 근거는 `crates/fleet-scheduler/src/dispatcher.rs`/`breaker.rs` 코드 주석 | 2026-08-12 |
 
 ## 도메인 9. 🧭 Governance & Contributor Guidance — [`governance/README.md`](./governance/README.md)
